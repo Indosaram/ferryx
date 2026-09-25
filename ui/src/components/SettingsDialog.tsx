@@ -128,7 +128,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
       className="fixed inset-0 z-50 flex overflow-hidden bg-background text-foreground"
     >
       <aside data-testid="settings-nav" className="flex w-[280px] shrink-0 flex-col border-r border-border bg-background">
-        <div data-tauri-drag-region className="drag-region h-titlebar shrink-0" />
+        <div data-tauri-drag-region className="h-titlebar shrink-0" />
         <div className="px-3 pb-3 pt-2">
           <button
             ref={backButtonRef}
@@ -155,7 +155,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
       </aside>
 
       <main className="min-w-0 flex-1 overflow-y-auto bg-background scrollbar-sleek">
-        <div data-tauri-drag-region className="drag-region h-titlebar shrink-0 border-b border-border/70" />
+        <div data-tauri-drag-region className="h-titlebar shrink-0 border-b border-border/70" />
         <div className="selectable mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}

@@ -1,8 +1,11 @@
 use crate::browser::snapshot_source::*;
 
+use crate::browser::remote_service::BrowserRemoteService;
 use crate::ipc::error::{IpcError, IpcErrorCode};
+use serde::Serialize;
 use std::path::PathBuf;
-use tauri::AppHandle;
+use std::sync::Arc;
+use tauri::{AppHandle, State};
 
 pub fn resolve_screenshot_path(path_str: &str) -> Result<PathBuf, IpcError> {
     let trimmed = path_str.trim();
@@ -78,7 +81,7 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
     let _ = (app, webview_label, out_path);
     Err(IpcError::new(
         IpcErrorCode::Unsupported,
-        "screenshots are unavailable on this platform",
+        "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
     ))
 }
 
@@ -112,6 +115,30 @@ pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Siz
     .await?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+/// Capability descriptor for native browser snapshots. The frontend uses this to
+/// disable platform-limited affordances (element picking, screenshot capture)
+/// instead of offering a control that can never complete.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSnapshotCapability {
+    pub supported: bool,
+    pub formats: Vec<String>,
+}
+
+/// Reports whether native webview snapshot capture is available in this build and
+/// which encodings it supports. Non-macOS builds report the platform limitation here
+/// instead of failing silently when a snapshot is requested.
+#[tauri::command]
+pub fn cmd_browser_snapshot_capability(
+    service: State<'_, Arc<BrowserRemoteService>>,
+) -> BrowserSnapshotCapability {
+    let source = service.snapshot_source();
+    BrowserSnapshotCapability {
+        supported: service.is_snapshot_supported(),
+        formats: source.supported_formats(),
+    }
 }
 
 #[cfg(test)]

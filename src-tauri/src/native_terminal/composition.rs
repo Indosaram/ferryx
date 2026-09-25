@@ -234,7 +234,9 @@ impl SurfaceCompositionLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompositorTargetKind {
     /// Host target is the whole Tauri WebviewWindow.
-    /// Occluded on macOS because WKWebView sits in front of the window-level layer.
+    /// Occluded on macOS because WKWebView sits in front of the window-level layer, and the only
+    /// surface left on Linux when no isolated child surface could be created, where nothing clips
+    /// it to a terminal pane.
     RootWebviewWindow,
     /// Dedicated platform layer-backed child view positioned relative to the webview (macOS NSView).
     NativeChildView,
@@ -304,7 +306,7 @@ impl PlatformCompositorDescriptor {
     pub fn validate_desktop_composition(&self) -> Result<(), NativeTerminalError> {
         if self.target_kind == CompositorTargetKind::RootWebviewWindow {
             return Err(NativeTerminalError::GpuPipelineError(
-                "Root WebviewWindow cannot be used as native terminal composition target because WKWebView occludes the layer".into(),
+                "Root WebviewWindow cannot be used as native terminal composition target because the hosting webview draws over the whole-window layer (WKWebView occludes it on macOS) and nothing clips it to a terminal pane".into(),
             ));
         }
         if self.target_kind == CompositorTargetKind::UnsupportedFallback {
@@ -417,6 +419,21 @@ mod tests {
             layer_backed: true,
         };
         let err = root_desc.validate_desktop_composition().unwrap_err();
+        assert!(
+            matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Root WebviewWindow")),
+            "Expected Root WebviewWindow error, got: {err:?}"
+        );
+
+        // The Linux no-child shape: the whole parent window, honest about having neither layer
+        // backing nor pointer transparency. It must still be rejected, so a missing isolated child
+        // surface cannot reach composition as a whole-window target.
+        let unbacked_root_desc = PlatformCompositorDescriptor {
+            target_kind: CompositorTargetKind::RootWebviewWindow,
+            pointer_transparent: false,
+            layer_backed: false,
+        };
+        assert!(!unbacked_root_desc.target_kind.is_child_compositor());
+        let err = unbacked_root_desc.validate_desktop_composition().unwrap_err();
         assert!(
             matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Root WebviewWindow")),
             "Expected Root WebviewWindow error, got: {err:?}"

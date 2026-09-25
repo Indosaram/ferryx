@@ -119,6 +119,52 @@ fn library() -> Option<&'static Mutex<Library>> {
         .as_ref()
 }
 
+struct FontConfig(*mut c_void);
+
+// SAFETY: the config is built once, is never modified, and is only passed to read-only
+// fontconfig matching calls, which fontconfig supports from multiple threads.
+unsafe impl Send for FontConfig {}
+unsafe impl Sync for FontConfig {}
+
+fn fontconfig() -> Option<&'static FontConfig> {
+    static CONFIG: OnceLock<Option<FontConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            // SAFETY: FcInitLoadConfigAndFonts returns a config owned by this cache, which keeps
+            // it alive for the process lifetime instead of leaking one per lookup.
+            let handle = unsafe { FcInitLoadConfigAndFonts() };
+            (!handle.is_null()).then_some(FontConfig(handle))
+        })
+        .as_ref()
+}
+
+/// Splits a comma-separated font stack into family names, trimming whitespace and surrounding
+/// quotes and dropping empty entries, so the first entry wins and later entries act as fallbacks.
+fn split_font_stack(stack: &str) -> Vec<String> {
+    stack
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('\'').trim_matches('"').trim())
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Families to try, in order: the stack entries followed by the `monospace` fallback.
+fn font_candidates(stack: &str) -> Vec<String> {
+    let mut candidates = split_font_stack(stack);
+    candidates.push("monospace".to_owned());
+    candidates
+}
+
+/// Resolves the first family in `stack` fontconfig can match for `ch`, falling back to
+/// `monospace` so a configured family that is not installed still renders.
+fn resolve_stack_font_path(stack: &str, ch: char, bold: bool, italic: bool) -> Option<String> {
+    font_candidates(stack)
+        .iter()
+        .map(String::as_str)
+        .find_map(|family| resolve_font_path(family, ch, bold, italic))
+}
+
 fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option<String> {
     let weight = if bold { "bold" } else { "regular" };
     let slant = if italic { "italic" } else { "roman" };
@@ -128,18 +174,19 @@ fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option
     );
     let name = CString::new(query).ok()?;
     let file_key = CString::new("file").ok()?;
-    // SAFETY: every fontconfig pattern created here is destroyed before returning, and the
-    // borrowed file string is copied out while its owning pattern is still alive.
+    let config = fontconfig()?;
+    // SAFETY: every fontconfig pattern created here is destroyed before returning, the config is
+    // the process-lifetime cache above, and the borrowed file string is copied out while its
+    // owning pattern is still alive.
     unsafe {
-        let config = FcInitLoadConfigAndFonts();
         let pattern = FcNameParse(name.as_ptr() as *const u8);
         if pattern.is_null() {
             return None;
         }
-        FcConfigSubstitute(config, pattern, FC_MATCH_PATTERN);
+        FcConfigSubstitute(config.0, pattern, FC_MATCH_PATTERN);
         FcDefaultSubstitute(pattern);
         let mut result: c_int = 0;
-        let matched = FcFontMatch(config, pattern, &mut result);
+        let matched = FcFontMatch(config.0, pattern, &mut result);
         FcPatternDestroy(pattern);
         if matched.is_null() {
             return None;
@@ -179,9 +226,7 @@ pub fn rasterize_to_alpha_buffer(
     let Some(library) = library() else {
         return false;
     };
-    let Some(path) = resolve_font_path(family, ch, bold, italic)
-        .or_else(|| resolve_font_path("monospace", ch, bold, italic))
-    else {
+    let Some(path) = resolve_stack_font_path(family, ch, bold, italic) else {
         return false;
     };
     let Ok(path) = CString::new(path) else {
@@ -243,5 +288,60 @@ pub fn rasterize_to_alpha_buffer(
         }
         FT_Done_Face(face);
         inked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f02_font_stack_first_entry_wins() {
+        assert_eq!(
+            split_font_stack("Fira Code, monospace"),
+            vec!["Fira Code".to_owned(), "monospace".to_owned()]
+        );
+    }
+
+    #[test]
+    fn f02_font_stack_trims_quotes_and_whitespace() {
+        assert_eq!(
+            split_font_stack("  'Fira Code' ,  \"Noto Sans Mono\"  "),
+            vec!["Fira Code".to_owned(), "Noto Sans Mono".to_owned()]
+        );
+    }
+
+    #[test]
+    fn f02_font_stack_skips_empty_entries() {
+        assert_eq!(
+            split_font_stack(" , '  ' ,, Fira Code ,"),
+            vec!["Fira Code".to_owned()]
+        );
+        assert!(split_font_stack("").is_empty());
+    }
+
+    #[test]
+    fn f02_font_stack_keeps_fallback_order() {
+        assert_eq!(
+            split_font_stack("Fira Code,Noto Sans Mono, monospace"),
+            vec![
+                "Fira Code".to_owned(),
+                "Noto Sans Mono".to_owned(),
+                "monospace".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn f02_font_candidates_append_monospace_fallback() {
+        assert_eq!(
+            font_candidates("Fira Code, Noto Sans Mono"),
+            vec![
+                "Fira Code".to_owned(),
+                "Noto Sans Mono".to_owned(),
+                "monospace".to_owned(),
+            ]
+        );
+        assert_eq!(font_candidates("  "), vec!["monospace".to_owned()]);
     }
 }

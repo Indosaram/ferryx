@@ -402,7 +402,7 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
         Box::pin(async move {
             Err(IpcError::new(
                 IpcErrorCode::Unsupported,
-                "screenshots are unavailable on this platform",
+                "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
             ))
         })
     }
@@ -611,7 +611,7 @@ impl BrowserSnapshotSource for UnsupportedSnapshotSource {
         Box::pin(async move {
             Err(IpcError::new(
                 IpcErrorCode::Unsupported,
-                "screenshots are unavailable on this platform",
+                "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
             ))
         })
     }
@@ -1105,6 +1105,35 @@ mod tests {
             .expect_err("Should fail on unsupported platform");
         assert_eq!(err.code, IpcErrorCode::Unsupported);
         assert!(err.message.contains("unavailable on this platform"));
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_capability_matches_capture_error_contract() {
+        // The platform stub: a source that reports itself unsupported must
+        // advertise no formats and fail capture with a typed Unsupported error.
+        let stub = UnsupportedSnapshotSource;
+        assert!(!stub.is_supported());
+        assert!(stub.supported_formats().is_empty());
+        let stub_error = stub
+            .capture_snapshot("main-view", SnapshotOptions::png())
+            .await
+            .expect_err("Unsupported platform source must fail capture");
+        assert_eq!(stub_error.code, IpcErrorCode::Unsupported);
+        assert!(
+            stub_error.message.contains("macOS-only"),
+            "Unsupported capture must name the platform limitation: {}",
+            stub_error.message
+        );
+
+        // The injectable fake must agree with the same capability contract.
+        let fake = FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Unsupported);
+        assert!(!fake.is_supported());
+        assert!(fake.supported_formats().is_empty());
+        let fake_error = fake
+            .capture_snapshot("main-view", SnapshotOptions::png())
+            .await
+            .expect_err("Unsupported fake must fail capture");
+        assert_eq!(fake_error.code, IpcErrorCode::Unsupported);
     }
 
     #[test]

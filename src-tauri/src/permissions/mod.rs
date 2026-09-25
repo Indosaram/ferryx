@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,12 @@ pub struct OpenPermissionsSettingsResult {
     pub reason: Option<String>,
 }
 
+/// Resolve the macOS home directory used by the Full Disk Access probe.
+///
+/// macOS-only: `check_full_disk_access` is its sole caller. A future non-macOS
+/// caller must also resolve `USERPROFILE` (Windows does not set `HOME`),
+/// mirroring the home fallback used elsewhere in the crate.
+#[cfg(target_os = "macos")]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }

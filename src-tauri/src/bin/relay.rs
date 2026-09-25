@@ -83,6 +83,21 @@ fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
     })
 }
 
+/// `<home>/.ferryx/account-data`, the directory holding persistent relay account
+/// state and the mail spool. There is deliberately no working-directory fallback:
+/// a relay started without `HOME` (Windows leaves it unset) must fail fast rather
+/// than write durable account data wherever it happened to be launched from.
+fn default_account_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| std::env::var_os("LOCALAPPDATA"));
+    #[cfg(not(windows))]
+    let base = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    base.filter(|base| !base.is_empty())
+        .map(|base| PathBuf::from(base).join(".ferryx").join("account-data"))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -108,15 +123,20 @@ async fn main() {
 
     let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
         .unwrap_or_else(|_| "https://relay.checka.cc".into());
-    let data_dir = std::env::var("FERRYX_ACCOUNT_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ferryx")
-                .join("account-data")
-        });
+    let data_dir = match std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => match default_account_data_dir() {
+            Some(dir) => dir,
+            None => {
+                eprintln!(
+                    "ferryx-relay: cannot resolve the account data directory; set \
+                     FERRYX_ACCOUNT_DATA_DIR or HOME (USERPROFILE on Windows), otherwise \
+                     persistent account data would be written relative to the working directory"
+                );
+                std::process::exit(2);
+            }
+        },
+    };
     let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
     let account_state = Arc::new(ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer));
 

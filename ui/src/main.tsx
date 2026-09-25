@@ -2,6 +2,7 @@ import "./lib/uuid";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BUILD_STAMP } from "./lib/buildStamp";
+import { SERVICE_WORKER_PATH } from "./lib/pushSubscription";
 import { installSettingsRuntimeBridge } from "./lib/settingsRuntimeBridge";
 import { isMacShortcutPlatform } from "./lib/shortcuts";
 import { installShortcutDiagnostics } from "./lib/shortcutDiagnostics";
@@ -69,6 +70,6 @@ void boot();
 
 if (typeof window !== "undefined" && "serviceWorker" in navigator && !isTauriApp) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.register(SERVICE_WORKER_PATH).catch(() => {});
   });
 }

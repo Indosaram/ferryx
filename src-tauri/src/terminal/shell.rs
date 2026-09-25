@@ -350,10 +350,11 @@ where
                 args: Vec::new(),
             },
             None => {
-                let program = get_env("SHELL")
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "/bin/bash".to_string());
+                let program = resolve_linux_default_shell(
+                    get_env("SHELL"),
+                    |path: &str| std::path::Path::new(path).exists(),
+                    |exe: &str| is_executable_on_path(exe),
+                );
                 ShellCommandPlan {
                     program,
                     args: vec!["-l".to_string()],
@@ -361,6 +362,35 @@ where
             }
         },
     }
+}
+
+/// Linux has no guaranteed login shell. `SHELL` wins when the user set it, but a
+/// headless (systemd-launched) gateway has none, and Alpine/busybox, NixOS and
+/// minimal container images ship no bash at all - spawning a nonexistent
+/// `/bin/bash` fails the pane outright. Prefer `/bin/bash` only when it really
+/// exists, then `/bin/sh`, then `sh` resolved through PATH at exec time. Mirrors
+/// the remote-helper fallback in `ferryx_scope::ssh::helper`.
+fn resolve_linux_default_shell<P, X>(shell_env: Option<String>, exists: X, is_on_path: P) -> String
+where
+    P: Fn(&str) -> bool,
+    X: Fn(&str) -> bool,
+{
+    if let Some(shell) = shell_env
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return shell;
+    }
+    if exists("/bin/bash") {
+        return "/bin/bash".to_string();
+    }
+    if exists("/bin/sh") {
+        return "/bin/sh".to_string();
+    }
+    if is_on_path("sh") {
+        return "sh".to_string();
+    }
+    "sh".to_string()
 }
 
 fn is_on_path(exe: &str) -> bool {
@@ -618,6 +648,44 @@ mod tests {
                 args: vec!["-l".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn test_linux_default_shell_uses_existing_bash() {
+        let program =
+            resolve_linux_default_shell(None, |path: &str| path == "/bin/bash", |_: &str| false);
+        assert_eq!(program, "/bin/bash");
+    }
+
+    #[test]
+    fn test_linux_default_shell_falls_back_when_bash_missing() {
+        // Alpine/busybox, NixOS and minimal container images: no /bin/bash.
+        let with_sh =
+            resolve_linux_default_shell(None, |path: &str| path == "/bin/sh", |_: &str| false);
+        assert_eq!(with_sh, "/bin/sh");
+
+        // `/bin/sh` is absent but `sh` resolves through PATH: return the bare
+        // name so exec resolves it, rather than a path that does not exist.
+        let via_path = resolve_linux_default_shell(None, |_: &str| false, |exe: &str| exe == "sh");
+        assert_eq!(via_path, "sh");
+
+        // Nothing found anywhere: keep a bare `sh` for exec-time resolution.
+        let last_resort = resolve_linux_default_shell(None, |_: &str| false, |_: &str| false);
+        assert_eq!(last_resort, "sh");
+    }
+
+    #[test]
+    fn test_linux_default_shell_prefers_shell_env_over_fallbacks() {
+        let from_env = resolve_linux_default_shell(
+            Some("  /usr/bin/fish\n".to_string()),
+            |_: &str| true,
+            |_: &str| true,
+        );
+        assert_eq!(from_env, "/usr/bin/fish");
+
+        let blank_env =
+            resolve_linux_default_shell(Some("   ".to_string()), |_: &str| false, |_: &str| false);
+        assert_eq!(blank_env, "sh");
     }
 
     #[test]

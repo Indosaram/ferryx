@@ -141,10 +141,6 @@ body {
     -webkit-user-select: text;
   }
 
-  .drag-region {
-    -webkit-app-region: drag;
-  }
-
   .no-drag {
     -webkit-app-region: no-drag;
   }

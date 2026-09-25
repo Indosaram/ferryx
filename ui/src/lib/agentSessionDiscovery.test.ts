@@ -32,6 +32,79 @@ describe("agentSessionDiscovery", () => {
       expect(agentPid).toBe(201);
     });
 
+    it("matches Windows shim executables by stripping the executable suffix case-insensitively", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 600, ppid: 1, command: "zsh" },
+        { pid: 601, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd" },
+        { pid: 602, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\codex.exe" },
+        { pid: 603, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\Copilot.CMD" },
+        { pid: 604, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\kimi.bat" },
+        { pid: 605, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\omo.ps1" },
+      ];
+
+      expect(findAgentPid(snapshot, 600, "claude")).toBe(601);
+      expect(findAgentPid(snapshot, 600, "codex")).toBe(602);
+      expect(findAgentPid(snapshot, 600, "copilot")).toBe(603);
+      expect(findAgentPid(snapshot, 600, "kimi")).toBe(604);
+      expect(findAgentPid(snapshot, 600, "omo")).toBe(605);
+    });
+
+    it("matches an agent under a quoted Windows path that contains spaces", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 620, ppid: 1, command: "zsh" },
+        {
+          pid: 621,
+          ppid: 620,
+          command: "\"C:\\Program Files\\Anthropic\\[CC]\\claude.exe\" --verbose",
+        },
+        {
+          pid: 622,
+          ppid: 620,
+          command: "\"C:\\Program Files\\nodejs\\cursor-agent.cmd\" --version",
+        },
+        { pid: 623, ppid: 620, command: "\"C:\\Program Files\\nodejs\\codex.exe\"" },
+      ];
+
+      expect(findAgentPid(snapshot, 620, "claude")).toBe(621);
+      expect(findAgentPid(snapshot, 620, "cursor")).toBe(622);
+      expect(findAgentPid(snapshot, 620, "codex")).toBe(623);
+    });
+
+    it("matches an agent when the quoted Windows path has no closing quote", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 630, ppid: 1, command: "zsh" },
+        { pid: 631, ppid: 630, command: "\"C:\\Program Files\\nodejs\\claude.exe" },
+      ];
+
+      expect(findAgentPid(snapshot, 630, "claude")).toBe(631);
+    });
+
+    it("keeps matching unquoted npm shims and POSIX executable paths", () => {
+      const shimSnapshot: ProcessSnapshot = [
+        { pid: 640, ppid: 1, command: "zsh" },
+        { pid: 641, ppid: 640, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd" },
+      ];
+      const posixSnapshot: ProcessSnapshot = [
+        { pid: 650, ppid: 1, command: "zsh" },
+        { pid: 651, ppid: 650, command: "/usr/local/bin/claude --verbose" },
+        { pid: 652, ppid: 650, command: "/opt/homebrew/bin/codex" },
+      ];
+
+      expect(findAgentPid(shimSnapshot, 640, "claude")).toBe(641);
+      expect(findAgentPid(posixSnapshot, 650, "claude")).toBe(651);
+      expect(findAgentPid(posixSnapshot, 650, "codex")).toBe(652);
+    });
+
+    it("does not strip non-executable extensions or partial suffix fragments", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 610, ppid: 1, command: "zsh" },
+        { pid: 611, ppid: 610, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.exe.bak" },
+        { pid: 612, ppid: 610, command: "/usr/local/bin/claude.sh" },
+      ];
+
+      expect(findAgentPid(snapshot, 610, "claude")).toBeNull();
+    });
+
     it("returns null when no matching descendant exists in the subtree", () => {
       const snapshot: ProcessSnapshot = [
         { pid: 300, ppid: 1, command: "zsh" },
@@ -249,6 +322,35 @@ describe("agentSessionDiscovery", () => {
       });
 
       expect(discovered).toBe(cursorChatId);
+    });
+
+    it("discovers session id end-to-end for a Windows npm shim (claude.cmd)", () => {
+      const claudePid = 702;
+      const sessionId = "33333333-3333-3333-3333-333333333333";
+      const snapshot: ProcessSnapshot = [
+        { pid: 700, ppid: 1, command: "C:\\Windows\\System32\\cmd.exe" },
+        {
+          pid: claudePid,
+          ppid: 700,
+          command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd --resume",
+        },
+      ];
+      const openFiles: OpenFileProbe = (pid: number) =>
+        pid === claudePid
+          ? [
+              "\\\\.\\pipe\\conpty",
+              `C:\\Users\\indo\\.claude\\projects\\-C-Users-indo-code-project\\${sessionId}.jsonl`,
+            ]
+          : [];
+
+      const discovered = discoverAgentSessionId({
+        snapshot,
+        rootPid: 700,
+        agentType: "claude",
+        openFiles,
+      });
+
+      expect(discovered).toBe(sessionId);
     });
 
     it("discovers session id end-to-end for omo", () => {

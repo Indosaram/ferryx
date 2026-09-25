@@ -54,12 +54,63 @@ pub fn default_desktop_user_agent() -> &'static str {
     }
     #[cfg(target_os = "linux")]
     {
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        static LINUX_USER_AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        LINUX_USER_AGENT
+            .get_or_init(|| {
+                linux_user_agent(
+                    linux_arch_token(),
+                    linux_display_server_token(
+                        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+                        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+                        std::env::var("DISPLAY").ok().as_deref(),
+                    ),
+                )
+            })
+            .as_str()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     }
+}
+
+/// Real target architecture, so an aarch64 host does not claim x86_64.
+#[cfg(target_os = "linux")]
+fn linux_arch_token() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        std::env::consts::ARCH
+    }
+}
+
+/// Wayland sessions must not be advertised as X11, and vice versa.
+#[cfg(target_os = "linux")]
+fn linux_display_server_token(
+    session_type: Option<&str>,
+    wayland_display: Option<&str>,
+    display: Option<&str>,
+) -> &'static str {
+    let session_type = session_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match session_type.as_deref() {
+        Some("wayland") => "Wayland",
+        Some("x11") => "X11",
+        _ if wayland_display.is_some_and(|value| !value.trim().is_empty()) => "Wayland",
+        _ if display.is_some_and(|value| !value.trim().is_empty()) => "X11",
+        _ => "X11",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_agent(arch: &str, display_server: &str) -> String {
+    format!(
+        "Mozilla/5.0 ({display_server}; Linux {arch}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    )
 }
 
 const MAX_URL_LENGTH_BYTES: usize = 8192;
@@ -88,5 +139,54 @@ pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
         "http" | "https" => Ok(parsed.to_string()),
         "about" if parsed.path() == "blank" => Ok("about:blank".to_string()),
         _ => Err(BrowserError::SchemeDenied(parsed.to_string())),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_linux_user_agent_reports_target_arch() {
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(linux_arch_token(), "aarch64");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(linux_arch_token(), "x86_64");
+        assert_eq!(linux_arch_token(), std::env::consts::ARCH);
+
+        let ua = linux_user_agent(linux_arch_token(), "X11");
+        assert!(
+            ua.contains(&format!("(X11; Linux {})", std::env::consts::ARCH)),
+            "unexpected Linux user agent: {ua}"
+        );
+        assert!(
+            ua.contains("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
+        );
+    }
+
+    #[test]
+    fn test_linux_user_agent_reports_real_display_server() {
+        assert_eq!(linux_display_server_token(Some("wayland"), None, Some(":0")), "Wayland");
+        assert_eq!(
+            linux_display_server_token(Some("x11"), Some("/run/user/1000/wayland-0"), None),
+            "X11"
+        );
+        assert_eq!(linux_display_server_token(Some("  Wayland "), None, None), "Wayland");
+        assert_eq!(
+            linux_display_server_token(Some("tty"), Some("/run/user/1000/wayland-0"), None),
+            "Wayland"
+        );
+        assert_eq!(linux_display_server_token(None, None, Some(":0")), "X11");
+        assert_eq!(linux_display_server_token(None, None, None), "X11");
+        assert_eq!(linux_display_server_token(Some(""), Some(""), Some("")), "X11");
+
+        assert_eq!(
+            linux_user_agent("aarch64", "Wayland"),
+            "Mozilla/5.0 (Wayland; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        );
+        assert_eq!(
+            linux_user_agent("x86_64", "X11"),
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        );
     }
 }

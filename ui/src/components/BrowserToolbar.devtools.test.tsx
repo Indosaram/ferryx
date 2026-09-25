@@ -41,8 +41,9 @@ const devtoolsSpy = spyOn(browserTauri, "openBrowserDevtools");
 const elementPickerSpy = spyOn(browserTauri, "injectBrowserElementPicker");
 const removePickerSpy = spyOn(browserTauri, "removeBrowserElementPicker");
 const finishPickerSpy = spyOn(browserTauri, "finishBrowserElementPick");
+const capabilitySpy = spyOn(browserTauri, "getBrowserSnapshotCapability");
 
-const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { BrowserToolbar } = await import("./BrowserToolbar");
 
 const tab: BrowserTab = {
@@ -79,6 +80,10 @@ describe("BrowserToolbar devtools", () => {
     elementPickerSpy.mockClear();
     removePickerSpy.mockClear();
     finishPickerSpy.mockClear();
+    capabilitySpy.mockClear();
+    // Default to native snapshot capture being available, which is the macOS behavior these
+    // tests exercise; the platform-limited case overrides this per test.
+    capabilitySpy.mockResolvedValue({ supported: true, formats: ["png"] });
     view.localStorage.clear();
   });
 
@@ -117,5 +122,26 @@ describe("BrowserToolbar devtools", () => {
       browserId: "browser-42",
     });
     expect(elementPickerSpy).not.toHaveBeenCalled();
+  });
+
+  it("disables element picking when the snapshot capability reports no native capture", async () => {
+    capabilitySpy.mockResolvedValue({ supported: false, formats: [] });
+    renderToolbar();
+
+    const picker = screen.getByRole("button", { name: "Select element" }) as HTMLButtonElement;
+    await waitFor(() => expect(picker.disabled).toBe(true));
+    expect(capabilitySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps element picking enabled and working when the snapshot capability reports support", async () => {
+    renderToolbar();
+
+    const picker = screen.getByRole("button", { name: "Select element" }) as HTMLButtonElement;
+    await act(async () => undefined);
+    expect(capabilitySpy).toHaveBeenCalledTimes(1);
+    expect(picker.disabled).toBe(false);
+
+    fireEvent.click(picker);
+    expect(elementPickerSpy).toHaveBeenCalledWith("browser-42");
   });
 });

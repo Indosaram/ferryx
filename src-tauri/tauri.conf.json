@@ -92,7 +92,8 @@
         "depends": [
           "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
           "libgtk-3-0",
-          "libappindicator3-1 | libayatana-appindicator3-1"
+          "libappindicator3-1 | libayatana-appindicator3-1",
+          "libasound2 | libasound2t64"
         ],
         "section": "devel",
         "priority": "optional"

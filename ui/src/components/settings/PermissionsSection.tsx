@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 
 import { OPEN_PERMISSIONS_ONBOARDING_EVENT, resetPermissionsOnboardingDismissed } from "../../lib/permissionsOnboarding";
-import { isMacShortcutPlatform } from "../../lib/shortcuts";
 import {
   getSystemPermissionsStatus,
   openPermissionsSystemSettings,
@@ -65,7 +64,9 @@ export function PermissionsSection() {
   const [refreshing, setRefreshing] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
-  const isMac = isMacShortcutPlatform();
+  // Host platform, not the browser's: the remote web client can run on a Mac while the
+  // host it is paired to is Windows or Linux.
+  const isMacHost = status?.platform === "macos";
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -158,7 +159,7 @@ export function PermissionsSection() {
             System Permissions
           </h2>
           <p className="text-sm text-muted-foreground">
-            {isMac
+            {isMacHost
               ? "Configure macOS permissions for terminal execution, file system access, and notifications."
               : "Windows and Linux manage these permissions at the OS level; adjust them in your system settings."}
           </p>
@@ -204,7 +205,7 @@ export function PermissionsSection() {
                 {status?.fullDiskAccess.description ||
                   (loading ? "Checking permission status…" : "Allows terminal tools and git worktrees to inspect project files without folder access prompts.")}
               </p>
-              {isMac && !status?.fullDiskAccess.granted && (
+              {isMacHost && !status?.fullDiskAccess.granted && (
                 <div className="pt-1 flex items-center gap-1.5 text-[11px] text-amber-400/90">
                   <Info className="size-3.5 shrink-0" />
                   <span>
@@ -332,7 +333,7 @@ export function PermissionsSection() {
         </Card>
       </div>
 
-      {isMac && (
+      {isMacHost && (
         <div className="flex justify-end">
           <Button
             variant="ghost"
@@ -346,7 +347,7 @@ export function PermissionsSection() {
         </div>
       )}
 
-      {isMac && (
+      {isMacHost && (
         <div className="rounded-lg border border-border/70 bg-muted/20 p-4 text-xs text-muted-foreground space-y-2">
           <p className="font-medium text-foreground">How to grant permissions in macOS:</p>
           <ol className="list-decimal pl-4 space-y-1">

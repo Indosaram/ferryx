@@ -381,6 +381,38 @@ pub fn normalize_wait_params(
     ))
 }
 
+/// Reason this build cannot serve the local browser IPC transport.
+///
+/// The `#[cfg(not(unix))]` stubs in `send_framed_request` and
+/// `subscribe_viewer` report `RemoteBrowserError::Unavailable` with this same
+/// text: Windows publishes a loopback port (`runtime/browser.port`) that this
+/// backend has no TCP transport for, so the capability probe must say so
+/// instead of probing a socket path that can never exist.
+const LOCAL_IPC_TRANSPORT_UNSUPPORTED_REASON: &str =
+    "Local browser IPC socket is not supported on this platform";
+
+/// Whether this build can speak the GUI's local browser IPC transport.
+const LOCAL_IPC_TRANSPORT_SUPPORTED: bool = cfg!(unix);
+
+/// Availability of the local browser IPC transport, plus the reason it is
+/// unavailable. Pure apart from the path existence probe, so the capability
+/// probe is unit-testable on every platform without a live socket.
+fn local_ipc_availability(
+    transport_supported: bool,
+    socket_path: &str,
+) -> (bool, Option<&'static str>) {
+    if !transport_supported {
+        return (false, Some(LOCAL_IPC_TRANSPORT_UNSUPPORTED_REASON));
+    }
+    if socket_path.is_empty() {
+        return (false, Some("Local IPC socket path empty"));
+    }
+    if !std::path::Path::new(socket_path).exists() {
+        return (false, Some("GUI process not running or socket unconnected"));
+    }
+    (true, None)
+}
+
 /// Local IPC framed provider connecting daemon to GUI process (§1.1, §4.4)
 pub struct LocalIpcBrowserBackend {
     socket_path: String,
@@ -469,7 +501,7 @@ impl LocalIpcBrowserBackend {
         _request_bytes: &[u8],
     ) -> Result<Vec<u8>, RemoteBrowserError> {
         Err(RemoteBrowserError::Unavailable(
-            "Local browser IPC socket is not supported on this platform".into(),
+            LOCAL_IPC_TRANSPORT_UNSUPPORTED_REASON.into(),
         ))
     }
 
@@ -920,7 +952,7 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
             let _ = (browser_id, device_id, viewer_instance_id, options);
             Box::pin(async move {
                 Err(RemoteBrowserError::Unavailable(
-                    "Local browser IPC socket is not supported on this platform".into(),
+                    LOCAL_IPC_TRANSPORT_UNSUPPORTED_REASON.into(),
                 ))
             })
         }
@@ -1237,11 +1269,14 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
 
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
         Box::pin(async move {
-            let available = if self.socket_path.is_empty() {
-                false
-            } else {
-                std::path::Path::new(&self.socket_path).exists()
-            };
+            // Honest probe: a platform without the local IPC transport must not
+            // stat a path that can never exist, so it reports unavailable with
+            // the reason its transport stubs use.
+            let (available, unavailable_reason) =
+                local_ipc_availability(LOCAL_IPC_TRANSPORT_SUPPORTED, &self.socket_path);
+            if let Some(reason) = unavailable_reason {
+                tracing::debug!("Local browser IPC backend unavailable: {reason}");
+            }
             BrowserCapabilities {
                 browser_available: available,
                 supported_formats: vec!["jpeg".into(), "png".into()],
@@ -2066,6 +2101,43 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn test_capability_probe_reports_unsupported_transport_with_reason() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // An existing path is exactly the Windows case: the GUI writes
+        // `runtime/browser.port`, yet this backend has no transport for it.
+        let existing_path = temp_dir.path().join("browser.port");
+        std::fs::write(&existing_path, "12345").unwrap();
+        let existing = existing_path.to_string_lossy().to_string();
+        let absent = temp_dir
+            .path()
+            .join("absent.sock")
+            .to_string_lossy()
+            .to_string();
+
+        // Unsupported transport: unavailable with a reason, never a path probe.
+        let (available, reason) = local_ipc_availability(false, &existing);
+        assert!(!available, "unsupported transport must report unavailable");
+        assert_eq!(reason, Some(LOCAL_IPC_TRANSPORT_UNSUPPORTED_REASON));
+
+        // Supported transport: the path probe still decides, with a reason.
+        let (available, reason) = local_ipc_availability(true, &existing);
+        assert!(available);
+        assert_eq!(reason, None);
+        let (available, reason) = local_ipc_availability(true, &absent);
+        assert!(!available);
+        assert_eq!(reason, Some("GUI process not running or socket unconnected"));
+        let (available, reason) = local_ipc_availability(true, "");
+        assert!(!available);
+        assert_eq!(reason, Some("Local IPC socket path empty"));
+
+        // The live capability probe follows the platform flag: an existing path
+        // only means available where the transport exists at all.
+        let backend = LocalIpcBrowserBackend::new(existing, None);
+        let caps = backend.capabilities().await;
+        assert_eq!(caps.browser_available, LOCAL_IPC_TRANSPORT_SUPPORTED);
+    }
+
+    #[tokio::test]
     async fn test_local_ipc_backend_framed_codec() {
         let payload = b"{\"command\":\"ping\"}";
         let frame = LocalIpcBrowserBackend::encode_ipc_frame(
@@ -2237,6 +2309,7 @@ pub mod tests {
         assert!(!service.is_producer_active("b-prod-1"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r4_1_local_ipc_backend_connects_and_dispatches() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2537,6 +2610,7 @@ pub mod tests {
         assert!(updated_caps.browser_available);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r5_1_list_sessions_propagates_error_envelope() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2601,6 +2675,7 @@ pub mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r5_2_params_cannot_overwrite_authorized_target() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2688,6 +2763,7 @@ pub mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r5_7_numeric_generation_and_revision_parsing() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2765,6 +2841,7 @@ pub mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r6_7_missing_viewport_revision_rejected_without_fallback() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -2895,6 +2972,7 @@ pub mod tests {
         assert_eq!(list[0].browser_id, "b1-wt1");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r6_3_local_ipc_list_filters_by_worktree() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -3107,6 +3185,7 @@ pub mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_r6_1_framed_image_subscription_produces_frames_and_stops_on_unsubscribe() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};

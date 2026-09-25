@@ -84,15 +84,21 @@ impl EditorTarget {
     }
 
     /// macOS application bundles ship a CLI that is not always on `PATH` for
-    /// GUI-launched processes.
+    /// GUI-launched processes. Only macOS has `/Applications`, so every other
+    /// platform resolves to an empty list instead of probing guaranteed misses.
     pub fn bundled_cli_paths(self) -> &'static [&'static str] {
         match self {
             Self::System => &[],
+            #[cfg(target_os = "macos")]
             Self::VsCode => {
                 &["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"]
             }
+            #[cfg(target_os = "macos")]
             Self::Cursor => &["/Applications/Cursor.app/Contents/Resources/app/bin/cursor"],
+            #[cfg(target_os = "macos")]
             Self::Zed => &["/Applications/Zed.app/Contents/MacOS/cli"],
+            #[cfg(not(target_os = "macos"))]
+            _ => &[],
         }
     }
 }
@@ -548,3 +554,36 @@ pub fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 #[path = "file_link_tests.rs"]
 mod file_link_tests;
+
+#[cfg(test)]
+mod bundled_cli_platform_tests {
+    use super::*;
+
+    /// The bundled list is the macOS-only fallback for app-bundle launchers, so
+    /// it must stay empty elsewhere: a `/Applications` probe can never hit on
+    /// Windows or Linux. The macOS arm is asserted here to catch a table that
+    /// silently loses a bundle CLI.
+    #[test]
+    fn bundled_cli_paths_stay_macos_only() {
+        assert!(EditorTarget::System.bundled_cli_paths().is_empty());
+
+        for editor in [EditorTarget::VsCode, EditorTarget::Cursor, EditorTarget::Zed] {
+            let paths = editor.bundled_cli_paths();
+            if cfg!(target_os = "macos") {
+                assert!(
+                    !paths.is_empty(),
+                    "{editor:?} must keep its macOS app-bundle CLI"
+                );
+                assert!(
+                    paths.iter().all(|path| path.starts_with("/Applications/")),
+                    "{editor:?} bundled paths must stay under /Applications: {paths:?}"
+                );
+            } else {
+                assert!(
+                    paths.is_empty(),
+                    "{editor:?} must not probe /Applications off macOS: {paths:?}"
+                );
+            }
+        }
+    }
+}

@@ -109,12 +109,22 @@ pub(super) fn subscribe(pid: i32) -> io::Result<Option<OwnedFd>> {
     Ok(Some(fd))
 }
 
+/// Kernel answers that mean "no pidfd observation exists", never "the drain
+/// failed": `ESRCH` for a leader that is already gone, `ENOSYS` on kernels
+/// older than 5.3, and `EINVAL` when the kernel rejects the call itself.
+/// `subscribe` reports those as `Ok(None)` so the caller keeps draining through
+/// the `/proc` inventory in `members` instead of failing the whole command.
+#[cfg(target_os = "linux")]
+fn pidfd_unobservable(errno: i32) -> bool {
+    matches!(errno, libc::ESRCH | libc::ENOSYS | libc::EINVAL)
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn subscribe(pid: i32) -> io::Result<Option<OwnedFd>> {
     let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
     if raw < 0 {
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
+        if error.raw_os_error().is_some_and(pidfd_unobservable) {
             return Ok(None);
         }
         return Err(error);
@@ -166,5 +176,23 @@ pub(super) fn wait(fd: OwnedFd, deadline: Instant) -> io::Result<()> {
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pidfd_absence_is_not_a_drain_failure() {
+        // Kernels older than 5.3 answer ENOSYS, kernels that reject the call
+        // itself answer EINVAL, and a leader already gone answers ESRCH. Each
+        // reads as "no watch", so the caller keeps its /proc inventory path.
+        assert!(pidfd_unobservable(libc::ENOSYS));
+        assert!(pidfd_unobservable(libc::EINVAL));
+        assert!(pidfd_unobservable(libc::ESRCH));
+        // Genuine observation failures must still reach the caller.
+        assert!(!pidfd_unobservable(libc::EMFILE));
+        assert!(!pidfd_unobservable(libc::EPERM));
     }
 }

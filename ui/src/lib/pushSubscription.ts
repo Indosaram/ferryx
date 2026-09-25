@@ -1,6 +1,14 @@
 import { getRemoteAuthToken } from "./remoteClient";
 
 /**
+ * Path of the shipped service worker (`ui/public/sw.js`). The app bootstrap in
+ * `main.tsx` and the fallback registration below must both use this constant:
+ * a divergent literal 404s the fallback and push registration then degrades to
+ * `false` with no diagnostic.
+ */
+export const SERVICE_WORKER_PATH = "/sw.js";
+
+/**
  * Registers the current page for Web Push notifications (used to alert the
  * user when an agent transitions into a waiting/blocked state) and forwards
  * the resulting subscription to the remote gateway's push endpoint.
@@ -30,7 +38,7 @@ export async function registerPushSubscription(
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const registration = await Promise.race([
       navigator.serviceWorker.ready.catch(
-        () => navigator.serviceWorker.register("/service-worker.js"),
+        () => navigator.serviceWorker.register(SERVICE_WORKER_PATH),
       ),
       new Promise<null>((resolve) => {
         timeout = setTimeout(() => resolve(null), 3000);

@@ -5,8 +5,9 @@
 //! connection, where that clipboard does not exist, so the image bytes have to travel with
 //! the paste and land in a file the remote agent can open.
 //!
-//! Every platform reads its own clipboard behind [`read_clipboard_image`]; targets without an
-//! implementation return `None`, which leaves the caller on the existing local paste chord.
+//! Every platform reads its own clipboard behind [`read_clipboard_image`]. Linux shells out to the
+//! session's own helper (`wl-paste` under Wayland, `xclip` under X11), so a host with neither
+//! installed reports an empty clipboard rather than a broken paste.
 
 use crate::ipc::IpcError;
 
@@ -198,8 +199,88 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         .and_then(|bytes| ClipboardImage::new(bytes, "png"))
 }
 
+/// Longest a clipboard helper may run before it is killed, so a wedged tool cannot hold a paste.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CLIPBOARD_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Clipboard helpers to try, in order. Wayland comes first: `wl-paste` reads the compositor's own
+/// clipboard, which is the only one that exists under a Wayland session even when XWayland runs.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CLIPBOARD_TOOLS: [(&str, &[&str]); 2] = [
+    ("wl-paste", &["--type", "image/png"]),
+    ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+];
+
+/// Runs one clipboard helper and hands back its stdout bytes.
+///
+/// A tool that is not installed, exits non-zero, prints nothing, or wedges are all ordinary
+/// misses, so the caller moves on to the next helper instead of reporting a clipboard error.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn run_clipboard_tool(program: &str, args: &[&str]) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // The payload is drained on its own thread: a helper that writes more than a pipe buffer holds
+    // would otherwise block on write until the timeout killed it and the image would be lost.
+    let stdout = child.stdout.take()?;
+    let drain = std::thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+
+    let deadline = std::time::Instant::now() + CLIPBOARD_TOOL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = drain.join().unwrap_or_default();
+                return status.success().then_some(bytes);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Wedged or unreapable: kill it so the paste fails fast instead of hanging.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = drain.join();
+                return None;
+            }
+        }
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
+    read_clipboard_image_from(&CLIPBOARD_TOOLS)
+}
+
+/// Reads the first helper in `tools` that hands back real PNG bytes.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn read_clipboard_image_from(tools: &[(&str, &[&str])]) -> Option<ClipboardImage> {
+    const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
+
+    for &(program, args) in tools {
+        let Some(bytes) = run_clipboard_tool(program, args) else {
+            continue;
+        };
+        // A helper can exit successfully with a payload in a format this build cannot decode;
+        // that is a miss, not an image, so only real PNG bytes travel on.
+        if bytes.starts_with(&PNG_MAGIC) {
+            if let Some(image) = ClipboardImage::new(bytes, "png") {
+                return Some(image);
+            }
+        }
+    }
+
     None
 }
 
@@ -689,5 +770,28 @@ mod tests {
         assert!(save_paste_file_in_dir(&dir, "noextension", b"data").is_err());
         assert!(save_paste_file_in_dir(&dir, ".hidden", b"data").is_err());
         assert!(save_paste_file_in_dir(&dir, "", b"data").is_err());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_missing_clipboard_tool_is_a_miss_rather_than_a_panic() {
+        // No helper is installed under this name, which is what a host with neither `wl-paste`
+        // nor `xclip` looks like: the read comes back empty instead of failing the paste.
+        let absent: [(&str, &[&str]); 1] = [("ferryx-no-such-clipboard-tool", &["--type"])];
+
+        assert_eq!(read_clipboard_image_from(&absent), None);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_wedged_clipboard_tool_is_killed_instead_of_holding_the_paste() {
+        let wedged: [(&str, &[&str]); 1] = [("sleep", &["30"])];
+
+        let started = std::time::Instant::now();
+        assert_eq!(read_clipboard_image_from(&wedged), None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a wedged helper must be killed at the timeout, not waited out"
+        );
     }
 }

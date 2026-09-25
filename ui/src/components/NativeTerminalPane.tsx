@@ -1222,7 +1222,11 @@ export function NativeTerminalPane({
       void pasteClipboardImageToRemote(remoteWorkspaceId)
         .then((result) => {
           if (!result) {
-            toast.error("No clipboard image could be read to send to the remote host.");
+            // An empty clipboard and a host whose clipboard helper cannot read an image both
+            // land here as null. That is "nothing to upload", not a failure: forward the
+            // platform's own paste chord so the terminal and the agent inside it can read the
+            // clipboard themselves.
+            sendImagePasteShortcut();
             return;
           }
           sendPaste(`${quoteShellPath(result.remotePath)} `);
@@ -1239,7 +1243,8 @@ export function NativeTerminalPane({
       void pasteClipboardImageLocally()
         .then((result) => {
           if (!result) {
-            toast.error("No clipboard image could be read from the clipboard.");
+            // Same degrade as the remote branch: null means no readable image on the clipboard.
+            sendImagePasteShortcut();
             return;
           }
           sendPaste(`${quoteShellPath(result.localPath)} `);
@@ -1253,7 +1258,7 @@ export function NativeTerminalPane({
           );
         });
     }
-  }, [remoteWorkspaceId, sendPaste]);
+  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste]);
 
   const suppressNextPasteRef = useRef(false);
 

@@ -38,7 +38,22 @@ pub fn account_data_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx").join("account"))
+    resolve_account_data_dir(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+/// Home-based resolution behind [`account_data_dir`], split out so the platform
+/// fallback can be asserted without mutating process-wide environment state.
+///
+/// Windows does not define `HOME`, so `USERPROFILE` has to stand in for it; without
+/// that fallback the resolver returns `None`, `account_origin()` reports
+/// `ACCOUNT_ORIGIN_UNSET`, and `ferryx-account` exits with
+/// `ACCOUNT_DATA_DIR_UNRESOLVED`.
+fn resolve_account_data_dir(
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    home.or(userprofile)
+        .map(|base| PathBuf::from(base).join(".ferryx").join("account"))
 }
 
 fn normalize_account_origin(value: &str) -> Result<String, AccountOriginError> {
@@ -105,6 +120,36 @@ mod tests {
             "http://127.0.0.1:9",
             "a non-default port must survive normalization, or peers sign a different origin"
         );
+    }
+
+    #[test]
+    fn account_data_dir_falls_back_to_userprofile_without_home() {
+        let userprofile = if cfg!(windows) {
+            r"C:\Users\ferryx"
+        } else {
+            "/home/ferryx"
+        };
+        let resolved = resolve_account_data_dir(None, Some(userprofile.into()))
+            .expect("USERPROFILE stands in for the HOME a Windows host does not define");
+        assert!(
+            resolved.is_absolute(),
+            "the account data dir must never resolve relative to the working directory"
+        );
+        assert!(
+            resolved.ends_with(PathBuf::from(".ferryx").join("account")),
+            "unexpected shape: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            resolved,
+            PathBuf::from(userprofile).join(".ferryx").join("account")
+        );
+        assert_eq!(
+            resolve_account_data_dir(Some("/home/ferryx".into()), Some(userprofile.into())),
+            Some(PathBuf::from("/home/ferryx").join(".ferryx").join("account")),
+            "HOME must keep winning so existing platforms resolve the same directory"
+        );
+        assert_eq!(resolve_account_data_dir(None, None), None);
     }
 
     struct EnvGuard;

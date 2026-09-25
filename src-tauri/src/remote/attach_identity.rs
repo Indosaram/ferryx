@@ -79,26 +79,11 @@ impl AttachLock {
             .write(true)
             .open(&path)
             .map_err(|error| format!("Failed to open attach identity lock: {error}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(format!(
-                    "Failed to lock attach identity: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
+        // `File::lock` is the portable cross-process lock on every target; the lock
+        // releases when the file handle drops, so no manual unlock is needed.
+        file.lock()
+            .map_err(|error| format!("Failed to lock attach identity: {error}"))?;
         Ok(Self { _file: file })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for AttachLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -109,6 +94,7 @@ fn lock_path(base_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -118,12 +104,15 @@ mod tests {
         std::fs::write(&identity_path, b"{\"machineId\":\"keep\"}").expect("seed");
         let first = load_or_generate_attach_identity(dir.path()).expect("generate");
         assert_eq!(std::fs::read(&identity_path).expect("read"), b"{\"machineId\":\"keep\"}");
-        let mode = std::fs::metadata(dir.path().join("attach-identity.json"))
-            .expect("meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(dir.path().join("attach-identity.json"))
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         let second = load_or_generate_attach_identity(dir.path()).expect("reload");
         assert_eq!(first, second);
         std::fs::remove_file(dir.path().join("attach-identity.json")).expect("remove");

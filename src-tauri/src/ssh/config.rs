@@ -1,6 +1,7 @@
 use super::SshAuthMethod;
 use super::SshHost;
 use super::SshHostSource;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 const IMPORT_CAP: usize = 100;
@@ -29,9 +30,25 @@ pub fn parse_ssh_config_with_dir(text: &str, config_dir: Option<&Path>) -> Vec<C
 }
 
 fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| PathBuf::from(h).join(".ssh"))
+    preferred_ssh_home(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+    .map(|h| PathBuf::from(h).join(".ssh"))
+}
+
+fn preferred_ssh_home(home: Option<OsString>, userprofile: Option<OsString>) -> Option<OsString> {
+    #[cfg(windows)]
+    {
+        // Windows normally leaves HOME unset; a stale HOME inherited from an
+        // MSYS or Git-Bash shell would otherwise shadow the config that
+        // OpenSSH itself reads from %USERPROFILE%\.ssh.
+        userprofile.or(home)
+    }
+    #[cfg(not(windows))]
+    {
+        home.or(userprofile)
+    }
 }
 
 fn parse_ssh_config_internal(
@@ -463,3 +480,33 @@ fn uuid_like(seed: &str) -> String {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod home_preference_tests {
+    use super::*;
+
+    #[test]
+    fn preferred_ssh_home_orders_by_platform() {
+        let home = OsString::from("/home/msys-user");
+        let userprofile = OsString::from(r"C:\Users\win-user");
+
+        #[cfg(windows)]
+        assert_eq!(
+            preferred_ssh_home(Some(home.clone()), Some(userprofile.clone())),
+            Some(userprofile.clone())
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            preferred_ssh_home(Some(home.clone()), Some(userprofile.clone())),
+            Some(home.clone())
+        );
+
+        // Whichever order the platform picks, a single set variable still wins.
+        assert_eq!(
+            preferred_ssh_home(None, Some(userprofile.clone())),
+            Some(userprofile)
+        );
+        assert_eq!(preferred_ssh_home(Some(home.clone()), None), Some(home));
+        assert_eq!(preferred_ssh_home(None, None), None);
+    }
+}

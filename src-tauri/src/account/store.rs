@@ -186,17 +186,8 @@ pub fn lock_account_dir(dir: &Path) -> Result<File, String> {
         .write(true)
         .open(&path)
         .map_err(|error| format!("Failed to open account lock: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(format!(
-                "Failed to lock account store: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
+    file.lock()
+        .map_err(|error| format!("Failed to lock account store: {error}"))?;
     Ok(file)
 }
 

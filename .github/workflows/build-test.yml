@@ -56,6 +56,10 @@ jobs:
       - name: Test Landing Site
         run: bun test --cwd site
 
+      # These packaging and release script tests were previously never executed in CI.
+      - name: Test Release and Packaging Scripts
+        run: bun test scripts/
+
   # =========================================================================
   # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
   # =========================================================================
@@ -146,11 +150,42 @@ jobs:
             --target ${{ matrix.target }} \
             --test windows_edge_probe_contract \
             --test windows_window_opacity_contract \
+            --test q4_windows_paths \
             -- --test-threads=1
+
+      # q4_windows_paths above is the only end-to-end check that Git's worktree inventory and
+      # WorktreeManager agree on Windows path identity. The step below executes the Windows-only
+      # lib code no other job runs - above all the job-object containment in worktree/git/windows.rs,
+      # which cargo check can only type-check. The worktree filter keeps the POSIX-only unit tests
+      # that share the same test binary from running on this runner. daemon::server::
+      # agent_state_transport_tests is named explicitly beside it: its tests carry no unix cfg, so
+      # this is the only job that compiles and runs them. They cover the non-unix agent-state ingress
+      # module's contracts - the rendezvous record shape, token matching, the publish/readiness
+      # ordering and the endpoint invariant - not the ingress path itself: nothing here drives the
+      # non-unix spawn_agent_state_listener accept loop that publishes agent-state.rendezvous.
+      - name: Cargo Test (Windows lib scope)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --lib \
+            -- worktree \
+            --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --lib \
+            -- daemon::server::agent_state_transport_tests \
+            --test-threads=1
 
       # The renderer contract suite constructs a real WGPU device (GpuContext::new) and is
       # verified locally on GPU hardware instead; hosted runners have no reliable adapter.
-      # daemon_persistence_contract shares on-disk daemon state, so tests run single-threaded.
+      # daemon_persistence_contract shares on-disk daemon state, so tests run single-threaded;
+      # its launchd case passes vacuously here (get_launchd_plist_path returns None off macOS),
+      # and that test file is owned by another node.
+      # The two updater contract files were listed in no job before this one;
+      # updater_endpoint_contract is gated on the `desktop` cfg that tauri-build emits for every
+      # non-mobile target, so this job is where they can actually run.
       - name: Cargo Test (renderer contract excluded)
         if: matrix.os_name == 'linux'
         run: |
@@ -172,6 +207,8 @@ jobs:
             --test native_terminal_wayland_subsurface_contract \
             --test rorca_native_contract \
             --test session_persistence_integration \
+            --test updater_config_contract \
+            --test updater_endpoint_contract \
             --test worktree_safety \
             -- --test-threads=1
 

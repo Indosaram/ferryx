@@ -56,17 +56,78 @@ fn io_error(path: &Path, error: std::io::Error) -> IpcError {
         .with_details(json!({"path": path, "kind": format!("{:?}", error.kind())}))
 }
 
-// Windows junctions can behave like directories rather than symlinks. Treat all
-// reparse points as links; the portable fallback uses symlink_metadata's file type.
+// Windows sets FILE_ATTRIBUTE_REPARSE_POINT on every entry that carries a reparse point, and
+// that set is wider than "link": OneDrive "Files On-Demand" cloud placeholders and AppExecLink
+// execution aliases carry it too. Only the tags that name another path -- symlinks and
+// junctions/mount points -- are links; every other tagged entry is an ordinary file or directory
+// whose size must still be counted. The portable fallback uses symlink_metadata's file type.
+#[cfg(any(windows, test))]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(any(windows, test))]
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+#[cfg(any(windows, test))]
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// Pure reparse classification, kept platform independent so it is testable everywhere.
+#[cfg(any(windows, test))]
+fn is_link_reparse_point(attributes: u32, reparse_tag: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && (reparse_tag == IO_REPARSE_TAG_SYMLINK || reparse_tag == IO_REPARSE_TAG_MOUNT_POINT)
+}
+
 mod platform {
     #[cfg(windows)]
-    pub fn is_link(metadata: &std::fs::Metadata) -> bool {
+    pub fn is_link(path: &std::path::Path, metadata: &std::fs::Metadata) -> bool {
         use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
+        let attributes = metadata.file_attributes();
+        if attributes & super::FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return false;
+        }
+        match reparse_tag(path) {
+            Some(tag) => super::is_link_reparse_point(attributes, tag),
+            // The tag query failed. symlink_metadata resolved the same
+            // FILE_ATTRIBUTE_TAG_INFO, so trust its file type instead of guessing.
+            None => metadata.file_type().is_symlink(),
+        }
+    }
+
+    /// Reparse tag of `path` itself, never of its target: FILE_FLAG_OPEN_REPARSE_POINT keeps the
+    /// handle on the link and FILE_FLAG_BACKUP_SEMANTICS allows directories to be opened.
+    #[cfg(windows)]
+    fn reparse_tag(path: &std::path::Path) -> Option<u32> {
+        use std::mem::{size_of, MaybeUninit};
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FileAttributeTagInfo, GetFileInformationByHandleEx,
+        };
+
+        let file = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        let mut info = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::zeroed();
+        // SAFETY: the handle is open and owned for this call, and the buffer is a correctly
+        // sized FILE_ATTRIBUTE_TAG_INFO for FileAttributeTagInfo.
+        let queried = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileAttributeTagInfo,
+                info.as_mut_ptr().cast(),
+                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        if queried == 0 {
+            return None;
+        }
+        // SAFETY: a non-zero result means the buffer was filled.
+        Some(unsafe { info.assume_init() }.ReparseTag)
     }
 
     #[cfg(not(windows))]
-    pub fn is_link(metadata: &std::fs::Metadata) -> bool {
+    pub fn is_link(_path: &std::path::Path, metadata: &std::fs::Metadata) -> bool {
         metadata.file_type().is_symlink()
     }
 }
@@ -107,7 +168,7 @@ pub fn scan_path(
         }
         let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         total.entries += 1;
-        if !platform::is_link(&metadata) {
+        if !platform::is_link(&path, &metadata) {
             if metadata.is_dir() {
                 check_cancelled(cancelled)?;
                 let canonical = fs::canonicalize(&path).map_err(|error| io_error(&path, error))?;
@@ -299,4 +360,37 @@ pub fn collect_workspace(
     }
     check_cancelled(cancelled)?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod reparse_point_tests {
+    use super::*;
+
+    #[test]
+    fn test_reparse_point_link_classification() {
+        // Real links: symlinks and junctions/mount points, always with the attribute set.
+        assert!(is_link_reparse_point(
+            FILE_ATTRIBUTE_REPARSE_POINT,
+            IO_REPARSE_TAG_SYMLINK
+        ));
+        assert!(is_link_reparse_point(
+            FILE_ATTRIBUTE_REPARSE_POINT,
+            IO_REPARSE_TAG_MOUNT_POINT
+        ));
+
+        // OneDrive "Files On-Demand" placeholders and AppExecLink carry the same attribute but
+        // name no other path, so they stay ordinary entries.
+        assert!(!is_link_reparse_point(
+            FILE_ATTRIBUTE_REPARSE_POINT,
+            0x9000_001A // IO_REPARSE_TAG_CLOUD_6, a dehydrated OneDrive placeholder
+        ));
+        assert!(!is_link_reparse_point(
+            FILE_ATTRIBUTE_REPARSE_POINT,
+            0x8000_001B // IO_REPARSE_TAG_APPEXECLINK
+        ));
+
+        // The attribute bit still gates the tag: a tag without it is not a reparse point.
+        assert!(!is_link_reparse_point(0, IO_REPARSE_TAG_SYMLINK));
+        assert!(!is_link_reparse_point(0, 0));
+    }
 }

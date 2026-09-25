@@ -181,6 +181,28 @@ async fn remote_persistence_migrates_out_of_volatile_runtime_dir() {
 #[path = "remote_ssh_gateway_qa.rs"]
 mod gateway_qa;
 
+/// Loopback `sshd` probing: macOS ships it at `/usr/sbin/sshd`, Linux
+/// distributions use `/usr/sbin`, `/usr/local/sbin`, or `/sbin`, so probe the
+/// known locations and fall back to PATH resolution.
+fn sshd_binary() -> PathBuf {
+    let candidates = ["/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd"];
+    for candidate in candidates {
+        let candidate = PathBuf::from(candidate);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("sshd");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(candidates[0])
+}
+
 #[tokio::test]
 async fn direct_ssh_real_transport_registration_and_pty() {
     if let Some(config) = std::env::var_os(qa::CONFIG_ENV) {
@@ -230,6 +252,12 @@ async fn direct_ssh_real_transport_registration_and_pty() {
     let log_path = dir.path().join("sshd.log");
     let log_for_server = log_path.clone();
     // sshd inetd mode uses an already-bound socket: no ephemeral-port race or polling.
+    let sshd = sshd_binary();
+    assert!(
+        sshd.is_file(),
+        "Explicit test prerequisite: install an OpenSSH server ({} missing)",
+        sshd.display()
+    );
     let server = tokio::spawn(async move {
         let mut children = tokio::task::JoinSet::new();
         loop {
@@ -241,7 +269,7 @@ async fn direct_ssh_real_transport_registration_and_pty() {
                     let input = Stdio::from(OwnedFd::from(stream.try_clone().unwrap()));
                     let output = Stdio::from(OwnedFd::from(stream));
                     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_for_server).unwrap();
-                    let mut child = tokio::process::Command::new("/usr/sbin/sshd")
+                    let mut child = tokio::process::Command::new(&sshd)
                         .args(["-i", "-e", "-f"]).arg(&config)
                         .stdin(input).stdout(output).stderr(log).kill_on_drop(true).spawn().unwrap();
                     children.spawn(async move { child.wait().await.unwrap() });

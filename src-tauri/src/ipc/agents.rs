@@ -88,19 +88,20 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
     }
 }
 
+#[cfg(not(windows))]
 fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
-    let output = crate::util::no_window_command("/bin/ps")
-        .args(["-axwwo", "pid=,ppid=,args="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
+    let ps = resolve_tool("ps")?;
+    let stdout = probe_stdout(
+        "ps",
+        crate::util::no_window_command(ps).args(["-axwwo", "pid=,ppid=,args="]),
+    )?;
+    String::from_utf8(stdout)
         .ok()
         .map(|stdout| parse_ps_entries(&stdout))
 }
 
+// Only the unix arm reads `ps`, so this parser is unix-only outside tests.
+#[cfg(any(not(windows), test))]
 fn parse_ps_entries(stdout: &str) -> Vec<(u32, u32, String)> {
     stdout
         .lines()
@@ -115,6 +116,76 @@ fn parse_ps_entries(stdout: &str) -> Vec<(u32, u32, String)> {
             Some((pid, ppid, args))
         })
         .collect()
+}
+
+// Windows has no `ps`, so the process table comes from PowerShell's CIM view of
+// Win32_Process, which exposes the same (pid, ppid, command line) triple. A null
+// CommandLine (protected or elevated processes) becomes an empty string so every
+// entry keeps the tuple shape the tree walk expects.
+#[cfg(windows)]
+fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
+    let powershell = resolve_tool("powershell")?;
+    let stdout = probe_stdout(
+        "powershell",
+        crate::util::no_window_command(powershell).args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            POWERSHELL_PROCESS_TABLE_COMMAND,
+        ]),
+    )?;
+    let stdout = match String::from_utf8(stdout) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            tracing::debug!(%error, "agent session discovery: powershell output not utf-8");
+            return None;
+        }
+    };
+    let entries = parse_powershell_process_json(&stdout);
+    if entries.is_none() {
+        tracing::debug!("agent session discovery: powershell process table unparsable");
+    }
+    entries
+}
+
+// Pinning the console output encoding to UTF-8 keeps non-ASCII command lines
+// intact across the pipe instead of arriving in the console code page.
+#[cfg(windows)]
+const POWERSHELL_PROCESS_TABLE_COMMAND: &str =
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-CimInstance Win32_Process | \
+     Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+
+// ConvertTo-Json emits an array for several processes but a bare object for a
+// single one, so both shapes are accepted; anything else is not a table.
+#[cfg(any(windows, test))]
+fn parse_powershell_process_json(json_str: &str) -> Option<Vec<(u32, u32, String)>> {
+    #[derive(serde::Deserialize)]
+    struct WindowsProcessEntry {
+        #[serde(rename = "ProcessId")]
+        process_id: u32,
+        #[serde(rename = "ParentProcessId")]
+        parent_process_id: u32,
+        #[serde(rename = "CommandLine", default)]
+        command_line: Option<String>,
+    }
+
+    let entries: Vec<WindowsProcessEntry> = match serde_json::from_str(json_str) {
+        Ok(entries) => entries,
+        Err(_) => vec![serde_json::from_str(json_str).ok()?],
+    };
+
+    Some(
+        entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.process_id,
+                    entry.parent_process_id,
+                    entry.command_line.unwrap_or_default(),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn args_match_agent(agent_type: &str, args: &str) -> bool {
@@ -190,16 +261,48 @@ fn descendant_agent_pid(
 }
 
 fn omo_session_id_from_environment(pid: u32, agent_type: &str) -> Option<String> {
-    let output = crate::util::no_window_command("/bin/ps")
-        .args(["-E", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    process_environment_output(pid)
+        .and_then(|stdout| session_id_from_env_output(agent_type, &stdout))
+}
+
+// procps-ng ps rejects BSD's `-E`, so Linux reads the target process's
+// NUL-separated /proc environment block instead of listing it through ps.
+#[cfg(target_os = "linux")]
+fn process_environment_output(pid: u32) -> Option<String> {
+    let bytes = match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(pid, %error, "agent session discovery: /proc environ unreadable");
+            return None;
+        }
+    };
+    if bytes.is_empty() {
         return None;
     }
-    String::from_utf8(output.stdout)
-        .ok()
-        .and_then(|stdout| session_id_from_env_output(agent_type, &stdout))
+    // session_id_from_env_output tokenizes on whitespace, as it does for ps -E output.
+    Some(String::from_utf8_lossy(&bytes).replace('\0', " "))
+}
+
+// Windows has neither /proc nor a BSD `ps -E`, so environment-based discovery is
+// unavailable there and callers fall back to the process table and session
+// directories; the None is logged rather than passed off as an empty environment.
+#[cfg(windows)]
+fn process_environment_output(pid: u32) -> Option<String> {
+    tracing::debug!(
+        pid,
+        "agent session discovery: environment discovery unavailable on Windows"
+    );
+    None
+}
+
+#[cfg(all(not(target_os = "linux"), not(windows)))]
+fn process_environment_output(pid: u32) -> Option<String> {
+    let ps = resolve_tool("ps")?;
+    let stdout = probe_stdout(
+        "ps",
+        crate::util::no_window_command(ps).args(["-E", "-p", &pid.to_string()]),
+    )?;
+    String::from_utf8(stdout).ok()
 }
 
 fn session_id_from_env_output(agent_type: &str, stdout: &str) -> Option<String> {
@@ -209,15 +312,25 @@ fn session_id_from_env_output(agent_type: &str, stdout: &str) -> Option<String> 
         .find_map(|path| extract_session_id_from_path(agent_type, path))
 }
 
+// lsof has no Windows counterpart, so the handle walk degrades to a logged None
+// there instead of spawning a binary that cannot exist.
+#[cfg(windows)]
+fn lsof_session_id(pid: u32, _agent_type: &str) -> Option<String> {
+    tracing::debug!(
+        pid,
+        "agent session discovery: lsof handle discovery unavailable on Windows"
+    );
+    None
+}
+
+#[cfg(not(windows))]
 fn lsof_session_id(pid: u32, agent_type: &str) -> Option<String> {
-    let output = crate::util::no_window_command("/usr/sbin/lsof")
-        .args(["-a", "-p", &pid.to_string(), "-Fn"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
+    let lsof = resolve_tool("lsof")?;
+    let stdout = probe_stdout(
+        "lsof",
+        crate::util::no_window_command(lsof).args(["-a", "-p", &pid.to_string(), "-Fn"]),
+    )?;
+    String::from_utf8(stdout)
         .ok()?
         .lines()
         .filter_map(|line| line.strip_prefix('n'))
@@ -338,7 +451,10 @@ fn antigravity_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<Strin
     if let Some(cwd) = target_cwd {
         let normalized_cwd = crate::daemon::server::normalize_process_cwd(&cwd);
         let cwd_str = normalized_cwd.to_string_lossy();
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+        {
             let cache_path = home.join(".gemini/antigravity-cli/cache/last_conversations.json");
             if let Ok(contents) = std::fs::read_to_string(&cache_path) {
                 if let Some(id) = find_antigravity_conversation_id(&contents, &cwd_str) {
@@ -362,7 +478,10 @@ fn opencode_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> 
         .or_else(|| crate::ipc::terminal::process_cwd(root_pid))?;
     let cwd_str = cwd.to_string_lossy();
 
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
         let db_path = home.join(".local/share/opencode/opencode.db");
         if db_path.exists() {
             if let Some(id) = opencode_session_id_from_sqlite(&db_path, &cwd_str) {
@@ -390,17 +509,13 @@ fn opencode_session_id_from_sqlite(db_path: &Path, cwd: &str) -> Option<String> 
         "SELECT id FROM session WHERE directory = '{}' ORDER BY time_updated DESC LIMIT 1;",
         escaped_cwd
     );
-    let output = crate::util::no_window_command("sqlite3")
-        .arg(db_path)
-        .arg(&query)
-        .output()
-        .ok()?;
+    let sqlite3 = resolve_tool("sqlite3")?;
+    let stdout = probe_stdout(
+        "sqlite3",
+        crate::util::no_window_command(sqlite3).arg(db_path).arg(&query),
+    )?;
 
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = String::from_utf8(stdout).ok()?;
     let id = stdout.trim().lines().next()?.trim();
     if is_valid_opencode_session_id(id) {
         Some(id.to_string())
@@ -410,17 +525,14 @@ fn opencode_session_id_from_sqlite(db_path: &Path, cwd: &str) -> Option<String> 
 }
 
 fn opencode_session_id_from_cli(cwd: &str) -> Option<String> {
-    let output = crate::util::no_window_command("opencode")
-        .args(["session", "list", "--format", "json", "-n", "10"])
-        .output()
-        .ok()?;
+    let opencode = resolve_tool("opencode")?;
+    let stdout = probe_stdout(
+        "opencode",
+        crate::util::no_window_command(opencode)
+            .args(["session", "list", "--format", "json", "-n", "10"]),
+    )?;
 
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_opencode_session_list_json(&stdout, cwd)
+    parse_opencode_session_list_json(&String::from_utf8(stdout).ok()?, cwd)
 }
 
 pub(crate) fn parse_opencode_session_list_json(json_str: &str, cwd: &str) -> Option<String> {
@@ -471,7 +583,9 @@ fn pi_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> {
 }
 
 fn pi_session_id_from_session_dir(cwd: &str) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
     let safe_dir = encode_pi_safe_path(cwd);
     let session_dir = home.join(".pi/agent/sessions").join(safe_dir);
     if !session_dir.is_dir() {
@@ -670,6 +784,38 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
+// Discovery probes system tools by bare name so PATH decides the location on
+// every platform (PATHEXT covers npm .cmd shims on Windows); a missing tool
+// yields None instead of a failed spawn.
+fn resolve_tool(name: &str) -> Option<PathBuf> {
+    let resolved = resolve_binary(name, &search_paths());
+    if resolved.is_none() {
+        tracing::debug!(tool = name, "agent session discovery: tool missing from PATH");
+    }
+    resolved
+}
+
+// Probe failures used to return None silently, which hid every platform
+// difference; log them and keep the None-on-failure contract.
+fn probe_stdout(tool: &str, command: &mut std::process::Command) -> Option<Vec<u8>> {
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::debug!(tool, %error, "agent session discovery: probe failed to spawn");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        tracing::debug!(
+            tool,
+            code = ?output.status.code(),
+            "agent session discovery: probe exited non-zero"
+        );
+        return None;
+    }
+    Some(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,6 +930,55 @@ mod tests {
                     "bun /Users/x/.bun/install/global/node_modules/omo-ai/bin/omo.js serve --very-long-argument=value".to_string(),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_powershell_process_json_accepts_array_and_single_object() {
+        let array = concat!(
+            "[",
+            r#"{"ProcessId":100,"ParentProcessId":1,"Name":"powershell.exe","CommandLine":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile"},"#,
+            r#"{"ProcessId":102,"ParentProcessId":101,"Name":"node.exe","CommandLine":"node C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\omo-ai\\bin\\omo.js serve"},"#,
+            r#"{"ProcessId":103,"ParentProcessId":101,"Name":"System","CommandLine":null}"#,
+            "]",
+        );
+
+        assert_eq!(
+            parse_powershell_process_json(array),
+            Some(vec![
+                (
+                    100,
+                    1,
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile"
+                        .to_string(),
+                ),
+                (
+                    102,
+                    101,
+                    r"node C:\Users\x\AppData\Roaming\npm\node_modules\omo-ai\bin\omo.js serve"
+                        .to_string(),
+                ),
+                (103, 101, String::new()),
+            ])
+        );
+
+        // A one-process table collapses to a bare object instead of an array.
+        assert_eq!(
+            parse_powershell_process_json(
+                r#"{"ProcessId":7,"ParentProcessId":1,"Name":"claude.exe","CommandLine":"claude --resume id"}"#
+            ),
+            Some(vec![(7, 1, "claude --resume id".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_powershell_process_json_rejects_non_tables() {
+        assert_eq!(parse_powershell_process_json(""), None);
+        assert_eq!(parse_powershell_process_json("not json"), None);
+        assert_eq!(parse_powershell_process_json(r#"[{"ProcessId":1"#), None);
+        assert_eq!(
+            parse_powershell_process_json(r#"{"ParentProcessId":1,"CommandLine":"x"}"#),
+            None
         );
     }
 

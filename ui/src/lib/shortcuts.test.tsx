@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   SHORTCUTS,
+  isMacShortcutPlatform,
   shortcutAliasesLabels,
   shortcutLabel,
   useShortcuts,
@@ -211,6 +212,77 @@ describe("shortcut registry", () => {
     terminal.dispatchEvent(split);
     expect(split.defaultPrevented).toBe(true);
     expect(handlers["terminal.splitRight"]).toHaveBeenCalledOnce();
+
+    terminalHost.remove();
+  });
+
+  it("leaves a bare Ctrl+letter to the shell when the terminal owns focus off macOS", () => {
+    const handlers = {
+      "terminal.splitRight": vi.fn(),
+    };
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+    const terminalHost = document.createElement("div");
+    terminalHost.className = "terminal-host";
+    const terminal = document.createElement("textarea");
+    terminalHost.appendChild(terminal);
+    document.body.appendChild(terminalHost);
+
+    // Ctrl+D is readline's EOF/delete-char on Windows and Linux; the app must not
+    // claim it and must leave the keystroke to reach the shell.
+    const ctrlD = new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, cancelable: true, bubbles: true });
+    terminal.dispatchEvent(ctrlD);
+    expect(handlers["terminal.splitRight"]).not.toHaveBeenCalled();
+    expect(ctrlD.defaultPrevented).toBe(false);
+
+    terminalHost.remove();
+  });
+
+  it("still claims the same Ctrl+letter chord outside the terminal off macOS", () => {
+    const handlers = {
+      "terminal.splitRight": vi.fn(),
+    };
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+
+    const ctrlD = new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, cancelable: true, bubbles: true });
+    document.body.dispatchEvent(ctrlD);
+    expect(handlers["terminal.splitRight"]).toHaveBeenCalledOnce();
+    expect(ctrlD.defaultPrevented).toBe(true);
+  });
+
+  it("still claims Ctrl+Shift+letter from the terminal off macOS", () => {
+    const handlers = {
+      "terminal.splitDown": vi.fn(),
+    };
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+    const terminalHost = document.createElement("div");
+    terminalHost.className = "terminal-host";
+    const terminal = document.createElement("textarea");
+    terminalHost.appendChild(terminal);
+    document.body.appendChild(terminalHost);
+
+    const ctrlShiftD = new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, shiftKey: true, cancelable: true, bubbles: true });
+    terminal.dispatchEvent(ctrlShiftD);
+    expect(handlers["terminal.splitDown"]).toHaveBeenCalledOnce();
+    expect(ctrlShiftD.defaultPrevented).toBe(true);
+
+    terminalHost.remove();
+  });
+
+  it("keeps claiming Cmd+letter from the terminal on macOS", () => {
+    const handlers = {
+      "terminal.splitRight": vi.fn(),
+    };
+    renderHook(() => useShortcuts(handlers, { isMac: true }));
+    const terminalHost = document.createElement("div");
+    terminalHost.className = "terminal-host";
+    const terminal = document.createElement("textarea");
+    terminalHost.appendChild(terminal);
+    document.body.appendChild(terminalHost);
+
+    const cmdD = new KeyboardEvent("keydown", { key: "d", code: "KeyD", metaKey: true, cancelable: true, bubbles: true });
+    terminal.dispatchEvent(cmdD);
+    expect(handlers["terminal.splitRight"]).toHaveBeenCalledOnce();
+    expect(cmdD.defaultPrevented).toBe(true);
 
     terminalHost.remove();
   });
@@ -525,5 +597,71 @@ describe("shortcut chord collision invariants", () => {
     expect(browserBack).toHaveBeenCalledOnce();
     expect(terminalPrev).not.toHaveBeenCalled();
     unmount();
+  });
+});
+
+describe("macOS platform detection", () => {
+  const MAC_PLATFORM = "MacIntel";
+  const MAC_USER_AGENT =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+  // jsdom answers for its own host: the `process.platform` fallback would report macOS
+  // on every developer Mac and hide whatever the browser signals decided, so it is
+  // pinned off here. `maxTouchPoints` is defined explicitly (possibly as undefined)
+  // because jsdom's prototype carries it and an own undefined value is what the
+  // detector sees for a property the webview never exposes.
+  function withPlatformSignals<T>(
+    platform: string,
+    userAgent: string,
+    maxTouchPoints: number | undefined,
+    run: () => T,
+  ): T {
+    const processPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(navigator, "platform", { value: platform, configurable: true });
+    Object.defineProperty(navigator, "userAgent", { value: userAgent, configurable: true });
+    Object.defineProperty(navigator, "maxTouchPoints", { value: maxTouchPoints, configurable: true });
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    try {
+      return run();
+    } finally {
+      const stubbed: { platform?: unknown; userAgent?: unknown; maxTouchPoints?: unknown } = navigator;
+      delete stubbed.platform;
+      delete stubbed.userAgent;
+      delete stubbed.maxTouchPoints;
+      if (processPlatform) Object.defineProperty(process, "platform", processPlatform);
+    }
+  }
+
+  function detectMac(platform: string, userAgent: string, maxTouchPoints?: number): boolean {
+    return withPlatformSignals(platform, userAgent, maxTouchPoints, () => isMacShortcutPlatform());
+  }
+
+  it("detects macOS when the webview does not expose maxTouchPoints", () => {
+    // Given: a Mac webview missing the property entirely, so `undefined` reaches both branches.
+    // When: detection runs from the platform string and, separately, from the user agent alone.
+    // Then: neither branch loses macOS to the absent property.
+    expect(detectMac(MAC_PLATFORM, MAC_USER_AGENT)).toBe(true);
+    expect(detectMac("Linux x86_64", MAC_USER_AGENT)).toBe(true);
+  });
+
+  it("still detects macOS when maxTouchPoints is reported as zero", () => {
+    expect(detectMac(MAC_PLATFORM, MAC_USER_AGENT, 0)).toBe(true);
+    expect(detectMac("Linux x86_64", MAC_USER_AGENT, 0)).toBe(true);
+  });
+
+  it("does not treat a touch-capable MacIntel device as macOS", () => {
+    // Given: an iPad with a hardware keyboard, which reports the Mac platform string
+    // and a Macintosh user agent and is separated from a real Mac only by touch points.
+    // When: detection runs.
+    // Then: a non-zero count still disqualifies it in both branches.
+    expect(detectMac(MAC_PLATFORM, MAC_USER_AGENT, 5)).toBe(false);
+    expect(detectMac("Linux x86_64", MAC_USER_AGENT, 5)).toBe(false);
+  });
+
+  it("resolves Mod to Cmd on a Mac webview without maxTouchPoints", () => {
+    // The regression this guards: losing macOS detection turns the label into Ctrl+T.
+    expect(
+      withPlatformSignals(MAC_PLATFORM, MAC_USER_AGENT, undefined, () => shortcutLabel("tab.newTerminal")),
+    ).toBe("⌘T");
   });
 });

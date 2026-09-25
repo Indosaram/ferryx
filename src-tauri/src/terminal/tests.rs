@@ -14,10 +14,26 @@ async fn wait_for_session_removal(manager: &PtyManager, session_id: &str) {
     .expect("session should be removed from registry");
 }
 
+// portable-pty hands the program path to the OS verbatim, so the tests must name a shell that
+// exists on the host: /bin/sh on unix, ComSpec (cmd.exe) on Windows.
+fn test_shell() -> CommandBuilder {
+    #[cfg(unix)]
+    {
+        CommandBuilder::new("/bin/sh")
+    }
+
+    #[cfg(not(unix))]
+    {
+        CommandBuilder::new(
+            std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe")),
+        )
+    }
+}
+
 #[tokio::test]
 async fn test_spawn_write_echo_and_read() {
     let manager = PtyManager::new();
-    let cmd = CommandBuilder::new("/bin/sh");
+    let cmd = test_shell();
     let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("failed to spawn");
 
     assert!(manager.has_session(&session_id));
@@ -85,7 +101,7 @@ async fn test_spawn_startup_command_omo() {
 #[tokio::test]
 async fn test_resize() {
     let manager = PtyManager::new();
-    let cmd = CommandBuilder::new("/bin/sh");
+    let cmd = test_shell();
     let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("failed to spawn");
 
     let session = manager.get_session(&session_id).expect("session not found");
@@ -107,10 +123,12 @@ async fn test_resize() {
         .expect("close failed");
 }
 
+// `stty` is a POSIX utility: cmd.exe has no way to report the tty size this test asserts.
+#[cfg(unix)]
 #[tokio::test]
 async fn resize_is_observed_by_the_child_shell() {
     let manager = PtyManager::new();
-    let cmd = CommandBuilder::new("/bin/sh");
+    let cmd = test_shell();
     let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("failed to spawn");
 
     manager
@@ -155,7 +173,7 @@ async fn resize_is_observed_by_the_child_shell() {
 #[tokio::test]
 async fn test_kill() {
     let manager = PtyManager::new();
-    let cmd = CommandBuilder::new("/bin/sh");
+    let cmd = test_shell();
     let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("failed to spawn");
 
     assert!(manager.has_session(&session_id));
@@ -177,10 +195,10 @@ async fn test_kill() {
 async fn test_multiple_concurrent_sessions() {
     let manager = PtyManager::new();
 
-    let cmd1 = CommandBuilder::new("/bin/sh");
+    let cmd1 = test_shell();
     let (id1, mut rx1) = manager.spawn(cmd1, 80, 24).expect("failed to spawn 1");
 
-    let cmd2 = CommandBuilder::new("/bin/sh");
+    let cmd2 = test_shell();
     let (id2, mut rx2) = manager.spawn(cmd2, 80, 24).expect("failed to spawn 2");
 
     assert_ne!(id1, id2);
@@ -259,7 +277,7 @@ async fn test_session_lifecycle_and_errors() {
 
     // Custom session ID
     let custom_id = "custom-pty-123";
-    let cmd = CommandBuilder::new("/bin/sh");
+    let cmd = test_shell();
     let _rx = manager
         .spawn_with_id(custom_id, cmd, 80, 24)
         .expect("failed spawn with id");
@@ -284,7 +302,7 @@ async fn test_lifecycle_poll_interval_is_relaxed_and_event_driven() {
     );
 
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.arg("-c");
     cmd.arg("exit 42");
 
@@ -300,10 +318,12 @@ async fn test_lifecycle_poll_interval_is_relaxed_and_event_driven() {
     assert!(session.is_reaped(), "child process must be reaped");
 }
 
+// The payload is POSIX shell (`sleep`, `;`), which cmd.exe cannot express.
+#[cfg(unix)]
 #[tokio::test]
 async fn natural_child_exit_auto_removes_session_and_records_exit_code() {
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.arg("-c");
     cmd.arg("sleep 0.1; exit 7");
 
@@ -319,10 +339,12 @@ async fn natural_child_exit_auto_removes_session_and_records_exit_code() {
     assert!(session.is_reaped(), "child handle must be reaped");
 }
 
+// The POSIX `sleep 30` keep-alive is what gives close a live child to kill; cmd.exe exits at once.
+#[cfg(unix)]
 #[tokio::test]
 async fn explicit_close_kills_reaps_and_removes_session() {
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.arg("-c");
     cmd.arg("sleep 30");
 
@@ -340,7 +362,7 @@ async fn explicit_close_kills_reaps_and_removes_session() {
 async fn close_session_is_idempotent() {
     let manager = PtyManager::new();
     let (session_id, _rx) = manager
-        .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+        .spawn(test_shell(), 80, 24)
         .expect("spawn");
 
     manager
@@ -354,10 +376,12 @@ async fn close_session_is_idempotent() {
     assert!(!manager.has_session(&session_id));
 }
 
+// The POSIX `sleep 30` keep-alive keeps a live child for the drop cleanup; cmd.exe exits at once.
+#[cfg(unix)]
 #[tokio::test]
 async fn dropped_output_receiver_still_cleans_reader_and_session() {
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.arg("-c");
     cmd.arg("sleep 30");
 
@@ -376,7 +400,7 @@ async fn fast_spawn_close_race_is_safe() {
 
     for _ in 0..16 {
         let (session_id, _rx) = manager
-            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .spawn(test_shell(), 80, 24)
             .expect("spawn");
         manager.close_session(&session_id).await.expect("close");
         assert!(!manager.has_session(&session_id));
@@ -385,11 +409,12 @@ async fn fast_spawn_close_race_is_safe() {
     assert_eq!(manager.session_count(), 0);
 }
 
+// SIGINT and foreground process groups are POSIX concepts; Windows has no equivalent signal.
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupt_signal_targets_foreground_pty_process_group() {
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.arg("-c");
     cmd.arg("sleep 30");
 
@@ -402,12 +427,14 @@ async fn interrupt_signal_targets_foreground_pty_process_group() {
     assert!(!manager.has_session(&session_id));
 }
 
+// The `printf done` payload is POSIX; cmd.exe has no equivalent builtin.
+#[cfg(unix)]
 #[tokio::test]
 async fn terminal_service_natural_exit_closes_daemon_owned_output_stream() {
     let pty_manager = Arc::new(PtyManager::new());
     let output_hub = Arc::new(TerminalOutputHub::new(1024));
     let service = TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub));
-    let mut command = CommandBuilder::new("/bin/sh");
+    let mut command = test_shell();
     command.arg("-c");
     command.arg("printf done");
 
@@ -443,7 +470,7 @@ async fn test_terminal_service_sequence_safe_attach_and_replay() {
     let service = TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub));
 
     let (session_id, _rx) = pty_manager
-        .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+        .spawn(test_shell(), 80, 24)
         .expect("spawn");
     let _hub_rx = output_hub.register_session(&session_id);
 
@@ -476,12 +503,14 @@ async fn test_terminal_service_sequence_safe_attach_and_replay() {
     assert!(!service.output_hub().has_session(&session_id));
 }
 
+// `$TERM` is a POSIX environment contract; cmd.exe children carry no equivalent.
+#[cfg(unix)]
 #[tokio::test]
 async fn spawned_pty_advertises_a_real_terminal_type() {
     // A PTY is a real terminal, so TERM must never be inherited as `dumb` from a GUI-launched
     // daemon: agent TUIs downgrade to non-interactive mode and stop reporting their state.
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.args(["-c", "printf 'TERMIS<%s>' \"$TERM\""]);
     let (_session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn");
 
@@ -510,12 +539,14 @@ async fn spawned_pty_advertises_a_real_terminal_type() {
     );
 }
 
+// `$COLORTERM` is a POSIX environment contract; cmd.exe children carry no equivalent.
+#[cfg(unix)]
 #[tokio::test]
 async fn spawned_pty_advertises_truecolor_support() {
     // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
     // COLORTERM to decide, and render a degraded monochrome palette when it is absent.
     let manager = PtyManager::new();
-    let mut cmd = CommandBuilder::new("/bin/sh");
+    let mut cmd = test_shell();
     cmd.args(["-c", "printf 'CTIS<%s>' \"$COLORTERM\""]);
     let (_session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn");
 

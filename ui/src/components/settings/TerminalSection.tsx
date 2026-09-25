@@ -9,6 +9,26 @@ import { SettingsHeading } from "./primitives";
 import type { TerminalSectionProps } from "./types";
 import { isMacShortcutPlatform } from "../../lib/shortcuts";
 import { loadFileLinkEditor, parseFileLinkEditor, saveFileLinkEditor } from "../../lib/fileLinkSettings";
+import { getSystemPermissionsStatus } from "../../lib/tauri";
+
+type ShellPreset = { value: string; label: string };
+
+/**
+ * Presets are keyed to the HOST platform reported by the backend, never to the
+ * browser OS: the remote web client can drive a host of a different platform.
+ */
+const WINDOWS_SHELL_PRESETS: ShellPreset[] = [
+  { value: "pwsh", label: "PowerShell" },
+  { value: "powershell", label: "Windows PowerShell" },
+  { value: "cmd", label: "Command Prompt" },
+  { value: "wsl", label: "WSL" },
+];
+
+const POSIX_SHELL_PRESETS: ShellPreset[] = [
+  { value: "zsh", label: "zsh" },
+  { value: "bash", label: "bash" },
+  { value: "fish", label: "fish" },
+];
 
 export function TerminalSection({
   fontFamily,
@@ -30,7 +50,16 @@ export function TerminalSection({
   const [sizeDraft, setSizeDraft] = useState(String(fontSize));
   const [scrollbackDraft, setScrollbackDraft] = useState(String(scrollback));
 
-  const knownShells = ["pwsh", "powershell", "cmd", "wsl"];
+  const [hostPlatform, setHostPlatform] = useState<string | null>(null);
+  // While the host platform is unknown no preset is offered: guessing either side
+  // would list shells that cannot spawn on the host.
+  const shellPresets: ShellPreset[] =
+    hostPlatform === "windows"
+      ? WINDOWS_SHELL_PRESETS
+      : hostPlatform === "macos" || hostPlatform === "linux"
+        ? POSIX_SHELL_PRESETS
+        : [];
+  const knownShells = shellPresets.map((preset) => preset.value);
   const isKnownShell = shell !== null && knownShells.includes(shell);
   const isCustomShell = shell !== null && shell !== "" && !isKnownShell;
 
@@ -54,6 +83,20 @@ export function TerminalSection({
   }, [scrollback]);
 
   useEffect(() => {
+    let cancelled = false;
+    void getSystemPermissionsStatus()
+      .then((status) => {
+        if (!cancelled) setHostPlatform(status?.platform ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setHostPlatform(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (shell === null || shell === "") {
       setSelectedShell("");
     } else if (knownShells.includes(shell)) {
@@ -62,7 +105,7 @@ export function TerminalSection({
       setSelectedShell("custom");
       setCustomDraft(shell);
     }
-  }, [shell]);
+  }, [shell, hostPlatform]);
 
   const commitFamily = () => {
     if (familyDraft.trim() === "") {
@@ -262,10 +305,11 @@ export function TerminalSection({
             className="h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-[11px] shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
           >
             <option value="" className="bg-popover text-popover-foreground">Platform default</option>
-            <option value="pwsh" className="bg-popover text-popover-foreground">PowerShell</option>
-            <option value="powershell" className="bg-popover text-popover-foreground">Windows PowerShell</option>
-            <option value="cmd" className="bg-popover text-popover-foreground">Command Prompt</option>
-            <option value="wsl" className="bg-popover text-popover-foreground">WSL</option>
+            {shellPresets.map((preset) => (
+              <option key={preset.value} value={preset.value} className="bg-popover text-popover-foreground">
+                {preset.label}
+              </option>
+            ))}
             <option value="custom" className="bg-popover text-popover-foreground">Custom...</option>
           </select>
           {selectedShell === "custom" ? (

@@ -1,5 +1,17 @@
+//! macOS `launchd` LaunchAgent plumbing for the headless daemon.
+//!
+//! Autostart is currently unwired on every platform: no production code calls
+//! [`install_launchd_agent`] or [`uninstall_launchd_agent`] (the GUI spawns the daemon on demand),
+//! and Windows/Linux have no autostart equivalent here - no registry `Run` key, no `systemd --user`
+//! unit, and no XDG autostart desktop file.
+//!
+//! Every path that spawns the `launchctl` binary is gated to `#[cfg(target_os = "macos")]`, so a
+//! future caller cannot shell out to a macOS-only tool on Windows or Linux.
+
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 const PLIST_LABEL: &str = "com.rorca.daemon";
@@ -45,6 +57,11 @@ pub fn generate_launchd_plist(executable_path: &str) -> String {
     )
 }
 
+/// Writes the LaunchAgent plist and loads it with `launchctl load -w`.
+///
+/// macOS-only: nothing calls this today (see the module docs), and the `launchctl` spawn must stay
+/// unreachable on every other target.
+#[cfg(target_os = "macos")]
 pub fn install_launchd_agent_for_path(
     executable_path: &Path,
     plist_path: &Path,
@@ -84,6 +101,18 @@ pub fn install_launchd_agent_for_path(
     Ok(())
 }
 
+/// Non-macOS stub: no LaunchAgent mechanism exists on Windows or Linux, so nothing is installed
+/// and the call is a no-op. The only caller, [`install_launchd_agent`], fails earlier on those
+/// targets because [`get_launchd_plist_path`] returns `None`, so this cannot report a false
+/// success to a real caller.
+#[cfg(not(target_os = "macos"))]
+pub fn install_launchd_agent_for_path(
+    _executable_path: &Path,
+    _plist_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
 pub fn install_launchd_agent() -> Result<PathBuf, String> {
     let plist_path = get_launchd_plist_path().ok_or("Cannot determine HOME directory")?;
     let current_exe =
@@ -93,6 +122,11 @@ pub fn install_launchd_agent() -> Result<PathBuf, String> {
     Ok(plist_path)
 }
 
+/// Unloads the LaunchAgent with `launchctl unload -w` and removes the plist.
+///
+/// macOS-only: nothing calls this today (see the module docs), and the `launchctl` spawn must stay
+/// unreachable on every other target.
+#[cfg(target_os = "macos")]
 pub fn uninstall_launchd_agent_from_path(plist_path: &Path) -> Result<(), String> {
     if plist_path.exists() {
         let output = Command::new("launchctl")
@@ -121,6 +155,13 @@ pub fn uninstall_launchd_agent_from_path(plist_path: &Path) -> Result<(), String
 
         fs::remove_file(plist_path).map_err(|e| format!("Failed to remove plist file: {e}"))?;
     }
+    Ok(())
+}
+
+/// Non-macOS no-op: there is no LaunchAgent to unload, so removal always reports the same
+/// idempotent success the macOS path returns for a plist that is not present.
+#[cfg(not(target_os = "macos"))]
+pub fn uninstall_launchd_agent_from_path(_plist_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

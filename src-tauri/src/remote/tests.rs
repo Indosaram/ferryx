@@ -429,8 +429,9 @@ fn test_resolve_dist_dir_packaged_macos_bundle_layout() {
 #[test]
 fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let install_dir = dir.path().join("FerryxApp");
-    let resources_ui_dist = install_dir.join("resources/ui/dist");
+    let bin_dir = dir.path().join("usr/bin");
+    let resources_ui_dist = dir.path().join("usr/lib/Ferryx/ui/dist");
+    std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::create_dir_all(&resources_ui_dist).unwrap();
     std::fs::write(
         resources_ui_dist.join("index.html"),
@@ -438,14 +439,17 @@ fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
     )
     .unwrap();
 
-    let exe_path = install_dir.join("ferryx");
-    let isolated_cwd = dir.path().join("isolated_cwd");
-    std::fs::create_dir_all(&isolated_cwd).unwrap();
+    let exe_path = bin_dir.join("ferryx");
 
-    let resolved =
-        crate::remote::server::resolve_dist_dir_from(Some(&isolated_cwd), Some(&exe_path), None);
+    let resolved = crate::remote::server::resolve_dist_dir_from(None, Some(&exe_path), None)
+        .expect("linux deb layout must resolve ui/dist");
+    assert!(
+        resolved.ends_with("usr/lib/Ferryx/ui/dist"),
+        "expected usr/lib/Ferryx/ui/dist, got {}",
+        resolved.display()
+    );
     let expected = resources_ui_dist.canonicalize().unwrap();
-    assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+    assert_eq!(resolved, expected);
 }
 
 #[test]

@@ -970,8 +970,21 @@ impl RemoteGatewayState {
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             browser_backend: parking_lot::RwLock::new(Arc::new(
                 crate::remote::browser_backend::LocalIpcBrowserBackend::new(
-                    crate::daemon::server::get_runtime_dir()
-                        .join("browser.sock")
+                    // Platform-correct endpoint, derived from the same helper the
+                    // GUI publishes with in `ipc::browser_cli`: a Unix socket at
+                    // `runtime/browser.sock` on unix, the loopback port file at
+                    // `runtime/browser.port` on Windows.
+                    //
+                    // Deliberate limitation, not an oversight: a daemon-hosted
+                    // gateway cannot serve browser IPC on Windows. Only the GUI
+                    // process calls `set_browser_backend` (see `src/lib.rs`), so a
+                    // daemon keeps this default, and `LocalIpcBrowserBackend`'s
+                    // non-unix transport is an explicit stub that answers
+                    // `Unavailable` for every call. Until a TCP transport for
+                    // `runtime/browser.port` exists, the daemon must report
+                    // `browserAvailable: false` there rather than pretend
+                    // otherwise.
+                    crate::ipc::browser_cli::browser_cli_socket_path()
                         .to_string_lossy()
                         .to_string(),
                     None,

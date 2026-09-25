@@ -58,14 +58,24 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
                     Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
                 );
             }
-            return self
+            let builder = self
                 .app
                 .notification()
                 .builder()
                 .title(&content.title)
-                .body(&content.body)
-                .show()
-                .map_err(|error| error.to_string());
+                .body(&content.body);
+            // Windows renders an unset sound name as a silent toast, so the
+            // default `System` choice has to name the platform default
+            // explicitly; `Silent` stays unset, which is already silent there.
+            // Linux is untouched: `"Default"` is not a freedesktop sound name,
+            // and the plugin builder exposes no suppress-sound hint.
+            #[cfg(target_os = "windows")]
+            let builder = if content.sound == NotificationSound::System {
+                builder.sound(crate::notification::notify_rust_adapter::DEFAULT_SOUND_NAME)
+            } else {
+                builder
+            };
+            return builder.show().map_err(|error| error.to_string());
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {

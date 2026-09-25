@@ -58,12 +58,52 @@ pub fn initial_project(registry: &WorkspaceRegistry) -> Result<RegisteredProject
     initial_project_from_path(registry, &cwd)
 }
 
+/// True when `cwd` names the same directory as `exe_dir`, the folder holding
+/// the running executable.
+///
+/// A Windows Start-Menu shortcut starts the process with the executable's own
+/// folder as the working directory, so that launch route would otherwise adopt
+/// the installation directory as the user's first project. Both sides are
+/// canonicalized and compared as text with the separator and case folding
+/// [`crate::ssh::worktree`] uses for Windows paths, because the two spellings
+/// can differ in separators, trailing separators, and case. The comparison is
+/// driven entirely by its arguments, so it is testable without touching the
+/// process working directory.
+fn cwd_is_executable_directory(cwd: &Path, exe_dir: &Path) -> bool {
+    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let canonical_exe = std::fs::canonicalize(exe_dir).unwrap_or_else(|_| exe_dir.to_path_buf());
+    let folded = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let trimmed = text.trim_end_matches('/').to_string();
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed
+        }
+    };
+    let folded_exe = folded(&canonical_exe);
+    // An empty executable directory means the path carried no folder at all
+    // (a bare relative executable name), which must never match a launch root.
+    !folded_exe.is_empty() && folded(&canonical_cwd) == folded_exe
+}
+
 pub fn initial_project_from_path(
     registry: &WorkspaceRegistry,
     path: &Path,
 ) -> Result<RegisteredProject, IpcError> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let target = if canonical.parent().is_none() {
+    // A launch route that names no project root - a macOS `.app` or Linux
+    // `.desktop` launch reports `/` or the home directory, and a Windows
+    // Start-Menu shortcut reports the folder holding `ferryx.exe` - falls back
+    // to the home directory instead of registering the installation directory.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let launched_from_executable_directory = match exe_dir {
+        Some(dir) => cwd_is_executable_directory(&canonical, &dir),
+        None => false,
+    };
+    let target = if canonical.parent().is_none() || launched_from_executable_directory {
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from);
@@ -486,5 +526,24 @@ mod git_identity_tests {
         assert_ne!(feature.workspace_id, main.workspace_id);
         assert_eq!(feature.repo_root, std::fs::canonicalize(linked).unwrap());
         assert_eq!(feature.git_root.as_ref(), Some(&feature.repo_root));
+    }
+}
+
+#[cfg(test)]
+mod launch_directory_tests {
+    use super::*;
+
+    #[test]
+    fn executable_directory_is_not_a_project_root() {
+        let install = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        // The installation directory is rejected, however it is spelled.
+        assert!(cwd_is_executable_directory(install.path(), install.path()));
+        assert!(cwd_is_executable_directory(
+            &install.path().join("."),
+            install.path()
+        ));
+        // A real project directory is still adopted.
+        assert!(!cwd_is_executable_directory(project.path(), install.path()));
     }
 }

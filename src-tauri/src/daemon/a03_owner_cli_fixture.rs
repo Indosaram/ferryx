@@ -28,18 +28,40 @@ struct CliOutput {
     authority: String,
 }
 
+// `kill` lives at `/bin/kill` on macOS and `/usr/bin/kill` on Linux
+// distributions, so probe both and fall back to PATH resolution.
+fn kill_binary() -> PathBuf {
+    let candidates = ["/bin/kill", "/usr/bin/kill"];
+    for candidate in candidates {
+        let candidate = PathBuf::from(candidate);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("kill");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(candidates[0])
+}
+
 // Owned by the outer process, so inner runtime failure cannot strand a CLI.
 struct OwnedGroup(u32);
 impl OwnedGroup {
     fn cleanup(&self) -> std::io::Result<()> {
         let group = format!("-{}", self.0);
-        let alive = std::process::Command::new("/bin/kill")
+        let kill = kill_binary();
+        let alive = std::process::Command::new(&kill)
             .args(["-0", "--", &group])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
         if alive.success() {
-            let killed = std::process::Command::new("/bin/kill")
+            let killed = std::process::Command::new(&kill)
                 .args(["-KILL", "--", &group])
                 .status()?;
             if !killed.success() {
@@ -406,8 +428,16 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
                 .env_remove("FERRYX_MACHINE_TOKEN")
                 .env_remove("FERRYX_RELAY_URL")
                 .kill_on_drop(true);
-            if let Some(libraries) = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
-                command.env("DYLD_FALLBACK_LIBRARY_PATH", libraries);
+            // Forward the platform dynamic-loader search path so the child test
+            // binary resolves the same libraries: DYLD_* on macOS, LD_LIBRARY_PATH
+            // on Linux distributions.
+            let loader_path = if cfg!(target_os = "macos") {
+                "DYLD_FALLBACK_LIBRARY_PATH"
+            } else {
+                "LD_LIBRARY_PATH"
+            };
+            if let Some(libraries) = std::env::var_os(loader_path) {
+                command.env(loader_path, libraries);
             }
             command.as_std_mut().process_group(0);
             let mut child = command.spawn()?;

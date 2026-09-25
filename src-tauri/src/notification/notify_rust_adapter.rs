@@ -14,18 +14,80 @@
 //! activation, dismissal, or timeout/close.
 
 use super::activation::{route_activation, ActivationAction, NotificationActivations};
-use super::model::{NotificationContent, NotificationTarget};
+use super::model::{
+    NotificationContent, NotificationPlatform, NotificationSound, NotificationTarget,
+};
 use notify_rust::{Notification, NotificationResponse};
 use std::sync::Arc;
 
 /// Canonical default-action identifier registered on every routed notification.
 const DEFAULT_ACTION_ID: &str = "default";
 
+/// Sound name that asks Windows for the platform default alert.
+///
+/// `tauri-winrt-notification` parses it into `Sound::Default`, which leaves the
+/// toast without an `<audio>` element and so plays the system alert. An unset
+/// name renders `<audio silent="true"/>` instead, so the default choice has to
+/// name it explicitly.
+pub(crate) const DEFAULT_SOUND_NAME: &str = "Default";
+
+/// Alert fields a platform backend needs to honour the user's sound setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SoundPolicy {
+    /// Sound name to request; `None` leaves the platform default in place.
+    sound_name: Option<&'static str>,
+    /// XDG `suppress-sound` hint.
+    suppress: bool,
+}
+
+/// Map the user's sound setting onto the Windows/Linux alert fields.
+///
+/// Windows renders an unset sound name as a *silent* toast, so the default
+/// `System` choice has to name the platform default explicitly; `Silent` stays
+/// unset, which is already silent there. Linux alerts by default and expresses
+/// `Silent` through the XDG `suppress-sound` hint, and is never sent a sound
+/// name because `"Default"` is not a valid freedesktop sound name.
+fn sound_policy(sound: NotificationSound, platform: NotificationPlatform) -> SoundPolicy {
+    match (sound, platform) {
+        (NotificationSound::System, NotificationPlatform::Windows) => SoundPolicy {
+            sound_name: Some(DEFAULT_SOUND_NAME),
+            suppress: false,
+        },
+        (NotificationSound::Silent, NotificationPlatform::Linux) => SoundPolicy {
+            sound_name: None,
+            suppress: true,
+        },
+        // `Silent` on Windows rides the unset name and `System` on Linux the
+        // server default; macOS applies its own policy in `macos_submission`.
+        _ => SoundPolicy {
+            sound_name: None,
+            suppress: false,
+        },
+    }
+}
+
+/// Does `dir` look like a cargo dev output directory (`target/debug` or
+/// `target/release`)?
+///
+/// Only dev runs skip the AppUserModelID: a `cargo run` binary has no
+/// Start-Menu shortcut, so applying an unregistered identifier there would
+/// only lose the toast.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_dev_output_dir(dir: &std::path::Path) -> bool {
+    dir.ends_with("target/debug") || dir.ends_with("target/release")
+}
+
 /// Show a notification and, when it carries a routing target, wait for the
 /// user's click on a dedicated thread and route it.
 ///
-/// `app_id` preserves the Windows AppUserModelID the app already registers so
-/// toasts keep their identity; it is ignored on Linux.
+/// The user's sound setting is applied before showing, since `notify-rust`
+/// leaves the alert entirely to the platform default otherwise.
+///
+/// `app_id` is the Windows AppUserModelID applied to the toast; it is ignored
+/// on Linux. Windows only shows the toast when that identifier matches the
+/// `System.AppUserModel.ID` of an installed Start-Menu shortcut, and this repo
+/// registers none yet, so the NSIS/MSI packaging must register `app_id` before
+/// packaged Windows toasts can be relied on.
 pub fn submit_with_click_routing(
     content: &NotificationContent,
     _app_id: &str,
@@ -36,15 +98,36 @@ pub fn submit_with_click_routing(
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-        let dev_output = exe
-            .parent()
-            .is_some_and(|dir| dir.ends_with("target/debug") || dir.ends_with("target/release"));
+        let dev_output = exe.parent().is_some_and(is_dev_output_dir);
         if !dev_output {
+            // Nothing in this repo registers the identifier, and Windows only
+            // delivers a toast whose AppUserModelID matches the installed
+            // Start-Menu shortcut.
+            tracing::warn!(
+                app_id = %_app_id,
+                "Windows toast delivery requires a registered AppUserModelID matching this identifier; an unpackaged or shortcut-less install may silently drop the toast"
+            );
             builder.app_id(_app_id);
         }
     }
     #[cfg(target_os = "linux")]
     builder.appname("Ferryx");
+
+    // The user's sound setting reaches neither notify-rust nor the tauri plugin
+    // on its own (macOS applies it in `macos_submission`), so apply it here.
+    let policy = sound_policy(content.sound, NotificationPlatform::current());
+    if let Some(name) = policy.sound_name {
+        #[cfg(target_os = "windows")]
+        builder.sound_name(name);
+        // Linux never carries a name: `"Default"` is not a freedesktop sound.
+        #[cfg(not(target_os = "windows"))]
+        let _ = name;
+    }
+    if policy.suppress {
+        // Windows expresses `Silent` by leaving the sound name unset instead.
+        #[cfg(target_os = "linux")]
+        builder.hint(notify_rust::Hint::SuppressSound(true));
+    }
 
     // Only notifications with a real destination need a click handler; test /
     // id-less notifications show without one and route nothing.
@@ -145,5 +228,43 @@ mod tests {
             &queue
         ));
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn system_sound_names_the_windows_default_only() {
+        let windows = sound_policy(NotificationSound::System, NotificationPlatform::Windows);
+        assert_eq!(windows.sound_name, Some(DEFAULT_SOUND_NAME));
+        assert!(!windows.suppress);
+
+        // Linux alerts by default and rejects `"Default"` as a sound name.
+        let linux = sound_policy(NotificationSound::System, NotificationPlatform::Linux);
+        assert_eq!(linux.sound_name, None);
+        assert!(!linux.suppress);
+    }
+
+    #[test]
+    fn silent_sound_suppresses_on_linux_only() {
+        let linux = sound_policy(NotificationSound::Silent, NotificationPlatform::Linux);
+        assert!(linux.suppress);
+        assert_eq!(linux.sound_name, None);
+
+        // Windows renders an unset sound name as a silent toast already.
+        let windows = sound_policy(NotificationSound::Silent, NotificationPlatform::Windows);
+        assert_eq!(windows.sound_name, None);
+        assert!(!windows.suppress);
+    }
+
+    #[test]
+    fn dev_output_detection_classifies_target_and_installed_dirs() {
+        assert!(is_dev_output_dir(std::path::Path::new(
+            "/repo/src-tauri/target/debug"
+        )));
+        assert!(is_dev_output_dir(std::path::Path::new(
+            "/repo/src-tauri/target/release"
+        )));
+        // A packaged install runs from its own directory, not a cargo target.
+        assert!(!is_dev_output_dir(std::path::Path::new(
+            r"C:\Users\dev\AppData\Local\Ferryx"
+        )));
     }
 }

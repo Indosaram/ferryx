@@ -1,5 +1,7 @@
 use crate::terminal::output_hub::TerminalOutputHub;
-use crate::terminal::session::{PtySessionExport, PtySessionSnapshot};
+#[cfg(unix)]
+use crate::terminal::session::PtySessionExport;
+use crate::terminal::session::PtySessionSnapshot;
 use crate::terminal::{
     session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal,
 };
@@ -26,6 +28,23 @@ pub fn utf8_locale_override<E>(get_env: E) -> Option<(&'static str, &'static str
 where
     E: Fn(&'static str) -> Option<std::ffi::OsString>,
 {
+    utf8_locale_override_for(get_env, cfg!(target_os = "windows"))
+}
+
+/// Windows console encoding is governed by the console code page, not by `LANG`/`LC_*`: ConPTY
+/// shells (cmd.exe, PowerShell, pwsh) ignore these variables entirely, so an override written
+/// into a Windows pane would be dead logic. The platform decision is a parameter so it stays
+/// testable from every host.
+fn utf8_locale_override_for<E>(
+    get_env: E,
+    is_windows: bool,
+) -> Option<(&'static str, &'static str)>
+where
+    E: Fn(&'static str) -> Option<std::ffi::OsString>,
+{
+    if is_windows {
+        return None;
+    }
     for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         if get_env(key).map(|v| !v.is_empty()).unwrap_or(false) {
             return None;
@@ -46,12 +65,87 @@ pub fn apply_session_env(
     workspace_id: Option<&str>,
 ) {
     cmd.env("FERRYX_SESSION_ID", session_id);
-    cmd.env("FERRYX_WORKTREE_PATH", worktree_path);
+    // Windows canonicalization returns verbatim paths (`\\?\C:\repo\...`), and a consumer of
+    // this variable reads it as literal path text rather than handing it back to the OS, so the
+    // prefix is stripped here. On unix the normalizer is a no-op for an ordinary path.
+    cmd.env(
+        "FERRYX_WORKTREE_PATH",
+        crate::daemon::session_service::normalize_process_cwd(Path::new(worktree_path)),
+    );
     if let Some(ws) = workspace_id {
         let trimmed = ws.trim();
         if !trimmed.is_empty() {
             cmd.env("FERRYX_WORKSPACE_ID", trimmed);
         }
+    }
+}
+
+/// Exports the loopback agent-state rendezvous the daemon publishes beside its agent-state
+/// socket while it runs. Windows has no unix socket, so the bundled extension's TCP mode is the
+/// only path a pane's state report can take. Both variables are written together or not at all:
+/// the extension enables TCP only when it has a usable port *and* a token.
+#[cfg(not(unix))]
+fn apply_agent_state_tcp_env(cmd: &mut CommandBuilder) {
+    let Ok(record) = std::fs::read_to_string(crate::daemon::get_agent_state_rendezvous_path()) else {
+        return;
+    };
+    let Some((port, token)) = parse_agent_state_rendezvous(&record) else {
+        return;
+    };
+    cmd.env("FERRYX_AGENT_STATE_PORT", port.to_string());
+    cmd.env("FERRYX_AGENT_STATE_TOKEN", token);
+}
+
+/// Reads the daemon-published rendezvous record: the port on the first line, the token on the
+/// second. The daemon renames the whole record into place, so a torn pair cannot be observed;
+/// a record missing either half is still read as "not published yet" and never reaches a pane.
+#[cfg(any(not(unix), test))]
+fn parse_agent_state_rendezvous(record: &str) -> Option<(u16, String)> {
+    let mut lines = record.lines();
+    let port = lines
+        .next()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)?;
+    let token = lines.next()?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some((port, token.to_string()))
+}
+
+#[cfg(test)]
+mod agent_state_rendezvous_tests {
+    use super::parse_agent_state_rendezvous;
+
+    #[test]
+    fn parse_accepts_only_a_complete_pair() {
+        assert_eq!(
+            parse_agent_state_rendezvous("41234\ntoken-abc\n"),
+            Some((41234, "token-abc".to_string()))
+        );
+        // Surrounding whitespace is tolerated: the record is a plain text file.
+        assert_eq!(
+            parse_agent_state_rendezvous(" 41234 \n token-abc \n"),
+            Some((41234, "token-abc".to_string()))
+        );
+
+        // A port without a token is half a pair, whether the token line is absent, empty or
+        // whitespace: exporting the port alone would enable nothing while looking configured.
+        assert_eq!(parse_agent_state_rendezvous("41234\n"), None);
+        assert_eq!(parse_agent_state_rendezvous("41234"), None);
+        assert_eq!(parse_agent_state_rendezvous("41234\n\n"), None);
+        assert_eq!(parse_agent_state_rendezvous("41234\n   \n"), None);
+
+        // A token without a usable port is the other half.
+        assert_eq!(parse_agent_state_rendezvous("\ntoken-abc\n"), None);
+        assert_eq!(parse_agent_state_rendezvous("not-a-port\ntoken-abc\n"), None);
+        assert_eq!(parse_agent_state_rendezvous("0\ntoken-abc\n"), None);
+        assert_eq!(parse_agent_state_rendezvous("70000\ntoken-abc\n"), None);
+
+        // Nothing published at all.
+        assert_eq!(parse_agent_state_rendezvous(""), None);
     }
 }
 
@@ -193,10 +287,15 @@ impl PtyManager {
         } else {
             cmd.env("FERRYX_SESSION_ID", &session_id);
         }
+        // Unix panes report agent state over the daemon's unix socket; every other platform has
+        // no such socket and reaches the daemon's loopback TCP ingress instead.
+        #[cfg(unix)]
         cmd.env(
             "FERRYX_AGENT_STATE_SOCKET",
             crate::daemon::agent_state_socket_path(),
         );
+        #[cfg(not(unix))]
+        apply_agent_state_tcp_env(&mut cmd);
 
         // A GUI-launched daemon inherits TERM=dumb, which agent TUIs read as a non-interactive
         // terminal: they drop to plain mode and stop reporting activity. A PTY is a real
@@ -857,6 +956,20 @@ mod tests {
     }
 
     #[test]
+    fn utf8_locale_override_is_absent_on_windows() {
+        // ConPTY shells read the console code page, not LANG, so a Windows pane must receive no
+        // override at all. The decision is asserted on every host, not only on Windows.
+        let empty: fn(&str) -> Option<std::ffi::OsString> = |_| None;
+        assert_eq!(utf8_locale_override_for(empty, true), None);
+
+        let with_lang = |k: &str| (k == "LANG").then(|| std::ffi::OsString::from("ko_KR.UTF-8"));
+        assert_eq!(utf8_locale_override_for(with_lang, true), None);
+
+        // The unix branch is untouched: with no locale in the environment the override lands.
+        assert!(utf8_locale_override_for(empty, false).is_some());
+    }
+
+    #[test]
     fn apply_session_env_sets_worktree_and_session_variables() {
         let mut cmd = CommandBuilder::new("/bin/sh");
         apply_session_env(
@@ -890,6 +1003,39 @@ mod tests {
             Some(""),
         );
         assert_eq!(cmd_empty_ws.get_env("FERRYX_WORKSPACE_ID"), None);
+    }
+
+    #[test]
+    fn apply_session_env_normalizes_a_verbatim_windows_worktree_path() {
+        // Windows canonicalization yields verbatim paths, and a pane's consumer reads this
+        // variable as literal path text, so the prefix must never reach the environment.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_session_env(
+            &mut cmd,
+            "session-test-42",
+            r"\\?\C:\repo\.orca-worktrees\wt-slug",
+            None,
+        );
+        assert_eq!(
+            cmd.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
+            Some(r"C:\repo\.orca-worktrees\wt-slug")
+        );
+
+        // A verbatim UNC path keeps its share and loses the prefix.
+        let mut unc = CommandBuilder::new("/bin/sh");
+        apply_session_env(&mut unc, "session-test-42", r"\\?\UNC\server\share\wt", None);
+        assert_eq!(
+            unc.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
+            Some(r"\\server\share\wt")
+        );
+
+        // A plain path stays byte-identical, so unix panes cannot change.
+        let mut plain = CommandBuilder::new("/bin/sh");
+        apply_session_env(&mut plain, "session-test-42", "/path/to/worktree", None);
+        assert_eq!(
+            plain.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
+            Some("/path/to/worktree")
+        );
     }
 
     #[tokio::test]

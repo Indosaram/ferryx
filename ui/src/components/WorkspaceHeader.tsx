@@ -32,7 +32,7 @@ export function WorkspaceHeader({
     <header
       data-tauri-drag-region
       onPointerDown={startWindowDrag}
-      className="drag-region flex h-titlebar shrink-0 items-center border-b border-border bg-card pl-3 pr-2"
+      className="flex h-titlebar shrink-0 items-center border-b border-border bg-card pl-3 pr-2"
     >
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {!sidebarOpen ? (

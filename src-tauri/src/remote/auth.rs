@@ -980,7 +980,7 @@ impl AuthManager {
     // A separate transaction lock file survives atomic replacement of the JSON inode
     // and serializes reload/mutation/save across both clones and independent processes.
     // It uses a distinct sidecar extension ("tx.lock") so holding a transaction does not
-    // deadlock with the low-level store flock ("lock") acquired during write_private_json.
+    // deadlock with the low-level store lock ("lock") acquired during write_private_json.
     fn begin_transaction(&self) -> Result<(MutexGuard<'_, ()>, Option<std::fs::File>), AuthError> {
         let guard = self.transaction.lock();
         let file = if let Some(path) = self.persistence_path.as_deref() {
@@ -1199,44 +1199,35 @@ fn prune_revoked_and_idle_devices(state: &mut PersistedAuthState, now: u64) {
 ///   with respect to readers, but without fsync the rename can reach disk while the
 ///   contents have not, so a crash can leave an empty or truncated store where a
 ///   valid one is expected.
+
 /// Holds an advisory exclusive lock for the lifetime of a store write.
 ///
 /// The daemon, the GUI and the CLI are separate PROCESSES writing the same file, so
 /// an in-process mutex cannot order them: two writers could each read, modify and
 /// rename, and the later rename would silently discard the earlier writer's change.
-/// `flock` on a sidecar file serializes them across processes.
+/// `std::fs::File::lock` on a sidecar file serializes them across processes on every
+/// platform. Gating this to Unix left Windows with no cross-process lock at all, so
+/// the daemon, the GUI and the CLI could each rename over the others' tokens.
 ///
 /// The lock is advisory and only effective between participants that take it, which
 /// is every writer that goes through [`write_private_json`]. It is released when the
 /// file descriptor closes, including on process death, so a crash cannot wedge it.
-#[cfg(unix)]
 struct StoreLock(std::fs::File);
 
-#[cfg(unix)]
 impl StoreLock {
     fn acquire(path: &Path) -> std::io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(path.with_extension("lock"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options.open(path.with_extension("lock"))?;
         // Blocking: a concurrent writer is expected and should be waited for, not
         // raced with or skipped.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        file.lock()?;
         Ok(Self(file))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -1251,11 +1242,10 @@ pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::i
     }
     // Serialize concurrent writers across processes before touching the store, so a
     // second process cannot interleave its own temp-write-and-rename with this one.
-    #[cfg(unix)]
     let _lock = StoreLock::acquire(path)?;
 
     // The temp file is per-process, so two writers cannot clobber each other's
-    // staging file even if the lock is unavailable on some platform.
+    // staging file even if one of them is not a participant in the lock.
     let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -1975,6 +1965,9 @@ mod persistence_tests {
     /// specific propagation (an unwritable parent fails earlier, at `create_dir_all`),
     /// so this asserts the observable properties: the resulting mode, correction of a
     /// pre-existing permissive file, and a real error for an impossible path.
+    ///
+    /// Unix-only: every mode assertion below reads POSIX mode bits, which have no
+    /// portable equivalent. This gate is about file modes, not about the store lock.
     #[cfg(unix)]
     #[test]
     fn the_store_is_written_owner_only_or_reports_an_error() {
@@ -2019,7 +2012,9 @@ mod persistence_tests {
     /// process boundaries: an in-process mutex cannot stop two processes from each
     /// reading, modifying and renaming, with the later rename discarding the earlier
     /// change. Concurrent writers must therefore never observe a torn store.
-    #[cfg(unix)]
+    ///
+    /// Runs on every platform: the lock it exercises is portable, so a Unix-only gate
+    /// would hide exactly the Windows regression this test exists to catch.
     #[test]
     fn concurrent_writers_never_observe_a_torn_store() {
         let dir = tempfile::TempDir::new().expect("tempdir");

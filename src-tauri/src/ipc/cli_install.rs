@@ -44,6 +44,13 @@ pub struct CliLauncherStatus {
     pub is_supported: bool,
 }
 
+/// POSIX launcher location: `~/.local/bin/ferryx`.
+///
+/// Launcher installation itself is unix-only (see `install_launcher`), so this
+/// resolution is compiled only where it can actually run. The signature stays
+/// identical on every platform because `resolve_launcher_status` is
+/// platform-parameterized for the status DTO.
+#[cfg(unix)]
 pub fn get_default_launcher_path_from(home: Option<&Path>) -> Result<PathBuf, CliInstallError> {
     let home = home.ok_or(CliInstallError::HomeDirNotFound)?;
     if home.as_os_str().is_empty() {
@@ -52,9 +59,30 @@ pub fn get_default_launcher_path_from(home: Option<&Path>) -> Result<PathBuf, Cl
     Ok(home.join(".local").join("bin").join("ferryx"))
 }
 
+#[cfg(not(unix))]
+pub fn get_default_launcher_path_from(_home: Option<&Path>) -> Result<PathBuf, CliInstallError> {
+    // No POSIX launcher path exists off unix, so report the documented
+    // unsupported error instead of resolving a `~/.local/bin` path.
+    Err(CliInstallError::PlatformUnsupported {
+        platform: std::env::consts::OS.to_string(),
+    })
+}
+
+/// Resolves the launcher path from `HOME`; unix-only, like the install itself.
+#[cfg(unix)]
 pub fn get_default_launcher_path() -> Result<PathBuf, CliInstallError> {
     let home = std::env::var_os("HOME");
     get_default_launcher_path_from(home.as_deref().map(Path::new))
+}
+
+#[cfg(not(unix))]
+pub fn get_default_launcher_path() -> Result<PathBuf, CliInstallError> {
+    // Keep the signature so `cmd_cli_launcher_install` compiles on every
+    // platform; off unix it reports the documented unsupported error rather
+    // than reading `HOME` and inventing a POSIX launcher path.
+    Err(CliInstallError::PlatformUnsupported {
+        platform: std::env::consts::OS.to_string(),
+    })
 }
 
 pub fn resolve_launcher_status(
@@ -305,7 +333,10 @@ mod tests {
         );
     }
 
+    // POSIX launcher resolution does not exist off unix (see
+    // `get_default_launcher_path_from`), so these two cases are unix-only.
     #[test]
+    #[cfg(unix)]
     fn test_resolve_launcher_status_unix_requires_home() {
         let err = resolve_launcher_status(true, None, None)
             .expect_err("Unix status without HOME must return HomeDirNotFound");
@@ -316,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_launcher_status_unix_with_home() {
         let home = Path::new("/mock/home");
         let status = resolve_launcher_status(true, Some(home), None)

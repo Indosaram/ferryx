@@ -249,6 +249,123 @@ pub fn classify_clipboard_content(
     NativeTerminalClipboardContent::Empty
 }
 
+pub fn decode_linux_clipboard_text(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+pub fn decode_linux_clipboard_descriptors(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn is_linux_image_clipboard_type(clipboard_type: &str) -> bool {
+    clipboard_type
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("image/")
+}
+
+/// The Linux clipboard helper family that answered a probe.
+///
+/// Wayland (`wl-paste`) and X11 (`xclip`) keep separate clipboards, so a probe has to pick one
+/// family and stay on it: reading the types through one and the bytes through the other would
+/// validate one clipboard while decoding another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxClipboardBackend {
+    Wayland,
+    X11,
+}
+
+impl LinuxClipboardBackend {
+    /// Probe order: Wayland first, then the X11 fallback.
+    pub const PROBE_ORDER: [LinuxClipboardBackend; 2] =
+        [LinuxClipboardBackend::Wayland, LinuxClipboardBackend::X11];
+
+    /// Helper binary that speaks for this backend.
+    pub fn program(self) -> &'static str {
+        match self {
+            LinuxClipboardBackend::Wayland => "wl-paste",
+            LinuxClipboardBackend::X11 => "xclip",
+        }
+    }
+
+    /// Arguments that list the types this clipboard advertises.
+    pub fn type_list_args(self) -> &'static [&'static str] {
+        match self {
+            LinuxClipboardBackend::Wayland => &["--list-types"],
+            LinuxClipboardBackend::X11 => &["-selection", "clipboard", "-t", "TARGETS", "-o"],
+        }
+    }
+
+    /// Arguments that read this clipboard's text.
+    pub fn text_args(self) -> &'static [&'static str] {
+        match self {
+            LinuxClipboardBackend::Wayland => &["--no-newline"],
+            LinuxClipboardBackend::X11 => &["-selection", "clipboard", "-o"],
+        }
+    }
+}
+
+/// Picks the first Linux clipboard backend whose type-list probe answers.
+///
+/// An empty list still counts as an answer (that is what a working helper reports for an empty
+/// clipboard), so exactly one backend is chosen and every later read must go through it. The probe
+/// is injected so the selection rule is testable without spawning clipboard helpers.
+pub fn select_linux_clipboard_backend<F>(mut probe: F) -> Option<(LinuxClipboardBackend, Vec<String>)>
+where
+    F: FnMut(LinuxClipboardBackend) -> Option<Vec<u8>>,
+{
+    LinuxClipboardBackend::PROBE_ORDER
+        .into_iter()
+        .find_map(|backend| {
+            probe(backend).map(|bytes| (backend, decode_linux_clipboard_descriptors(&bytes)))
+        })
+}
+
+/// Reports whether the advertised clipboard types include a text flavour.
+///
+/// The Wayland/X11 text read is untyped, so it must only run when text is actually on offer;
+/// alongside `text/*` the X11 atoms `TEXT`, `UTF8_STRING` and `STRING` also denote text.
+pub fn linux_clipboard_advertises_text(types: &[String]) -> bool {
+    types.iter().any(|t| {
+        let t = t.trim().to_ascii_lowercase();
+        t.starts_with("text/") || matches!(t.as_str(), "text" | "utf8_string" | "string")
+    })
+}
+
+pub fn classify_linux_clipboard(
+    text: Option<String>,
+    types: &[String],
+) -> NativeTerminalClipboardContent {
+    let has_image = types.iter().any(|t| is_linux_image_clipboard_type(t));
+    // An image-only clipboard can still hand raw image bytes to the untyped text read, and the
+    // lossy decode turns those into non-empty garbage. With no text flavour advertised, the
+    // image content is the only trustworthy reading.
+    if has_image && !linux_clipboard_advertises_text(types) {
+        return NativeTerminalClipboardContent::Image;
+    }
+    if let Some(text) = text {
+        if !text.is_empty() {
+            return NativeTerminalClipboardContent::Text { text };
+        }
+    }
+    if has_image {
+        return NativeTerminalClipboardContent::Image;
+    }
+    // Wayland/X11 clipboards also advertise `text/*` and private atoms; unlike macOS there is no
+    // DOM paste fallback for those, so only real image content routes the image paste chord.
+    NativeTerminalClipboardContent::Empty
+}
+
 #[cfg(target_os = "macos")]
 fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
@@ -410,9 +527,128 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (content, descriptor_types)
 }
 
+/// Longest a Wayland/X11 clipboard helper may run before it is killed, so a wedged tool cannot
+/// hold the paste path open.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const NATIVE_CLIPBOARD_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Runs one clipboard helper with a bounded wall-clock budget and hands back its stdout bytes.
+///
+/// The child's pipes are drained on a helper thread, so a payload larger than a pipe buffer holds
+/// cannot deadlock the wait loop. A helper that is not installed, exits non-zero, or wedges is an
+/// ordinary clipboard miss (`None`) rather than an error, and no path panics.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn run_clipboard_tool(
+    program: &str,
+    args: &[&str],
+    stdin_bytes: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    use std::io::{Read as _, Write as _};
+    use std::process::Stdio;
+
+    let mut command = crate::util::no_window_command(program);
+    command
+        .args(args)
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let mut child = command.spawn().ok()?;
+    let writing = stdin_bytes.is_some();
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        if let (Some(mut stdin), Some(bytes)) = (stdin, stdin_bytes) {
+            // Closing the pipe after the write is what tells `wl-copy`/`xclip -i` the payload ended.
+            let _ = stdin.write_all(&bytes);
+            let _ = stdin.flush();
+        }
+        let mut buffer = Vec::new();
+        if let Some(mut stdout) = stdout {
+            let _ = stdout.read_to_end(&mut buffer);
+        }
+        let _ = sender.send(buffer);
+    });
+
+    let deadline = std::time::Instant::now() + NATIVE_CLIPBOARD_TOOL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                if writing {
+                    // A clipboard writer hands the payload to a background owner that can keep the
+                    // inherited stdout open, so a clean exit is the whole write receipt.
+                    return Some(Vec::new());
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                return receiver.recv_timeout(remaining).ok();
+            }
+            // Wedged or unreapable: kill it so the paste fails fast instead of hanging.
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Reads the system clipboard through the Wayland helpers first, then the X11 ones.
+///
+/// Both families speak the same contract (type list, then text) and a missing binary is a normal
+/// miss, so the two paths chain for discovery only: the backend that answers the type list is the
+/// one the text read runs against, because Wayland and X11 keep separate clipboards.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
-    (NativeTerminalClipboardContent::Empty, Vec::new())
+    let discovered = select_linux_clipboard_backend(|backend| {
+        run_clipboard_tool(backend.program(), backend.type_list_args(), None)
+    });
+
+    let (types, text) = match discovered {
+        // An empty type list means the probe tool failed, and an unadvertised text flavour means
+        // the untyped read would return whatever the clipboard holds (image bytes included), so
+        // skip the read in both cases. A backend that answers the types but then fails the read
+        // yields no text at all rather than borrowing the other backend's clipboard.
+        Some((backend, types)) if !types.is_empty() && linux_clipboard_advertises_text(&types) => {
+            let text = run_clipboard_tool(backend.program(), backend.text_args(), None)
+                .and_then(|bytes| decode_linux_clipboard_text(&bytes));
+            (types, text)
+        }
+        Some((_, types)) => (types, None),
+        None => (Vec::new(), None),
+    };
+
+    let content = classify_linux_clipboard(text, &types);
+    (content, types)
+}
+
+/// Writes the selection to the system clipboard, Wayland first and X11 second.
+///
+/// Reports whether a helper accepted the payload; with neither installed the caller keeps its
+/// existing behaviour instead of failing the command.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn write_native_clipboard(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes().to_vec();
+    if run_clipboard_tool("wl-copy", &[], Some(bytes.clone())).is_some() {
+        return true;
+    }
+    run_clipboard_tool("xclip", &["-selection", "clipboard", "-i"], Some(bytes)).is_some()
 }
 
 async fn dispatch_pty_resizes<F, Fut>(
@@ -1421,9 +1657,27 @@ pub async fn cmd_native_terminal_copy_selection<R: Runtime>(
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         let _ = app;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app;
+        if !text.is_empty() {
+            let selection = text.clone();
+            let written = tokio::task::spawn_blocking(move || write_native_clipboard(&selection))
+                .await
+                .unwrap_or(false);
+            if !written {
+                // No Wayland/X11 clipboard helper accepted the selection. The command keeps its
+                // existing contract, so the miss only has to be diagnosable.
+                tracing::debug!(
+                    session_id = %session_id,
+                    "No system clipboard helper accepted the native terminal selection"
+                );
+            }
+        }
     }
 
     Ok(text)
@@ -1786,7 +2040,37 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
-        Ok(NativeTerminalClipboardContent::Empty)
+        let (content, types) = tokio::task::spawn_blocking(read_native_pasteboard)
+            .await
+            .unwrap_or_else(|_| (NativeTerminalClipboardContent::Empty, Vec::new()));
+        if cfg!(debug_assertions)
+            || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            let (kind, text_length) = match &content {
+                NativeTerminalClipboardContent::Text { text } => ("text", text.len()),
+                NativeTerminalClipboardContent::Image => ("image", 0),
+                NativeTerminalClipboardContent::Empty => ("empty", 0),
+            };
+            let wall_time_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let entry = serde_json::json!({
+                "runId": "rust-clipboard",
+                "sequence": 0,
+                "event": "terminal.surface.paste.clipboard.classify",
+                "wallTimeMs": wall_time_ms,
+                "details": {
+                    "types": types,
+                    "kind": kind,
+                    "textLength": text_length,
+                }
+            });
+            crate::ipc::debug::log_native_switch_debug(entry);
+        }
+        Ok(content)
     }
 }
 
@@ -2343,6 +2627,155 @@ mod tests {
         assert_eq!(
             classify_windows_clipboard(Some("".to_string()), &[], &[]),
             NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn test_is_linux_image_clipboard_type() {
+        assert!(is_linux_image_clipboard_type("image/png"));
+        assert!(is_linux_image_clipboard_type("image/jpeg"));
+        assert!(is_linux_image_clipboard_type("IMAGE/TIFF"));
+        assert!(is_linux_image_clipboard_type(" image/webp "));
+        assert!(!is_linux_image_clipboard_type("text/plain;charset=utf-8"));
+        assert!(!is_linux_image_clipboard_type("text/uri-list"));
+        assert!(!is_linux_image_clipboard_type(""));
+    }
+
+    #[test]
+    fn test_linux_clipboard_advertises_text() {
+        assert!(linux_clipboard_advertises_text(&["text/plain".to_string()]));
+        assert!(linux_clipboard_advertises_text(&[
+            "text/plain;charset=utf-8".to_string(),
+            "text/html".to_string()
+        ]));
+        assert!(linux_clipboard_advertises_text(&["UTF8_STRING".to_string()]));
+        assert!(linux_clipboard_advertises_text(&["STRING".to_string()]));
+        assert!(linux_clipboard_advertises_text(&["TEXT".to_string()]));
+        assert!(linux_clipboard_advertises_text(&[" text/uri-list ".to_string()]));
+        assert!(!linux_clipboard_advertises_text(&["image/png".to_string()]));
+        assert!(!linux_clipboard_advertises_text(&[
+            "image/png".to_string(),
+            "image/bmp".to_string()
+        ]));
+        assert!(!linux_clipboard_advertises_text(&[]));
+        assert!(!linux_clipboard_advertises_text(&["TARGETS".to_string()]));
+    }
+
+    #[test]
+    fn test_linux_clipboard_backend_probe_arguments_match_each_family() {
+        assert_eq!(LinuxClipboardBackend::Wayland.program(), "wl-paste");
+        assert_eq!(LinuxClipboardBackend::Wayland.type_list_args(), &["--list-types"]);
+        assert_eq!(LinuxClipboardBackend::Wayland.text_args(), &["--no-newline"]);
+        assert_eq!(LinuxClipboardBackend::X11.program(), "xclip");
+        assert_eq!(
+            LinuxClipboardBackend::X11.type_list_args(),
+            &["-selection", "clipboard", "-t", "TARGETS", "-o"]
+        );
+        assert_eq!(LinuxClipboardBackend::X11.text_args(), &["-selection", "clipboard", "-o"]);
+    }
+
+    #[test]
+    fn test_select_linux_clipboard_backend_keeps_the_answering_backend() {
+        // The first backend that answers wins, even when it advertises nothing: consulting the
+        // other family afterwards would gate on one clipboard while decoding another.
+        let mut probed = Vec::new();
+        let selected = select_linux_clipboard_backend(|backend| {
+            probed.push(backend);
+            (backend == LinuxClipboardBackend::Wayland).then_some(Vec::new())
+        });
+        assert_eq!(selected, Some((LinuxClipboardBackend::Wayland, Vec::new())));
+        assert_eq!(probed, vec![LinuxClipboardBackend::Wayland]);
+
+        // Wayland missing: the X11 answer is the one carried forward, descriptors included.
+        let selected = select_linux_clipboard_backend(|backend| {
+            (backend == LinuxClipboardBackend::X11).then_some(b"image/png\ntext/plain\n".to_vec())
+        });
+        let expected = (
+            LinuxClipboardBackend::X11,
+            vec!["image/png".to_string(), "text/plain".to_string()],
+        );
+        assert_eq!(selected, Some(expected));
+
+        // Neither helper installed: no backend and no types.
+        assert_eq!(select_linux_clipboard_backend(|_| None), None);
+    }
+
+    #[test]
+    fn test_classify_linux_clipboard_prefers_text_over_image_types() {
+        assert_eq!(
+            classify_linux_clipboard(
+                Some("Hello Linux".to_string()),
+                &["image/png".to_string(), "text/plain".to_string()]
+            ),
+            NativeTerminalClipboardContent::Text {
+                text: "Hello Linux".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_linux_clipboard_image_only_for_image_types() {
+        assert_eq!(
+            classify_linux_clipboard(None, &["image/png".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_linux_clipboard(Some("".to_string()), &["image/jpeg".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_linux_clipboard(None, &["text/uri-list".to_string()]),
+            NativeTerminalClipboardContent::Empty
+        );
+        assert_eq!(
+            classify_linux_clipboard(None, &[]),
+            NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn test_classify_linux_clipboard_image_wins_when_only_image_types_advertised() {
+        // The untyped text read can emit raw image bytes; the lossy decode makes them non-empty.
+        assert_eq!(
+            classify_linux_clipboard(Some("PNG\u{fffd}".to_string()), &["image/png".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_linux_clipboard(
+                Some("garbage".to_string()),
+                &["image/jpeg".to_string(), "image/bmp".to_string()]
+            ),
+            NativeTerminalClipboardContent::Image
+        );
+    }
+
+    #[test]
+    fn test_decode_linux_clipboard_descriptors_drops_blank_lines() {
+        assert_eq!(
+            decode_linux_clipboard_descriptors(b"image/png\n\ntext/plain;charset=utf-8\n"),
+            vec![
+                "image/png".to_string(),
+                "text/plain;charset=utf-8".to_string()
+            ]
+        );
+        assert!(decode_linux_clipboard_descriptors(b"\n\n").is_empty());
+        assert!(decode_linux_clipboard_descriptors(b"").is_empty());
+    }
+
+    #[test]
+    fn test_decode_linux_clipboard_text_never_panics_on_invalid_utf8() {
+        assert_eq!(
+            decode_linux_clipboard_text(b"clipboard text"),
+            Some("clipboard text".to_string())
+        );
+        assert_eq!(
+            decode_linux_clipboard_text("\u{1F680} Ferryx".as_bytes()),
+            Some("\u{1F680} Ferryx".to_string())
+        );
+        assert_eq!(decode_linux_clipboard_text(b""), None);
+        assert_eq!(
+            decode_linux_clipboard_text(&[0xff, 0xfe]),
+            Some("\u{fffd}\u{fffd}".to_string())
         );
     }
 

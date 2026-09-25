@@ -25,6 +25,7 @@ import {
   getUpdateStatus,
   relaunchApp,
   subscribeUpdateStatus,
+  updatesManagedExternally,
   type UpdateStatus,
 } from "../../lib/updater";
 import {
@@ -60,9 +61,33 @@ function updateStatusMessage(status: UpdateStatus): string {
   }
 }
 
+type ExternallyManagedHost = "windows" | "linux" | "unknown";
+
+/**
+ * Host platform of the running desktop shell. `updatesManagedExternally()` answers with one
+ * boolean for two different owners — the Microsoft Store on Windows and the distribution
+ * package manager on a Linux deb/rpm install — so the card has to name the owner this host
+ * actually has. The remote web client never reaches that branch: outside the desktop runtime
+ * the probe fails and reports `false`, so the webview platform is the host platform here.
+ */
+function externallyManagedHost(): ExternallyManagedHost {
+  if (typeof navigator === "undefined") return "unknown";
+  const signals = [navigator.userAgent, navigator.platform];
+  if (signals.some((signal) => /Windows|Win32|Win64/i.test(signal))) return "windows";
+  if (signals.some((signal) => /Linux|X11|CrOS/i.test(signal))) return "linux";
+  return "unknown";
+}
+
+function externallyManagedUpdateMessage(host: ExternallyManagedHost): string {
+  if (host === "windows") return "Updates are managed by the Microsoft Store.";
+  if (host === "linux") return "Updates are managed by your system package manager.";
+  return "Updates for this install are managed outside the app.";
+}
+
 export function SoftwareUpdateCard() {
   const [status, setStatus] = useState<UpdateStatus>(() => getUpdateStatus());
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [managedExternally, setManagedExternally] = useState<boolean>(false);
 
   useEffect(() => subscribeUpdateStatus(setStatus), []);
 
@@ -71,10 +96,24 @@ export function SoftwareUpdateCard() {
     void getCurrentVersion().then((version) => {
       if (active) setCurrentVersion(version);
     });
+    void updatesManagedExternally().then((managed) => {
+      if (active) setManagedExternally(managed);
+    });
     return () => {
       active = false;
     };
   }, []);
+
+  if (managedExternally) {
+    return (
+      <Card className="rounded-lg border border-border bg-card p-4">
+        <h3 className="text-[12px] font-semibold">Software Update</h3>
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          Current version {currentVersion ?? "unknown"}. {externallyManagedUpdateMessage(externallyManagedHost())}
+        </p>
+      </Card>
+    );
+  }
 
   const busy = status.state === "checking" || status.state === "downloading";
   const isAvailable = status.state === "available";
@@ -192,11 +231,13 @@ export function CliLauncherCard() {
         <TerminalSquare className="size-4 text-muted-foreground" />
         <h3 className="text-[12px] font-semibold">Ferryx CLI</h3>
       </div>
-      <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
-        Ferryx does not alter shell profiles or PATH. Ensure{" "}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">~/.local/bin</code> is on
-        PATH, then open a new terminal.
-      </p>
+      {status?.isSupported !== false ? (
+        <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+          Ferryx does not alter shell profiles or PATH. Ensure{" "}
+          <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">~/.local/bin</code> is on
+          PATH, then open a new terminal.
+        </p>
+      ) : null}
 
       {error ? (
         <Alert
@@ -210,10 +251,12 @@ export function CliLauncherCard() {
 
       <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="space-y-0.5 text-[11px]">
-          <div className="text-muted-foreground">
-            Launcher location:{" "}
-            <code className="font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
-          </div>
+          {status?.isSupported !== false ? (
+            <div className="text-muted-foreground">
+              Launcher location:{" "}
+              <code className="font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
+            </div>
+          ) : null}
           {status?.currentTarget ? (
             <div className="truncate font-mono text-[11px] text-muted-foreground">
               Target: {status.currentTarget}
@@ -260,8 +303,19 @@ export function CliLauncherCard() {
 
 export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
+  const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
   const autoSuspendEnabled = settings.sessionIdleTimeoutMinutes > 0;
+
+  useEffect(() => {
+    let active = true;
+    void updatesManagedExternally().then((managed) => {
+      if (active) setManagedExternally(managed);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   // Preserve the user's last custom timeout so toggling auto-suspend back on
   // restores it instead of silently resetting to the default.
   const lastEnabledIdleMinutesRef = useRef(
@@ -276,7 +330,11 @@ export function GeneralSection() {
       <SettingsHeading
         icon={<MonitorCog />}
         title="General"
-        description="Tab behavior, startup, CLI helper, and software updates."
+        description={
+          managedExternally
+            ? "Tab behavior, startup, and CLI helper."
+            : "Tab behavior, startup, CLI helper, and software updates."
+        }
       />
       <h2 id="settings-general-heading" className="sr-only">General</h2>
       <div data-testid="settings-general-overview" className="space-y-6">

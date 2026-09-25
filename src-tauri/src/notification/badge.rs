@@ -1,6 +1,7 @@
 //! Application badge domain logic and native Dock tile updates.
 //!
-//! Exposes typed badge count synchronization for the macOS Dock tile.
+//! Exposes typed badge count synchronization for the macOS Dock tile, and
+//! records the Windows taskbar overlay count without claiming it was drawn.
 //! On non-macOS platforms, operations return a structured unsupported outcome
 //! without failing. Never accepts arbitrary user-controlled strings over IPC.
 
@@ -20,6 +21,31 @@ impl SetBadgeCountResult {
     pub fn macos(count: u32, badge_label: Option<String>) -> Self {
         Self {
             supported: true,
+            count,
+            badge_label,
+        }
+    }
+
+    /// Windows taskbar overlay badge outcome.
+    ///
+    /// The taskbar overlay icon is drawn by the shell COM interface
+    /// `ITaskbarList3::SetOverlayIcon`. That interface lives behind the
+    /// `windows-sys` `Win32_UI_Shell` feature, which this crate does not enable,
+    /// so nothing can be drawn from here today. This constructor therefore stays
+    /// honest rather than optimistic: it records the count and the label the
+    /// taskbar would show, and reports `supported: false` instead of a success
+    /// that never reached the shell.
+    ///
+    /// TODO(windows-badge): enable `Win32_UI_Shell` in the `windows-sys` feature
+    /// list in `src-tauri/Cargo.toml`, then create the taskbar instance with
+    /// `CoCreateInstance(CLSID_TaskbarList, IID_ITaskbarList3)` against the main
+    /// window `HWND`, build the overlay `HICON` from `badge_label` (passing
+    /// `None` to clear the overlay), call
+    /// `ITaskbarList3::SetOverlayIcon(hwnd, icon, description)`, and only then
+    /// flip `supported` to `true`.
+    pub fn windows(count: u32, badge_label: Option<String>) -> Self {
+        Self {
+            supported: false,
             count,
             badge_label,
         }
@@ -96,6 +122,64 @@ mod tests {
         // When: formatting the badge label
         // Then: None is returned to clear the badge
         assert_eq!(format_badge_label(0), None);
+    }
+
+    #[test]
+    fn windows_badge_records_count_and_label_without_claiming_support() {
+        // Given: an unread count on Windows
+        // When: building the Windows taskbar overlay outcome
+        let recorded = SetBadgeCountResult::windows(4, format_badge_label(4));
+
+        // Then: the count and label are recorded for the pending shell call,
+        // and support is not claimed because no overlay icon was drawn
+        assert!(!recorded.supported);
+        assert_eq!(recorded.count, 4);
+        assert_eq!(recorded.badge_label.as_deref(), Some("4"));
+        assert_eq!(
+            serde_json::to_value(&recorded).expect("serialize"),
+            json!({
+                "supported": false,
+                "count": 4,
+                "badgeLabel": "4"
+            })
+        );
+
+        // Given: the full u32 range and a cleared count
+        // When: building the Windows taskbar overlay outcome
+        let widest = SetBadgeCountResult::windows(u32::MAX, format_badge_label(u32::MAX));
+        let cleared = SetBadgeCountResult::windows(0, format_badge_label(0));
+
+        // Then: the recorded label is never truncated, and zero clears it
+        assert_eq!(widest.badge_label.as_deref(), Some("4294967295"));
+        assert!(!widest.supported);
+        assert_eq!(cleared.count, 0);
+        assert_eq!(cleared.badge_label, None);
+        assert!(!cleared.supported);
+    }
+
+    #[test]
+    fn badge_constructor_selection_tracks_the_host_platform() {
+        // Given: the unread count the IPC command receives
+        let count = 3;
+        let label = format_badge_label(count);
+
+        // When: selecting the constructor for this host
+        #[cfg(target_os = "macos")]
+        let selected = SetBadgeCountResult::macos(count, label.clone());
+        #[cfg(not(target_os = "macos"))]
+        let selected = SetBadgeCountResult::windows(count, label.clone());
+
+        // Then: only macOS claims a native badge; every other host records
+        // the count while reporting the structured unsupported outcome
+        #[cfg(target_os = "macos")]
+        assert!(selected.supported);
+        #[cfg(not(target_os = "macos"))]
+        assert!(!selected.supported);
+        assert_eq!(selected.count, count);
+        assert_eq!(selected.badge_label, label);
+
+        // And: the generic unsupported constructor never carries a label
+        assert!(SetBadgeCountResult::unsupported(count).badge_label.is_none());
     }
 
     #[test]

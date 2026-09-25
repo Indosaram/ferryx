@@ -884,6 +884,30 @@ pub fn identify_browser_session(manager: &BrowserManager) -> Option<BrowserSessi
         .max_by_key(|s| ids.iter().rposition(|id| id == &s.browser_id))
 }
 
+/// WebView2 runtime `101.0.1210.39` is the oldest one that honors `incognito`;
+/// older runtimes ignore the flag and keep cookies and history for what the UI
+/// calls a private profile.
+#[cfg(any(target_os = "windows", test))]
+const WEBVIEW2_PRIVATE_PROFILE_MINIMUM: (u32, u32, u32, u32) = (101, 0, 1210, 39);
+
+/// Whether a WebView2 runtime version string predates the version that honors
+/// `incognito`. Unparseable strings count as too old, so the caller warns
+/// rather than staying silent.
+#[cfg(any(target_os = "windows", test))]
+fn webview2_version_is_below_private_profile_minimum(version: &str) -> bool {
+    let mut parts = version
+        .trim()
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let parsed = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    parsed < WEBVIEW2_PRIVATE_PROFILE_MINIMUM
+}
+
 pub async fn create_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -952,6 +976,29 @@ pub async fn create_browser_session<R: tauri::Runtime>(
         let page_load_bridge_script = eval_bridge_script.clone();
         let (creation_sender, creation_receiver) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
+
+        // Tauri documents that `incognito` needs the WebView2 runtime
+        // 101.0.1210.39 or newer on Windows and silently does nothing on older
+        // runtimes, so a "Private" tab would still keep cookies and history.
+        // Warn instead of letting the profile lie; the profile selection itself
+        // is unchanged.
+        #[cfg(target_os = "windows")]
+        if incognito {
+            match tauri::webview_version() {
+                Ok(version) => {
+                    if webview2_version_is_below_private_profile_minimum(&version) {
+                        tracing::warn!(
+                            version = %version,
+                            "WebView2 runtime is older than 101.0.1210.39; the private browser profile will keep cookies and history"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "could not read the WebView2 runtime version; the private browser profile may keep cookies and history"
+                ),
+            }
+        }
 
         let window_clone = main_window.clone();
         let run_result = main_window.run_on_main_thread(move || {
@@ -1810,6 +1857,20 @@ fn windows_keypress_capability() -> Result<(), IpcError> {
     ))
 }
 
+/// Linux has no trusted key injection either: the only remaining path is the
+/// synthetic `KeyboardEvent` built by `automation_script`, and an untrusted
+/// event (`isTrusted === false`) triggers no default action - no text
+/// insertion, no form submit, no scrolling - so the command used to report
+/// success while doing nothing. Refuse it instead of lying. A real fix needs
+/// the platform's native key injection (`webkit2gtk` `send_key_event`).
+#[cfg(any(target_os = "linux", test))]
+fn linux_keypress_capability() -> Result<(), IpcError> {
+    Err(IpcError::new(
+        crate::ipc::error::IpcErrorCode::Unsupported,
+        "Trusted browser keypress automation is unavailable on Linux",
+    ))
+}
+
 pub async fn browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -1824,6 +1885,8 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
             manager.assert_automation_generation(&request.browser_id, request.generation)?;
             #[cfg(target_os = "windows")]
             windows_keypress_capability()?;
+            #[cfg(target_os = "linux")]
+            linux_keypress_capability()?;
             None
         }
     };
@@ -2083,6 +2146,25 @@ mod tests {
         let error =
             super::windows_keypress_capability().expect_err("no trusted Windows input adapter");
         assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn linux_keypress_returns_typed_unsupported() {
+        let error =
+            super::linux_keypress_capability().expect_err("no trusted Linux input adapter");
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn webview2_private_profile_minimum_matches_the_documented_runtime() {
+        use super::webview2_version_is_below_private_profile_minimum as below_minimum;
+
+        assert!(below_minimum("100.0.1185.39"));
+        assert!(below_minimum("101.0.1210.38"));
+        assert!(!below_minimum("101.0.1210.39"));
+        assert!(!below_minimum("120.0.2210.91"));
+        // A version that cannot be parsed cannot be confirmed as new enough.
+        assert!(below_minimum("unknown"));
     }
 
     #[test]

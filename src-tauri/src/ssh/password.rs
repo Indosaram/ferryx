@@ -101,8 +101,10 @@ static BROKER: OnceLock<Result<u16, String>> = OnceLock::new();
 fn broker() -> Result<u16, IpcError> {
     BROKER
         .get_or_init(|| {
-            let listener =
-                TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|e| {
+                tracing::warn!("SSH askpass broker could not bind a loopback listener: {e}");
+                e.to_string()
+            })?;
             let port = listener.local_addr().map_err(|e| e.to_string())?.port();
             std::thread::Builder::new()
                 .name("ssh-askpass".into())
@@ -114,7 +116,11 @@ fn broker() -> Result<u16, IpcError> {
                         }
                     }
                 })
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    tracing::warn!("SSH askpass broker thread could not start: {e}");
+                    e.to_string()
+                })?;
+            tracing::debug!("SSH askpass broker listening on 127.0.0.1:{port}");
             Ok(port)
         })
         .clone()
@@ -165,54 +171,92 @@ pub fn environment(args: &[String]) -> Result<Vec<(String, String)>, IpcError> {
         .get(&key)
         .map(|v| v.token.clone())
         .ok_or_else(|| error("SSH password required; enter it in machine settings"))?;
+    let askpass = std::env::current_exe().map_err(|e| {
+        tracing::warn!("SSH askpass helper path unavailable, password auth cannot prompt: {e}");
+        IpcError::internal(e.to_string())
+    })?;
+    let port = broker()?;
+    // SSH_ASKPASS_REQUIRE=force is an OpenSSH 8.4+ feature and Win32-OpenSSH
+    // support for it (and for DISPLAY) is unverified. If Windows password auth
+    // fails or hangs, check this environment contract first: without it ssh falls
+    // back to a terminal prompt that a non-interactive child does not have.
+    tracing::debug!(
+        "SSH askpass environment set for {key}: SSH_ASKPASS={} SSH_ASKPASS_REQUIRE=force DISPLAY=ferryx:0 FERRYX_SSH_ASKPASS_PORT={port} token=present",
+        askpass.display()
+    );
     Ok(vec![
-        (
-            "SSH_ASKPASS".into(),
-            std::env::current_exe()
-                .map_err(|e| IpcError::internal(e.to_string()))?
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        ("SSH_ASKPASS".into(), askpass.to_string_lossy().into_owned()),
         ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
         ("DISPLAY".into(), "ferryx:0".into()),
-        ("FERRYX_SSH_ASKPASS_PORT".into(), broker()?.to_string()),
+        ("FERRYX_SSH_ASKPASS_PORT".into(), port.to_string()),
         ("FERRYX_SSH_ASKPASS_TOKEN".into(), token),
     ])
 }
-/// Must run before GUI/daemon initialization, including on Windows.
-pub fn run_askpass() -> Option<i32> {
-    let port = std::env::var("FERRYX_SSH_ASKPASS_PORT").ok()?;
-    // An ordinary Ferryx child inheriting an SSH environment is not an askpass
-    // invocation. OpenSSH supplies exactly one password prompt argument.
+/// OpenSSH invokes the askpass helper with exactly one password prompt argument.
+fn is_askpass_prompt() -> bool {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.len() != 2
-        || !args[1]
+    args.len() == 2
+        && args[1]
             .to_string_lossy()
             .to_ascii_lowercase()
             .contains("password")
-    {
+}
+/// The helper exits before any tracing subscriber exists, so it reports on stderr
+/// too, which ssh inherits from the Ferryx pane or the captured pipe.
+fn report_askpass(message: &str) {
+    tracing::warn!("SSH askpass: {message}");
+    eprintln!("ferryx askpass: {message}");
+}
+/// Must run before GUI/daemon initialization, including on Windows.
+pub fn run_askpass() -> Option<i32> {
+    let port = match std::env::var("FERRYX_SSH_ASKPASS_PORT") {
+        Ok(port) => port,
+        Err(_) => {
+            // A prompt-shaped command line without our environment means ssh ran
+            // the helper and the askpass variables did not reach it, which is the
+            // Windows failure this diagnostics set exists to expose.
+            if is_askpass_prompt() {
+                report_askpass(
+                    "FERRYX_SSH_ASKPASS_PORT is unset for an askpass invocation; ssh ran the \
+                     helper without the askpass environment",
+                );
+            }
+            return None;
+        }
+    };
+    // An ordinary Ferryx child inheriting an SSH environment is not an askpass
+    // invocation. OpenSSH supplies exactly one password prompt argument.
+    if !is_askpass_prompt() {
         return None;
     }
-    Some(
-        (|| -> std::io::Result<()> {
-            let port: u16 = port.parse().map_err(std::io::Error::other)?;
-            let token = std::env::var("FERRYX_SSH_ASKPASS_TOKEN").map_err(std::io::Error::other)?;
-            let mut stream = TcpStream::connect_timeout(
-                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-                Duration::from_secs(3),
-            )?;
-            stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-            stream.write_all(token.as_bytes())?;
-            let mut password = Vec::new();
-            stream.take(4097).read_to_end(&mut password)?;
-            if password.is_empty() || password.len() > 4096 {
-                return Err(std::io::Error::other("credential unavailable"));
-            }
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&password)?;
-            stdout.write_all(b"\n")?;
-            Ok(())
-        })()
-        .map_or(1, |_| 0),
-    )
+    let status = (|| -> std::io::Result<()> {
+        let port: u16 = port.parse().map_err(std::io::Error::other)?;
+        let token = std::env::var("FERRYX_SSH_ASKPASS_TOKEN").map_err(std::io::Error::other)?;
+        let mut stream = TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_secs(3),
+        )?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.write_all(token.as_bytes())?;
+        let mut password = Vec::new();
+        stream.take(4097).read_to_end(&mut password)?;
+        if password.is_empty() || password.len() > 4096 {
+            return Err(std::io::Error::other("credential unavailable"));
+        }
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&password)?;
+        stdout.write_all(b"\n")?;
+        Ok(())
+    })();
+    match status {
+        Ok(()) => Some(0),
+        Err(e) => {
+            // ssh reads this status: anything non-zero aborts password auth, and no
+            // line at all means ssh never ran the helper (see the environment site).
+            report_askpass(&format!(
+                "could not serve the password prompt on 127.0.0.1:{port}: {e}"
+            ));
+            Some(1)
+        }
+    }
 }

@@ -2587,6 +2587,9 @@ pub(crate) fn resolve_dist_dir_from(
             // Windows / Linux packaged layout: next to executable or resources subdirectory
             candidates.push(exe_dir.join("ui/dist"));
             candidates.push(exe_dir.join("resources/ui/dist"));
+            // Linux deb/AppImage: binary at usr/bin, resources at usr/lib/<productName>.
+            candidates.push(exe_dir.join("../lib/Ferryx/ui/dist"));
+            candidates.push(exe_dir.join("../lib/ui/dist"));
         }
     }
 

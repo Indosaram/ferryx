@@ -23,8 +23,6 @@ const DONE_AT_SEGMENT_START_RE = new RegExp(`^${DONE_WORDS_SOURCE}(?![\\w-])`, "
 const DONE_GLYPH_RE = /^[◇*](?:\s|$)/u;
 const WORKING_RE = /\b(working|thinking|running|executing|processing)\b/i;
 
-const SHELL_ONLY_RE = /^(?:-?(?:zsh|bash|fish|sh|csh|tcsh|dash|ksh|login|tmux|screen))$/i;
-
 export interface KnownAgent {
   pattern: RegExp;
   type: string;
@@ -114,12 +112,6 @@ export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivit
   }
 
   if (containsAgentSpinnerGlyph(normalized) || WORKING_RE.test(normalized)) return "working";
-
-  const cleaned = stripLeadingActivityGlyphs(normalized);
-
-  if (SHELL_ONLY_RE.test(cleaned)) {
-    return null;
-  }
 
   // An agent-name-only title carries no activity signal: the agent is present
   // but idle, so it must NOT be classified as working (Orca parity).

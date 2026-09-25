@@ -3825,7 +3825,12 @@ impl NativeSurfaceFrameTarget {
                 instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
             },
             #[cfg(not(target_os = "macos"))]
-            Some(_) => instance.create_surface(target.surface_target()),
+            // `PlatformCompositorTarget::surface_layer_ptr` returns `None` on every non-macOS
+            // target (platform/mod.rs:130-137), so this arm cannot be reached. It exists only to
+            // keep the match exhaustive; off macOS the `None` arm below is the only live path.
+            Some(_) => unreachable!(
+                "surface_layer_ptr returns Some only on macOS (platform/mod.rs:130-137)"
+            ),
             None => instance.create_surface(target.surface_target()),
         }
         .map_err(|error| {

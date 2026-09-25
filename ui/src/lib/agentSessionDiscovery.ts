@@ -29,10 +29,23 @@ export const UNSUPPORTED_DISCOVERY_AGENTS: ReadonlySet<string> = new Set([
 const UNSUPPORTED_DISCOVERY_REASONS: Readonly<Record<string, string>> = {
 };
 
+// Windows agents launched through npm shims appear as claude.cmd / codex.exe, so the
+// executable suffix must be stripped before comparing against the bare agent name.
+const WINDOWS_EXECUTABLE_SUFFIX_RE = /\.(?:exe|cmd|bat|ps1)$/i;
+
 function extractCommandBaseName(command: string): string {
-  const firstToken = command.trim().split(/\s+/)[0] ?? "";
-  const baseName = firstToken.split(/[\/\\]/).pop() ?? "";
-  return baseName.toLowerCase();
+  const trimmed = command.trim();
+  // A Windows command line is quote-delimited whenever the executable path contains a space,
+  // e.g. "C:\Program Files\nodejs\node.exe" ...\cli.js. Splitting on whitespace would yield
+  // `"C:\Program` and never match, so the leading quoted segment is the executable path.
+  const quoted = trimmed.startsWith('"');
+  const quotedEnd = quoted ? trimmed.indexOf('"', 1) : -1;
+  const firstToken = quoted
+    ? trimmed.slice(1, quotedEnd === -1 ? undefined : quotedEnd)
+    : (trimmed.split(/\s+/)[0] ?? "");
+  const executablePath = firstToken.replace(/^"|"$/g, "");
+  const baseName = executablePath.split(/[\/\\]/).pop() ?? "";
+  return baseName.toLowerCase().replace(WINDOWS_EXECUTABLE_SUFFIX_RE, "");
 }
 
 function matchesAgentCommand(command: string, agentType: string): boolean {

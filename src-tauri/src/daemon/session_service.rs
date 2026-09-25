@@ -187,6 +187,9 @@ struct RemoteSnapshotFileLock(std::fs::File);
 
 impl RemoteSnapshotFileLock {
     fn acquire(path: &std::path::Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1103,6 +1106,13 @@ impl DaemonSessionService {
                     fs::rename(&staging, &durable)?;
                     // Complete the durable-publication sequence: the rename must be
                     // durable itself before the sidecar lock is released.
+                    //
+                    // The parent-directory fsync is unix-only: Windows does not permit
+                    // opening a directory as a file, so `File::open(parent)` fails there
+                    // and would turn an already-published rename into an error. On
+                    // non-unix the rename is already ordered by the filesystem and the
+                    // staged bytes were fsynced above.
+                    #[cfg(unix)]
                     if let Some(parent) = durable.parent() {
                         fs::File::open(parent)?.sync_all()?;
                     }

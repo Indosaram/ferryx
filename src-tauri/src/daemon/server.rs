@@ -664,6 +664,20 @@ impl DaemonLockFile {
 
         Ok(Self { file })
     }
+
+    /// Detaches the underlying file without invoking `UnlockFileEx`, preserving the lock
+    /// across ownership transfer to the successor process.
+    pub(crate) fn detach_without_unlock(self) -> File {
+        let file = unsafe { std::ptr::read(&self.file) };
+        std::mem::forget(self);
+        file
+    }
+
+    /// Constructs a `DaemonLockFile` from an already-locked file handle received
+    /// during handover transfer.
+    pub(crate) fn from_locked_file(file: File) -> Self {
+        Self { file }
+    }
 }
 
 #[cfg(windows)]
@@ -702,6 +716,16 @@ pub(crate) struct DaemonLockFile {
 impl DaemonLockFile {
     pub(crate) fn try_lock(file: File) -> Result<Self, String> {
         Ok(Self { _file: file })
+    }
+
+    pub(crate) fn detach_without_unlock(self) -> File {
+        let file = unsafe { std::ptr::read(&self._file) };
+        std::mem::forget(self);
+        file
+    }
+
+    pub(crate) fn from_locked_file(file: File) -> Self {
+        Self { _file: file }
     }
 }
 
@@ -823,12 +847,182 @@ fn remove_stale_socket_after_lock(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Runtime file carrying this boot's daemon transport token, beside the `daemon.port` file the
+/// loopback listener publishes. A loopback TCP port has no filesystem ownership check, so the
+/// published port alone must not be enough to drive the daemon.
+#[cfg(not(unix))]
+pub fn get_transport_token_path() -> PathBuf {
+    get_runtime_dir().join("daemon.token")
+}
+
+/// Length of every generated transport token.
+#[cfg(not(unix))]
+const TRANSPORT_TOKEN_LEN: usize = 48;
+
+/// One per-boot bearer token, drawn from the crate's CSPRNG.
+#[cfg(not(unix))]
+fn generate_transport_token() -> String {
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(TRANSPORT_TOKEN_LEN)
+        .map(char::from)
+        .collect()
+}
+
+/// Publishes this boot's loopback rendezvous pair in the order a reader depends on: the previous
+/// boot's token is dropped first, this boot's token is written second, and the port is published
+/// last. The ordering guarantees that this boot's port is never on disk before this boot's token.
+/// It does not extend to a port a predecessor left behind: while this boot is republishing, a
+/// reader can still find that port with no token beside it, an interval that is harmless because
+/// the daemon rejects a credential it did not mint and `DaemonClient` re-reads both halves once.
+///
+/// The stale port is dropped by the caller, not here: `remove_stale_socket_after_lock` removes it
+/// under the instance lock before the listener binds. The ordering does not make the pair atomic,
+/// so a reader can still assemble this boot's token beside a predecessor's port; that pair is made
+/// harmless by the daemon rejecting a credential it did not mint and by `DaemonClient` re-reading
+/// both halves once.
+///
+/// `on_token_published` observes the instant between the two writes, which is the only instant
+/// that decides the contract; the ordering test in `agent_state_transport_tests` pins it without
+/// a daemon by reading both files there.
+#[cfg(any(not(unix), test))]
+fn publish_transport_rendezvous_internal<F: FnMut()>(
+    port_path: &Path,
+    token_path: &Path,
+    port: u16,
+    token: &str,
+    mut on_token_published: F,
+) -> std::io::Result<()> {
+    // The previous boot's token goes first: while it is gone and the port has not been rewritten,
+    // a reader's pair is absent rather than mismatched, so it re-reads both halves instead of
+    // presenting a credential that cannot belong to the port it read.
+    match fs::remove_file(token_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(%error, "Failed to remove stale daemon transport token"),
+    }
+    fs::write(token_path, token)?;
+    on_token_published();
+    fs::write(port_path, port.to_string())
+}
+
+/// Publishes the pair with no observer attached.
+#[cfg(not(unix))]
+fn publish_transport_rendezvous(
+    port_path: &Path,
+    token_path: &Path,
+    port: u16,
+    token: &str,
+) -> std::io::Result<()> {
+    publish_transport_rendezvous_internal(port_path, token_path, port, token, || {})
+}
+
+/// Constant-time comparison of a presented token against the expected one. An absent or empty
+/// token never matches, so a client that omits the credential is rejected exactly like one that
+/// guesses wrong. Compiled for the loopback transport and for the tests that pin it.
+#[cfg(any(not(unix), test))]
+fn transport_token_matches(expected: &str, presented: Option<&str>) -> bool {
+    let Some(presented) = presented.filter(|token| !token.is_empty()) else {
+        return false;
+    };
+    if presented.len() != expected.len() {
+        return false;
+    }
+    presented
+        .bytes()
+        .zip(expected.bytes())
+        .fold(0u8, |acc, (presented, expected)| {
+            acc | (presented ^ expected)
+        })
+        == 0
+}
+
+/// Reads the bearer token out of one raw protocol line. The token travels beside the payload as
+/// `token`, the shape the agent extension's TCP mode already writes for remote sessions, so no
+/// wire struct has to carry it.
+#[cfg(any(not(unix), test))]
+fn transport_token_from_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    value.get("token")?.as_str().map(str::to_owned)
+}
+
 pub fn get_agent_state_socket_path() -> PathBuf {
     get_runtime_dir().join("agent-state.sock")
 }
 
 pub fn agent_state_socket_path() -> String {
     get_agent_state_socket_path().to_string_lossy().into_owned()
+}
+
+/// Name of the rendezvous record the non-unix ingress publishes beside its socket: the loopback
+/// port on the first line, the bearer token a pane must present on the second.
+const AGENT_STATE_RENDEZVOUS_FILE: &str = "agent-state.rendezvous";
+
+/// Runtime record carrying the non-unix ingress endpoint. `apply_agent_state_tcp_env` reads
+/// exactly this path as a pane spawns.
+pub fn get_agent_state_rendezvous_path() -> PathBuf {
+    get_runtime_dir().join(AGENT_STATE_RENDEZVOUS_FILE)
+}
+
+/// Publishes the ingress endpoint as one record renamed into place: a reader can never observe
+/// this boot's port beside a previous boot's token, or the reverse.
+///
+/// `fs::rename` replaces an existing destination on every target: Unix `rename(2)`, and Windows
+/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` (see `library/std/src/sys/fs/windows.rs`),
+/// matching the `std::fs::rename` documentation's "replacing the original file if `to` already
+/// exists". A Windows reader does not block the replace: std opens files with a default share
+/// mode of `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`.
+#[cfg(any(not(unix), test))]
+fn publish_agent_state_rendezvous(
+    runtime_dir: &Path,
+    port: u16,
+    token: &str,
+) -> std::io::Result<()> {
+    let staged = runtime_dir.join(format!("{AGENT_STATE_RENDEZVOUS_FILE}.tmp"));
+    fs::write(&staged, format!("{port}\n{token}\n"))?;
+    fs::rename(&staged, runtime_dir.join(AGENT_STATE_RENDEZVOUS_FILE))
+}
+
+/// Publishes the rendezvous record and only then records the endpoint the accessor reports, so an
+/// endpoint is observable exactly when a pane can discover the pair from disk. A publish that
+/// fails leaves the endpoint untouched rather than reporting a pair that was never made
+/// discoverable.
+#[cfg(any(not(unix), test))]
+fn publish_agent_state_endpoint(
+    endpoint: &Mutex<Option<(u16, String)>>,
+    runtime_dir: &Path,
+    port: u16,
+    token: &str,
+) -> std::io::Result<()> {
+    publish_agent_state_rendezvous(runtime_dir, port, token)?;
+    *endpoint.lock() = Some((port, token.to_owned()));
+    Ok(())
+}
+
+/// Drops a previous boot's rendezvous record, including the two-file pair older builds published.
+/// A listener that fails to bind or publish must not leave a stale pair looking valid.
+#[cfg(any(not(unix), test))]
+fn clear_stale_agent_state_rendezvous(runtime_dir: &Path) {
+    let staged = format!("{AGENT_STATE_RENDEZVOUS_FILE}.tmp");
+    for name in [
+        AGENT_STATE_RENDEZVOUS_FILE,
+        staged.as_str(),
+        "agent-state.port",
+        "agent-state.token",
+    ] {
+        match fs::remove_file(runtime_dir.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                %error,
+                file = name,
+                "Failed to remove stale agent state rendezvous"
+            ),
+        }
+    }
 }
 
 pub(crate) use super::session_service::normalize_process_cwd;
@@ -859,11 +1053,252 @@ pub struct DaemonServer {
     binary_path: Option<String>,
     binary_mtime_ms: Option<u64>,
     pub(crate) session_service: Arc<DaemonSessionService>,
+    /// Loopback TCP endpoint (`port`, bearer `token`) of the agent-state ingress, recorded once
+    /// that ingress published its rendezvous record. `None` on unix, whose ingress is the socket
+    /// path [`agent_state_socket_path`] returns, and `None` on every platform until then: every
+    /// failure to bind or publish leaves it `None`, so it is `Some` only while a pane can discover
+    /// the pair from disk.
+    agent_state_endpoint: Mutex<Option<(u16, String)>>,
+    /// Set once this boot's agent-state ingress was observed to fail. It is the only thing that
+    /// separates "not published because binding or publishing FAILED" from "not published yet":
+    /// the endpoint above is `None` in both cases, so a caller reporting an absent endpoint needs
+    /// this flag to know whether it is looking at a degradation.
+    agent_state_ingress_unavailable: std::sync::atomic::AtomicBool,
+    /// Bearer token every connection must present before a request is dispatched. Windows has no
+    /// filesystem ownership boundary on the transport, so the published port alone cannot
+    /// authenticate a client.
+    #[cfg(not(unix))]
+    transport_token: String,
     #[cfg(test)]
     helper_home: Option<String>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     #[cfg(test)]
     _catalog_fixture: Option<tempfile::TempDir>,
+}
+
+#[cfg(test)]
+mod agent_state_transport_tests {
+    use super::*;
+
+    #[test]
+    fn transport_token_matches_only_the_exact_credential() {
+        let token = "9Zq3r8Tf2kLp";
+        assert!(transport_token_matches(token, Some(token)));
+        assert!(!transport_token_matches(token, None));
+        assert!(!transport_token_matches(token, Some("")));
+        assert!(!transport_token_matches(token, Some("9Zq3r8Tf2kL")));
+        assert!(!transport_token_matches(token, Some("9Zq3r8Tf2kLq")));
+        assert!(!transport_token_matches(token, Some("9Zq3r8Tf2kLx")));
+    }
+
+    #[test]
+    fn transport_token_is_read_from_the_request_line() {
+        assert_eq!(
+            transport_token_from_line(r#"{"type":"handshake","version":5,"token":"abc"}"#)
+                .as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            transport_token_from_line(
+                r#"{"type":"agentState","sessionId":"s","state":"idle","token":"abc"}"#
+            )
+            .as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            transport_token_from_line(r#"{"type":"handshake","version":5}"#),
+            None
+        );
+        assert_eq!(
+            transport_token_from_line(r#"{"type":"handshake","token":42}"#),
+            None
+        );
+        assert_eq!(transport_token_from_line("not json"), None);
+    }
+
+    #[test]
+    fn the_port_is_published_only_after_the_token_that_authenticates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_path = dir.path().join("daemon.port");
+        let token_path = dir.path().join("daemon.token");
+        // The pair a previous boot left on disk, as a reader finds it mid-restart.
+        std::fs::write(&port_path, "41111").unwrap();
+        std::fs::write(&token_path, "previous-boot-token").unwrap();
+
+        // Observed between the two writes: a new port visible here would mean a reader can pair a
+        // new port with the token the previous boot published beside the old one.
+        let observed = std::cell::RefCell::new(None);
+        publish_transport_rendezvous_internal(
+            &port_path,
+            &token_path,
+            52222,
+            "this-boot-token",
+            || {
+                *observed.borrow_mut() = Some((
+                    std::fs::read_to_string(&port_path).unwrap(),
+                    std::fs::read_to_string(&token_path).unwrap(),
+                ));
+            },
+        )
+        .unwrap();
+
+        let (port_between_writes, token_between_writes) = observed.into_inner().unwrap();
+        assert_eq!(
+            port_between_writes, "41111",
+            "the port must still be the predecessor's when this boot's token becomes readable, \
+             otherwise a reader finds a port whose credential is not yet on disk"
+        );
+        assert_eq!(token_between_writes, "this-boot-token");
+        assert_eq!(
+            std::fs::read_to_string(&token_path).unwrap(),
+            "this-boot-token"
+        );
+        assert_eq!(std::fs::read_to_string(&port_path).unwrap(), "52222");
+    }
+
+    #[test]
+    fn agent_state_endpoint_is_absent_until_the_ingress_binds() {
+        let server = DaemonServer::new_with_paths(None, None);
+        assert_eq!(server.agent_state_endpoint(), None);
+    }
+
+    #[test]
+    fn a_failed_rendezvous_publish_leaves_no_endpoint_to_report() {
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "ferryx-endpoint-unpublished-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&runtime_dir).ok();
+
+        // An absent runtime directory is the publish failure the ingress reports as unavailable.
+        // The endpoint must stay absent, or a caller observes an unavailable ingress beside an
+        // endpoint that no pane can discover.
+        let endpoint = Mutex::new(None);
+        assert!(
+            publish_agent_state_endpoint(&endpoint, &runtime_dir, 41_234, "token-abc").is_err(),
+            "publishing into an absent runtime directory must fail"
+        );
+        assert_eq!(
+            *endpoint.lock(),
+            None,
+            "an unpublished rendezvous must never be reported as an endpoint"
+        );
+        assert!(!runtime_dir.exists());
+
+        // The endpoint becomes observable only with the record it names, and it names the pair
+        // that record carries.
+        fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        publish_agent_state_endpoint(&endpoint, &runtime_dir, 41_234, "token-abc")
+            .expect("publish endpoint");
+        assert_eq!(*endpoint.lock(), Some((41_234, "token-abc".to_string())));
+        assert_eq!(
+            fs::read_to_string(runtime_dir.join(AGENT_STATE_RENDEZVOUS_FILE))
+                .expect("read published record"),
+            "41234\ntoken-abc\n"
+        );
+
+        fs::remove_dir_all(&runtime_dir).ok();
+    }
+
+    #[test]
+    fn readiness_is_released_only_after_the_ingress_failure_is_recorded() {
+        let server = DaemonServer::new_with_paths(None, None);
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        // Read from inside the readiness signal itself, so the assertion is on the ordering and
+        // not on the final state: a boot that signals first and records afterwards observes
+        // `false` here and fails.
+        let recorded_before_signal = std::cell::Cell::new(None);
+        let probe = &server;
+        probe.settle_agent_state_ingress(None, || {
+            recorded_before_signal.set(Some(probe.agent_state_ingress_unavailable()));
+            let _ = ready_tx.send(());
+        });
+        assert_eq!(
+            recorded_before_signal.get(),
+            Some(true),
+            "the failed ingress must be recorded before readiness is released"
+        );
+        assert!(
+            server.agent_state_ingress_unavailable(),
+            "a boot without a usable ingress must record it rather than leave callers to infer it"
+        );
+        assert!(
+            ready_rx.try_recv().is_ok(),
+            "readiness must still be signalled: terminals keep working without the ingress"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_ingress_is_not_recorded_as_unavailable() {
+        let server = DaemonServer::new_with_paths(None, None);
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        // A live handle stands in for an ingress that bound and published its endpoint.
+        let ingress = Some(tokio::spawn(async {}));
+        let probe = &server;
+        probe.settle_agent_state_ingress(ingress, || {
+            let _ = ready_tx.send(());
+        });
+        assert!(
+            !server.agent_state_ingress_unavailable(),
+            "an ingress that bound must never be reported as a failure"
+        );
+        assert!(
+            ready_rx.try_recv().is_ok(),
+            "readiness must still be signalled when the ingress bound"
+        );
+    }
+
+    #[test]
+    fn agent_state_rendezvous_record_sits_beside_the_socket() {
+        // The non-unix ingress publishes its loopback port and bearer token to this one record,
+        // and `apply_agent_state_tcp_env` reads exactly it before a pane spawns.
+        let socket = get_agent_state_socket_path();
+        let runtime_dir = socket.parent().expect("agent state socket has a parent");
+        assert_eq!(
+            get_agent_state_rendezvous_path(),
+            runtime_dir.join(AGENT_STATE_RENDEZVOUS_FILE)
+        );
+    }
+
+    #[test]
+    fn rendezvous_publish_writes_the_port_and_the_token_as_one_file() {
+        let runtime_dir =
+            std::env::temp_dir().join(format!("ferryx-rendezvous-{}", std::process::id()));
+        fs::create_dir_all(&runtime_dir).expect("create rendezvous dir");
+        clear_stale_agent_state_rendezvous(&runtime_dir);
+
+        publish_agent_state_rendezvous(&runtime_dir, 41_234, "token-abc")
+            .expect("publish rendezvous");
+        let record = runtime_dir.join(AGENT_STATE_RENDEZVOUS_FILE);
+        assert_eq!(
+            fs::read_to_string(&record).expect("read published rendezvous"),
+            "41234\ntoken-abc\n",
+            "one record must carry both the port and the token"
+        );
+        // The pair exists under a single name, and the staged file the rename consumed is gone.
+        assert!(!runtime_dir.join("agent-state.port").exists());
+        assert!(!runtime_dir.join("agent-state.token").exists());
+        assert!(!runtime_dir.join(format!("{AGENT_STATE_RENDEZVOUS_FILE}.tmp")).exists());
+
+        // A later boot replaces the record in place rather than leaving two halves behind.
+        publish_agent_state_rendezvous(&runtime_dir, 41_235, "token-def")
+            .expect("republish rendezvous");
+        assert_eq!(
+            fs::read_to_string(&record).expect("read republished rendezvous"),
+            "41235\ntoken-def\n"
+        );
+
+        // Clearing drops the record and the two-file pair older builds published.
+        fs::write(runtime_dir.join("agent-state.port"), "41234").expect("stage legacy port");
+        fs::write(runtime_dir.join("agent-state.token"), "token-abc")
+            .expect("stage legacy token");
+        clear_stale_agent_state_rendezvous(&runtime_dir);
+        assert!(!record.exists());
+        assert!(!runtime_dir.join("agent-state.port").exists());
+        assert!(!runtime_dir.join("agent-state.token").exists());
+
+        fs::remove_dir_all(&runtime_dir).ok();
+    }
 }
 
 #[cfg(test)]
@@ -1411,6 +1846,10 @@ impl DaemonServer {
             binary_path,
             binary_mtime_ms,
             session_service,
+            agent_state_endpoint: Mutex::new(None),
+            agent_state_ingress_unavailable: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(not(unix))]
+            transport_token: generate_transport_token(),
             #[cfg(test)]
             helper_home: isolated_dir
                 .as_ref()
@@ -1471,6 +1910,47 @@ impl DaemonServer {
 
     pub fn remote_state(&self) -> &Arc<RemoteGatewayState> {
         &self.remote_state
+    }
+
+    /// The loopback TCP endpoint (`port`, bearer `token`) the agent-state ingress bound, or
+    /// `None` while it has not bound. Unix exposes the socket path through
+    /// [`agent_state_socket_path`] instead.
+    pub fn agent_state_endpoint(&self) -> Option<(u16, String)> {
+        self.agent_state_endpoint.lock().clone()
+    }
+
+    /// True once this boot's agent-state ingress was observed to fail, so an absent endpoint is
+    /// reported as a failure instead of being inferred from a `None` that also means "not yet".
+    pub fn agent_state_ingress_unavailable(&self) -> bool {
+        self.agent_state_ingress_unavailable
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Observes the agent-state ingress outcome, records it, and only then releases the readiness
+    /// signal. That order is the contract: a client released by the signal can spawn a pane
+    /// immediately, and the pane reads its agent-state endpoint as it spawns, so recording the
+    /// outcome afterwards would announce a boot whose panes already lost the ingress.
+    ///
+    /// A missing ingress is recorded and warned about, never fatal. Terminals are the product and
+    /// must keep working; agent-state reporting is only an observability ingress, so the
+    /// degradation has to be visible and reportable rather than turned into a refused boot.
+    fn settle_agent_state_ingress<S: FnOnce()>(
+        &self,
+        ingress: Option<tokio::task::JoinHandle<()>>,
+        signal_ready: S,
+    ) {
+        // The handle is deliberately dropped rather than awaited: the ingress task, when there is
+        // one, serves this boot for as long as it runs.
+        if ingress.is_none() {
+            self.agent_state_ingress_unavailable
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::warn!(
+                "Agent-state ingress unavailable for this boot: no agent-state endpoint was \
+                 bound or published, so panes will not receive one and agent-state reporting is \
+                 unavailable for their lifetime; terminals are unaffected"
+            );
+        }
+        signal_ready();
     }
 
     /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
@@ -1576,6 +2056,130 @@ impl DaemonServer {
         }))
     }
 
+    /// Windows/Linux counterpart of the unix socket ingress: a loopback TCP listener the bundled
+    /// extension reaches through `FERRYX_AGENT_STATE_PORT`/`FERRYX_AGENT_STATE_TOKEN`, the same
+    /// TCP mode remote sessions already use. Any local process can connect to a loopback port,
+    /// so a report is accepted only when it carries this boot's token.
+    #[cfg(not(unix))]
+    pub fn spawn_agent_state_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        // The previous boot's record is dropped before this boot publishes: a listener that fails
+        // to bind below must not leave the old boot's endpoint looking valid. The reported
+        // endpoint is dropped with it, so no failure path below can leave this boot reporting an
+        // endpoint while nothing is discoverable on disk.
+        clear_stale_agent_state_rendezvous(&get_runtime_dir());
+        *self.agent_state_endpoint.lock() = None;
+        let bound = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to bind agent state listener");
+                return None;
+            }
+        };
+        if let Err(error) = bound.set_nonblocking(true) {
+            tracing::warn!(%error, "Failed to configure agent state listener");
+            return None;
+        }
+        let port = match bound.local_addr() {
+            Ok(address) => address.port(),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to read agent state listener address");
+                return None;
+            }
+        };
+        let listener = match TcpListener::from_std(bound) {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to register agent state listener");
+                return None;
+            }
+        };
+        let token = generate_transport_token();
+        // A pane reads the endpoint out of this record as it spawns, so it must be on disk before
+        // the accept loop admits a connection. Port and token travel as one renamed file, so a
+        // reader can never observe one half of a pair, and the endpoint is recorded only once that
+        // file exists.
+        if let Err(error) = publish_agent_state_endpoint(
+            &self.agent_state_endpoint,
+            &get_runtime_dir(),
+            port,
+            &token,
+        ) {
+            tracing::warn!(%error, "Failed to publish agent state rendezvous");
+            return None;
+        }
+        tracing::info!(port, "Agent state ingress listening on loopback");
+
+        let states = Arc::clone(&self.agent_states);
+        let sessions = self.session_service.clone();
+        let epoch = crate::scoped_contracts::Epoch(self.epoch);
+        Some(tokio::spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let states = Arc::clone(&states);
+                let sessions = sessions.clone();
+                let token = token.clone();
+                while clients.try_join_next().is_some() {}
+                clients.spawn(async move {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        let presented = transport_token_from_line(&line);
+                        if !transport_token_matches(&token, presented.as_deref()) {
+                            tracing::debug!(
+                                "Agent state report rejected: token missing or invalid"
+                            );
+                            line.clear();
+                            continue;
+                        }
+                        if let Some(report) = Self::parse_agent_state_report(&line) {
+                            match sessions.machine_detail_routed(&report.0, epoch).await {
+                                Ok(crate::remote::machine_protocol::SessionDetail::Running {
+                                    session,
+                                }) => {
+                                    let hint = AgentStateReport {
+                                        session_id: report.0.clone(),
+                                        state: report.1.clone(),
+                                        agent: report.2.clone(),
+                                        provider_session: report.3.clone(),
+                                    };
+                                    if let Err(error) = sessions
+                                        .validate_machine_agent_report(session.target, hint)
+                                        .await
+                                    {
+                                        tracing::debug!(%error, "Machine agent metadata rejected");
+                                        line.clear();
+                                        continue;
+                                    }
+                                }
+                                Ok(_) => {
+                                    line.clear();
+                                    continue;
+                                }
+                                Err(error) if error == "SESSION_NOT_FOUND" => {}
+                                Err(error) => {
+                                    tracing::debug!(%error, "Machine agent owner unavailable");
+                                    line.clear();
+                                    continue;
+                                }
+                            }
+                            states.publish_canonical(AgentState {
+                                session_id: report.0,
+                                state: report.1,
+                                agent: report.2,
+                                provider_session: report.3,
+                                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                            });
+                        }
+                        line.clear();
+                    }
+                });
+            }
+        }))
+    }
+
     fn spawn_foreground_observer(self: &Arc<Self>) {
         let server = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -1603,10 +2207,27 @@ impl DaemonServer {
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
                 let observations = crate::ipc::run_blocking(move || {
+                    // One process listing per tick. On Windows that listing is a full
+                    // PowerShell enumeration, so capturing it per session multiplied the
+                    // cost by the pane count; every session in this tick is classified
+                    // against the same sample. A failed capture is unknown ownership for
+                    // all of them, which is the same evidence a failed per-session
+                    // inspection already produced.
+                    let snapshot = crate::terminal::foreground::capture_process_snapshot();
                     Ok(sessions
                         .into_iter()
                         .map(|(id, session)| {
-                            let observation = crate::terminal::foreground::inspect(&session);
+                            let observation = match &snapshot {
+                                Ok(snapshot) => {
+                                    crate::terminal::foreground::inspect_with_snapshot(
+                                        &session, snapshot,
+                                    )
+                                }
+                                Err(error) => Err(std::io::Error::new(
+                                    error.kind(),
+                                    error.to_string(),
+                                )),
+                            };
                             (id, observation)
                         })
                         .collect::<Vec<_>>())
@@ -1679,6 +2300,9 @@ impl DaemonServer {
             // Strictly validate that legacy socket is in the expected runtime directory,
             // owned by current user, mode 0700 parent directory, and not a symlink.
             validate_runtime_socket_path(legacy_path)?;
+            // Only unix can be handed sessions: `spawn_legacy_handover_daemon` and the
+            // `--handover-from` producer are unix-only, so the peer has no other consumer.
+            #[cfg(unix)]
             let legacy_peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
                 legacy_path.clone(),
                 Vec::new(),
@@ -1764,39 +2388,6 @@ impl DaemonServer {
                 }
                 self.session_router.add_legacy_peer(legacy_peer);
             }
-
-            #[cfg(not(unix))]
-            {
-                let sessions = legacy_peer.list_sessions().await?;
-                let route = crate::daemon::manifest::HandoverRoute {
-                    legacy_socket_path: legacy_path.clone(),
-                    sessions,
-                };
-                crate::ipc::run_blocking(move || {
-                    crate::daemon::manifest::HandoverManifest::update_at_path(
-                        &crate::daemon::manifest::get_manifest_path(),
-                        |manifest| manifest.add_or_update_route(route),
-                    )
-                    .map_err(|error| {
-                        crate::ipc::IpcError::internal(format!(
-                            "Failed to persist predecessor route before handover: {error}"
-                        ))
-                    })?;
-                    Ok(())
-                })
-                .await
-                .map_err(|error| error.to_string())?;
-
-                let commit_resp = legacy_peer
-                    .send_request(&DaemonRequest::CommitHandover {
-                        legacy_socket_path: None,
-                    })
-                    .await?;
-                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
-                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
-                }
-                self.session_router.add_legacy_peer(legacy_peer);
-            }
         }
 
         let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
@@ -1824,8 +2415,16 @@ impl DaemonServer {
                 .local_addr()
                 .map_err(|e| format!("Failed to get local port: {e}"))?
                 .port();
-            fs::write(&socket_path, port.to_string())
-                .map_err(|e| format!("Failed to write daemon.port: {e}"))?;
+            // Publish the pair as one unit, in the order the reader depends on: the token is this
+            // boot's only client credential and is on disk before the accept loop admits a
+            // connection, and the port is the marker a client keys on, so it is published last.
+            publish_transport_rendezvous(
+                &socket_path,
+                &get_transport_token_path(),
+                port,
+                &self.transport_token,
+            )
+            .map_err(|e| format!("Failed to publish daemon port and token: {e}"))?;
         }
 
         // Ensure 0600 mode
@@ -1848,14 +2447,22 @@ impl DaemonServer {
                 .await?;
         }
 
-        if let Some(tx) = ready_tx {
-            let _ = tx.send(());
-        }
-
-        #[cfg(unix)]
-        self.spawn_agent_state_listener();
+        // Both platform listeners share this call site: unix binds the socket path, every other
+        // platform binds a loopback TCP port. This runs before the readiness signal below: a
+        // client released by that signal can spawn a pane immediately, and the pane reads its
+        // agent-state endpoint from disk as it spawns, so a listener started afterwards leaves
+        // that pane with no endpoint for its whole lifetime.
+        let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
         crate::daemon::agent_extension::install_agent_state_extension();
+
+        // The ingress outcome is observed and recorded before readiness is released, so a boot
+        // that announces itself ready without a usable ingress is reported rather than inferred.
+        self.settle_agent_state_ingress(agent_state_ingress, || {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(());
+            }
+        });
 
         let persisted_remote_config = self.remote_state.config.read().clone();
         if persisted_remote_config.mode != RemoteNetworkMode::Off {
@@ -1890,6 +2497,13 @@ impl DaemonServer {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         let mut abort_rx = self.handover_manager.subscribe_client_abort();
+        // Set once the connection has presented this boot's transport token. Unix inherits the
+        // socket's ownership boundary and never needs the check.
+        #[cfg(not(unix))]
+        let mut transport_authenticated = false;
+        #[cfg(not(unix))]
+        const TRANSPORT_REJECTION: &str =
+            "Daemon connection rejected: transport token missing or invalid";
 
         loop {
             tokio::select! {
@@ -1902,6 +2516,28 @@ impl DaemonServer {
                         Ok(_) => {}
                     }
                     let req: Result<DaemonRequest, _> = serde_json::from_str(line.trim());
+                    // The loopback transport has no filesystem ownership boundary, so the first
+                    // frame must carry this boot's token before any request is dispatched. A
+                    // rejected connection is closed rather than answered, so a local process
+                    // that can only read `daemon.port` cannot drive the daemon.
+                    #[cfg(not(unix))]
+                    if !transport_authenticated {
+                        let presented = transport_token_from_line(&line);
+                        if !transport_token_matches(&self.transport_token, presented.as_deref()) {
+                            tracing::warn!("{}", TRANSPORT_REJECTION);
+                            let mut rejection = serde_json::to_string(&DaemonResponse::Error {
+                                message: TRANSPORT_REJECTION.to_string(),
+                                code: Some("TRANSPORT_UNAUTHORIZED".to_string()),
+                                details: None,
+                            })
+                            .unwrap_or_else(|_| "{\"type\":\"error\"}".to_string());
+                            rejection.push('\n');
+                            let _ = write_half.write_all(rejection.as_bytes()).await;
+                            let _ = write_half.flush().await;
+                            break;
+                        }
+                        transport_authenticated = true;
+                    }
                     line.clear();
                     let should_check_retirement = matches!(
                         req.as_ref(),
@@ -1909,7 +2545,7 @@ impl DaemonServer {
                     );
 
                     let resp = match req {
-                Ok(DaemonRequest::Handshake { version }) => {
+                Ok(DaemonRequest::Handshake { version, .. }) => {
                     if version != DAEMON_PROTOCOL_VERSION {
                         DaemonResponse::ProtocolMismatch {
                             expected_version: DAEMON_PROTOCOL_VERSION,
@@ -3219,8 +3855,8 @@ impl DaemonServer {
                     tracing::warn!(
                         live_sessions,
                         "Daemon upgrade requested on a platform without session transfer; \
-                         set FERRYX_DAEMON_IDLE_UPGRADE=1 to allow an idle restart, or restart \
-                         the daemon manually"
+                         Ferryx must be restarted to finish updating (set \
+                         FERRYX_DAEMON_IDLE_UPGRADE=1 to allow an idle daemon restart)"
                     );
                     return DaemonResponse::UpgradeUnsupported;
                 }
@@ -3260,10 +3896,13 @@ impl DaemonServer {
                 }
             }
             crate::daemon::handover::UpgradeAction::Refuse { live_sessions } => {
+                // `UpgradeUnsupported` carries no field, so the restart instruction has to
+                // travel in the log: this is the only place the user learns why the update
+                // did not finish.
                 tracing::warn!(
                     live_sessions,
-                    "Daemon upgrade refused: this platform cannot upgrade without ending live \
-                     sessions"
+                    "Daemon upgrade refused: this platform cannot transfer live sessions; \
+                     restart Ferryx to finish updating"
                 );
                 DaemonResponse::UpgradeUnsupported
             }
@@ -5246,6 +5885,7 @@ mod tests {
         // 1. Handshake
         let hs = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: None,
         };
         let mut hs_json = serde_json::to_string(&hs).unwrap();
         hs_json.push('\n');
@@ -5306,7 +5946,10 @@ mod tests {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
 
-        let hs = DaemonRequest::Handshake { version: 9999 };
+        let hs = DaemonRequest::Handshake {
+            version: 9999,
+            token: None,
+        };
         let mut hs_json = serde_json::to_string(&hs).unwrap();
         hs_json.push('\n');
         write_half.write_all(hs_json.as_bytes()).await.unwrap();
@@ -5539,6 +6182,7 @@ mod tests {
             for request in [
                 DaemonRequest::Handshake {
                     version: DAEMON_PROTOCOL_VERSION,
+                    token: None,
                 },
                 DaemonRequest::Attach {
                     session_id: session_id.clone(),
@@ -5949,6 +6593,7 @@ mod tests {
 
         let hs = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: None,
         };
         let mut hs_json = serde_json::to_string(&hs).unwrap();
         hs_json.push('\n');

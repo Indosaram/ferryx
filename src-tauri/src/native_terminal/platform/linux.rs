@@ -8,19 +8,23 @@
 //! 1. **Handle Lifetime**: The `NativeChildViewHandle` retains the X11 Window/Wayland surface
 //!    handle obtained from the parent window, valid for the lifetime of the compositor target.
 //! 2. **Thread Safety**: Linux window and display handles are safe to borrow and query across threads.
-//! 3. **Capability Reporting**: Every session owns a real isolated child with an empty input
-//!    region -- an `InputOutput` window under X11/XWayland, a `wl_subsurface` under native
-//!    Wayland -- so the descriptor reports layer-backed and pointer-transparent on both.
+//! 3. **Capability Reporting**: A session with a real isolated child -- an `InputOutput` window
+//!    under X11/XWayland, a `wl_subsurface` under native Wayland -- reports layer-backed and
+//!    pointer-transparent for that child. A session whose child could not be created (no
+//!    `wl_subcompositor`, `FERRYX_DISABLE_WAYLAND_SUBSURFACE=1`, or a failed X11 child) has only
+//!    the whole parent GTK window left as a surface, which nothing positions at the pane and
+//!    nothing clips to it, so it reports that whole-window surface truthfully and fails
+//!    composition instead of claiming child-surface capabilities it does not have;
+//!    `LinuxChildSurfaceAbsence` names the cause.
 
-use std::ffi::{c_int, c_ulong, c_void};
-use std::num::NonZeroU32;
+use std::ffi::{c_int, c_uint, c_ulong, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
-    RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XcbDisplayHandle,
-    XcbWindowHandle, XlibDisplayHandle, XlibWindowHandle,
+    RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XlibDisplayHandle,
+    XlibWindowHandle,
 };
 use tauri::{Runtime, Window};
 
@@ -63,6 +67,15 @@ unsafe extern "C" {
     fn XRaiseWindow(display: *mut c_void, window: c_ulong) -> c_int;
     fn XUnmapWindow(display: *mut c_void, window: c_ulong) -> c_int;
     fn XDestroyWindow(display: *mut c_void, window: c_ulong) -> c_int;
+    fn XQueryTree(
+        display: *mut c_void,
+        window: c_ulong,
+        root_return: *mut c_ulong,
+        parent_return: *mut c_ulong,
+        children_return: *mut *mut c_ulong,
+        nchildren_return: *mut c_uint,
+    ) -> c_int;
+    fn XFree(data: *mut c_void) -> c_int;
     fn XFlush(display: *mut c_void) -> c_int;
 }
 
@@ -149,14 +162,14 @@ impl Drop for X11Child {
 enum LinuxWindowHandleInner {
     Xlib {
         window: c_ulong,
-        /// An Xlib visual ID, or 0 if unknown (`raw-window-handle` uses a plain
-        /// `c_ulong` here, unlike the XCB variant which is `Option<NonZeroU32>`).
+        /// An Xlib visual ID, or 0 if unknown (`raw-window-handle` uses a plain `c_ulong`
+        /// here).
         visual_id: c_ulong,
     },
-    Xcb {
-        window: NonZeroU32,
-        visual_id: Option<NonZeroU32>,
-    },
+    // No `Xcb` arm: tao's Linux backend only ever hands back an Xlib or Wayland handle, so an
+    // XCB pair would be unreachable. Leaving one would also re-open the silent degradation this
+    // module now reports explicitly, because an unconverted pair used to fall through to the
+    // no-child path. An XCB handle now fails loudly at construction instead.
     Wayland {
         surface: NonNull<c_void>,
     },
@@ -168,10 +181,7 @@ enum LinuxDisplayHandleInner {
         display: Option<NonNull<c_void>>,
         screen: c_int,
     },
-    Xcb {
-        connection: Option<NonNull<c_void>>,
-        screen: c_int,
-    },
+    // See `LinuxWindowHandleInner`: tao never reports an XCB connection on Linux.
     Wayland {
         display: NonNull<c_void>,
     },
@@ -195,11 +205,6 @@ impl HasWindowHandle for NativeChildViewHandle {
                 handle.visual_id = *visual_id;
                 RawWindowHandle::Xlib(handle)
             }
-            LinuxWindowHandleInner::Xcb { window, visual_id } => {
-                let mut handle = XcbWindowHandle::new(*window);
-                handle.visual_id = *visual_id;
-                RawWindowHandle::Xcb(handle)
-            }
             LinuxWindowHandleInner::Wayland { surface } => {
                 let handle = WaylandWindowHandle::new(*surface);
                 RawWindowHandle::Wayland(handle)
@@ -217,10 +222,6 @@ impl HasDisplayHandle for NativeChildViewHandle {
                 let handle = XlibDisplayHandle::new(*display, *screen);
                 RawDisplayHandle::Xlib(handle)
             }
-            LinuxDisplayHandleInner::Xcb { connection, screen } => {
-                let handle = XcbDisplayHandle::new(*connection, *screen);
-                RawDisplayHandle::Xcb(handle)
-            }
             LinuxDisplayHandleInner::Wayland { display } => {
                 let handle = WaylandDisplayHandle::new(*display);
                 RawDisplayHandle::Wayland(handle)
@@ -236,10 +237,121 @@ enum LinuxChild {
     Wayland(WaylandChild),
 }
 
+/// Descriptor for a Linux target that owns an isolated child surface: an X11 child window or a
+/// `wl_subsurface`, both created with an empty input region, so the child clips rendering to the
+/// pane and passes pointer events through to the webview.
+pub const fn child_surface_descriptor() -> PlatformCompositorDescriptor {
+    PlatformCompositorDescriptor {
+        target_kind: CompositorTargetKind::LinuxChildWindow,
+        pointer_transparent: true,
+        layer_backed: true,
+    }
+}
+
+/// Descriptor for a Linux target with no isolated child surface.
+///
+/// Without a child, the only surface wgpu can render into is the whole parent GTK window: nothing
+/// clips it to the pane, nothing positions it there (see `LinuxCompositorTarget::update_viewport`),
+/// and the webview draws over the same window. Reporting it as the root webview window, with no
+/// layer backing and no pointer transparency, is what it is, so composition validation rejects the
+/// target loudly. Reporting `LinuxChildWindow` capabilities here would be a fabrication that
+/// bypasses that check and renders the terminal over the whole window instead.
+pub const fn parent_window_surface_descriptor() -> PlatformCompositorDescriptor {
+    PlatformCompositorDescriptor {
+        target_kind: CompositorTargetKind::RootWebviewWindow,
+        pointer_transparent: false,
+        layer_backed: false,
+    }
+}
+
+/// Why no isolated child surface exists, so a target left with only the whole parent window names
+/// the real cause behind its composition failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxChildSurfaceAbsence {
+    /// The `FERRYX_DISABLE_WAYLAND_SUBSURFACE=1` escape hatch disabled the subsurface, leaving only
+    /// the whole parent window.
+    WaylandSubsurfaceDisabledByEnv,
+    /// The compositor does not advertise `wl_subcompositor` (or refused the subsurface), so no
+    /// clipping-isolated child surface can exist.
+    WaylandSubcompositorUnavailable,
+    /// `XCreateSimpleWindow` on the parent window did not produce an X11 child window.
+    X11ChildWindowUnavailable,
+    /// The Tauri window/display handle pair cannot host an isolated child surface.
+    UnsupportedHandlePair,
+}
+
+impl LinuxChildSurfaceAbsence {
+    /// The cause to report, and what it takes to get a surface that can sit at the pane.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::WaylandSubsurfaceDisabledByEnv => {
+                "FERRYX_DISABLE_WAYLAND_SUBSURFACE=1 disabled the Wayland subsurface, so the native terminal has no surface to place at its pane; unset it to attach a wl_subsurface"
+            }
+            Self::WaylandSubcompositorUnavailable => {
+                "the Wayland compositor does not advertise wl_subcompositor, so the native terminal has no surface to place at its pane"
+            }
+            Self::X11ChildWindowUnavailable => {
+                "no X11 child window could be created on the parent window, so the native terminal has no surface to place at its pane"
+            }
+            Self::UnsupportedHandlePair => {
+                "the Tauri window/display handle pair cannot host an isolated child surface, so the native terminal has no surface to place at its pane"
+            }
+        }
+    }
+}
+
+/// The parent window's client-area origin, in logical pixels.
+///
+/// A child window or `wl_subsurface` is parented to the GTK toplevel, whose origin can sit above
+/// the WebView that DOM viewport coordinates are measured from. Adding this offset to a viewport
+/// position keeps the surface aligned with the pane; it is the Linux counterpart of the
+/// `ScreenToClient` correction the Windows path applies to pointer coordinates
+/// (`platform/windows_focus.rs`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientAreaOrigin {
+    y: i32,
+}
+
+impl ClientAreaOrigin {
+    /// Derives the offset from the parent window's frame origin and its client-area origin.
+    ///
+    /// Both positions are reported in screen coordinates by the same window, so their difference
+    /// is the decoration band above the client area. A platform that reports no frame origin
+    /// (Wayland exposes no global window coordinates), an absent band, or a nonsensical scale
+    /// factor yields no offset rather than shifting the surface upward.
+    pub fn from_window_positions(
+        frame_origin_y: Option<i32>,
+        client_origin_y: Option<i32>,
+        scale_factor: f64,
+    ) -> Self {
+        let (Some(frame_y), Some(client_y)) = (frame_origin_y, client_origin_y) else {
+            return Self::default();
+        };
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            return Self::default();
+        }
+        let band_px = client_y.saturating_sub(frame_y);
+        if band_px <= 0 {
+            return Self::default();
+        }
+        Self {
+            y: (band_px as f64 / scale_factor).round() as i32,
+        }
+    }
+
+    /// Applies the offset to a viewport position expressed in DOM coordinates.
+    #[inline]
+    pub const fn apply(self, dom_y: i32) -> i32 {
+        dom_y.saturating_add(self.y)
+    }
+}
+
 /// Linux native child compositor target.
 pub struct LinuxCompositorTarget {
     handle: Arc<NativeChildViewHandle>,
     child: Option<LinuxChild>,
+    child_absence: Option<LinuxChildSurfaceAbsence>,
+    client_area_origin: ClientAreaOrigin,
     visibility: Mutex<ChildSurfaceVisibility>,
     geometry_latch: GeometryLatch,
     wayland_geometry_latch: GeometryLatch<WaylandSubsurfaceGeometry>,
@@ -264,11 +376,10 @@ impl LinuxCompositorTarget {
                 window: h.window,
                 visual_id: h.visual_id,
             },
-            RawWindowHandle::Xcb(h) => LinuxWindowHandleInner::Xcb {
-                window: h.window,
-                visual_id: h.visual_id,
-            },
             RawWindowHandle::Wayland(h) => LinuxWindowHandleInner::Wayland { surface: h.surface },
+            // tao's Linux backend produces Xlib or Wayland handles only, so an XCB window cannot
+            // reach this arm; a future tao that switches must be converted deliberately instead
+            // of degrading into the parent-window path.
             other => {
                 return Err(NativeTerminalError::GpuPipelineError(format!(
                     "Unsupported window handle type on Linux: {other:?}"
@@ -281,10 +392,6 @@ impl LinuxCompositorTarget {
                 display: d.display,
                 screen: d.screen,
             },
-            RawDisplayHandle::Xcb(d) => LinuxDisplayHandleInner::Xcb {
-                connection: d.connection,
-                screen: d.screen,
-            },
             RawDisplayHandle::Wayland(d) => LinuxDisplayHandleInner::Wayland { display: d.display },
             other => {
                 return Err(NativeTerminalError::GpuPipelineError(format!(
@@ -293,20 +400,45 @@ impl LinuxCompositorTarget {
             }
         };
 
+        let mut child_absence = None;
+        let mut client_area_origin = ClientAreaOrigin::default();
         let child = match (&window_inner, &display_inner) {
             (
-                LinuxWindowHandleInner::Xlib { window, .. },
+                LinuxWindowHandleInner::Xlib { window: parent, .. },
                 LinuxDisplayHandleInner::Xlib { display, .. },
-            ) => display
-                .and_then(|display| X11Child::create(display.as_ptr(), *window))
-                .map(LinuxChild::X11),
+            ) => {
+                let child = display
+                    .and_then(|display| X11Child::create(display.as_ptr(), *parent))
+                    .map(LinuxChild::X11);
+                if child.is_none() {
+                    child_absence = Some(LinuxChildSurfaceAbsence::X11ChildWindowUnavailable);
+                } else if let Some(display) = display {
+                    client_area_origin = x11_client_area_origin(window, display.as_ptr(), *parent);
+                }
+                child
+            }
             (
                 LinuxWindowHandleInner::Wayland { surface },
                 LinuxDisplayHandleInner::Wayland { display },
-            ) if std::env::var_os("FERRYX_DISABLE_WAYLAND_SUBSURFACE").is_none() => {
-                WaylandChild::create(display.as_ptr(), *surface).map(LinuxChild::Wayland)
+            ) => {
+                if std::env::var_os("FERRYX_DISABLE_WAYLAND_SUBSURFACE").is_some() {
+                    child_absence = Some(LinuxChildSurfaceAbsence::WaylandSubsurfaceDisabledByEnv);
+                    None
+                } else {
+                    match WaylandChild::create(display.as_ptr(), *surface) {
+                        Some(child) => Some(LinuxChild::Wayland(child)),
+                        None => {
+                            child_absence =
+                                Some(LinuxChildSurfaceAbsence::WaylandSubcompositorUnavailable);
+                            None
+                        }
+                    }
+                }
             }
-            _ => None,
+            _ => {
+                child_absence = Some(LinuxChildSurfaceAbsence::UnsupportedHandlePair);
+                None
+            }
         };
 
         let window_inner = match (&child, window_inner) {
@@ -329,9 +461,21 @@ impl LinuxCompositorTarget {
             display_inner,
         });
 
+        if let Some(absence) = child_absence {
+            // With no isolated child there is no surface that can be placed at the pane, so
+            // composition rejects this target. Report the real cause loudly here, because the
+            // descriptor must not claim child capabilities to get past that check.
+            tracing::error!(
+                reason = absence.reason(),
+                "Linux native terminal has no isolated child surface to place at its pane"
+            );
+        }
+
         Ok(Self {
             handle,
             child,
+            child_absence,
+            client_area_origin,
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
             geometry_latch: GeometryLatch::default(),
             wayland_geometry_latch: GeometryLatch::default(),
@@ -343,15 +487,25 @@ impl LinuxCompositorTarget {
         Arc::clone(&self.handle)
     }
 
-    /// Reports child capabilities only when a real isolated child surface was created, whether
-    /// that is an X11 child window or a Wayland subsurface.
+    /// Reports the capabilities of the surface wgpu actually renders into.
+    ///
+    /// With an isolated child -- an X11 child window or a Wayland subsurface, both created with an
+    /// empty input region -- that child is the surface, so child-surface capabilities are reported.
+    /// With no child, the whole parent GTK window is the surface: it is neither clipped to the pane
+    /// nor pointer-transparent, so the parent-window descriptor is reported and composition
+    /// validation fails. The cause is named through [`Self::child_surface_absence`] and the
+    /// construction-time error.
     pub fn descriptor(&self) -> PlatformCompositorDescriptor {
-        let has_child = self.child.is_some();
-        PlatformCompositorDescriptor {
-            target_kind: CompositorTargetKind::LinuxChildWindow,
-            pointer_transparent: has_child,
-            layer_backed: has_child,
+        if self.child.is_some() {
+            child_surface_descriptor()
+        } else {
+            parent_window_surface_descriptor()
         }
+    }
+
+    /// Names why no isolated child surface exists, for callers reporting the degradation.
+    pub fn child_surface_absence(&self) -> Option<LinuxChildSurfaceAbsence> {
+        self.child_absence
     }
 
     pub fn uses_wayland_subsurface(&self) -> bool {
@@ -375,6 +529,9 @@ impl LinuxCompositorTarget {
                 if !self.geometry_latch.needs_apply(geometry) {
                     return;
                 }
+                // The child is parented to the window we were handed, which is not necessarily
+                // the client area the DOM viewport coordinates are measured from.
+                let y = self.client_area_origin.apply(geometry.y);
                 // SAFETY: the child window and display belong to this target and stay valid
                 // until drop.
                 unsafe {
@@ -382,7 +539,7 @@ impl LinuxCompositorTarget {
                         child.display,
                         child.window,
                         geometry.x,
-                        geometry.y,
+                        y,
                         geometry.width,
                         geometry.height,
                     );
@@ -402,7 +559,7 @@ impl LinuxCompositorTarget {
                 }
                 child.set_geometry(
                     geometry.position_x,
-                    geometry.position_y,
+                    self.client_area_origin.apply(geometry.position_y),
                     geometry.buffer_scale,
                 );
             }
@@ -442,5 +599,126 @@ impl Drop for LinuxCompositorTarget {
         if let Ok(mut visibility) = self.visibility.lock() {
             visibility.mark_detached();
         }
+    }
+}
+
+/// Resolves the X11 client-area origin for a child parented to `parent`.
+///
+/// The child window is created inside the window handle tao handed us. A window-manager frame is
+/// a direct child of the root window and its origin sits above the client area the WebView draws
+/// in, so the band between the frame origin and the client origin belongs to every DOM viewport
+/// position. A client window the window manager has reparented into such a frame is itself the
+/// client area, where no correction applies.
+fn x11_client_area_origin<R: Runtime>(
+    window: &Window<R>,
+    display: *mut c_void,
+    parent: c_ulong,
+) -> ClientAreaOrigin {
+    if !x11_window_is_root_child(display, parent) {
+        return ClientAreaOrigin::default();
+    }
+    ClientAreaOrigin::from_window_positions(
+        window.outer_position().ok().map(|position| position.y),
+        window.inner_position().ok().map(|position| position.y),
+        window.scale_factor().unwrap_or(1.0),
+    )
+}
+
+/// Returns true when `window` is a direct child of the root window, which is what a
+/// window-manager frame is; a reparented client window sits under its frame instead.
+fn x11_window_is_root_child(display: *mut c_void, window: c_ulong) -> bool {
+    if display.is_null() || window == 0 {
+        return false;
+    }
+    let mut root: c_ulong = 0;
+    let mut parent: c_ulong = 0;
+    let mut children: *mut c_ulong = std::ptr::null_mut();
+    let mut child_count: c_uint = 0;
+    // SAFETY: `display` is the live Xlib connection owned by GTK and `window` came from that
+    // connection, so both stay valid for the duration of this call.
+    let queried = unsafe {
+        XQueryTree(
+            display,
+            window,
+            &mut root,
+            &mut parent,
+            &mut children,
+            &mut child_count,
+        )
+    };
+    if !children.is_null() {
+        // SAFETY: XQueryTree returns an Xlib-allocated child array the caller must release.
+        unsafe { XFree(children as *mut c_void) };
+    }
+    queried != 0 && root != 0 && parent == root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_band_becomes_the_client_area_origin_in_logical_pixels() {
+        // A 28 physical-pixel decoration band on a 2x output is 14 logical pixels.
+        let origin = ClientAreaOrigin::from_window_positions(Some(100), Some(128), 2.0);
+        assert_eq!(origin.apply(0), 14);
+    }
+
+    #[test]
+    fn client_origin_at_or_above_the_frame_origin_adds_no_offset() {
+        let same_origin = ClientAreaOrigin::from_window_positions(Some(100), Some(100), 1.0);
+        assert_eq!(same_origin.apply(40), 40);
+        let above_frame = ClientAreaOrigin::from_window_positions(Some(100), Some(96), 1.0);
+        assert_eq!(above_frame.apply(40), 40);
+    }
+
+    #[test]
+    fn platforms_without_window_positions_keep_dom_coordinates() {
+        // Wayland exposes no global window origin, so the toplevel surface origin is the client
+        // origin and DOM coordinates pass through unchanged.
+        let wayland = ClientAreaOrigin::from_window_positions(None, None, 1.0);
+        assert_eq!(wayland.apply(37), 37);
+        let nonsensical_scale = ClientAreaOrigin::from_window_positions(Some(0), Some(28), 0.0);
+        assert_eq!(nonsensical_scale.apply(37), 37);
+    }
+
+    #[test]
+    fn offset_application_saturates_instead_of_wrapping() {
+        let origin = ClientAreaOrigin::from_window_positions(Some(0), Some(1), 1.0);
+        assert_eq!(origin.apply(i32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn parent_window_surface_descriptor_claims_no_child_surface_capabilities() {
+        let descriptor = parent_window_surface_descriptor();
+        assert_eq!(
+            descriptor.target_kind,
+            CompositorTargetKind::RootWebviewWindow,
+            "with no isolated child the only surface is the whole parent window"
+        );
+        assert!(
+            !descriptor.layer_backed,
+            "the whole parent window is not layer-backed, so the no-child descriptor must not claim it"
+        );
+        assert!(
+            !descriptor.pointer_transparent,
+            "the whole parent window is not pointer-transparent, so the no-child descriptor must not claim it"
+        );
+        let err = descriptor
+            .validate_desktop_composition()
+            .expect_err("a target with no surface to place at the pane must fail composition loudly");
+        assert!(
+            matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Root WebviewWindow")),
+            "Expected the whole-window rejection, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn child_surface_descriptor_reports_the_isolated_child() {
+        let descriptor = child_surface_descriptor();
+        assert_eq!(descriptor.target_kind, CompositorTargetKind::LinuxChildWindow);
+        assert!(descriptor.layer_backed);
+        assert!(descriptor.pointer_transparent);
+        assert!(descriptor.validate_desktop_composition().is_ok());
     }
 }

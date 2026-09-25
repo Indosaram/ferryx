@@ -489,8 +489,82 @@ fn find_ghostty_binary_on_path() -> Option<PathBuf> {
     None
 }
 
+/// Environment-derived directories where Ghostty may keep its configuration.
+///
+/// Windows normally defines neither `HOME` nor `XDG_CONFIG_HOME`; Ghostty stores its config under
+/// `%LOCALAPPDATA%\ghostty` there, with `%APPDATA%` as the secondary convention. Factored into a
+/// value type so the candidate roots stay unit-testable without mutating the process environment.
+struct GhosttyEnvRoots {
+    home: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+}
+
+impl GhosttyEnvRoots {
+    fn from_env() -> Self {
+        Self {
+            // Windows uses `USERPROFILE` instead of `HOME`.
+            home: env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .map(PathBuf::from),
+            xdg_config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            local_app_data: env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            app_data: env::var_os("APPDATA").map(PathBuf::from),
+        }
+    }
+
+    /// Ghostty config directories, in lookup order.
+    ///
+    /// The list is empty only when the process carries no home directory, no `XDG_CONFIG_HOME`,
+    /// and neither `LOCALAPPDATA` nor `APPDATA`. That is an explicit "no known config location"
+    /// outcome, not a missing default: the caller then reports the import as absent with no
+    /// source path instead of probing an invented location.
+    fn config_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(xdg_config_home) = &self.xdg_config_home {
+            dirs.push(xdg_config_home.join("ghostty"));
+        }
+        if let Some(home) = &self.home {
+            dirs.push(home.join(".config").join("ghostty"));
+        }
+        if let Some(local_app_data) = &self.local_app_data {
+            dirs.push(local_app_data.join("ghostty"));
+        }
+        if let Some(app_data) = &self.app_data {
+            dirs.push(app_data.join("ghostty"));
+        }
+        dirs
+    }
+}
+
+/// Config file names searched inside each Ghostty config directory.
+const GHOSTTY_CONFIG_FILE_NAMES: [&str; 2] = ["config.ghostty", "config"];
+
+fn config_candidates_from_roots(roots: &GhosttyEnvRoots) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for dir in roots.config_dirs() {
+        for file_name in GHOSTTY_CONFIG_FILE_NAMES {
+            candidates.push(dir.join(file_name));
+        }
+    }
+    candidates
+}
+
+fn theme_candidates_from_roots(roots: &GhosttyEnvRoots, name: &str) -> Vec<PathBuf> {
+    roots
+        .config_dirs()
+        .into_iter()
+        .map(|dir| dir.join("themes").join(name))
+        .collect()
+}
+
 /// Ghostty theme lookup order: user theme dir, then the shipped resources theme dir.
 /// A theme name containing path separators is only honored when absolute.
+///
+/// An empty list is an explicit "nothing to inspect" outcome: the theme name is unusable, or the
+/// process exposes no config root and no shipped theme directory was found. Callers then leave the
+/// config's own colors in place rather than falling back to a guessed path.
 fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
     let Some(name) = theme_name_for_appearance(name) else {
         return Vec::new();
@@ -503,24 +577,7 @@ fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
 
-    let mut candidates = Vec::new();
-    if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
-        candidates.push(
-            PathBuf::from(xdg_config_home)
-                .join("ghostty")
-                .join("themes")
-                .join(&name),
-        );
-    }
-    if let Some(home) = env::var_os("HOME") {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".config")
-                .join("ghostty")
-                .join("themes")
-                .join(&name),
-        );
-    }
+    let mut candidates = theme_candidates_from_roots(&GhosttyEnvRoots::from_env(), &name);
     if let Some(ghostty_bin) = find_ghostty_binary_on_path() {
         if let Some(bin_dir) = ghostty_bin.parent() {
             candidates.push(
@@ -636,11 +693,11 @@ pub fn load_terminal_preferences_from_path(path: &Path) -> TerminalPreferences {
 }
 
 fn ghostty_config_candidates() -> Vec<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from);
+    let roots = GhosttyEnvRoots::from_env();
     let mut candidates = Vec::new();
 
     if cfg!(target_os = "macos") {
-        if let Some(home) = &home {
+        if let Some(home) = &roots.home {
             candidates.push(
                 home.join("Library")
                     .join("Application Support")
@@ -656,23 +713,9 @@ fn ghostty_config_candidates() -> Vec<PathBuf> {
         }
     }
 
-    if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
-        candidates.push(
-            PathBuf::from(&xdg_config_home)
-                .join("ghostty")
-                .join("config.ghostty"),
-        );
-        candidates.push(
-            PathBuf::from(xdg_config_home)
-                .join("ghostty")
-                .join("config"),
-        );
-    }
-
-    if let Some(home) = home {
-        candidates.push(home.join(".config").join("ghostty").join("config.ghostty"));
-        candidates.push(home.join(".config").join("ghostty").join("config"));
-    }
+    // Empty only when no config root exists on this platform at all; the caller then reports the
+    // import as absent with no source path instead of guessing a location.
+    candidates.extend(config_candidates_from_roots(&roots));
 
     candidates.dedup();
     candidates
@@ -683,6 +726,9 @@ pub fn load_terminal_preferences() -> TerminalPreferences {
         return TerminalPreferences::imported(cli_config, PathBuf::from("ghostty"));
     }
 
+    // An empty candidate list means no config root is known on this platform: the import is
+    // reported absent with no source path. Otherwise the first candidate is surfaced as the
+    // expected location even when the file does not exist yet.
     let candidates = ghostty_config_candidates();
     if let Some(path) = candidates.iter().find(|path| path.is_file()) {
         return load_terminal_preferences_from_path(path);
@@ -944,6 +990,61 @@ mod tests {
             fs::set_permissions(&ghostty_bin, perms).expect("set permissions");
             assert_eq!(find_ghostty_binary_on_path(), None);
         }
+    }
+
+    #[test]
+    fn test_ghostty_candidates_include_windows_roots() {
+        // Windows defines neither HOME nor XDG_CONFIG_HOME: Ghostty keeps its config under
+        // %LOCALAPPDATA%\ghostty there, with %APPDATA% as the secondary convention.
+        let local_app_data = PathBuf::from(r"C:\Users\ferryx\AppData\Local");
+        let app_data = PathBuf::from(r"C:\Users\ferryx\AppData\Roaming");
+        let roots = GhosttyEnvRoots {
+            home: None,
+            xdg_config_home: None,
+            local_app_data: Some(local_app_data.clone()),
+            app_data: Some(app_data.clone()),
+        };
+
+        let config_dirs = roots.config_dirs();
+        assert_eq!(config_dirs, vec![local_app_data.join("ghostty"), app_data.join("ghostty")]);
+        assert!(
+            config_dirs[0].to_string_lossy().starts_with(r"C:\Users\ferryx\AppData\Local"),
+            "candidate {:?} should be a Windows-shaped path",
+            config_dirs[0]
+        );
+
+        let config_candidates = config_candidates_from_roots(&roots);
+        for expected in [
+            local_app_data.join("ghostty").join("config.ghostty"),
+            local_app_data.join("ghostty").join("config"),
+        ] {
+            assert!(
+                config_candidates.contains(&expected),
+                "candidates {config_candidates:?} should contain {expected:?}"
+            );
+        }
+
+        let theme_candidates = theme_candidates_from_roots(&roots, "tokyonight");
+        let expected_theme = local_app_data.join("ghostty").join("themes").join("tokyonight");
+        assert!(
+            theme_candidates.contains(&expected_theme),
+            "candidates {theme_candidates:?} should contain {expected_theme:?}"
+        );
+
+        // A unix root keeps resolving through the same helper, with XDG_CONFIG_HOME first.
+        let unix_roots = GhosttyEnvRoots {
+            home: Some(PathBuf::from("/home/ferryx")),
+            xdg_config_home: Some(PathBuf::from("/home/ferryx/.config")),
+            local_app_data: None,
+            app_data: None,
+        };
+        assert_eq!(
+            unix_roots.config_dirs(),
+            vec![
+                PathBuf::from("/home/ferryx/.config").join("ghostty"),
+                PathBuf::from("/home/ferryx").join(".config").join("ghostty"),
+            ]
+        );
     }
 
     #[test]

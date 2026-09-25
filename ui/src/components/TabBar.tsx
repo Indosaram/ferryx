@@ -17,6 +17,7 @@ import {
   useSleepingSessionIds,
 } from "../lib/sessionLifecycle";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+import { getSystemPermissionsStatus } from "../lib/tauri";
 import type { WorkspaceTab } from "../lib/types";
 import { SortableTab } from "./tab-dnd/SortableTab";
 import type { TabDropEdge } from "./tab-dnd/tabDragTypes";
@@ -62,13 +63,6 @@ const WINDOWS_SHELL_OPTIONS = [
   { id: "new-terminal:wsl", shell: "wsl", label: "WSL" },
 ] as const;
 
-function isWindowsPlatform(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const platform = typeof navigator.platform === "string" ? navigator.platform : "";
-  const userAgent = typeof navigator.userAgent === "string" ? navigator.userAgent : "";
-  return platform.toLowerCase().startsWith("win") || userAgent.includes("Windows");
-}
-
 export function TabBar({
   groupId = "group-default",
   tabs,
@@ -104,8 +98,11 @@ export function TabBar({
   const renameCancelledRef = useRef(false);
   const addButtonRef = useRef<HTMLDivElement>(null);
   const menuUnlistenRef = useRef<(() => void) | null>(null);
+  const [hostPlatform, setHostPlatform] = useState<string | null>(null);
   const isMac = isMacShortcutPlatform();
-  const isWindows = isWindowsPlatform();
+  // The shell profile menu follows the HOST platform reported by the backend, never
+  // the browser OS: the remote web client can drive a host of a different platform.
+  const isWindows = hostPlatform === "windows";
   const { settings: browserSettings } = useBrowserSettings();
   const sleepingSessionIds = useSleepingSessionIds();
 
@@ -117,6 +114,25 @@ export function TabBar({
     return () => {
       menuUnlistenRef.current?.();
       menuUnlistenRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // The IPC binding may be unavailable or partial (missing export, non-function, sync throw),
+    // and tab-bar rendering must never break over it. Deferring the call into the promise chain
+    // routes any such failure into the catch below. The platform only picks which shell presets
+    // the menu offers, so an unknown platform falls back to the non-Windows list.
+    void Promise.resolve()
+      .then(() => getSystemPermissionsStatus())
+      .then((status) => {
+        if (!cancelled) setHostPlatform(status?.platform ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setHostPlatform(null);
+      });
+    return () => {
+      cancelled = true;
     };
   }, []);
 

@@ -450,6 +450,10 @@ export function useShortcuts(
           continue;
         }
         trace("match", { action: shortcut.id });
+        if (shouldYieldControlLetterToTerminal(event, isMac)) {
+          trace("reject", { action: shortcut.id, reason: "terminal-control-letter" });
+          continue;
+        }
         if (
           isEditableTarget(event.target) &&
           !isTerminalTarget(event.target) &&
@@ -573,6 +577,23 @@ function isTerminalTarget(target: EventTarget | null) {
   return target instanceof HTMLElement && target.closest(".terminal-host") !== null;
 }
 
+/**
+ * A bare Ctrl+<letter> belongs to the shell's readline namespace on Windows/Linux
+ * (Ctrl+W deletes a word, Ctrl+R reverse-searches, Ctrl+A jumps to line start), and
+ * off macOS `mod` resolves to Ctrl, so the app must not claim it while the terminal
+ * owns focus — the keystroke has to reach the shell instead of being prevented.
+ *
+ * Only the bare chords yield: a chord carrying another modifier (Ctrl+Shift+*), the
+ * non-letter chords (Ctrl+digit, Ctrl+Tab, Ctrl+PageUp/PageDown) and every macOS
+ * chord stay claimed, because there `mod` is Cmd and this predicate is never true.
+ */
+export function shouldYieldControlLetterToTerminal(event: KeyboardEvent, isMac: boolean): boolean {
+  if (isMac) return false;
+  if (!isTerminalTarget(event.target)) return false;
+  if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+  return /^[a-zA-Z]$/.test(event.key);
+}
+
 function normalizeKey(key: string) {
   return key.length === 1 ? key.toLowerCase() : key;
 }
@@ -586,8 +607,18 @@ function displayKey(key: string) {
 
 function detectMacPlatform() {
   if (typeof navigator === "undefined") return false;
-  if (/Mac|iPhone|iPad|iPod/.test(navigator.platform)) return true;
-  if (typeof navigator.userAgent === "string" && /Macintosh|Mac OS X/.test(navigator.userAgent)) return true;
+  // iPadOS masquerades as macOS: it reports platform "MacIntel" and a Macintosh user
+  // agent, and only the touch-point count separates it from a real Mac (which is 0),
+  // so an iPad with a hardware keyboard must not resolve `mod` to Cmd.
+  if (/iPhone|iPad|iPod/.test(navigator.platform)) return true;
+  if (/Mac/.test(navigator.platform) && (navigator.maxTouchPoints ?? 0) === 0) return true;
+  if (
+    typeof navigator.userAgent === "string" &&
+    /Macintosh|Mac OS X/.test(navigator.userAgent) &&
+    (navigator.maxTouchPoints ?? 0) === 0
+  ) {
+    return true;
+  }
   if (typeof process !== "undefined" && process.platform === "darwin") return true;
   return false;
 }

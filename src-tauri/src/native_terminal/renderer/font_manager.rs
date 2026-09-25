@@ -15,6 +15,52 @@ use crate::terminal::preferences::{
 #[cfg(target_os = "macos")]
 use crate::native_terminal::renderer::coretext_font::macos::CoreTextFontSystem;
 
+/// Fallback advance ratio (cell width / font size) for a face whose real advance is NOT measured.
+///
+/// This is a heuristic, not a measurement: it assumes a 0.60 em advance, which is exact only for
+/// a monospace face whose advance really is 1233/2048 em (MesloLGS NF, the Ghostty default).
+/// Any other face accumulates horizontal drift across a long line, and the cell width reported
+/// to the terminal is wrong as well. It is used only by [`unmeasured_cell_metrics`]; a measured
+/// face goes through [`cell_metrics_from_measurement`].
+pub const FALLBACK_CELL_WIDTH_EM_RATIO: f32 = 0.6;
+
+/// Fallback line-height ratio (cell height / font size) for a face whose real ascent and descent
+/// are NOT measured. Same caveat as [`FALLBACK_CELL_WIDTH_EM_RATIO`].
+pub const FALLBACK_CELL_HEIGHT_EM_RATIO: f32 = 1.25;
+
+/// Builds cell metrics from a measured monospace advance and line height, both in physical
+/// pixels at the requested display scale.
+///
+/// This is the measured path for cell metrics: the caller measures the real advance of the
+/// terminal's representative cell (the `M` advance) and the face's ascent + descent, instead of
+/// assuming a ratio of the font size. Zero, negative, and non-finite measurements clamp to one
+/// pixel so the grid pitch can never collapse.
+pub fn cell_metrics_from_measurement(advance_px: f32, line_height_px: f32) -> CellMetrics {
+    fn pixels(value: f32) -> u32 {
+        if value.is_finite() {
+            value.round().max(1.0) as u32
+        } else {
+            1
+        }
+    }
+    CellMetrics {
+        width_px: pixels(advance_px),
+        height_px: pixels(line_height_px),
+    }
+}
+
+/// Cell metrics for a face whose advance could not be measured: the font size in physical pixels
+/// times [`FALLBACK_CELL_WIDTH_EM_RATIO`] and [`FALLBACK_CELL_HEIGHT_EM_RATIO`].
+///
+/// Called only by the non-macOS arm of [`FontManager::cell_metrics_for_scale`], where no
+/// measurement is wired yet; macOS measures through CoreText.
+pub fn unmeasured_cell_metrics(font_size_px: f32) -> CellMetrics {
+    cell_metrics_from_measurement(
+        font_size_px * FALLBACK_CELL_WIDTH_EM_RATIO,
+        font_size_px * FALLBACK_CELL_HEIGHT_EM_RATIO,
+    )
+}
+
 pub struct FontManager {
     font_family: String,
     #[cfg(target_os = "macos")]
@@ -129,10 +175,16 @@ impl FontManager {
                 1.0
             };
             let fs = *self.font_size.lock() * scale;
-            CellMetrics {
-                width_px: (fs * 0.6).round().max(1.0) as u32,
-                height_px: (fs * 1.25).round().max(1.0) as u32,
-            }
+            // No advance measurement is wired on this platform yet, so the pitch comes from the
+            // documented ratio fallback and drifts on any face that is not 0.60 em wide. To fix
+            // this for real, expose a measurement function from the module that already loads the
+            // face - `renderer::freetype_raster` (its `FtFaceRec` carries ascent/descent/height and
+            // `FT_Load_Char` fills the glyph slot's advance) on Linux, or
+            // `renderer::directwrite_raster` (which can measure the same text it draws) on Windows
+            // - and call `cell_metrics_from_measurement(advance_px, line_height_px)` here with the
+            // measured values scaled by `scale`. Those metrics drive the renderer grid pitch and
+            // the PTY resize path, so the fallback is only honest as long as it is named.
+            unmeasured_cell_metrics(fs)
         }
     }
 
@@ -403,6 +455,64 @@ mod tests {
             !cjk_mask.iter().all(|&b| b == 0),
             "CJK '가' must produce non-empty mask via CoreText fallback"
         );
+    }
+
+    #[test]
+    fn test_measured_advance_converts_to_cell_metrics() {
+        // MesloLGS NF at 13pt: 'M' advance 1233/2048 em = 7.83px, ascent + descent
+        // 2584/2048 em = 16.40px. The measured path rounds both to the ghostty cell.
+        assert_eq!(
+            cell_metrics_from_measurement(1233.0 * 13.0 / 2048.0, 2584.0 * 13.0 / 2048.0),
+            CellMetrics {
+                width_px: 8,
+                height_px: 16
+            }
+        );
+    }
+
+    #[test]
+    fn test_measurement_clamps_degenerate_values_to_one_pixel() {
+        for (advance, line_height) in [(0.0, 0.0), (-4.0, -1.0), (f32::NAN, f32::NAN)] {
+            assert_eq!(
+                cell_metrics_from_measurement(advance, line_height),
+                CellMetrics {
+                    width_px: 1,
+                    height_px: 1
+                },
+                "degenerate measurement ({advance}, {line_height}) must clamp to one pixel"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_ratios_apply_only_without_a_measurement() {
+        // The fallback is a pure ratio of the font size, so it scales linearly with the size.
+        assert_eq!(
+            unmeasured_cell_metrics(13.0),
+            CellMetrics {
+                width_px: 8,
+                height_px: 16
+            }
+        );
+        assert_eq!(
+            unmeasured_cell_metrics(26.0),
+            CellMetrics {
+                width_px: 16,
+                height_px: 33
+            }
+        );
+
+        // A measured advance that is not the fallback ratio must not be run through the ratio.
+        let measured = cell_metrics_from_measurement(13.0 * 0.5, 13.0 * 1.25);
+        assert_ne!(measured.width_px, unmeasured_cell_metrics(13.0).width_px);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn test_non_macos_cell_metrics_use_the_documented_fallback() {
+        let mgr = FontManager::new_with_family_and_size("monospace", 13.0);
+        assert_eq!(mgr.cell_metrics(), unmeasured_cell_metrics(13.0));
+        assert_eq!(mgr.cell_metrics_for_scale(2.0), unmeasured_cell_metrics(26.0));
     }
 
     #[test]

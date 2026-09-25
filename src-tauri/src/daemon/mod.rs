@@ -9,6 +9,8 @@ pub mod handover_socket;
 pub mod handover_transaction;
 #[cfg(unix)]
 pub mod handover_wire;
+// macOS LaunchAgent autostart plumbing. Unwired on every platform (no production caller); the
+// `launchctl`-spawning paths inside are gated to `#[cfg(target_os = "macos")]`.
 pub mod launchd;
 pub(crate) mod logging;
 pub mod manifest;
