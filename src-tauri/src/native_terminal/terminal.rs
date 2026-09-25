@@ -1332,16 +1332,33 @@ mod tests {
     }
 
     #[test]
-    fn partial_scroll_region_never_creates_scrollback() {
-        // DECSTBM with a bottom margin below the last row (as bottom-anchored
-        // TUIs use to pin status/input bars) must scroll strictly in place:
-        // no padding rows or stale frames may ever reach the physical
-        // scrollback history. This guards the vendored Ghostty index()/scrollUp()
-        // partial-region policy that previously dumped margin rows into history.
+    fn top_anchored_scroll_region_creates_scrollback() {
+        // Reference parity: xterm's BufferService.scroll creates history whenever
+        // scrollTop === 0, whatever the bottom margin. A bottom-anchored TUI that
+        // pins a status bar with ESC[1;Nr must still keep every row that scrolls off
+        // the top of the region; gating this on a full-screen bottom margin made the
+        // history drop most of a live agent session.
         let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
-        // Region rows 1..=4 (1-based) => 0-indexed top=0, bottom=3 on a 5-row
-        // screen, so bottom < rows - 1 (partial region).
+        // Region rows 1..=4 (1-based) => 0-indexed top=0, bottom=3 on a 5-row screen.
         terminal.feed_str("\x1b[1;4r").expect("set scroll region");
+        for i in 0..8 {
+            terminal
+                .feed(format!("L{}\r\n", i).as_bytes())
+                .expect("feed output");
+        }
+        assert!(
+            terminal.scrollback_rows().expect("query scrollback") > 0,
+            "a region anchored at row 0 must retain scrollback like the reference emulator"
+        );
+    }
+
+    #[test]
+    fn region_whose_top_is_below_row_zero_never_creates_scrollback() {
+        // The complement of the reference rule: with the region's top below row 0
+        // the scroll is strictly in place, so nothing reaches history.
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        // Region rows 2..=4 (1-based) => 0-indexed top=1, bottom=3.
+        terminal.feed_str("\x1b[2;4r").expect("set scroll region");
         for i in 0..8 {
             terminal
                 .feed(format!("L{}\r\n", i).as_bytes())
@@ -1350,7 +1367,7 @@ mod tests {
         assert_eq!(
             terminal.scrollback_rows().expect("query scrollback"),
             0,
-            "partial-region scrolling must not push rows into scrollback"
+            "a region whose top is not row 0 scrolls in place and must not create history"
         );
     }
 

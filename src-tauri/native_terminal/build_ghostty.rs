@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXPECTED_GHOSTTY_SHA: &str = "26d5b3b33f043f969aa54f178f0b58d07fb91d5f";
+pub const EXPECTED_GHOSTTY_SHA: &str = "6a508fd5e34c7e222c052a6d00bb3891ff3feace";
 pub const REQUIRED_ZIG_VERSION: &str = "0.16.0";
 
 /// Result of build environment verification and libghostty-vt compilation.

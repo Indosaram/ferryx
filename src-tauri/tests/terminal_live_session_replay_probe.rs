@@ -8,10 +8,34 @@ use ferryx_lib::native_terminal::{
 use std::ops::Range;
 use std::path::PathBuf;
 
-const COLS: u16 = 110;
-const ROWS: u16 = 81;
 const CELL_W: u32 = 8;
 const CELL_H: u32 = 16;
+
+/// Geometry override so a probe can replay at the exact size another emulator used
+/// (`FERRYX_PROBE_COLS` / `FERRYX_PROBE_ROWS`). Defaults keep the original harness size.
+fn geometry() -> (u16, u16) {
+    let read = |key: &str, fallback: u16| {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+    };
+    (
+        read("FERRYX_PROBE_COLS", 110),
+        read("FERRYX_PROBE_ROWS", 81),
+    )
+}
+
+/// Print the viewport's text rows so another emulator's buffer can be diffed row by row.
+fn print_viewport_rows(label: &str, snapshot: &RenderSnapshot) {
+    if std::env::var_os("FERRYX_PROBE_TEXT").is_none() {
+        return;
+    }
+    for row in 0..snapshot.rows as usize {
+        println!("[text:{label}:{row}] {}", snapshot.row_text(row));
+    }
+}
 
 fn history_path() -> Option<PathBuf> {
     std::env::var_os("FERRYX_SESSION_HISTORY").map(PathBuf::from)
@@ -98,9 +122,11 @@ fn replay_live_session_history_shows_images_and_scrollback() {
         return;
     };
     let bytes = std::fs::read(path).expect("session history");
-    let mut terminal = NativeTerminal::new(COLS, ROWS).expect("terminal");
+    let (cols, rows) = geometry();
+    println!("replay geometry {cols}x{rows}");
+    let mut terminal = NativeTerminal::new(cols, rows).expect("terminal");
     terminal
-        .resize(COLS, ROWS, CELL_W, CELL_H)
+        .resize(cols, rows, CELL_W, CELL_H)
         .expect("metrics");
     for chunk in bytes.chunks(8191) {
         terminal.feed(chunk).expect("replay");
@@ -109,12 +135,12 @@ fn replay_live_session_history_shows_images_and_scrollback() {
 
     let live = terminal.render_snapshot().expect("snapshot");
     report("live", &terminal, &live);
+    print_viewport_rows("bottom", &live);
 
-    terminal
-        .scroll_viewport(ScrollViewport::Top)
-        .expect("top");
+    terminal.scroll_viewport(ScrollViewport::Top).expect("top");
     let top = terminal.render_snapshot().expect("snapshot");
     report("top", &terminal, &top);
+    print_viewport_rows("top", &top);
 
     let Some(mut renderer) = evidence_dir().map(|_| {
         NativeTerminalRenderer::new(RendererConfig {
@@ -152,9 +178,7 @@ fn replay_live_session_history_shows_images_and_scrollback() {
             describe_placements(&terminal)
         );
         save_frame(
-            &renderer
-                .render_snapshot(&snapshot, None)
-                .expect("readback"),
+            &renderer.render_snapshot(&snapshot, None).expect("readback"),
             &format!("live-{step:02}-up"),
         );
     }
