@@ -39,6 +39,110 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use worktree::WorkspaceRegistry;
 
+/// Ceiling for the raised soft `RLIMIT_NOFILE`. macOS reports the hard limit as
+/// `RLIM_INFINITY`, and requesting infinity back is rejected, so the raise clamps to this
+/// large finite value instead.
+pub const FILE_DESCRIPTOR_LIMIT_CAP: u64 = 102_400;
+
+/// Pure target computation for the raised soft descriptor limit.
+///
+/// `hard` uses `u64::MAX` as the "infinity" sentinel so this stays platform-free and
+/// testable without a syscall.
+pub fn file_descriptor_limit_target(current: u64, hard: u64) -> u64 {
+    let cap = if hard == u64::MAX {
+        FILE_DESCRIPTOR_LIMIT_CAP
+    } else {
+        hard.min(FILE_DESCRIPTOR_LIMIT_CAP)
+    };
+    if current >= cap {
+        current
+    } else {
+        cap
+    }
+}
+
+/// Raises this process's soft `RLIMIT_NOFILE` to the target computed above.
+///
+/// macOS gives every launchd-spawned process a soft limit of 256. A terminal daemon spends
+/// roughly three descriptors per live session (PTY master, reader pipe, bridge socket), so a
+/// few dozen sessions exhaust that inherited default and the next `open`/`spawn` fails with
+/// EMFILE ("Too many open files"). That failure is fatal to the daemon and to every session
+/// it owns: on 2026-09-25 a daemon died mid-write of `remote_sessions.json`, leaving a
+/// half-written temporary file and no crash report, exactly the signature of a descriptor
+/// exhaustion failure. Raising the limit once at startup bounds sessions by memory instead.
+///
+/// Returns the resulting soft limit, or `None` when the platform has no such concept.
+#[cfg(unix)]
+pub fn raise_file_descriptor_limit() -> Option<u64> {
+    // SAFETY: `getrlimit`/`setrlimit` only read and write the `rlimit` struct passed by
+    // pointer, and `RLIMIT_NOFILE` is a valid resource selector on every unix target here.
+    unsafe {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) != 0 {
+            return None;
+        }
+        let hard = if limits.rlim_max == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            limits.rlim_max as u64
+        };
+        let target = file_descriptor_limit_target(limits.rlim_cur as u64, hard);
+        if target <= limits.rlim_cur as u64 {
+            return Some(limits.rlim_cur as u64);
+        }
+        let raised = libc::rlimit {
+            rlim_cur: target as libc::rlim_t,
+            rlim_max: limits.rlim_max,
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) != 0 {
+            // Keep serving with the inherited limit rather than aborting startup; the
+            // caller can still log the shortfall.
+            return Some(limits.rlim_cur as u64);
+        }
+        Some(target)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn raise_file_descriptor_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+mod file_descriptor_limit_tests {
+    use super::{file_descriptor_limit_target, FILE_DESCRIPTOR_LIMIT_CAP};
+
+    #[test]
+    fn launchd_default_is_raised_to_the_cap() {
+        // macOS gives GUI-spawned processes a soft limit of 256 with an infinite hard limit;
+        // that is the value a daemon inherits when the app is launched from Finder.
+        assert_eq!(
+            file_descriptor_limit_target(256, u64::MAX),
+            FILE_DESCRIPTOR_LIMIT_CAP
+        );
+    }
+
+    #[test]
+    fn a_generous_limit_is_left_alone() {
+        // A shell-launched run already has a high limit; never lower it.
+        assert_eq!(file_descriptor_limit_target(1_048_576, u64::MAX), 1_048_576);
+        assert_eq!(
+            file_descriptor_limit_target(FILE_DESCRIPTOR_LIMIT_CAP, u64::MAX),
+            FILE_DESCRIPTOR_LIMIT_CAP
+        );
+    }
+
+    #[test]
+    fn a_finite_hard_limit_bounds_the_target() {
+        // Some hosts cap the hard limit; never ask for more than the kernel will grant.
+        assert_eq!(file_descriptor_limit_target(256, 4096), 4096);
+        assert_eq!(file_descriptor_limit_target(8192, 4096), 8192);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};

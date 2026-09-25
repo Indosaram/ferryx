@@ -4,6 +4,11 @@
 pub use ferryx_lib::cli::*;
 
 fn main() {
+    // Both launch modes need this before anything opens a file: launchd gives an app a soft
+    // descriptor limit of 256, and a terminal daemon spends roughly three descriptors per live
+    // session, so the inherited default is exhausted after a few dozen sessions and the next
+    // spawn fails with EMFILE. Raising it here also propagates to the daemon the GUI spawns.
+    let raised_limit = ferryx_lib::raise_file_descriptor_limit();
     if let Some(code) = ferryx_lib::ssh::password::run_askpass() {
         std::process::exit(code);
     }
@@ -58,6 +63,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
+            let _ = raised_limit;
             ferryx_lib::run();
         }
     }

@@ -1056,6 +1056,9 @@ pub fn run_daemon_headless(
     handover_from: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let announce_readiness = handover_from.is_none();
+    // Install before anything else: a panic during startup is exactly the death that left no
+    // trace on 2026-09-25, and the desktop discards this process's stderr.
+    crate::daemon::logging::install_panic_recorder();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

@@ -108,6 +108,57 @@ impl DaemonLogging {
     }
 }
 
+/// Formats the panic record written by [`install_panic_recorder`].
+///
+/// Split out so the shape is testable without installing a process-wide hook.
+pub(crate) fn panic_record(location: &str, thread: &str, payload: &str) -> String {
+    format!(
+        "daemon_panic thread={thread} at={location} payload={}\n",
+        payload.chars().take(1024).collect::<String>()
+    )
+}
+
+/// Appends every panic to the persistent daemon log before chaining to the previous hook.
+///
+/// A panic is the event that explains a daemon's death, and stderr is not durable here: the
+/// GUI spawns the daemon with a piped stderr that it discards, so a panic leaves no trace on
+/// disk. On 2026-09-25 a daemon died mid-write of `remote_sessions.json` -- the half-written
+/// temporary file survived, but nothing on the machine recorded why. Writing the message,
+/// location, and thread into the same bounded file as the agent-state records closes that gap
+/// without depending on the desktop draining a pipe.
+pub(crate) fn install_panic_recorder() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(text) = info.payload().downcast_ref::<&str>() {
+            (*text).to_string()
+        } else if let Some(text) = info.payload().downcast_ref::<String>() {
+            text.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        let record = panic_record(&location, &thread, &payload);
+        if let Ok(mut file) = open_log() {
+            let _ = append_bounded(&mut file, record.as_bytes());
+        }
+        previous(info);
+    }));
+}
+
 pub(crate) fn report_failure(error: &anyhow::Error) {
     // One bounded report, never a retry loop into the desktop's undrained pipe.
     // Use non-panicking write_all on locked stderr so broken pipes do not abort the process.
@@ -203,6 +254,25 @@ fn append_bounded(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::panic_record;
+
+    #[test]
+    fn panic_record_carries_location_thread_and_payload() {
+        let record = panic_record("src/daemon/server.rs:42:9", "tokio-runtime-worker", "boom");
+        assert_eq!(
+            record,
+            "daemon_panic thread=tokio-runtime-worker at=src/daemon/server.rs:42:9 payload=boom\n"
+        );
+    }
+
+    #[test]
+    fn panic_record_bounds_an_oversized_payload() {
+        // A pathological payload must not blow past the bounded log record size.
+        let record = panic_record("at", "t", &"x".repeat(4096));
+        assert!(record.len() < 1100, "record length {}", record.len());
+        assert!(record.ends_with('\n'));
+    }
+
     use super::*;
 
     #[test]
