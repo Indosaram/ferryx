@@ -4114,7 +4114,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 "127.0.0.1:{}",
                 crate::remote::state::REMOTE_GATEWAY_PORT
             ),
-            authorize: Arc::new(move |key| auth.device_for_attach_key_bytes(key).is_some()),
+            authorize: Arc::new(move |key| auth.authorizes_attach_key_bytes(key)),
         });
         router = router.merge(crate::remote::attach_router::attach_router(deps));
     }

@@ -690,7 +690,7 @@ impl RelayClient {
             &machine_id,
             session_id,
             &enrollment_epoch,
-            move |key: &[u8; 32]| auth.device_for_attach_key_bytes(key).is_some(),
+            move |key: &[u8; 32]| auth.authorizes_attach_key_bytes(key),
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

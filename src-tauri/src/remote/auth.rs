@@ -894,6 +894,37 @@ impl AuthManager {
         self.device_for_attach_key(&STANDARD.encode(attach_public_key))
     }
 
+    pub fn live_pairing_capability_accepts_attach_key(&self, attach_public_key_b64: &str) -> bool {
+        let key = attach_public_key_b64.trim();
+        if key.is_empty() {
+            return false;
+        }
+        let mut window = self.pairing_window.write();
+        let now = Instant::now();
+        window.refresh(now);
+        window.codes.values().any(|pairing| {
+            now.saturating_duration_since(pairing.created_at) < pairing.lifetime
+                && pairing.attach_public_key.as_deref().map(str::trim) == Some(key)
+        })
+    }
+
+    pub fn live_pairing_capability_accepts_attach_key_bytes(
+        &self,
+        attach_public_key: &[u8],
+    ) -> bool {
+        self.live_pairing_capability_accepts_attach_key(&STANDARD.encode(attach_public_key))
+    }
+
+    pub fn authorizes_attach_key(&self, attach_public_key_b64: &str) -> bool {
+        self.device_for_attach_key(attach_public_key_b64).is_some()
+            || self.live_pairing_capability_accepts_attach_key(attach_public_key_b64)
+    }
+
+    pub fn authorizes_attach_key_bytes(&self, attach_public_key: &[u8]) -> bool {
+        self.device_for_attach_key_bytes(attach_public_key).is_some()
+            || self.live_pairing_capability_accepts_attach_key_bytes(attach_public_key)
+    }
+
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
         let now = unix_now();
         self.devices
@@ -1911,6 +1942,198 @@ mod tests {
         assert!(
             manager.validate_token("legacy-token").is_ok(),
             "token for legacy device must validate"
+        );
+    }
+
+    #[test]
+    fn test_live_pairing_capability_accepts_attach_key() {
+        let manager = AuthManager::new();
+        let k = "test-attach-key-k";
+        let k2 = "test-attach-key-k2";
+
+        // 1. A live capability registered with attach key K authorizes K
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-token-1",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(k.to_string()),
+            )
+            .expect("register capability");
+
+        assert!(
+            manager.live_pairing_capability_accepts_attach_key(k),
+            "live capability must authorize its attach key"
+        );
+        assert!(
+            manager.live_pairing_capability_accepts_attach_key(&format!("  {k}  ")),
+            "whitespace trimming must be supported"
+        );
+
+        // Also test the byte-slice helper
+        let k_bytes = b"test-attach-key-bytes-32-chars!!";
+        let k_b64 = STANDARD.encode(k_bytes);
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-token-bytes",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(k_b64),
+            )
+            .expect("register capability with b64 key");
+        assert!(
+            manager.live_pairing_capability_accepts_attach_key_bytes(k_bytes),
+            "byte helper must authorize matching key bytes"
+        );
+
+        // 2. The same capability does not authorize a different key K2
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key(k2),
+            "unregistered key K2 must not be authorized"
+        );
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key(""),
+            "empty string must never authorize"
+        );
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key("   "),
+            "whitespace-only string must never authorize"
+        );
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key_bytes(
+                b"wrong-bytes-attach-key-32chars!"
+            ),
+            "different key bytes must not authorize"
+        );
+
+        // 3. After the capability expires, K no longer authorizes
+        manager.backdate_pairing_code("cap-token-1", Duration::from_secs(601));
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key(k),
+            "expired capability must no longer authorize attach key"
+        );
+
+        // 4. A revoked device's key still does not authorize
+        let dev_key = "device-attach-key-revocation-test";
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-for-device",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(dev_key.to_string()),
+            )
+            .expect("register capability for exchange");
+        assert!(manager.live_pairing_capability_accepts_attach_key(dev_key));
+
+        // Exchange the capability into an active device
+        let (_token, device) = manager
+            .exchange_pairing_code("cap-for-device", "Test Phone")
+            .expect("exchange capability into device");
+        assert_eq!(device.attach_public_key.as_deref(), Some(dev_key));
+
+        // Consumed capability no longer accepts it in the pairing window
+        assert!(!manager.live_pairing_capability_accepts_attach_key(dev_key));
+        // But the device store now accepts it
+        assert!(manager.device_for_attach_key(dev_key).is_some());
+
+        // Revoke the device
+        assert!(manager.revoke_device(&device.id).expect("revoke device"));
+
+        // After revocation, neither device store nor pairing window authorizes the key
+        assert!(
+            manager.device_for_attach_key(dev_key).is_none(),
+            "revoked device must not be found by attach key"
+        );
+        assert!(
+            !manager.live_pairing_capability_accepts_attach_key(dev_key),
+            "revoked device must not authorize via pairing capability"
+        );
+
+        // Legacy tombstone device (revoked: true) must also not authorize
+        {
+            let mut devices = manager.devices.write();
+            devices.insert(
+                "legacy-revoked-dev".to_string(),
+                DeviceInfo {
+                    id: "legacy-revoked-dev".to_string(),
+                    name: "Legacy Revoked".to_string(),
+                    permission: DevicePermission::Control,
+                    access_scope: DeviceAccessScope::Machine,
+                    created_at: unix_now(),
+                    last_seen_at: unix_now(),
+                    revoked: true,
+                    installation_id: None,
+                    attach_public_key: Some("tombstone-key".to_string()),
+                },
+            );
+        }
+        assert!(manager.device_for_attach_key("tombstone-key").is_none());
+        assert!(!manager.live_pairing_capability_accepts_attach_key("tombstone-key"));
+    }
+
+    #[test]
+    fn test_authorizes_attach_key_bytes_cases() {
+        let manager = AuthManager::new();
+
+        // 1. Live device key: true
+        let dev_key_bytes = b"live-device-attach-key-bytes-32!";
+        let dev_key_b64 = STANDARD.encode(dev_key_bytes);
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-for-live-dev",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(dev_key_b64),
+            )
+            .expect("register capability for live device");
+        let (_token, device) = manager
+            .exchange_pairing_code("cap-for-live-dev", "Live Phone")
+            .expect("exchange capability");
+        assert_eq!(device.name, "Live Phone");
+        assert!(
+            manager.authorizes_attach_key_bytes(dev_key_bytes),
+            "live device attach key must authorize"
+        );
+
+        // 2. Live granted capability key: true
+        let cap_key_bytes = b"granted-cap-attach-key-bytes-32!";
+        let cap_key_b64 = STANDARD.encode(cap_key_bytes);
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-granted-live",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(cap_key_b64),
+            )
+            .expect("register live capability");
+        assert!(
+            manager.authorizes_attach_key_bytes(cap_key_bytes),
+            "live granted capability key must authorize"
+        );
+
+        // 3. Unknown key: false
+        let unknown_key_bytes = b"completely-unknown-attach-key-32";
+        assert!(
+            !manager.authorizes_attach_key_bytes(unknown_key_bytes),
+            "unknown key must not authorize"
+        );
+
+        // 4. Expired capability key: false
+        let expired_key_bytes = b"expired-cap-attach-key-bytes-32!";
+        let expired_key_b64 = STANDARD.encode(expired_key_bytes);
+        manager
+            .register_scoped_pairing_capability_with_attach(
+                "cap-to-expire",
+                DevicePermission::Control,
+                DeviceAccessScope::Machine,
+                Some(expired_key_b64),
+            )
+            .expect("register capability to expire");
+        assert!(manager.authorizes_attach_key_bytes(expired_key_bytes));
+        manager.backdate_pairing_code("cap-to-expire", Duration::from_secs(601));
+        assert!(
+            !manager.authorizes_attach_key_bytes(expired_key_bytes),
+            "expired capability key must not authorize"
         );
     }
 }
