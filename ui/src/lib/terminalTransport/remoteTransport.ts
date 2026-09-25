@@ -18,6 +18,7 @@ interface RemoteSessionRow {
   session_id?: string;
   target?: RemoteSessionTarget;
   daemonEpoch?: string | number;
+  machineId?: string;
   worktreePath?: string | null;
   running?: boolean;
 }
@@ -57,6 +58,7 @@ export class WebSocketTerminalTransport implements TerminalTransport {
         : s.target?.daemonEpoch !== undefined && s.target?.daemonEpoch !== null
           ? String(s.target.daemonEpoch)
           : undefined,
+      machineId: s.machineId ?? s.target?.machineId ?? undefined,
       worktreePath: s.worktreePath,
       running: s.running,
     }));

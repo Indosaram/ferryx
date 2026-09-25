@@ -697,10 +697,14 @@ export function RemoteTerminal({
       };
 
       if (isAccountSession && createWebSocket) {
-        const epochParam = daemonEpoch !== undefined && daemonEpoch !== null
-          ? `?daemonEpoch=${encodeURIComponent(String(daemonEpoch))}`
-          : "";
-        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}${epochParam}`;
+        const epoch = daemonEpoch !== undefined && daemonEpoch !== null ? String(daemonEpoch).trim() : "";
+        if (!epoch) {
+          const errMsg = `Cannot connect terminal: daemonEpoch is missing for session ${socketRequest.sessionId}`;
+          console.error(errMsg);
+          if (onTransportFailure) onTransportFailure();
+          return;
+        }
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}`;
         Promise.resolve(createWebSocket(pathAndQuery))
           .then(initSocket)
           .catch((error) => {
@@ -768,7 +772,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;

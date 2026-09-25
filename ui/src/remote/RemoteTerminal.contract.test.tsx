@@ -12,9 +12,10 @@ class MockWebSocket {
   readyState = MockWebSocket.OPEN;
   send = vi.fn();
   close = vi.fn();
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
+  onopen: ((event?: any) => void) | null = null;
+  onclose: ((event?: any) => void) | null = null;
+  onmessage: ((event: any) => void) | null = null;
+  onerror: ((event?: any) => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
@@ -90,6 +91,64 @@ describe("remote terminal grid contract", () => {
     act(() => socket().onopen?.());
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("builds account terminal socket URL with daemonEpoch and contains neither render nor cols", async () => {
+    let capturedPath: string | null = null;
+    const mockSocket = new MockWebSocket("mock://socket");
+    const createWebSocket = vi.fn((pathAndQuery: string) => {
+      capturedPath = pathAndQuery;
+      return mockSocket;
+    });
+
+    render(
+      <RemoteTerminal
+        sessionId="session-account-123"
+        token="token-unused"
+        title="Account Terminal"
+        isAccountSession={true}
+        daemonEpoch="1790310731270"
+        createWebSocket={createWebSocket}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(createWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(capturedPath).not.toBeNull();
+    expect(capturedPath).toContain("daemonEpoch=");
+    expect(capturedPath).toContain("daemonEpoch=1790310731270");
+    expect(capturedPath).not.toContain("render=");
+    expect(capturedPath).not.toContain("cols=");
+    expect(capturedPath).not.toContain("rows=");
+    expect(capturedPath).toBe("/api/v1/terminal/session-account-123?daemonEpoch=1790310731270");
+  });
+
+  it("reports failure and avoids sending an empty or guessed value when daemonEpoch is genuinely unknown in account mode", async () => {
+    const createWebSocket = vi.fn();
+    const onTransportFailure = vi.fn();
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <RemoteTerminal
+        sessionId="session-unknown-epoch"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch={undefined}
+        createWebSocket={createWebSocket}
+        onTransportFailure={onTransportFailure}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onTransportFailure).toHaveBeenCalled();
+    });
+
+    expect(createWebSocket).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("daemonEpoch is missing for session session-unknown-epoch"),
+    );
   });
 
   it("reports whether a socket opened or closed before opening", () => {
