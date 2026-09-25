@@ -7,6 +7,8 @@ import {
   allocateSession,
   openTunnel,
   redeemInTunnel,
+  openAccountWebSocket,
+  createAccountConnection,
   AccountSessionError,
   getStoredAccountSessionToken,
   clearStoredAccountSessionToken,
@@ -403,5 +405,282 @@ describe("accountSession client module", () => {
       expect(call.url).not.toContain("token=");
       expect(call.url).not.toContain("ticket=");
     }
+  });
+
+  it("opens an events socket and a terminal socket on the same connection and asserts BOTH stay usable", async () => {
+    let sessionCount = 0;
+    const allocatedSessions: string[] = [];
+    const openTunnels: Array<{ sessionId: string; close: any }> = [];
+
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+
+      if (url.endsWith("/api/v1/attach/session")) {
+        sessionCount += 1;
+        const sessionId = `sess-alloc-${sessionCount}`;
+        allocatedSessions.push(sessionId);
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessionId }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("OK", { status: 200 }));
+    });
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async (params) => {
+      let isUpgraded = false;
+      const tunnelCloseSpy = vi.fn();
+      const mockWs: any = {
+        readyState: 1,
+        send: vi.fn(),
+        close: vi.fn(function (this: any) {
+          this.readyState = 3;
+          if (this.onclose) this.onclose({ code: 1000, reason: "normal", wasClean: true });
+        }),
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+      };
+
+      const transport: any = {
+        fetchLike: vi.fn(async (path: string) => {
+          if (isUpgraded) {
+            throw new Error("STREAM_UPGRADED: stream has been handed over to WebSocket");
+          }
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(JSON.stringify({ ok: true, path })),
+          };
+        }),
+        openWebSocket: vi.fn(async (pathAndQuery: string) => {
+          if (isUpgraded) {
+            throw new Error("STREAM_UPGRADED: stream has been handed over to WebSocket");
+          }
+          isUpgraded = true;
+          mockWs.pathAndQuery = pathAndQuery;
+          return mockWs;
+        }),
+      };
+
+      openTunnels.push({ sessionId: params.sessionId, close: tunnelCloseSpy });
+      return { transport, close: tunnelCloseSpy };
+    });
+
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-1",
+      machineId: "mach-1",
+      displayName: "My Laptop",
+      publicKey: "pub-key-1",
+      attachPublicKey: "attach-pub-key-1",
+      relayOrigin: origin,
+      platform: "macos",
+      online: true,
+      enrollmentEpoch: "1",
+      lastSeenAt: 123456789,
+    };
+
+    const httpCloseSpy = vi.fn();
+    let httpTransportUpgraded = false;
+    const httpTransport: any = {
+      fetchLike: vi.fn(async (_path: string) => {
+        if (httpTransportUpgraded) {
+          throw new Error("STREAM_UPGRADED: stream has been handed over to WebSocket");
+        }
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: new TextEncoder().encode(JSON.stringify({ workspaceId: "ws-1" })),
+        };
+      }),
+      openWebSocket: vi.fn(async () => {
+        httpTransportUpgraded = true;
+        throw new Error("STREAM_UPGRADED: stream has been handed over to WebSocket");
+      }),
+    };
+
+    const attachKey = {
+      publicKey: "key-pub-1",
+      privateKey: "key-priv-1",
+    };
+
+    const conn = createAccountConnection({
+      relayUrl: origin,
+      accountSessionToken: sessionToken,
+      machine,
+      deviceToken: "device-bearer-token-live",
+      httpTransport,
+      httpClose: httpCloseSpy,
+      attachKey,
+    });
+
+    // 1. Open events socket on this connection
+    const eventsWs = await conn.openWebSocket("/api/v1/events");
+    expect(eventsWs).toBeDefined();
+    expect(eventsWs.readyState).toBe(1);
+
+    // 2. Open terminal socket on the SAME connection simultaneously
+    const terminalWs = await conn.openWebSocket("/api/v1/terminal/term-session-1?daemonEpoch=1");
+    expect(terminalWs).toBeDefined();
+    expect(terminalWs.readyState).toBe(1);
+
+    // 3. Assert BOTH stay usable simultaneously
+    eventsWs.send(JSON.stringify({ type: "ping" }));
+    terminalWs.send("echo hello\n");
+
+    const eventsReceived: any[] = [];
+    eventsWs.onmessage = (event) => eventsReceived.push(event.data);
+    eventsWs.onmessage({ data: JSON.stringify({ type: "remote_active_selection_changed" }) });
+
+    const terminalReceived: any[] = [];
+    terminalWs.onmessage = (event) => terminalReceived.push(event.data);
+    terminalWs.onmessage({ data: "hello\n" });
+
+    expect(eventsReceived).toEqual([JSON.stringify({ type: "remote_active_selection_changed" })]);
+    expect(terminalReceived).toEqual(["hello\n"]);
+
+    // 4. Assert short HTTP requests on conn.httpTransport remain usable and NOT upgraded
+    const httpRes = await conn.httpTransport.fetchLike("/api/v1/workspace/state");
+    expect(httpRes.status).toBe(200);
+
+    // 5. Assert two separate sessions and tunnels were allocated for the two sockets
+    expect(allocatedSessions).toHaveLength(2);
+    expect(allocatedSessions[0]).not.toBe(allocatedSessions[1]);
+    expect(openTunnels).toHaveLength(2);
+
+    // 6. Close eventsWs; assert terminalWs and httpTransport stay usable
+    eventsWs.close();
+    expect(openTunnels[0].close).toHaveBeenCalledTimes(1);
+    expect(openTunnels[1].close).not.toHaveBeenCalled();
+
+    terminalWs.send("still alive\n");
+    const httpRes2 = await conn.httpTransport.fetchLike("/api/v1/workspace/select");
+    expect(httpRes2.status).toBe(200);
+
+    // 7. Close terminalWs; assert its tunnel closes
+    terminalWs.close();
+    expect(openTunnels[1].close).toHaveBeenCalledTimes(1);
+
+    // 8. Close connection; assert httpClose is called
+    conn.close();
+    expect(httpCloseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops and reports exact error if daemon or relay refuses second concurrent session", async () => {
+    let sessionCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/v1/attach/session")) {
+        sessionCount += 1;
+        if (sessionCount === 1) {
+          return Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-events-1" }), { status: 200 }));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              code: "CONCURRENT_ATTACH_SESSION_LIMIT",
+              message: "Maximum concurrent attach sessions reached for this machine",
+            }),
+            { status: 429 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("OK", { status: 200 }));
+    });
+
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: {
+        fetchLike: vi.fn(),
+        openWebSocket: vi.fn(async () => ({ readyState: 1, send: vi.fn(), close: vi.fn() } as any)),
+      } as any,
+      close: vi.fn(),
+    });
+
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-1",
+      machineId: "mach-1",
+      displayName: "My Laptop",
+      publicKey: "pub-key-1",
+      attachPublicKey: "attach-pub-key-1",
+      relayOrigin: origin,
+      platform: "macos",
+      online: true,
+      enrollmentEpoch: "1",
+      lastSeenAt: 123456789,
+    };
+
+    const conn = createAccountConnection({
+      relayUrl: origin,
+      accountSessionToken: sessionToken,
+      machine,
+      deviceToken: "device-bearer-token-live",
+      httpTransport: { fetchLike: vi.fn(), openWebSocket: vi.fn() } as any,
+      httpClose: vi.fn(),
+      attachKey: { publicKey: "k1", privateKey: "k2" },
+    });
+
+    // First socket succeeds
+    const eventsWs = await conn.openWebSocket("/api/v1/events");
+    expect(eventsWs).toBeDefined();
+
+    // Second socket fails with exact error from server and does NOT paper over it
+    await expect(
+      conn.openWebSocket("/api/v1/terminal/sess-2?daemonEpoch=1"),
+    ).rejects.toThrow("Maximum concurrent attach sessions reached for this machine");
+
+    try {
+      await conn.openWebSocket("/api/v1/terminal/sess-2?daemonEpoch=1");
+    } catch (err: any) {
+      expect(err instanceof AccountSessionError).toBe(true);
+      expect(err.code).toBe("CONCURRENT_ATTACH_SESSION_LIMIT");
+      expect(err.status).toBe(429);
+    }
+  });
+
+  it("openAccountWebSocket allocates a dedicated session, opens a tunnel and returns an upgraded socket", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-standalone-1" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("OK", { status: 200 }));
+    });
+
+    const tunnelCloseSpy = vi.fn();
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: {
+        fetchLike: vi.fn(),
+        openWebSocket: vi.fn(async () => ({ readyState: 1, send: vi.fn(), close: vi.fn() } as any)),
+      } as any,
+      close: tunnelCloseSpy,
+    });
+
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-1",
+      machineId: "mach-1",
+      displayName: "My Laptop",
+      publicKey: "pub-key-1",
+      attachPublicKey: "attach-pub-key-1",
+      relayOrigin: origin,
+      platform: "macos",
+      online: true,
+      enrollmentEpoch: "1",
+      lastSeenAt: 123456789,
+    };
+
+    const ws = await openAccountWebSocket({
+      relayUrl: origin,
+      accountSessionToken: sessionToken,
+      machine,
+      deviceToken: "device-bearer-token-live",
+      pathAndQuery: "/api/v1/events",
+      attachKey: { publicKey: "k1", privateKey: "k2" },
+    });
+
+    expect(ws).toBeDefined();
+    expect(ws.readyState).toBe(1);
+
+    ws.close();
+    expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
   });
 });

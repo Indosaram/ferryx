@@ -53,6 +53,7 @@ type RemoteTerminalProps = {
   readonly createWebSocket?: (
     pathAndQuery: string,
   ) => Promise<WebSocketLike> | WebSocketLike;
+  readonly daemonEpoch?: string | number | null;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -380,6 +381,7 @@ export function RemoteTerminal({
   isAccountSession,
   attachKey,
   createWebSocket,
+  daemonEpoch,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   const wheelRemainderRowsRef = useRef(0);
@@ -695,7 +697,10 @@ export function RemoteTerminal({
       };
 
       if (isAccountSession && createWebSocket) {
-        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?render=grid&cols=${socketRequest.geometry.cols}&rows=${socketRequest.geometry.rows}`;
+        const epochParam = daemonEpoch !== undefined && daemonEpoch !== null
+          ? `?daemonEpoch=${encodeURIComponent(String(daemonEpoch))}`
+          : "";
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}${epochParam}`;
         Promise.resolve(createWebSocket(pathAndQuery))
           .then(initSocket)
           .catch((error) => {

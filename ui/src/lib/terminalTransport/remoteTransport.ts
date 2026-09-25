@@ -7,6 +7,21 @@ type PendingPayload = {
   readonly byteLength: number;
 };
 
+interface RemoteSessionTarget {
+  sessionId?: string;
+  daemonEpoch?: string | number;
+  machineId?: string;
+}
+
+interface RemoteSessionRow {
+  sessionId?: string;
+  session_id?: string;
+  target?: RemoteSessionTarget;
+  daemonEpoch?: string | number;
+  worktreePath?: string | null;
+  running?: boolean;
+}
+
 export class WebSocketTerminalTransport implements TerminalTransport {
   private baseUrl: string;
   private token: string;
@@ -29,7 +44,22 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     });
     if (!res.ok) throw new Error(`Failed to list sessions: ${res.statusText}`);
     const data = await res.json();
-    return data.map((s: { sessionId: string }) => ({ sessionId: s.sessionId }));
+    const rows: RemoteSessionRow[] = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.sessions)
+        ? data.sessions
+        : [];
+    return rows.map((s: RemoteSessionRow) => ({
+      sessionId: s.sessionId ?? s.session_id ?? s.target?.sessionId ?? "",
+      target: s.target,
+      daemonEpoch: s.daemonEpoch !== undefined && s.daemonEpoch !== null
+        ? String(s.daemonEpoch)
+        : s.target?.daemonEpoch !== undefined && s.target?.daemonEpoch !== null
+          ? String(s.target.daemonEpoch)
+          : undefined,
+      worktreePath: s.worktreePath,
+      running: s.running,
+    }));
   }
 
   /// Trades the device token for a single-use ticket.

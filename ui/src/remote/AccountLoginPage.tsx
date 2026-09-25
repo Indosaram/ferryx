@@ -24,14 +24,19 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   useEffect(() => {
     let code: string | null = null;
     const hash = window.location.hash;
-    if (hash.startsWith("#login=")) {
+    if (hash.startsWith("#code=")) {
+      code = new URLSearchParams(hash.slice(1)).get("code");
+    } else if (hash.startsWith("#login=")) {
       code = new URLSearchParams(hash.slice(1)).get("login");
     } else if (hash.startsWith("#account_token=")) {
       code = new URLSearchParams(hash.slice(1)).get("account_token");
+    } else if (hash.length > 1) {
+      const hashParams = new URLSearchParams(hash.slice(1));
+      code = hashParams.get("code") ?? hashParams.get("login") ?? hashParams.get("account_token");
     }
     if (!code && window.location.search) {
       const searchParams = new URLSearchParams(window.location.search);
-      code = searchParams.get("login") ?? searchParams.get("account_token");
+      code = searchParams.get("code") ?? searchParams.get("login") ?? searchParams.get("account_token");
     }
 
     if (code && code.trim()) {

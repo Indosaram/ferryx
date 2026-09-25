@@ -1,10 +1,13 @@
 import {
   buildAttachSocketUrl,
+  getOrCreateAttachKey,
   type AttachKeyPair,
 } from "./accountAttach";
 import {
   openAccountTunnel,
   type TunnelTransport,
+  type TunnelWebSocket,
+  type TunnelCloseEvent,
 } from "./attachTunnel";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
@@ -410,5 +413,169 @@ export async function issueEnrollmentCode(
     throw new AccountSessionError("INVALID_RESPONSE", "Missing code in enrollment code response", res.status);
   }
   return data as IssueEnrollmentCodeResponse;
+}
+
+export interface OpenAccountWebSocketParams {
+  relayUrl: string;
+  accountSessionToken: string;
+  machine: AccountMachineView;
+  deviceToken: string;
+  pathAndQuery: string;
+  attachKey?: AttachKeyPair | null;
+}
+
+export async function openAccountWebSocket(
+  params: OpenAccountWebSocketParams,
+): Promise<TunnelWebSocket> {
+  const attachKey = params.attachKey ?? (await getOrCreateAttachKey());
+  if (!attachKey) {
+    throw new AccountSessionError("ATTACH_KEY_UNSUPPORTED", "Failed to get or create attach key");
+  }
+
+  const session = await allocateSession(
+    params.relayUrl,
+    params.accountSessionToken,
+    params.machine.machineId,
+  );
+
+  const tunnel = await openTunnel({
+    relayOrigin: params.machine.relayOrigin || params.relayUrl,
+    machineId: params.machine.machineId,
+    enrollmentEpoch: params.machine.enrollmentEpoch,
+    machineAttachPublicKey: params.machine.attachPublicKey,
+    localKeyPair: attachKey,
+    sessionId: session.sessionId,
+  });
+
+  try {
+    const ws = await tunnel.transport.openWebSocket(params.pathAndQuery, {
+      Authorization: `Bearer ${params.deviceToken}`,
+    });
+
+    const origClose = ws.close.bind(ws);
+    let isCleaningUp = false;
+    let isCleanedUp = false;
+
+    const cleanup = () => {
+      if (isCleaningUp || isCleanedUp) return;
+      isCleaningUp = true;
+      try {
+        tunnel.close();
+      } finally {
+        isCleaningUp = false;
+        isCleanedUp = true;
+      }
+    };
+
+    ws.close = (code?: number, reason?: string) => {
+      if (isCleaningUp || isCleanedUp) {
+        origClose(code, reason);
+        return;
+      }
+      try {
+        origClose(code, reason);
+      } finally {
+        cleanup();
+      }
+    };
+
+    let userOnClose: ((event: TunnelCloseEvent) => void) | null = null;
+    const origSetOnClose = Object.getOwnPropertyDescriptor(ws, "onclose")?.set;
+
+    if (origSetOnClose) {
+      Object.defineProperty(ws, "onclose", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return userOnClose;
+        },
+        set(handler: ((event: TunnelCloseEvent) => void) | null) {
+          userOnClose = handler;
+          origSetOnClose.call(ws, (event: TunnelCloseEvent) => {
+            cleanup();
+            if (userOnClose) userOnClose(event);
+          });
+        },
+      });
+      origSetOnClose.call(ws, () => {
+        cleanup();
+      });
+    } else {
+      const origOnClose = ws.onclose;
+      ws.onclose = (event: TunnelCloseEvent) => {
+        cleanup();
+        if (origOnClose) origOnClose(event);
+      };
+    }
+
+    return ws;
+  } catch (err) {
+    tunnel.close();
+    throw err;
+  }
+}
+
+export interface AccountConnection {
+  readonly transport: TunnelTransport;
+  readonly httpTransport: TunnelTransport;
+  readonly machine: AccountMachineView;
+  readonly deviceToken: string;
+  openWebSocket(pathAndQuery: string): Promise<TunnelWebSocket>;
+  close(): void;
+}
+
+export function createAccountConnection(params: {
+  relayUrl: string;
+  accountSessionToken: string;
+  machine: AccountMachineView;
+  deviceToken: string;
+  httpTransport: TunnelTransport;
+  httpClose: () => void;
+  attachKey?: AttachKeyPair | null;
+}): AccountConnection {
+  const openSockets = new Set<TunnelWebSocket>();
+  let isClosed = false;
+
+  return {
+    transport: params.httpTransport,
+    httpTransport: params.httpTransport,
+    machine: params.machine,
+    deviceToken: params.deviceToken,
+    async openWebSocket(pathAndQuery: string): Promise<TunnelWebSocket> {
+      if (isClosed) {
+        throw new AccountSessionError("CONNECTION_CLOSED", "Account connection has been closed");
+      }
+      const ws = await openAccountWebSocket({
+        relayUrl: params.relayUrl,
+        accountSessionToken: params.accountSessionToken,
+        machine: params.machine,
+        deviceToken: params.deviceToken,
+        pathAndQuery,
+        attachKey: params.attachKey,
+      });
+      openSockets.add(ws);
+      const prevClose = ws.close.bind(ws);
+      let socketClosed = false;
+      ws.close = (code?: number, reason?: string) => {
+        if (!socketClosed) {
+          socketClosed = true;
+          openSockets.delete(ws);
+        }
+        prevClose(code, reason);
+      };
+      return ws;
+    },
+    close() {
+      if (isClosed) return;
+      isClosed = true;
+      params.httpClose();
+      for (const ws of Array.from(openSockets)) {
+        try {
+          ws.close();
+        } catch {}
+      }
+      openSockets.clear();
+    },
+  };
 }
 
