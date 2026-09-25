@@ -34,7 +34,7 @@ use crate::remote::protocol::{
 };
 pub use crate::remote::state::DEFAULT_RELAY_URL;
 use axum::{
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Path as AxumPath, Query, State,
@@ -297,6 +297,7 @@ struct RelayInner {
     /// deliveries never share a queue, and so tests that build a `ControlChannel`
     /// directly keep working with notices alone.
     grant_channels: Mutex<HashMap<String, mpsc::Sender<GrantDeliveryRequest>>>,
+    account_state: Mutex<Option<Arc<crate::account::service::AccountState>>>,
     machine_public_keys: Mutex<HashMap<String, String>>,
     key_store_path: Option<std::path::PathBuf>,
     admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
@@ -305,6 +306,8 @@ struct RelayInner {
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
+    #[cfg(test)]
+    spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
 }
 
 /// Audience used before challenges carried one.
@@ -386,6 +389,7 @@ impl RelayState {
                 machine_tokens: state.inner.machine_tokens.clone(),
                 control_channels: Mutex::new(HashMap::new()),
                 grant_channels: Mutex::new(HashMap::new()),
+                account_state: Mutex::new(None),
                 machine_public_keys: Mutex::new(keys),
                 key_store_path: state.inner.key_store_path.clone(),
                 admission: Mutex::new(HashMap::new()),
@@ -394,6 +398,8 @@ impl RelayState {
                 next_generation: AtomicU64::new(1),
                 pending_sessions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                spliced_taps: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -433,6 +439,7 @@ impl RelayState {
                 next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
                 grant_channels: Mutex::new(HashMap::new()),
+                account_state: Mutex::new(None),
                 machine_public_keys: Mutex::new(keys),
                 key_store_path,
                 admission: Mutex::new(HashMap::new()),
@@ -440,11 +447,35 @@ impl RelayState {
                 pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                spliced_taps: Mutex::new(HashMap::new()),
             }),
         })
     }
 
     /// Cache a token just issued or revalidated by this machine's gateway.
+    pub fn set_account_state(&self, account: Arc<crate::account::service::AccountState>) {
+        *self.inner.account_state.lock() = Some(account);
+    }
+
+    pub fn clear_account_state(&self) {
+        *self.inner.account_state.lock() = None;
+    }
+
+    #[cfg(test)]
+    pub fn tap_session_traffic(&self, session_id: &str) -> Arc<Mutex<Vec<u8>>> {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        self.inner
+            .spliced_taps
+            .lock()
+            .insert(session_id.to_string(), Arc::clone(&log));
+        log
+    }
+
+    pub fn account_state(&self) -> Option<Arc<crate::account::service::AccountState>> {
+        self.inner.account_state.lock().clone()
+    }
+
     pub fn register_device_token(&self, machine_id: &str, token: &str) {
         let mut tokens = self.paired_tokens.lock();
         let now = Instant::now();
@@ -1532,6 +1563,115 @@ async fn pair_exchange_handler(
     exchange_http(state, peer_ip(peer), None, request).await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachSessionRequest {
+    pub machine_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachSessionResponse {
+    pub session_id: String,
+    pub machine_id: String,
+    pub opaque: bool,
+}
+
+async fn attach_session_handler(
+    State(state): State<RelayState>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ip = peer_ip(peer);
+    if !state.admit(ip, Instant::now()) {
+        return crate::account::service::ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "admission limit exceeded",
+        )
+        .into_response();
+    }
+
+    let Some(account_state) = state.account_state() else {
+        return crate::account::service::ApiError::new(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "relay is not an account origin",
+        )
+        .into_response();
+    };
+
+    let user = match crate::account::service::authenticate_user(&account_state, &headers) {
+        Ok(user) => user,
+        Err(error) => return error.into_response(),
+    };
+
+    let request: AttachSessionRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(error) => {
+            return crate::account::service::ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                error.to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    let machine = crate::account::service::machine_for_owner(
+        &account_state,
+        &user.user_id,
+        &request.machine_id,
+    );
+    if machine.is_none() {
+        return crate::account::service::ApiError::new(
+            StatusCode::NOT_FOUND,
+            "MACHINE_NOT_FOUND",
+            "no such machine on this account",
+        )
+        .into_response();
+    }
+
+    let channel = {
+        let channels = state.inner.control_channels.lock();
+        channels.get(&request.machine_id).cloned()
+    };
+    let Some(channel) = channel else {
+        return crate::account::service::ApiError::new(
+            StatusCode::CONFLICT,
+            "MACHINE_OFFLINE",
+            "machine is offline",
+        )
+        .into_response();
+    };
+    if channel.tx.is_closed() {
+        return crate::account::service::ApiError::new(
+            StatusCode::CONFLICT,
+            "MACHINE_OFFLINE",
+            "machine is offline",
+        )
+        .into_response();
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    if !state.issue_session(&request.machine_id, &session_id, Some(channel.generation), true) {
+        return crate::account::service::ApiError::new(
+            StatusCode::CONFLICT,
+            "MACHINE_OFFLINE",
+            "machine is offline",
+        )
+        .into_response();
+    }
+
+    Json(AttachSessionResponse {
+        session_id,
+        machine_id: request.machine_id,
+        opaque: true,
+    })
+    .into_response()
+}
+
 async fn host_http_handler(
     State(state): State<RelayState>,
     AxumPath((machine, path)): AxumPath<(String, String)>,
@@ -1651,6 +1791,7 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["pair", "exchange"])
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
+            | ("GET", ["attach"])
     )
 }
 
@@ -2030,12 +2171,18 @@ pub fn relay_router_with_account(
     account_public_key: Option<String>,
     account_state: Option<Arc<crate::account::service::AccountState>>,
 ) -> Router {
+    if let Some(ref account) = account_state {
+        state.set_account_state(account.clone());
+    } else {
+        state.clear_account_state();
+    }
     let grant_gate = crate::remote::account_grants::GrantGate {
         account_public_key,
         delivery: state.clone(),
     };
     let mut router = Router::new()
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
+        .route("/api/v1/attach/session", post(attach_session_handler))
         .route(
             "/host/{machine_id}/api/v1/socket-ticket",
             post(socket_ticket_handler),
@@ -2073,6 +2220,9 @@ pub fn relay_router_with_account(
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
         .route("/tunnel/opaque/{session_id}", get(opaque_handler))
+        .route("/install.sh", get(install_script_handler))
+        .route("/download/ferryx-cli", get(download_cli_handler))
+        .route("/download/{artifact}", get(download_cli_artifact_handler))
         .fallback(axum::routing::get(
             crate::remote::server::serve_static_or_index,
         ))
@@ -2101,6 +2251,71 @@ pub fn spawn_session_reaper(state: RelayState) {
             state.sweep_expired_sessions();
         }
     });
+}
+
+async fn install_script_handler() -> impl axum::response::IntoResponse {
+    let script = include_str!("../../../scripts/install.sh");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        script,
+    )
+}
+
+async fn download_cli_handler() -> axum::response::Response {
+    download_cli_artifact_handler(axum::extract::Path("ferryx-cli".to_string())).await
+}
+
+/// Artifact names the unauthenticated `/download/{artifact}` route may serve.
+///
+/// The relay proxy is reachable without authentication, so an open filename
+/// lookup would turn the download route into a file-read oracle for anything
+/// sitting in the staging directories. Only published `ferryx-cli` artifacts
+/// are addressable.
+fn is_downloadable_artifact(artifact: &str) -> bool {
+    matches!(
+        artifact,
+        "ferryx-cli"
+            | "ferryx-cli-linux-amd64"
+            | "ferryx-cli-linux-arm64"
+            | "ferryx-cli-darwin-universal"
+            | "ferryx-cli-windows-amd64.exe"
+    )
+}
+
+async fn download_cli_artifact_handler(
+    axum::extract::Path(artifact): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_downloadable_artifact(&artifact) {
+        return (StatusCode::BAD_REQUEST, "Unknown artifact name").into_response();
+    }
+
+    let candidate_dirs = [
+        std::env::var("FERRYX_DOWNLOADS_DIR").ok().map(std::path::PathBuf::from),
+        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".ferryx").join("downloads")),
+        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join("bin")),
+        Some(std::path::PathBuf::from("/usr/local/bin")),
+    ];
+
+    for dir in candidate_dirs.into_iter().flatten() {
+        let file_path = dir.join(&artifact);
+        if let Ok(meta) = tokio::fs::symlink_metadata(&file_path).await {
+            if meta.file_type().is_file() {
+                if let Ok(bytes) = tokio::fs::read(&file_path).await {
+                    return (
+                        [
+                            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+                            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"ferryx-cli\""),
+                        ],
+                        bytes,
+                    ).into_response();
+                }
+            }
+        }
+    }
+
+    let github_url = format!("https://github.com/Indosaram/ferryx/releases/latest/download/{artifact}");
+    axum::response::Redirect::temporary(&github_url).into_response()
 }
 
 fn extract_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
@@ -2475,10 +2690,32 @@ async fn handle_half_socket(
                     }
                 };
                 let mut peer = timeout(SESSION_PAIRING_TIMEOUT, pairing).await??;
+                #[cfg(test)]
+                let tap = guard
+                    .state
+                    .inner
+                    .spliced_taps
+                    .lock()
+                    .get(&guard.session_id)
+                    .cloned();
                 for message in buffered {
+                    #[cfg(test)]
+                    if let Some(tap) = &tap {
+                        match &message {
+                            Message::Binary(data) => tap.lock().extend_from_slice(data),
+                            Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                            _ => {}
+                        }
+                    }
                     timeout(TRANSFER_TIMEOUT, peer.send(message)).await??;
                 }
-                proxy_sockets(socket, peer).await
+                proxy_sockets(
+                    socket,
+                    peer,
+                    #[cfg(test)]
+                    tap,
+                )
+                .await
             };
             match timeout(SESSION_TRANSFER_TIMEOUT, transfer).await {
                 Ok(Ok(())) => {}
@@ -2492,14 +2729,28 @@ async fn handle_half_socket(
 
 /// Proxies WebSocket frames bidirectionally between `a` and `b` until
 /// either side closes or errors.
-async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
+async fn proxy_sockets(
+    a: WebSocket,
+    b: WebSocket,
+    #[cfg(test)] tap: Option<Arc<Mutex<Vec<u8>>>>,
+) -> anyhow::Result<()> {
     let (mut a_tx, mut a_rx) = a.split();
     let (mut b_tx, mut b_rx) = b.split();
 
+    #[cfg(test)]
+    let tap_a = tap.clone();
     let a_to_b = async {
         while let Some(msg) = a_rx.next().await {
             let msg = msg?;
             let is_close = matches!(msg, Message::Close(_));
+            #[cfg(test)]
+            if let Some(tap) = &tap_a {
+                match &msg {
+                    Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
+                    Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                    _ => {}
+                }
+            }
             timeout(TRANSFER_TIMEOUT, b_tx.send(msg)).await??;
             if is_close {
                 break;
@@ -2507,10 +2758,20 @@ async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     };
+    #[cfg(test)]
+    let tap_b = tap;
     let b_to_a = async {
         while let Some(msg) = b_rx.next().await {
             let msg = msg?;
             let is_close = matches!(msg, Message::Close(_));
+            #[cfg(test)]
+            if let Some(tap) = &tap_b {
+                match &msg {
+                    Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
+                    Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                    _ => {}
+                }
+            }
             timeout(TRANSFER_TIMEOUT, a_tx.send(msg)).await??;
             if is_close {
                 break;
@@ -2527,6 +2788,10 @@ async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // `FERRYX_DOWNLOADS_DIR` is process-global and the harness runs tests in parallel
+    // threads, so every test that sets it must hold this guard for the whole body.
+    static DOWNLOAD_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     thread_local! {
         static PROBE_ENROLLMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -2659,6 +2924,19 @@ mod tests {
                 Err(StatusCode::BAD_REQUEST)
             );
         }
+    }
+
+    #[test]
+    fn test_allowed_http_route_attach() {
+        // The axum route is /host/{machine_id}/api/v1/{*path}, so host_http_handler
+        // strips the /host/{machine}/api/v1 prefix and passes only the wildcard
+        // remainder to allowed_http_route. Live probe on omarchy proved that passing
+        // "api/v1/attach" causes production 403 while passing "attach" matches.
+        assert!(allowed_http_route(&Method::GET, "attach"));
+        assert!(!allowed_http_route(&Method::POST, "attach"));
+        assert!(!allowed_http_route(&Method::GET, "attach/../secret"));
+        assert!(!allowed_http_route(&Method::GET, "api/v1/attach"));
+        assert!(allowed_http_route(&Method::GET, "capabilities"));
     }
 
     #[tokio::test]
@@ -3862,6 +4140,7 @@ mod tests {
         let (generation, _notices, _grants) = state.register_control_channel("opaque-load".into());
         let session = "opaque-e2e";
         assert!(state.issue_session("opaque-load", session, Some(generation), true));
+        let recorded = state.tap_session_traffic(session);
 
         let machine = {
             let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -3901,7 +4180,12 @@ mod tests {
                 let SessionTransport::Attached(mut secure) = transport else {
                     panic!("expected an attached transport");
                 };
-                secure.recv_frame().await.expect("decrypted frame")
+                let received = secure.recv_frame().await.expect("decrypted frame");
+                secure
+                    .send_frame(b"FERRYX_E2EE_REPLY terminal output")
+                    .await
+                    .expect("daemon reply");
+                received
             }
         });
 
@@ -3916,7 +4200,7 @@ mod tests {
         )
         .await
         .expect("account attach handshake");
-        let sentinel = b"FERRYX_E2EE_SENTINEL".to_vec();
+        let sentinel = b"FERRYX_E2EE_SENTINEL typing keystrokes".to_vec();
         secure.send_frame(&sentinel).await.expect("send");
 
         let decrypted = timeout(Duration::from_secs(10), daemon)
@@ -3924,6 +4208,26 @@ mod tests {
             .expect("daemon replied in time")
             .expect("daemon task");
         assert_eq!(decrypted, sentinel, "only the daemon could read this");
+
+        let reply = timeout(Duration::from_secs(10), secure.recv_frame())
+            .await
+            .expect("client received reply in time")
+            .expect("client reply");
+        assert_eq!(reply, b"FERRYX_E2EE_REPLY terminal output");
+
+        let spliced = String::from_utf8_lossy(&recorded.lock()).to_string();
+        assert!(
+            !spliced.contains("FERRYX_E2EE_SENTINEL"),
+            "the spliced copy must never contain terminal plaintext"
+        );
+        assert!(
+            !spliced.contains("keystrokes") && !spliced.contains("terminal output"),
+            "no fragment of the payload may survive in the spliced copy"
+        );
+        assert!(
+            !recorded.lock().is_empty(),
+            "the relay must have forwarded spliced frames"
+        );
         server.abort();
     }
 
@@ -6059,6 +6363,449 @@ mod tests {
         );
 
         state.unregister_control_channel("machine_stage_2", generation);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_install_script_and_download_cli_routes() {
+        let _guard = DOWNLOAD_DIR_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = RelayState::new(vec!["test-machine-token".to_string()]);
+        let (url, _handle) = spawn_test_relay_with_state(state).await;
+        let http_url = url.replace("ws://", "http://");
+
+        let client = reqwest::Client::new();
+        let res = client.get(format!("{http_url}/install.sh")).send().await.unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        let script = res.text().await.unwrap();
+        assert!(
+            script.contains("Ferryx CLI Installer"),
+            "install.sh must be the ferryx installer script, got: {script}"
+        );
+
+        // Stage an artifact so the download route must serve bytes rather than redirect.
+        let staging = tempfile::tempdir().expect("staging dir");
+        let artifact_bytes = b"\x7fELF-ferryx-cli-test-bytes";
+        std::fs::write(staging.path().join("ferryx-cli-linux-amd64"), artifact_bytes)
+            .expect("stage artifact");
+        // SAFETY: this test owns the variable for the duration of the request; no other
+        // test in this module reads FERRYX_DOWNLOADS_DIR.
+        unsafe {
+            std::env::set_var("FERRYX_DOWNLOADS_DIR", staging.path());
+        }
+
+        let staged = client
+            .get(format!("{http_url}/download/ferryx-cli-linux-amd64"))
+            .send()
+            .await
+            .expect("download request");
+        assert_eq!(staged.status(), reqwest::StatusCode::OK);
+        let served = staged.bytes().await.expect("download body");
+        assert_eq!(
+            served.as_ref(),
+            artifact_bytes.as_slice(),
+            "download route must serve the staged artifact bytes"
+        );
+
+        unsafe {
+            std::env::remove_var("FERRYX_DOWNLOADS_DIR");
+        }
+
+        // Path traversal must be rejected rather than proxied.
+        let rejected = client
+            .get(format!("{http_url}/download/..%2F..%2Fetc%2Fpasswd"))
+            .send()
+            .await
+            .expect("traversal request");
+        assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // A file that exists in the staging dir must still be refused by name.
+        std::fs::write(staging.path().join("private-notes.txt"), b"secret")
+            .expect("stage secret");
+        unsafe {
+            std::env::set_var("FERRYX_DOWNLOADS_DIR", staging.path());
+        }
+        let secret = client
+            .get(format!("{http_url}/download/private-notes.txt"))
+            .send()
+            .await
+            .expect("secret request");
+        assert_eq!(
+            secret.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "non-whitelisted artifact names must be refused even when the file exists"
+        );
+        unsafe {
+            std::env::remove_var("FERRYX_DOWNLOADS_DIR");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_symlinked_artifact_is_not_served() {
+        let _guard = DOWNLOAD_DIR_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = RelayState::new(vec!["test-machine-token".to_string()]);
+        let (url, _handle) = spawn_test_relay_with_state(state).await;
+        let http_url = url.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let outside_dir = tempfile::tempdir().expect("outside dir");
+        let staging = tempfile::tempdir().expect("staging dir");
+        let secret_bytes = b"secret-payload-should-not-be-served";
+        let target_file = outside_dir.path().join("real-file");
+        std::fs::write(&target_file, secret_bytes).expect("write target file");
+
+        let symlink_path = staging.path().join("ferryx-cli-linux-amd64");
+        std::os::unix::fs::symlink(&target_file, &symlink_path).expect("create symlink");
+
+        unsafe {
+            std::env::set_var("FERRYX_DOWNLOADS_DIR", staging.path());
+        }
+
+        let symlink_res = client
+            .get(format!("{http_url}/download/ferryx-cli-linux-amd64"))
+            .send()
+            .await
+            .expect("download request");
+        assert_ne!(
+            symlink_res.status(),
+            reqwest::StatusCode::OK,
+            "symlink artifact must not return 200 OK"
+        );
+        assert_eq!(
+            symlink_res.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "symlink artifact must trigger 307 redirect to GitHub fallback"
+        );
+
+        // Remove the symlink and stage a genuine regular file with the same name.
+        std::fs::remove_file(&symlink_path).expect("remove symlink");
+        let real_artifact_bytes = b"\x7fELF-ferryx-cli-linux-amd64-real-bytes";
+        std::fs::write(&symlink_path, real_artifact_bytes).expect("write regular artifact");
+
+        let real_res = client
+            .get(format!("{http_url}/download/ferryx-cli-linux-amd64"))
+            .send()
+            .await
+            .expect("download request for regular file");
+        assert_eq!(real_res.status(), reqwest::StatusCode::OK);
+        let served_bytes = real_res.bytes().await.expect("download body");
+        assert_eq!(
+            served_bytes.as_ref(),
+            real_artifact_bytes.as_slice(),
+            "download route must serve genuine regular file bytes"
+        );
+
+        unsafe {
+            std::env::remove_var("FERRYX_DOWNLOADS_DIR");
+        }
+    }
+
+    async fn spawn_test_relay_with_account_state(
+        state: RelayState,
+        account_state: Option<Arc<crate::account::service::AccountState>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let router = relay_router_with_account(state, None, account_state);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("relay server exited unexpectedly");
+        });
+
+        (format!("ws://{addr}"), handle)
+    }
+
+    fn test_account_state(
+        temp_dir: &std::path::Path,
+        user_id: &str,
+        session_token: &str,
+        owned_machine_id: &str,
+        other_machine_id: &str,
+    ) -> Arc<crate::account::service::AccountState> {
+        let mail_dir = temp_dir.join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
+        let account = Arc::new(crate::account::service::AccountState::new(
+            temp_dir.join("account"),
+            "https://relay.test",
+            mailer,
+        ));
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "test@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(session_token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-owned".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-owned".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: owned_machine_id.into(),
+                        display_name: "Owned Machine".into(),
+                        public_key: "pubkey-1".into(),
+                        attach_public_key: "attachkey-1".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.machines.insert(
+                    "rec-other".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-other".into(),
+                        owner_user_id: "another-user".into(),
+                        machine_id: other_machine_id.into(),
+                        display_name: "Other Machine".into(),
+                        public_key: "pubkey-2".into(),
+                        attach_public_key: "attachkey-2".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                Ok(())
+            })
+            .expect("setup test account store");
+        account
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_success_for_owned_machine() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "machineId": "owned-machine" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let session_id = body["sessionId"].as_str().expect("sessionId in response");
+        assert!(!session_id.is_empty());
+        assert_eq!(body["machineId"], "owned-machine");
+        assert_eq!(body["opaque"], true);
+
+        // Control channel received exactly one notice with opaque: true and that id
+        let notice = notices.try_recv().expect("must receive exactly one notice");
+        assert_eq!(notice.session_id, session_id);
+        assert!(notice.opaque);
+        assert!(matches!(
+            notices.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // The id minted this way is takeable as HalfKind::Opaque and NOT as a plain client half
+        assert!(matches!(
+            state.reserve_half(session_id, HalfKind::Client),
+            Err(StatusCode::NOT_FOUND)
+        ));
+        assert!(state.reserve_half(session_id, HalfKind::Opaque).is_ok());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_rejects_other_accounts_machine() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("other-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "machineId": "other-machine" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "MACHINE_NOT_FOUND");
+
+        // Nothing was pushed to the control channel
+        assert!(matches!(
+            notices.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_rejects_missing_or_invalid_bearer() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // Missing bearer
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .json(&serde_json::json!({ "machineId": "owned-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "UNAUTHORIZED");
+
+        // Invalid bearer
+        let response_invalid = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth("bad-token")
+            .json(&serde_json::json!({ "machineId": "owned-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response_invalid.status(), StatusCode::UNAUTHORIZED);
+        let body_invalid: serde_json::Value = response_invalid.json().await.unwrap();
+        assert_eq!(body_invalid["code"], "UNAUTHORIZED");
+
+        // Nothing was pushed
+        assert!(matches!(
+            notices.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_rejects_offline_machine() {
+        let state = test_state(vec![]);
+        // Do NOT register a control channel for owned-machine (it is offline)
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "machineId": "owned-machine" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "MACHINE_OFFLINE");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_rejects_when_relay_is_not_account_origin() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_account_state(state.clone(), None).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth("any-token")
+            .json(&serde_json::json!({ "machineId": "some-machine" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_attach_session_resolves_aliased_machine_channel() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("token-alpha".into());
+        state.bind_control_alias("token-alpha", "owned-machine".into());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "machineId": "owned-machine" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let session_id = body["sessionId"].as_str().expect("sessionId in response");
+
+        let notice = notices.try_recv().expect("must receive notice via alias");
+        assert_eq!(notice.session_id, session_id);
+        assert!(notice.opaque);
+
         server.abort();
     }
 }

@@ -1383,7 +1383,8 @@ describe("Remote UI Components", () => {
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
   });
 
-  it("clears authorization and returns to PairingPage when token is revoked (401)", async () => {
+  // Plan ordering constraint (.omo/plans/account-issued-remote-grants.md): browser account attach retired the PIN surface in favour of the account sign-in surface.
+  it("returns to the account sign-in surface when the session token is revoked (401)", async () => {
     localStorage.setItem("ferryx_remote_token", "revoked-device-token");
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue({
       ok: false,
@@ -1394,8 +1395,9 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
 
-    // Must navigate to pairing page and clear token
-    expect(await screen.findByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
+    // Must navigate to account sign-in surface and clear token
+    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
     expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
   });
 
@@ -2133,7 +2135,8 @@ describe("Remote UI Components", () => {
     expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
   });
 
-  it("clears optimistic session override when user disconnects", async () => {
+  // Plan ordering constraint (.omo/plans/account-issued-remote-grants.md): browser account attach retired the PIN surface in favour of the account sign-in surface.
+  it("clears optimistic session override and returns to account sign-in when user disconnects", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const selectionResponse = deferred<Response>();
     const stateWithSessions = {
@@ -2171,13 +2174,14 @@ describe("Remote UI Components", () => {
     // Click Disconnect
     fireEvent.click(screen.getByRole("button", { name: /Disconnect/i }));
 
-    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Sign In to Ferryx/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Confirm disconnect/i }));
 
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
   });
 
   it("requires confirmation before Disconnect removes the pairing", async () => {

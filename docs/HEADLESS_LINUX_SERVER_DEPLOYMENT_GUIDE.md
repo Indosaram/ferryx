@@ -105,6 +105,18 @@ Extracted files remain in `squashfs-root`.
 Do not copy libraries from `squashfs-root/usr/lib/*` directly into `/usr/local/lib/` or suppress copy errors. Blindly copying libraries bypasses system package tracking and linker configuration.
 Instead, install runtime shared libraries (`libgtk-3-0`, `libwebkit2gtk-4.1-0`) through your system package manager. Alternatively, keep the extracted directory intact in an application root such as `/opt/ferryx` and invoke the binary using `LD_LIBRARY_PATH=/opt/ferryx/usr/lib /opt/ferryx/usr/bin/ferryx --daemon`.
 
+### Option B2: One-Line Installer (Recommended for `ferryx-cli`)
+
+```bash
+curl -fsSL https://relay.ferryx.dev/install.sh | bash
+```
+
+The installer detects the OS/architecture, downloads the matching standalone `ferryx-cli`
+binary from the relay (falling back to the GitHub release), verifies the Linux ELF header,
+and installs to `~/.local/bin` (or `/usr/local/bin` when run as root). Override the target
+directory with `FERRYX_INSTALL_DIR`, or the download origin with `FERRYX_ORIGIN`.
+The same script is served from `https://ferryx.dev/install.sh`.
+
 ### Option C: Build from Source
 
 You can build either the main `ferryx` binary or the standalone `ferryx-cli` binary.

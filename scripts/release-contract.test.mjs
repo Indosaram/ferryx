@@ -319,6 +319,36 @@ test("parseReceipt accepts valid host receipts bound to plan", () => {
   assert.equal(winReceipt.host, "maho-win");
 });
 
+test("parseReceipt accepts host receipts containing standalone ferryx-cli artifacts", () => {
+  const plan = makeValidPlan();
+
+  const linuxReceiptWithCli = makeValidReceipt("omaki", plan);
+  linuxReceiptWithCli.artifacts.push({
+    kind: "cli-linux-amd64",
+    name: "ferryx-cli-linux-amd64",
+    relPath: "linux/ferryx-cli-linux-amd64",
+    signatureRelPath: null,
+    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    bytes: 1048576,
+    targets: [],
+  });
+  const parsedLinux = parseReceipt(linuxReceiptWithCli, plan);
+  assert.equal(parsedLinux.artifacts.length, 3);
+
+  const macReceiptWithCli = makeValidReceipt("macbook", plan);
+  macReceiptWithCli.artifacts.push({
+    kind: "cli-darwin-universal",
+    name: "ferryx-cli-darwin-universal",
+    relPath: "darwin/ferryx-cli-darwin-universal",
+    signatureRelPath: null,
+    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    bytes: 1048576,
+    targets: [],
+  });
+  const parsedMac = parseReceipt(macReceiptWithCli, plan);
+  assert.equal(parsedMac.artifacts.length, 3);
+});
+
 test("parseReceipt rejects unknown receipt properties or schema URLs", () => {
   const plan = makeValidPlan();
   assert.throws(
@@ -686,4 +716,144 @@ test("parseReceipt rejects legacy compressed wrappers (.AppImage.tar.gz, .nsis.z
     /does not match allowed extensions/i,
   );
 });
+
+test("parseReceipt accepts receipts containing cli-linux-amd64 from host omaki", () => {
+  const plan = makeValidPlan();
+  const omakiReceipt = makeValidReceipt("omaki", plan);
+  omakiReceipt.artifacts.push({
+    kind: "cli-linux-amd64",
+    name: "ferryx-cli-linux-amd64",
+    relPath: "linux/ferryx-cli-linux-amd64",
+    bytes: 12345678,
+    sha256: "4423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+
+  const parsed = parseReceipt(omakiReceipt, plan);
+  assert.equal(parsed.host, "omaki");
+  const cliArtifact = parsed.artifacts.find((a) => a.kind === "cli-linux-amd64");
+  assert.ok(cliArtifact);
+  assert.equal(cliArtifact.name, "ferryx-cli-linux-amd64");
+  assert.equal(cliArtifact.relPath, "linux/ferryx-cli-linux-amd64");
+  assert.deepEqual(cliArtifact.targets, []);
+
+  // Also accept alternate extension name "ferryx-cli"
+  const altReceipt = makeValidReceipt("omaki", plan, {
+    artifacts: [
+      {
+        kind: "cli-linux-amd64",
+        name: "ferryx-cli",
+        relPath: "linux/ferryx-cli",
+        bytes: 12345678,
+        sha256: "4423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureRelPath: null,
+        targets: [],
+      },
+    ],
+  });
+  const parsedAlt = parseReceipt(altReceipt, plan);
+  assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
+});
+
+test("parseReceipt accepts receipts containing cli-darwin-universal from host macbook", () => {
+  const plan = makeValidPlan();
+  const macReceipt = makeValidReceipt("macbook", plan);
+  macReceipt.artifacts.push({
+    kind: "cli-darwin-universal",
+    name: "ferryx-cli-darwin-universal",
+    relPath: "darwin/ferryx-cli-darwin-universal",
+    bytes: 23456789,
+    sha256: "5523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+
+  const parsed = parseReceipt(macReceipt, plan);
+  assert.equal(parsed.host, "macbook");
+  const cliArtifact = parsed.artifacts.find((a) => a.kind === "cli-darwin-universal");
+  assert.ok(cliArtifact);
+  assert.equal(cliArtifact.name, "ferryx-cli-darwin-universal");
+  assert.equal(cliArtifact.relPath, "darwin/ferryx-cli-darwin-universal");
+  assert.deepEqual(cliArtifact.targets, []);
+
+  // Also accept alternate extension name "ferryx-cli"
+  const altReceipt = makeValidReceipt("macbook", plan, {
+    artifacts: [
+      {
+        kind: "cli-darwin-universal",
+        name: "ferryx-cli",
+        relPath: "darwin/ferryx-cli",
+        bytes: 23456789,
+        sha256: "5523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureRelPath: null,
+        targets: [],
+      },
+    ],
+  });
+  const parsedAlt = parseReceipt(altReceipt, plan);
+  assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
+});
+
+test("parseReceipt enforces permitted hosts and targets for cli artifacts", () => {
+  const plan = makeValidPlan();
+
+  // macbook trying to claim cli-linux-amd64
+  const invalidMacReceipt = makeValidReceipt("macbook", plan, {
+    artifacts: [
+      {
+        kind: "cli-linux-amd64",
+        name: "ferryx-cli-linux-amd64",
+        relPath: "darwin/ferryx-cli-linux-amd64",
+        bytes: 1234,
+        sha256: "4423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureRelPath: null,
+        targets: [],
+      },
+    ],
+  });
+  assert.throws(
+    () => parseReceipt(invalidMacReceipt, plan),
+    /kind 'cli-linux-amd64' not permitted for host 'macbook'/i,
+  );
+
+  // omaki trying to claim cli-darwin-universal
+  const invalidOmakiReceipt = makeValidReceipt("omaki", plan, {
+    artifacts: [
+      {
+        kind: "cli-darwin-universal",
+        name: "ferryx-cli-darwin-universal",
+        relPath: "linux/ferryx-cli-darwin-universal",
+        bytes: 1234,
+        sha256: "5523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureRelPath: null,
+        targets: [],
+      },
+    ],
+  });
+  assert.throws(
+    () => parseReceipt(invalidOmakiReceipt, plan),
+    /kind 'cli-darwin-universal' not permitted for host 'omaki'/i,
+  );
+
+  // non-empty targets rejected for cli artifacts (not updater)
+  const invalidTargetsReceipt = makeValidReceipt("omaki", plan, {
+    artifacts: [
+      {
+        kind: "cli-linux-amd64",
+        name: "ferryx-cli-linux-amd64",
+        relPath: "linux/ferryx-cli-linux-amd64",
+        bytes: 1234,
+        sha256: "4423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureRelPath: null,
+        targets: ["linux-x86_64"],
+      },
+    ],
+  });
+  assert.throws(
+    () => parseReceipt(invalidTargetsReceipt, plan),
+    /targets for kind 'cli-linux-amd64' must be empty/i,
+  );
+});
+
 

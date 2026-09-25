@@ -11,6 +11,8 @@
 //! Machine Tokens can additionally be supplied via the comma-separated
 //! `FERRYX_RELAY_MACHINE_TOKENS` environment variable; tokens from both the
 //! environment and `--machine-token` flags are accepted.
+//! The relay origin advertised in machine records can be configured via
+//! `FERRYX_ACCOUNT_RELAY_ORIGIN`, falling back to the resolved account origin.
 
 use ferryx_lib::remote::relay_server::{
     relay_router_with_account, spawn_session_reaper, RelayState,
@@ -123,6 +125,11 @@ async fn main() {
 
     let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
         .unwrap_or_else(|_| "https://relay.checka.cc".into());
+    let relay_origin = std::env::var("FERRYX_ACCOUNT_RELAY_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| origin.clone());
     let data_dir = match std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => match default_account_data_dir() {
@@ -138,7 +145,10 @@ async fn main() {
         },
     };
     let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
-    let account_state = Arc::new(ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer));
+    let account_state = Arc::new(
+        ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer)
+            .with_relay_origin(relay_origin),
+    );
 
     let router = relay_router_with_account(state, config.account_public_key, Some(account_state));
 

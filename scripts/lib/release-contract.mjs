@@ -73,6 +73,20 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "Ferryx_x64-setup.exe",
     allowedExtensions: ["-setup.exe"],
   },
+  "cli-linux-amd64": {
+    permittedHost: "omaki",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-cli-linux-amd64",
+    allowedExtensions: ["-linux-amd64", "ferryx-cli"],
+  },
+  "cli-darwin-universal": {
+    permittedHost: "macbook",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-cli-darwin-universal",
+    allowedExtensions: ["-darwin-universal", "ferryx-cli"],
+  },
 });
 
 export const ALLOWED_RECEIPT_KEYS = Object.freeze([

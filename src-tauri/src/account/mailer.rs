@@ -267,6 +267,15 @@ pub fn create_production_mailer(fallback_dir: Option<PathBuf>) -> Arc<dyn Mailer
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    static MAIL_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_mail_dir_env() -> MutexGuard<'static, ()> {
+        MAIL_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn file_mailer_writes_link() {
@@ -303,6 +312,7 @@ mod tests {
 
     #[test]
     fn file_mailer_writes_link_env_dir() {
+        let _guard = lock_mail_dir_env();
         let temp_dir = std::env::temp_dir().join(format!("ferryx-test-mail-env-{}", uuid::Uuid::new_v4()));
         std::env::set_var("FERRYX_MAIL_DIR", &temp_dir);
 
@@ -321,10 +331,12 @@ mod tests {
         assert_eq!(content, test_url);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("FERRYX_MAIL_DIR");
     }
 
     #[test]
     fn file_mailer_writes_link_missing_parent_returns_mail_failed() {
+        let _guard = lock_mail_dir_env();
         let missing_parent = std::env::temp_dir()
             .join(format!("nonexistent-parent-{}", uuid::Uuid::new_v4()))
             .join("sub")
@@ -336,6 +348,7 @@ mod tests {
         assert!(res.is_err(), "Must fail when parent directory is missing");
         let err = res.unwrap_err();
         assert_eq!(err.code(), "MAIL_FAILED", "Error code must be MAIL_FAILED");
+        std::env::remove_var("FERRYX_MAIL_DIR");
     }
 
     #[test]

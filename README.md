@@ -32,12 +32,14 @@ No Electron anywhere.
 | **Windows** | Installer (x64, not code-signed yet) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`ferryx-cli`](https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
 
-The macOS, Windows, and Linux links resolve against the latest release. `ferryx-cli` is pinned
-to `v2026.09.11.1`, the most recent release that publishes it; newer releases do not, so build it
-from source (`cargo build --release --bin ferryx-cli`) if you need it current. Verify downloads
-with the `SHA256SUMS.txt` published alongside the binaries:
+The macOS, Windows, and Linux links resolve against the latest release. Each release pipeline
+run stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
+`ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
+`ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
+the release publishes one and otherwise fails closed. Verify downloads with the `SHA256SUMS.txt`
+published alongside the binaries:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -94,18 +96,15 @@ public IPs / open SSH ports connect seamlessly.
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
 ```bash
-# 1. Download ferryx-cli on the remote Linux machine (x64)
-#    Pinned to the most recent release that publishes this binary.
-sudo curl -fsSL https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli -o /usr/local/bin/ferryx-cli
-sudo chmod +x /usr/local/bin/ferryx-cli
+# 1. One-line install ferryx-cli on the remote machine (Linux x64/ARM, macOS)
+curl -fsSL https://relay.ferryx.dev/install.sh | bash
 
 # 2. Start the headless PTY daemon in background
-nohup ferryx-cli --daemon > /tmp/ferryx.log 2>&1 &
+ferryx-cli --daemon &
 
-# 3. Generate a 10-minute machine pairing PIN
-ferryx-cli pair generate --access machine
-
-# 4. In Ferryx Desktop, open Settings (Cmd+,) > Remote > [Pair with PIN] and enter the 6-digit PIN
+# 3. Link machine to your account via email magic link (no open ports or GUI PIN copying needed)
+ferryx-cli account login --email you@example.com --origin https://relay.ferryx.dev
+# Click [Authorize Machine] in your email inbox to enroll automatically
 ```
 
 ### Zero Electron overhead

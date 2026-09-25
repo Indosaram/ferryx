@@ -621,6 +621,9 @@ export NO_STRIP=true
 rm -rf "$CARGO_TARGET_DIR/release/bundle"
 cd "$source_dir"
 bun tauri build --bundles appimage,deb
+cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --bin ferryx-cli
+cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
+test -s "$out_dir/ferryx-cli-linux-amd64"
 appimages=()
 while IFS= read -r f; do
   [ -n "$f" ] && appimages+=("$f")
@@ -1184,6 +1187,10 @@ export async function buildHost({
       if (dmgPath && existsSync(dmgPath)) {
         execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_universal.dmg")]);
       }
+      const universalCli = join(universalRel, "ferryx-cli");
+      if (existsSync(universalCli)) {
+        execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+      }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
       // Bundle transfer and artifact retrieval can be silent for minutes on a
@@ -1214,7 +1221,7 @@ export async function buildHost({
         const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
         toolchains = parseBuildResult(result.stdout);
-        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb"]) {
+        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64"]) {
           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
         }
       } else {

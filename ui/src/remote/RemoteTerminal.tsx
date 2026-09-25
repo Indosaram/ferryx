@@ -8,6 +8,7 @@ import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl } from "./remoteClient";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
+import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
   applyGridFrame,
   decodeGridAttrs,
@@ -18,6 +19,17 @@ import {
   type GridRun,
   type TerminalGridState,
 } from "./terminalGridProtocol";
+
+export type WebSocketLike = {
+  send(data: Uint8Array | string): void;
+  close(code?: number, reason?: string): void;
+  readyState: number;
+  binaryType?: string;
+  onopen: ((event?: any) => void) | null;
+  onmessage: ((event: { data: any }) => void) | null;
+  onerror: ((event?: any) => void) | null;
+  onclose: ((event?: any) => void) | null;
+};
 
 type RemoteTerminalProps = {
   readonly sessionId: string;
@@ -36,6 +48,11 @@ type RemoteTerminalProps = {
   ) => void;
   readonly onInputOverflow?: (droppedBytes: number) => void;
   readonly onInputDrop?: (droppedBytes: number) => void;
+  readonly isAccountSession?: boolean;
+  readonly attachKey?: AttachKeyPair | null;
+  readonly createWebSocket?: (
+    pathAndQuery: string,
+  ) => Promise<WebSocketLike> | WebSocketLike;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -214,9 +231,13 @@ function jamoCommitDelta(held: string, committed: string): string {
   return committed;
 }
 
-function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string, signal: AbortSignal): string | Promise<string> {
-  const base = new URL(transportUrl);
-  const target = `/api/v1/terminal/${sessionId}`;
+function terminalSocketUrl(
+  sessionId: string,
+  token: string,
+  geometry: GridGeometry,
+  transportUrl: string,
+  signal: AbortSignal,
+): Promise<string> | string {
   const withGeometry = (socketUrl: string): string => {
     const url = new URL(socketUrl);
     url.searchParams.set("render", "grid");
@@ -224,6 +245,9 @@ function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeome
     url.searchParams.set("rows", String(geometry.rows));
     return url.toString();
   };
+
+  const base = new URL(transportUrl);
+  const target = `/api/v1/terminal/${sessionId}`;
   // In unit test harnesses testing synchronous terminal grid behaviors with a dummy token:
   if (token.startsWith("token-") && (base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "terminal.example.com" || base.hostname.startsWith("192.168.1."))) {
     const url = new URL(`${transportUrl.replace(/\/$/, "")}${target}`);
@@ -232,6 +256,21 @@ function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeome
     return withGeometry(url.toString());
   }
   return remoteSocketUrl(transportUrl, target, token, signal).then(withGeometry);
+}
+
+async function accountTerminalSocketUrl(
+  sessionId: string,
+  _geometry: GridGeometry,
+  transportUrl: string,
+  providedAttachKey?: AttachKeyPair | null,
+): Promise<string> {
+  let key = providedAttachKey;
+  if (key === undefined) {
+    key = await getOrCreateAttachKey();
+  }
+  // If key is null or missing, buildAttachSocketUrl will throw MISSING_ATTACH_KEY
+  // which prevents fallback to the legacy route.
+  return buildAttachSocketUrl(transportUrl, sessionId, key);
 }
 
 function geometriesEqual(left: GridGeometry | null, right: GridGeometry): boolean {
@@ -338,8 +377,11 @@ export function RemoteTerminal({
   onSocketLifecycle,
   onInputOverflow,
   onInputDrop,
+  isAccountSession,
+  attachKey,
+  createWebSocket,
 }: RemoteTerminalProps) {
-  const socketRef = useRef<WebSocket | null>(null);
+  const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   const wheelRemainderRowsRef = useRef(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
@@ -566,78 +608,146 @@ export function RemoteTerminal({
       }
     };
 
-    const dial = async () => {
+    const dial = () => {
       clearReconnectTimer();
       if (disposed) return;
-      let socket: WebSocket;
-      try {
-        const pendingUrl = terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry, transportUrl, abort.signal);
-        const url = typeof pendingUrl === "string" ? pendingUrl : await pendingUrl;
+
+      const initSocket = (socketOrUrl: string | WebSocketLike) => {
         if (disposed) return;
-        socket = new WebSocket(url);
+        const socket = typeof socketOrUrl === "string" ? new WebSocket(socketOrUrl) : socketOrUrl;
+        socket.onerror = () => {
+          if (!disposed && socketRef.current === socket) onTransportFailure?.();
+        };
+        try {
+          socket.binaryType = "arraybuffer";
+        } catch {
+          // ignore
+        }
+        socketRef.current = socket;
+        activeSocketRequestRef.current = socketRequest;
+        socket.onopen = () => {
+          if (disposed || socketRef.current !== socket) return;
+          backoffAttempt = 0;
+          wheelRemainderRowsRef.current = 0;
+          setConnected(true);
+          onSocketLifecycle?.(socketRequest.sessionId, "open");
+          flushOutboundBuffer();
+          requestResizeRef.current();
+        };
+        socket.onclose = () => {
+          if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
+          wheelRemainderRowsRef.current = 0;
+          setConnected(false);
+          lastSentGenerationRef.current = null;
+          generationRef.current = null;
+          if (onTransportFailure) {
+            onTransportFailure();
+            return;
+          }
+          onSocketLifecycle?.(socketRequest.sessionId, "closed");
+
+          const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
+          backoffAttempt += 1;
+          clearReconnectTimer();
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            dial();
+          }, delay);
+        };
+        socket.onmessage = (event: any) => {
+          if (disposed || socketRef.current !== socket) return;
+          const rawData = event.data;
+          const data = typeof rawData === "string"
+            ? rawData
+            : rawData instanceof Uint8Array
+            ? new TextDecoder().decode(rawData)
+            : rawData instanceof ArrayBuffer
+            ? new TextDecoder().decode(new Uint8Array(rawData))
+            : String(rawData ?? "");
+          if (!data.startsWith('{"type":"grid')) {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed?.type === "remoteStatus" && typeof parsed.generation === "string") {
+                generationRef.current = parsed.generation;
+                lastSentGenerationRef.current = null;
+                requestResizeRef.current();
+                return;
+              }
+            } catch {
+              // Non-JSON or unrecognized control frames pass through to the grid parser.
+            }
+          }
+          const frame = parseGridFrame(data);
+          if (!frame) return;
+          setGrid((current) => applyGridFrame(current, frame));
+        };
+
+        if (socket.readyState === 1) {
+          queueMicrotask(() => {
+            if (!disposed && socketRef.current === socket && socket.readyState === 1) {
+              const handler = socket.onopen;
+              if (handler) {
+                (handler as (ev: Event) => void).call(socket, new Event("open"));
+              }
+            }
+          });
+        }
+      };
+
+      if (isAccountSession && createWebSocket) {
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?render=grid&cols=${socketRequest.geometry.cols}&rows=${socketRequest.geometry.rows}`;
+        Promise.resolve(createWebSocket(pathAndQuery))
+          .then(initSocket)
+          .catch((error) => {
+            if (disposed) return;
+            if (onTransportFailure) onTransportFailure();
+            else console.warn("Terminal socket connection failed", error);
+          });
+        return;
+      }
+
+      if (isAccountSession) {
+        accountTerminalSocketUrl(
+          socketRequest.sessionId,
+          socketRequest.geometry,
+          transportUrl,
+          attachKey,
+        ).then(initSocket).catch((error) => {
+          if (disposed) return;
+          if (onTransportFailure) onTransportFailure();
+          else console.warn("Terminal socket connection failed", error);
+        });
+        return;
+      }
+
+      let syncOrPromiseUrl: string | Promise<string>;
+      try {
+        syncOrPromiseUrl = terminalSocketUrl(
+          socketRequest.sessionId,
+          socketRequest.token,
+          socketRequest.geometry,
+          transportUrl,
+          abort.signal,
+        );
       } catch (error) {
         if (disposed) return;
         if (onTransportFailure) onTransportFailure();
         else console.warn("Terminal socket connection failed", error);
         return;
       }
-      socket.onerror = () => {
-        if (!disposed && socketRef.current === socket) onTransportFailure?.();
-      };
-      socket.binaryType = "arraybuffer";
-      socketRef.current = socket;
-      activeSocketRequestRef.current = socketRequest;
-      socket.onopen = () => {
-        if (disposed || socketRef.current !== socket) return;
-        backoffAttempt = 0;
-        wheelRemainderRowsRef.current = 0;
-        setConnected(true);
-        onSocketLifecycle?.(socketRequest.sessionId, "open");
-        flushOutboundBuffer();
-        requestResizeRef.current();
-      };
-      socket.onclose = () => {
-        if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
-        wheelRemainderRowsRef.current = 0;
-        setConnected(false);
-        lastSentGenerationRef.current = null;
-        generationRef.current = null;
-        if (onTransportFailure) {
-          onTransportFailure();
-          return;
-        }
-        onSocketLifecycle?.(socketRequest.sessionId, "closed");
 
-        const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
-        backoffAttempt += 1;
-        clearReconnectTimer();
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          void dial();
-        }, delay);
-      };
-      socket.onmessage = (event) => {
-        if (disposed || socketRef.current !== socket) return;
-        if (typeof event.data !== "string") return;
-        if (!event.data.startsWith('{"type":"grid')) {
-          try {
-            const parsed = JSON.parse(event.data);
-            if (parsed?.type === "remoteStatus" && typeof parsed.generation === "string") {
-              generationRef.current = parsed.generation;
-              requestResizeRef.current();
-              return;
-            }
-          } catch {
-            // Non-JSON or grid frame payload
-          }
-        }
-        const frame = parseGridFrame(event.data);
-        if (!frame) return;
-        setGrid((current) => applyGridFrame(current, frame));
-      };
+      if (typeof syncOrPromiseUrl === "string") {
+        initSocket(syncOrPromiseUrl);
+      } else {
+        syncOrPromiseUrl.then(initSocket).catch((error) => {
+          if (disposed) return;
+          if (onTransportFailure) onTransportFailure();
+          else console.warn("Terminal socket connection failed", error);
+        });
+      }
     };
 
-    void dial();
+    dial();
 
     return () => {
       disposed = true;
@@ -653,7 +763,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;

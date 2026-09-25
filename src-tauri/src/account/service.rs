@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 
 use super::mailer::Mailer;
 use super::store::{
-    lock_account_dir, normalize_email, now_secs, random_token, token_hash, AccountStore,
-    EnrollmentCodeRecord, GrantRecord, LoginCodeRecord, MachineRecord, SessionRecord, UserRecord,
-    DEFAULT_LOGIN_REQUESTS_PER_HOUR, DEFAULT_MAX_BODY_BYTES, ENROLLMENT_CODE_TTL, LOGIN_CODE_TTL,
-    SESSION_TTL,
+    lock_account_dir, normalize_email, now_secs, random_token, signing_key_path, token_hash,
+    write_private_json, AccountSigningKeyRecord, AccountStore, EnrollmentCodeRecord, GrantRecord,
+    LoginCodeRecord, MachineRecord, SessionRecord, UserRecord, DEFAULT_LOGIN_REQUESTS_PER_HOUR,
+    DEFAULT_MAX_BODY_BYTES, ENROLLMENT_CODE_TTL, LOGIN_CODE_TTL, SESSION_TTL,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signer, SigningKey};
+use crate::remote::account_grants::{submission_signing_input, GrantSubmission};
 use crate::remote::account_protocol::{
     AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantOffer,
     AccountGrantOfferEnvelope, AccountGrantRequest, AccountGrantResponse, AccountGrantScope,
@@ -34,8 +36,10 @@ pub struct AccountState {
     pub mailer: Arc<dyn Mailer>,
     pub login_requests_per_hour: u32,
     pub max_body_bytes: usize,
+    http_client: reqwest::Client,
     login_attempts: Mutex<HashMap<String, Vec<Instant>>>,
     challenges: Mutex<HashMap<String, EnrollChallenge>>,
+    signing_key: Mutex<Option<Arc<SigningKey>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,12 +48,61 @@ struct EnrollChallenge {
     expires_at: u64,
 }
 
+fn parse_signing_key(bytes: &[u8]) -> Result<SigningKey, String> {
+    let record: AccountSigningKeyRecord = serde_json::from_slice(bytes)
+        .map_err(|error| format!("ACCOUNT_SIGNING_KEY_CORRUPT: {error}"))?;
+    let secret_bytes = STANDARD
+        .decode(&record.private_key)
+        .map_err(|error| format!("ACCOUNT_SIGNING_KEY_INVALID: {error}"))?;
+    let secret_arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "ACCOUNT_SIGNING_KEY_INVALID: private key must be 32 bytes".to_string())?;
+    let key = SigningKey::from_bytes(&secret_arr);
+    let public_str = STANDARD.encode(key.verifying_key().as_bytes());
+    if public_str != record.public_key {
+        return Err("ACCOUNT_SIGNING_KEY_MISMATCH: public key does not match private key".into());
+    }
+    Ok(key)
+}
+
+fn load_or_generate_account_signing_key(dir: &Path) -> Result<SigningKey, String> {
+    let path = signing_key_path(dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => return parse_signing_key(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to read account signing key: {error}")),
+    }
+
+    let _guard = lock_account_dir(dir)
+        .map_err(|error| format!("Failed to lock account directory for signing key: {error}"))?;
+
+    match std::fs::read(&path) {
+        Ok(bytes) => return parse_signing_key(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to read account signing key: {error}")),
+    }
+
+    let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let record = AccountSigningKeyRecord {
+        public_key: STANDARD.encode(key.verifying_key().as_bytes()),
+        private_key: STANDARD.encode(key.to_bytes()),
+    };
+    write_private_json(&path, &record)
+        .map_err(|error| format!("Failed to persist account signing key: {error}"))?;
+    Ok(key)
+}
+
 impl AccountState {
     pub fn new(
         data_dir: impl Into<PathBuf>,
         origin: impl Into<String>,
         mailer: Arc<dyn Mailer>,
     ) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
         Self {
             data_dir: data_dir.into(),
             origin: origin.into(),
@@ -57,9 +110,29 @@ impl AccountState {
             mailer,
             login_requests_per_hour: DEFAULT_LOGIN_REQUESTS_PER_HOUR,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            http_client,
             login_attempts: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
+            signing_key: Mutex::new(None),
         }
+    }
+
+    pub fn signing_key(&self) -> Result<Arc<SigningKey>, String> {
+        let mut guard = self.signing_key.lock();
+        if let Some(key) = guard.as_ref() {
+            return Ok(key.clone());
+        }
+        let key = load_or_generate_account_signing_key(&self.data_dir)?;
+        let arc_key = Arc::new(key);
+        *guard = Some(arc_key.clone());
+        Ok(arc_key)
+    }
+
+    pub fn account_public_key(&self) -> String {
+        let key = self
+            .signing_key()
+            .expect("account signing key must be available");
+        STANDARD.encode(key.verifying_key().as_bytes())
     }
 
     pub fn with_relay_origin(mut self, relay_origin: impl Into<String>) -> Self {
@@ -117,7 +190,7 @@ impl AccountState {
         AccountStore::load(&self.data_dir)
     }
 
-    fn mutate<T>(
+    pub(crate) fn mutate<T>(
         &self,
         change: impl FnOnce(&mut AccountStore) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
@@ -184,6 +257,23 @@ impl IntoResponse for ApiError {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountPublicKeyResponse {
+    pub public_key: String,
+}
+
+pub async fn get_public_key(
+    State(state): State<Arc<AccountState>>,
+) -> Result<Json<AccountPublicKeyResponse>, ApiError> {
+    let key = state
+        .signing_key()
+        .map_err(|error| ApiError::internal(format!("signing key unavailable: {error}")))?;
+    Ok(Json(AccountPublicKeyResponse {
+        public_key: STANDARD.encode(key.verifying_key().as_bytes()),
+    }))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginRequestBody {
@@ -244,6 +334,30 @@ fn require_user(state: &AccountState, headers: &HeaderMap) -> Result<UserRecord,
             .cloned()
             .ok_or_else(|| ApiError::unauthorized("UNAUTHORIZED", "unknown or expired session"))
     })
+}
+
+pub(crate) fn authenticate_user(
+    state: &AccountState,
+    headers: &HeaderMap,
+) -> Result<UserRecord, ApiError> {
+    require_user(state, headers)
+}
+
+pub(crate) fn machine_for_owner(
+    state: &AccountState,
+    user_id: &str,
+    machine_id: &str,
+) -> Option<MachineRecord> {
+    state
+        .read(|store| {
+            Ok(store
+                .machines
+                .values()
+                .find(|m| m.machine_id == machine_id && m.owner_user_id == user_id)
+                .cloned())
+        })
+        .ok()
+        .flatten()
 }
 
 async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiError> {
@@ -859,6 +973,89 @@ pub async fn issue_grant(
             sealed: STANDARD.encode(sealed),
         })?;
 
+    let signing_key = state
+        .signing_key()
+        .map_err(|error| ApiError::internal(format!("signing key unavailable: {error}")))?;
+    let mut submission = GrantSubmission {
+        machine_id: machine.machine_id.clone(),
+        enrollment_epoch: offer.enrollment_epoch.clone(),
+        envelope: sealed_offer.clone(),
+        signature: String::new(),
+    };
+    let signing_input = submission_signing_input(&submission);
+    let signature = signing_key.sign(&signing_input);
+    submission.signature = STANDARD.encode(signature.to_bytes());
+
+    let relay_url = format!(
+        "{}/api/v1/attach/grant",
+        machine.relay_origin.trim_end_matches('/')
+    );
+    let delivery_response = state
+        .http_client
+        .post(&relay_url)
+        .timeout(Duration::from_secs(5))
+        .json(&submission)
+        .send()
+        .await
+        .map_err(|error| {
+            let _ = state.mutate(|store| {
+                store.grants.remove(&grant.grant_id);
+                Ok(())
+            });
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "GRANT_DELIVERY_FAILED",
+                format!("failed to deliver grant to relay at {relay_url}: {error}"),
+            )
+        })?;
+
+    if !delivery_response.status().is_success() {
+        let status = delivery_response.status();
+        let body = delivery_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable response body>".to_string());
+        let _ = state.mutate(|store| {
+            store.grants.remove(&grant.grant_id);
+            Ok(())
+        });
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "GRANT_DELIVERY_FAILED",
+            format!("relay refused grant delivery with status {status}: {body}"),
+        ));
+    }
+
+    let body_text = delivery_response.text().await.unwrap_or_default();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text) {
+        if value.get("accepted").and_then(|v| v.as_bool()) == Some(false) {
+            let _ = state.mutate(|store| {
+                store.grants.remove(&grant.grant_id);
+                Ok(())
+            });
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "GRANT_DELIVERY_FAILED",
+                "relay refused grant delivery",
+            ));
+        }
+        if let Some(delivered) = value.get("delivered") {
+            if let Some(status) = delivered.get("status").and_then(|s| s.as_str()) {
+                if status != "ready" {
+                    let _ = state.mutate(|store| {
+                        store.grants.remove(&grant.grant_id);
+                        Ok(())
+                    });
+                    return Err(ApiError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "GRANT_DELIVERY_FAILED",
+                        format!("machine refused grant delivery: {status}"),
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(Json(AccountGrantResponse {
         grant_id: grant.grant_id,
         machine_id: machine.machine_id,
@@ -874,6 +1071,7 @@ pub async fn issue_grant(
 pub fn router(state: Arc<AccountState>) -> Router {
     let limit = state.max_body_bytes;
     Router::new()
+        .route("/api/account/v1/public-key", get(get_public_key))
         .route("/api/account/v1/login/request", post(login_request))
         .route("/api/account/v1/login/consume", post(login_consume))
         .route("/api/account/v1/device/request", post(device_request))
@@ -1013,5 +1211,412 @@ mod tests {
             assert_eq!(error.code, "BAD_REQUEST");
             assert_eq!(error.message, "valid email is required");
         }
+    }
+
+    #[tokio::test]
+    async fn account_signing_key_is_stable_across_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mail_dir = tmp.path().join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
+
+        let state1 = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer.clone()));
+        let pk1 = state1.account_public_key();
+        assert!(!pk1.is_empty(), "public key must not be empty");
+
+        let key_file = tmp.path().join("account-signing-key.json");
+        assert!(key_file.exists(), "signing key file must be created on disk");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&key_file).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "signing key file must be mode 0600 on unix"
+            );
+        }
+
+        let state2 = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let pk2 = state2.account_public_key();
+        assert_eq!(pk1, pk2, "reloading the same directory must yield the same public key");
+    }
+
+    #[tokio::test]
+    async fn public_key_endpoint_returns_base64_pinned_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mail_dir = tmp.path().join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let expected_key = state.account_public_key();
+
+        let resp = get_public_key(State(state))
+            .await
+            .expect("valid public key")
+            .0;
+        assert_eq!(resp.public_key, expected_key);
+
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json.get("publicKey").and_then(|v| v.as_str()),
+            Some(expected_key.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn public_key_endpoint_corrupt_key_returns_500_without_panicking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_file = tmp.path().join("account-signing-key.json");
+        std::fs::write(
+            &key_file,
+            b"{\"publicKey\":\"corrupt\",\"privateKey\":\"invalid\"}",
+        )
+        .unwrap();
+
+        let mail_dir = tmp.path().join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+
+        let err = get_public_key(State(state))
+            .await
+            .expect_err("corrupt signing key file must return an error response, not panic");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "INTERNAL_ERROR");
+        assert!(err.message.contains("signing key unavailable"));
+    }
+
+    fn setup_test_user_and_machine(
+        state: &AccountState,
+        relay_origin: &str,
+    ) -> (String, MachineRecord) {
+        let now = now_secs();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let session_token = random_token();
+        let attach_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let attach_public = x25519_dalek::PublicKey::from(&attach_secret);
+        let attach_public_key = STANDARD.encode(attach_public.as_bytes());
+
+        let machine = MachineRecord {
+            machine_record_id: uuid::Uuid::new_v4().to_string(),
+            owner_user_id: user_id.clone(),
+            machine_id: "test-machine-1".to_string(),
+            display_name: "Test Machine".to_string(),
+            public_key: STANDARD.encode([1u8; 32]),
+            attach_public_key,
+            relay_origin: relay_origin.to_string(),
+            platform: "macos".to_string(),
+            enrollment_epoch: 1,
+            enrolled_at: now,
+            last_seen_at: now,
+        };
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.clone(),
+                    UserRecord {
+                        user_id: user_id.clone(),
+                        email: "tester@example.com".to_string(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    token_hash(&session_token),
+                    SessionRecord {
+                        user_id: user_id.clone(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store
+                    .machines
+                    .insert(machine.machine_record_id.clone(), machine.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        (session_token, machine)
+    }
+
+    #[tokio::test]
+    async fn grant_request_delivers_verifiable_submission_to_relay() {
+        use crate::remote::account_grants::verify_grant_signature;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, GrantSubmission)>(1);
+        let stub_relay = Router::new().route(
+            "/api/v1/attach/grant",
+            post(move |body: Bytes| {
+                let tx = tx.clone();
+                async move {
+                    let raw_body = String::from_utf8(body.to_vec()).expect("utf8 json");
+                    let sub: GrantSubmission =
+                        serde_json::from_str(&raw_body).expect("valid submission json");
+                    let _ = tx.send((raw_body, sub)).await;
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "accepted": true,
+                            "delivered": { "grantId": "g1", "status": "ready" }
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let relay_origin = format!("http://{relay_addr}");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+
+        let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin);
+
+        let device_attach_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let device_attach_public = x25519_dalek::PublicKey::from(&device_attach_secret);
+        let device_attach_key = STANDARD.encode(device_attach_public.as_bytes());
+
+        let req_body = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key,
+        })
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+
+        let response = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine.machine_record_id.clone()),
+            headers,
+            Bytes::from(req_body),
+        )
+        .await
+        .expect("grant issuance and delivery must succeed");
+
+        assert_eq!(response.0.machine_id, machine.machine_id);
+        assert!(response.0.sealed_offer.is_some());
+
+        let (raw_body, submission) = rx.recv().await.expect("relay must receive submission");
+        assert_eq!(submission.machine_id, machine.machine_id);
+        assert_eq!(submission.enrollment_epoch, "1");
+
+        // Verify that the relay NEVER sees the pairing token or plaintext grant offer JSON
+        let pairing_token = &response.0.pairing_token;
+        assert!(
+            !raw_body.contains(pairing_token),
+            "relay submission body must never contain the plaintext pairing token"
+        );
+        let sealed_plaintext_json_fragment = format!("\"grantId\":\"{}\"", response.0.grant_id);
+        assert!(
+            !raw_body.contains(&sealed_plaintext_json_fragment),
+            "relay submission body must not contain plaintext offer json fields"
+        );
+        assert!(
+            !raw_body.contains("\"grantScope\""),
+            "relay submission body must carry only ciphertext envelope, never unencrypted offer json"
+        );
+
+        let sealed_bytes = STANDARD
+            .decode(&submission.envelope.sealed)
+            .expect("valid base64 sealed offer");
+        assert!(
+            !String::from_utf8_lossy(&sealed_bytes).contains(pairing_token),
+            "sealed envelope bytes must be encrypted ciphertext, never plaintext"
+        );
+
+        let account_pk = Some(state.account_public_key());
+        assert_eq!(
+            verify_grant_signature(&account_pk, &submission),
+            Ok(()),
+            "submission signature must verify against the account public key"
+        );
+
+        let foreign = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let foreign_key = Some(STANDARD.encode(foreign.verifying_key().as_bytes()));
+        assert_eq!(
+            verify_grant_signature(&foreign_key, &submission),
+            Err(StatusCode::FORBIDDEN),
+            "submission signature must fail against a valid but foreign key"
+        );
+
+        // Operator pinned an invalid Ed25519 point: distinct from signature mismatch
+        let malformed_key = Some(STANDARD.encode([8u8; 32]));
+        assert_eq!(
+            verify_grant_signature(&malformed_key, &submission),
+            Err(StatusCode::INTERNAL_SERVER_ERROR),
+            "malformed pinned key must yield 500 internal server error"
+        );
+
+        assert_eq!(
+            verify_grant_signature(&None, &submission),
+            Err(StatusCode::FORBIDDEN),
+            "submission signature must fail with no pinned key"
+        );
+
+        let grant_count = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(grant_count, 1, "delivered grant must be recorded in store");
+    }
+
+    #[tokio::test]
+    async fn delivery_failure_relay_refuses_or_unreachable_yields_502() {
+        // Case A: Relay returns 403 Forbidden
+        let stub_relay_403 = Router::new().route(
+            "/api/v1/attach/grant",
+            post(|| async { (StatusCode::FORBIDDEN, "unpinned relay refuses grant") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_origin_403 = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay_403).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+
+        let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin_403);
+        let device_attach_key = STANDARD.encode([3u8; 32]);
+        let req_body = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key.clone(),
+        })
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+
+        let err_403 = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine.machine_record_id.clone()),
+            headers.clone(),
+            Bytes::from(req_body.clone()),
+        )
+        .await
+        .expect_err("relay 403 must fail grant issuance");
+
+        assert_eq!(err_403.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_403.code, "GRANT_DELIVERY_FAILED");
+        assert!(err_403.message.contains("403"));
+
+        let grants_after_403 = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(
+            grants_after_403, 0,
+            "refused delivery must not leave orphan grant in store"
+        );
+
+        // Case B: Nothing is listening (closed port)
+        let (session_token2, machine_dead) =
+            setup_test_user_and_machine(&state, "http://127.0.0.1:1");
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token2}").parse().unwrap(),
+        );
+        let req_body2 = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine_dead.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test-2".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key.clone(),
+        })
+        .unwrap();
+
+        let err_unreachable = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine_dead.machine_record_id.clone()),
+            headers2,
+            Bytes::from(req_body2),
+        )
+        .await
+        .expect_err("unreachable relay must fail grant issuance");
+
+        assert_eq!(err_unreachable.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_unreachable.code, "GRANT_DELIVERY_FAILED");
+
+        let grants_after_unreachable = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(
+            grants_after_unreachable, 0,
+            "unreachable delivery must not leave orphan grant in store"
+        );
+
+        // Case C: Machine refused grant offer (status != "ready", e.g. ACCOUNT_OFFER_UNSEAL_FAILED)
+        let stub_relay_refusal = Router::new().route(
+            "/api/v1/attach/grant",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "accepted": true,
+                        "delivered": {
+                            "grantId": "g1",
+                            "status": "ACCOUNT_OFFER_UNSEAL_FAILED"
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_origin_refusal = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay_refusal).await;
+        });
+
+        let (session_token3, machine_refused) =
+            setup_test_user_and_machine(&state, &relay_origin_refusal);
+        let mut headers3 = HeaderMap::new();
+        headers3.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token3}").parse().unwrap(),
+        );
+        let req_body3 = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine_refused.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test-3".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key,
+        })
+        .unwrap();
+
+        let err_refusal = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine_refused.machine_record_id.clone()),
+            headers3,
+            Bytes::from(req_body3),
+        )
+        .await
+        .expect_err("machine refusal status must fail grant issuance");
+
+        assert_eq!(err_refusal.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_refusal.code, "GRANT_DELIVERY_FAILED");
+        assert!(
+            err_refusal.message.contains("ACCOUNT_OFFER_UNSEAL_FAILED"),
+            "refusal message must include status verbatim: {}",
+            err_refusal.message
+        );
+
+        let grants_after_refusal = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(
+            grants_after_refusal, 0,
+            "refused delivery must not leave orphan grant in store"
+        );
     }
 }

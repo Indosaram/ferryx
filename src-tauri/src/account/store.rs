@@ -109,6 +109,24 @@ pub struct DeviceAuthRecord {
     pub expires_at: u64,
 }
 
+pub const ACCOUNT_SIGNING_KEY_FILE: &str = "account-signing-key.json";
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSigningKeyRecord {
+    pub public_key: String,
+    pub private_key: String,
+}
+
+impl std::fmt::Debug for AccountSigningKeyRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountSigningKeyRecord")
+            .field("public_key", &self.public_key)
+            .field("private_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStore {
@@ -170,6 +188,10 @@ pub fn store_path(dir: &Path) -> PathBuf {
     dir.join("account-store.json")
 }
 
+pub fn signing_key_path(dir: &Path) -> PathBuf {
+    dir.join(ACCOUNT_SIGNING_KEY_FILE)
+}
+
 pub fn lock_account_dir(dir: &Path) -> Result<File, String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("Failed to create account data dir: {error}"))?;
@@ -191,7 +213,7 @@ pub fn lock_account_dir(dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -263,5 +285,16 @@ mod tests {
             1,
             "login codes stay so the consume path can report expiry instead of reuse"
         );
+    }
+
+    #[test]
+    fn account_signing_key_record_debug_redacts_private_key() {
+        let record = AccountSigningKeyRecord {
+            public_key: "pub".into(),
+            private_key: "secret".into(),
+        };
+        let formatted = format!("{record:?}");
+        assert!(!formatted.contains("secret"));
+        assert!(formatted.contains("[REDACTED]"));
     }
 }

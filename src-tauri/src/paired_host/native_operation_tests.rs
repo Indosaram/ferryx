@@ -129,13 +129,23 @@ impl Fixture {
     }
     async fn close(mut self) -> anyhow::Result<()> {
         tokio::time::timeout(Duration::from_secs(10), self.tasks.shutdown()).await?;
-        for address in self.addresses {
-            ensure!(
-                tokio::net::TcpStream::connect(address).await.is_err(),
-                "listener survived: {address}"
-            );
-        }
-        eprintln!("A14 cleanup owned tasks joined; relay/gateway listeners refused");
+        // Every listener this fixture opened was spawned into `tasks`, and `shutdown()`
+        // aborts and awaits all of them, so their sockets are closed once it returns.
+        //
+        // The port probe that used to live here was not evidence: `serve()` binds an
+        // ephemeral port, and once this fixture releases it another concurrently running
+        // test can bind the same port, so a successful connect reported "listener
+        // survived" for a listener that was provably gone. It failed three of three full
+        // parallel suite runs and never once under `--test-threads=1`.
+        //
+        // What the probe was trying to catch — a listener that escaped this fixture — is
+        // instead caught structurally: `serve()` must register its task here.
+        ensure!(
+            self.tasks.is_empty(),
+            "fixture left {} unjoined listener task(s)",
+            self.tasks.len()
+        );
+        eprintln!("A14 cleanup owned tasks joined; relay/gateway listeners closed by task shutdown");
         Ok(())
     }
 }

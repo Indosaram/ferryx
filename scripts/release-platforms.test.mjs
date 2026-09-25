@@ -513,6 +513,19 @@ fi
     writeFileSync(join(binDir, "rustc"), "#!/usr/bin/env bash\necho 'rustc 1.92.0 (mock)'\n");
     chmodSync(join(binDir, "rustc"), 0o755);
 
+    // Mock cargo
+    const cargoScript = `#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "cargo 1.92.0 (mock)"
+elif [ "$1" = "build" ]; then
+  mkdir -p "$CARGO_TARGET_DIR/release"
+  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/release/ferryx-cli"
+  exit 0
+fi
+`;
+    writeFileSync(join(binDir, "cargo"), cargoScript);
+    chmodSync(join(binDir, "cargo"), 0o755);
+
     const plan = {
       commitSha: sourceSha,
       ghosttyPin: ghosttySha,
@@ -533,12 +546,15 @@ fi
 
     const appImageFile = join(workspaceDir, "out", "Ferryx_amd64.AppImage");
     const debFile = join(workspaceDir, "out", "Ferryx_amd64.deb");
+    const cliFile = join(workspaceDir, "out", "ferryx-cli-linux-amd64");
     const tarGzFile = join(workspaceDir, "out", "Ferryx_amd64.AppImage.tar.gz");
 
     assert.ok(existsSync(appImageFile), "Raw AppImage must exist in output directory");
     assert.equal(readFileSync(appImageFile, "utf8"), "ELF_MOCK_APPIMAGE_BYTES");
     assert.ok(existsSync(debFile), "Deb package must exist in output directory");
     assert.equal(readFileSync(debFile, "utf8"), "DEB_MOCK_BYTES");
+    assert.ok(existsSync(cliFile), "Standalone CLI binary must exist in output directory");
+    assert.equal(readFileSync(cliFile, "utf8"), "ELF_MOCK_CLI_BYTES");
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
     assert.match(runRes, /---BUILD_RESULT---/);
   } finally {

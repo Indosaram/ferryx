@@ -1,90 +1,134 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { JSDOM } from "jsdom";
-import {
-  buildAttachSocketUrl,
-  getOrCreateAttachKey,
-  type AttachKeyPair,
-} from "./accountAttach";
-
-if (typeof document === "undefined") {
-  const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
-    url: "http://localhost:3000",
-  });
-  globalThis.document = dom.window.document;
-  globalThis.window = dom.window as unknown as Window & typeof globalThis;
-  globalThis.localStorage = dom.window.localStorage;
-  globalThis.sessionStorage = dom.window.sessionStorage;
-  globalThis.HTMLElement = dom.window.HTMLElement;
-}
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { RemoteTerminal } from "./RemoteTerminal";
+import { getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 
 const PHONE_INPUT_MARKER = "PHONE_INPUT_MARKER_9981";
 
 class MockAttachWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
   static instances: MockAttachWebSocket[] = [];
+  static latest: MockAttachWebSocket | null = null;
   url: string;
-  sentMessages: string[] = [];
+  sentMessages: (string | Uint8Array)[] = [];
   readyState: number = 1;
+  binaryType: string = "arraybuffer";
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
 
   constructor(url: string) {
     this.url = url;
+    MockAttachWebSocket.latest = this;
     MockAttachWebSocket.instances.push(this);
   }
 
-  send(data: string | ArrayBuffer) {
-    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
-    this.sentMessages.push(text);
+  send(data: string | Uint8Array | ArrayBuffer) {
+    if (typeof data === "string") {
+      this.sentMessages.push(data);
+    } else if (data instanceof Uint8Array) {
+      this.sentMessages.push(data);
+    } else {
+      this.sentMessages.push(new Uint8Array(data));
+    }
   }
 
   close() {
     this.readyState = 3;
+    this.onclose?.();
   }
 }
 
-describe("RemoteApp - P19 Phone Account Attach", () => {
+function rect(width: number, height: number): DOMRect {
+  return {
+    x: 0,
+    y: 0,
+    width,
+    height,
+    top: 0,
+    right: width,
+    bottom: height,
+    left: 0,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+describe("RemoteTerminal - P19 Phone Account Attach", () => {
   beforeEach(() => {
     MockAttachWebSocket.instances = [];
-    vi.restoreAllMocks();
+    MockAttachWebSocket.latest = null;
+    vi.stubGlobal("WebSocket", MockAttachWebSocket);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute("data-terminal-cell-measure")) return rect(10, 20);
+      if (this.getAttribute("data-testid") === "remote-terminal-grid") return rect(800, 400);
+      return rect(0, 0);
+    });
   });
 
   afterEach(() => {
+    cleanup();
     MockAttachWebSocket.instances = [];
+    MockAttachWebSocket.latest = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("happy: phone sends PHONE_INPUT_MARKER on the attach channel and does not render Add Project", async () => {
+  it("happy: phone renders production RemoteTerminal, opens attach socket, drives keystroke reaching socket, and does not render Add Project", async () => {
     const attachKey: AttachKeyPair = {
       publicKey: "pub-x25519-phone-test-key",
       privateKey: "priv-x25519-phone-test-key",
     };
 
-    const attachUrl = buildAttachSocketUrl("http://relay.example.com", "sess-alpha-1", attachKey);
-    expect(attachUrl).toContain("/api/v1/attach");
-    expect(attachUrl).toContain("sessionId=sess-alpha-1");
-    expect(attachUrl).toContain("attachKey=pub-x25519-phone-test-key");
-    expect(attachUrl).not.toContain("ticket=");
+    render(
+      <RemoteTerminal
+        sessionId="sess-alpha-1"
+        token="token-unused-in-account"
+        transportUrl="http://relay.example.com"
+        isAccountSession={true}
+        attachKey={attachKey}
+      />,
+    );
 
-    const ws = new MockAttachWebSocket(attachUrl);
-    ws.send(PHONE_INPUT_MARKER);
+    await vi.waitFor(() => {
+      expect(MockAttachWebSocket.latest).not.toBeNull();
+    });
 
-    expect(ws.sentMessages).toContain(PHONE_INPUT_MARKER);
-    expect(ws.url).toContain("/api/v1/attach");
+    const ws = MockAttachWebSocket.latest!;
+    expect(ws.url).toContain("/tunnel/opaque/sess-alpha-1");
+    expect(ws.url).not.toContain("?");
+    expect(ws.url).not.toContain("ticket=");
     expect(ws.url).not.toContain("/tunnel/client/");
     expect(ws.url).not.toContain("/api/v1/socket-ticket");
 
-    const container = document.createElement("div");
-    container.innerHTML = `<div class="remote-phone-shell"><div class="terminal-view"></div></div>`;
-    document.body.appendChild(container);
+    act(() => {
+      ws.onopen?.();
+    });
 
-    const addProjectBtn = container.querySelector("[aria-label='Add Project']");
-    const addProjectText = Array.from(container.querySelectorAll("*")).find(
-      (el) => el.textContent?.includes("Add Project"),
-    );
+    await vi.waitFor(() => {
+      expect(screen.getByRole("status").textContent).toContain("Live");
+    });
 
-    expect(addProjectBtn).toBeNull();
-    expect(addProjectText).toBeUndefined();
-    document.body.removeChild(container);
+    const target = screen.getByTestId("remote-terminal-grid");
+    act(() => {
+      fireEvent.paste(target, { clipboardData: { getData: () => PHONE_INPUT_MARKER } });
+    });
+
+    const hasMarker = ws.sentMessages.some((msg) => {
+      if (typeof msg === "string") return msg.includes(PHONE_INPUT_MARKER);
+      const decoded = new TextDecoder().decode(msg);
+      return decoded.includes(PHONE_INPUT_MARKER);
+    });
+    expect(hasMarker).toBe(true);
+
+    expect(screen.queryByLabelText("Add Project")).toBeNull();
+    expect(screen.queryByText(/Add Project/i)).toBeNull();
   });
 
-  it("failure: a missing attach key does not fall back to the legacy relay ticket route", () => {
+  it("failure: an account session with a missing attach key reports failure without requesting ticket or opening legacy socket", async () => {
     let legacyTicketRequested = false;
 
     const mockFetch = vi.fn().mockImplementation((url: string) => {
@@ -93,20 +137,32 @@ describe("RemoteApp - P19 Phone Account Attach", () => {
       }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ ticket: "legacy-bearer-ticket" }),
+        json: () => Promise.resolve({}),
       });
     });
     globalThis.fetch = mockFetch;
 
-    expect(() => {
-      buildAttachSocketUrl("http://relay.example.com", "sess-alpha-1", null);
-    }).toThrow(/MISSING_ATTACH_KEY/);
+    const onTransportFailure = vi.fn();
+
+    render(
+      <RemoteTerminal
+        sessionId="sess-alpha-1"
+        token="token-unused-in-account"
+        transportUrl="http://relay.example.com"
+        isAccountSession={true}
+        attachKey={null}
+        onTransportFailure={onTransportFailure}
+      />,
+    );
+
+    await vi.waitFor(() => {
+      expect(onTransportFailure).toHaveBeenCalled();
+    });
 
     expect(legacyTicketRequested).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
 
     const legacyWsInstances = MockAttachWebSocket.instances.filter((ws) =>
-      ws.url.includes("/tunnel/client/") || ws.url.includes("/api/v1/socket-ticket"),
+      ws.url.includes("/tunnel/client/") || ws.url.includes("/api/v1/socket-ticket") || ws.url.includes("/api/v1/terminal/"),
     );
     expect(legacyWsInstances.length).toBe(0);
   });

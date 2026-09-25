@@ -43,10 +43,19 @@ full terms.
 
 There is no Microsoft Store listing: the Store catalogue returns no Ferryx product, and the
 `Ferryx_x64.msix` in each release is an unsigned Store-ingestion package, not an installable one.
-Windows users install the `.exe`, which self-updates. `ferryx-cli` is not published by every
-release; the most recent one that publishes it is
-[v2026.09.11.1](https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli),
-and it can otherwise be built from source with `cargo build --release --bin ferryx-cli`.
+Windows users install the `.exe`, which self-updates.
+
+For the Linux headless `ferryx-cli`, install with the one-line installer, which resolves the
+current build rather than a pinned tag:
+
+```bash
+curl -fsSL https://relay.ferryx.dev/install.sh | bash
+```
+
+The release pipeline stages `ferryx-cli` beside the Linux AppImage and `.deb` (and, on macOS,
+as a universal binary), so the installer has a current artifact to fetch; it falls back to the
+GitHub release asset if the relay has no local copy. `cargo build --release --bin ferryx-cli`
+remains available for building from source.
 
 Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can be checked with
 `sha256sum -c SHA256SUMS.txt` before it is run.
