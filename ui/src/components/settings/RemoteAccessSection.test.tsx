@@ -94,6 +94,7 @@ describe("RemoteAccessSection", () => {
     expect(screen.queryByAltText(/pairing qr code/i)).toBeNull();
     expect(screen.queryByTestId("remote-pairing-code")).toBeNull();
     expect(screen.queryByTestId("pairing-url")).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
   });
 
   it("never exposes a manual machine secret or token input", async () => {
@@ -153,6 +154,7 @@ describe("RemoteAccessSection", () => {
     expect(getRemoteStatus).toHaveBeenCalledTimes(1);
     expect(createPairingCode).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
   });
 
   it("sends the typed relay URL when enabling remote access", async () => {
@@ -264,5 +266,20 @@ describe("RemoteAccessSection", () => {
     });
     expect(createPairingCode).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
+  });
+
+  it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {
+    render(<RemoteAccessSection />);
+
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
+    expect(screen.queryByAltText(/pairing qr code/i)).toBeNull();
+    expect(screen.queryByTestId("remote-pairing-code")).toBeNull();
+
+    // Remaining surface renders properly
+    expect(screen.getByRole("switch", { name: "Remote Access" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Relay / Signaling Server URL")).toBeInTheDocument();
+    expect(screen.getByText("Authorized Devices")).toBeInTheDocument();
   });
 });

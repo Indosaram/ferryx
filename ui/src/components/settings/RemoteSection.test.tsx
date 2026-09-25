@@ -240,7 +240,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.getByRole("button", { name: "Forget Linux Build Box" })).toBeInTheDocument();
   });
 
-  it("shows the sign-in form with email input when signed out", async () => {
+  it("shows the sign-in form with email input when signed out and asserts Generate QR is absent", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
 
@@ -251,6 +251,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     const emailInput = screen.getByLabelText(/Email Address/i);
     expect(emailInput).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Send Magic Link/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
   });
 
   it("asserts PIN issuance is no longer offered on this surface", async () => {
@@ -264,6 +266,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Generate PIN/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
     const dialog = screen.getByRole("dialog", { name: "Add Machine" });
@@ -272,8 +276,28 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
     expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
     expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+  });
+
+  it("asserts Generate QR is absent and the SSH tab is present in Add Machine", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    // Remote Access UI must not render a Generate QR button
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByText(/PIN:/i)).toBeNull();
+
+    // SSH tab is present in Add Machine dialog
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
   });
 
   it("asserts an SSH machine row is still rendered", async () => {
