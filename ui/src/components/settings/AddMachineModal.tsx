@@ -7,16 +7,12 @@ import {
   ChevronDown,
   ChevronRight,
   FileCode,
-  KeyRound,
   Terminal,
   X,
 } from "lucide-react";
 import type { MachineProjectTarget } from "../../lib/machineNavigation";
 import {
-  DEFAULT_MACHINE_LABEL,
   DEFAULT_RELAY_ORIGIN,
-  normalizeRelayOrigin,
-  parsePairingInvite,
   pairedHostInventory,
   type PairedHostError,
 } from "../../lib/pairedHostInventory";
@@ -85,7 +81,7 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
     case "EXPIRED_PIN":
       return "Code expired. Sign in to your Ferryx account, issue a fresh enrollment code, and retry.";
     case "INVALID_PIN":
-      return "Invalid PIN. Check the PIN entered and obtain a fresh machine PIN if needed.";
+      return "Invalid code. Check the code entered and issue a fresh enrollment code if needed.";
     case "WRONG_RELAY":
     case "INVALID_RELAY_ORIGIN":
       return `Relay mismatch. Verify both machines use the same relay origin (default: ${DEFAULT_RELAY_ORIGIN}).`;
@@ -143,6 +139,7 @@ export interface AddMachineModalProps {
   onImportDone?: (selectedHostId: string) => void;
   initialRelayOrigin?: string;
   getStoredRelayOrigin?: () => Promise<string | null>;
+  initialTab?: "ssh" | "import";
 }
 
 async function defaultGetStoredRelayOrigin(): Promise<string | null> {
@@ -158,21 +155,19 @@ export function AddMachineModal({
   isOpen,
   onClose,
   inventory = pairedHostInventory,
-  store = remoteHostStore,
-  negotiate = defaultNegotiate,
+  store: _store = remoteHostStore,
+  negotiate: _negotiate = defaultNegotiate,
   onSuccess,
   onOfferProject,
   onImportDone,
-  initialRelayOrigin,
-  getStoredRelayOrigin = defaultGetStoredRelayOrigin,
+  initialRelayOrigin: _initialRelayOrigin,
+  getStoredRelayOrigin: _getStoredRelayOrigin = defaultGetStoredRelayOrigin,
+  initialTab,
 }: AddMachineModalProps) {
-  const [activeTab, setActiveTab] = useState<"pin" | "ssh" | "import">("pin");
+  const [activeTab, setActiveTab] = useState<"ssh" | "import">(
+    initialTab === "import" ? "import" : "ssh",
+  );
 
-  // PIN state
-  const [pin, setPin] = useState("");
-  const [relayOrigin, setRelayOrigin] = useState(initialRelayOrigin ?? DEFAULT_RELAY_ORIGIN);
-
-  // SSH state
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
   const [sshPassword, setSshPasswordInput] = useState("");
   const [showAdvancedSsh, setShowAdvancedSsh] = useState(false);
@@ -233,25 +228,8 @@ export function AddMachineModal({
     }
   }, [isOpen, successTarget, importResult]);
 
-  // Read system SSH config when modal opens or path changes
   useEffect(() => {
     if (!isOpen) return;
-    if (initialRelayOrigin) {
-      setRelayOrigin(initialRelayOrigin);
-    } else {
-      void getStoredRelayOrigin()
-        .then(stored => {
-          if (isMountedRef.current && !isDismissedRef.current && stored && stored.trim()) {
-            try {
-              const normalized = normalizeRelayOrigin(stored);
-              setRelayOrigin(normalized);
-            } catch {
-              // retain current if stored relay is invalid
-            }
-          }
-        })
-        .catch(() => {});
-    }
 
     void readSystemSshConfig(configPathOverride)
       .then(cfg => {
@@ -278,8 +256,6 @@ export function AddMachineModal({
     setStructuredError(null);
     setSuccessTarget(null);
     setImportResult(null);
-    setPin("");
-    setRelayOrigin(initialRelayOrigin ?? DEFAULT_RELAY_ORIGIN);
     setSshForm(DEFAULT_SSH_FORM);
     setSshPasswordInput("");
     setConfigText("");
@@ -308,150 +284,6 @@ export function AddMachineModal({
       } else if (!e.shiftKey && document.activeElement === last) {
         e.preventDefault();
         first.focus();
-      }
-    }
-  };
-
-  const handlePinChange = (value: string) => {
-    const invite = parsePairingInvite(value);
-    if (invite) {
-      if (invite.pin) setPin(invite.pin);
-      if (invite.relayOrigin) setRelayOrigin(invite.relayOrigin);
-    } else {
-      setPin(value);
-    }
-  };
-
-  const handleRelayOriginChange = (value: string) => {
-    const invite = parsePairingInvite(value);
-    if (invite?.relayOrigin) {
-      setRelayOrigin(invite.relayOrigin);
-      if (invite.pin) setPin(invite.pin);
-    } else {
-      setRelayOrigin(value);
-    }
-  };
-
-  const handlePairSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (busy || !pin.trim()) return;
-
-    setBusy(true);
-    setError(null);
-    setStructuredError(null);
-
-    let effectivePin = pin.trim();
-    let effectiveRelay = relayOrigin.trim() || DEFAULT_RELAY_ORIGIN;
-
-    const inviteFromPin = parsePairingInvite(effectivePin);
-    if (inviteFromPin) {
-      if (inviteFromPin.pin) effectivePin = inviteFromPin.pin;
-      if (inviteFromPin.relayOrigin) effectiveRelay = inviteFromPin.relayOrigin;
-    }
-
-    const inviteFromRelay = parsePairingInvite(effectiveRelay);
-    if (inviteFromRelay) {
-      if (inviteFromRelay.relayOrigin) effectiveRelay = inviteFromRelay.relayOrigin;
-      if (inviteFromRelay.pin && !effectivePin) effectivePin = inviteFromRelay.pin;
-    }
-
-    try {
-      effectiveRelay = normalizeRelayOrigin(effectiveRelay);
-    } catch {
-      const err: PairedHostError = {
-        code: "INVALID_RELAY_ORIGIN",
-        message: "INVALID_RELAY_ORIGIN",
-        retryable: false,
-      };
-      setStructuredError(err);
-      setError(getModalErrorMessage(err));
-      setBusy(false);
-      return;
-    }
-
-    let pairedContext: PairedHostContext | undefined;
-    try {
-      const result = await inventory.pair(
-        { relayOrigin: effectiveRelay, displayLabel: DEFAULT_MACHINE_LABEL, pin: effectivePin },
-        host => { pairedContext = { hostId: host.hostId, generation: host.generation! }; },
-      );
-      if (isDismissedRef.current || !isMountedRef.current) return;
-
-      if (!result.ok || !pairedContext) {
-        const err = !result.ok
-          ? result.error
-          : {
-              code: "PAIR_FAILED",
-              message: "Pairing context missing after successful exchange",
-              retryable: false,
-            };
-        setStructuredError(err);
-        setError(getModalErrorMessage(err));
-        setBusy(false);
-        return;
-      }
-
-      // Initial live auth/scope check
-      let host = store.getState().hosts[pairedContext.hostId];
-      if (!host || host.generation !== pairedContext.generation || host.authStatus !== "paired" || host.grantScope !== "machine") {
-        const errCode = !host || host.generation !== pairedContext.generation
-          ? "STALE_HOST_GENERATION"
-          : "MACHINE_GRANT_REQUIRED";
-        const err: PairedHostError = {
-          code: errCode,
-          message: explanations[errCode] ?? errCode,
-          retryable: errCode === "STALE_HOST_GENERATION",
-        };
-        setStructuredError(err);
-        setError(getModalErrorMessage(err));
-        setBusy(false);
-        return;
-      }
-
-      // Negotiate capabilities within modal
-      await negotiate(pairedContext);
-      if (isDismissedRef.current || !isMountedRef.current) return;
-
-      // RECHECK live paired generation/auth after await negotiate and before project offer!
-      host = store.getState().hosts[pairedContext.hostId];
-      if (!host || host.generation !== pairedContext.generation || host.authStatus !== "paired" || host.grantScope !== "machine") {
-        const errCode = !host || host.generation !== pairedContext.generation
-          ? "STALE_HOST_GENERATION"
-          : "MACHINE_GRANT_REQUIRED";
-        const err: PairedHostError = {
-          code: errCode,
-          message: explanations[errCode] ?? errCode,
-          retryable: errCode === "STALE_HOST_GENERATION",
-        };
-        setStructuredError(err);
-        setError(getModalErrorMessage(err));
-        setBusy(false);
-        return;
-      }
-
-      // Verified! Clear PIN on success
-      setPin("");
-      const machineName = host.name || DEFAULT_MACHINE_LABEL;
-      const target: MachineProjectTarget = {
-        kind: "pairedDaemon",
-        hostId: pairedContext.hostId,
-        generation: pairedContext.generation,
-      };
-
-      setSuccessTarget({ target, name: machineName });
-      onSuccess({
-        kind: "pairedDaemon",
-        hostId: pairedContext.hostId,
-        generation: pairedContext.generation,
-        name: machineName,
-      });
-    } catch (err) {
-      if (isDismissedRef.current || !isMountedRef.current) return;
-      const msg = err instanceof Error ? err.message : "";
-      setError(explanations[msg] ?? (msg || explanations.PAIR_FAILED));
-    } finally {
-      if (isMountedRef.current) {
-        setBusy(false);
       }
     }
   };
@@ -722,21 +554,6 @@ export function AddMachineModal({
               <button
                 type="button"
                 role="tab"
-                aria-selected={activeTab === "pin"}
-                disabled={busy}
-                className={`flex items-center gap-1.5 px-3 py-2 font-medium border-b-2 transition-colors disabled:opacity-50 ${
-                  activeTab === "pin"
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => { setActiveTab("pin"); setError(null); }}
-              >
-                <KeyRound className="size-3.5" />
-                Pair with PIN
-              </button>
-              <button
-                type="button"
-                role="tab"
                 aria-selected={activeTab === "ssh"}
                 disabled={busy}
                 className={`flex items-center gap-1.5 px-3 py-2 font-medium border-b-2 transition-colors disabled:opacity-50 ${
@@ -766,78 +583,7 @@ export function AddMachineModal({
               </button>
             </div>
 
-            {/* PIN Method */}
-            {activeTab === "pin" ? (
-              <form className="space-y-4 pt-2" onSubmit={handlePairSubmit}>
-                <div className="text-xs text-muted-foreground space-y-1">
-                  <p>
-                    Sign in on a machine you already use, issue an enrollment code for this machine, then run
-                    this on the machine that should join:
-                  </p>
-                  <code className="block rounded bg-muted/60 px-2 py-1 font-mono text-[11px] text-foreground">
-                    ferryx-cli account enroll --code &lt;CODE&gt;
-                  </code>
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="add-machine-relay" className="text-xs font-medium">
-                      Relay Origin
-                    </Label>
-                    {relayOrigin !== DEFAULT_RELAY_ORIGIN ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        className="text-[11px] text-muted-foreground hover:text-foreground underline cursor-pointer"
-                        onClick={() => setRelayOrigin(DEFAULT_RELAY_ORIGIN)}
-                      >
-                        Reset to default
-                      </button>
-                    ) : null}
-                  </div>
-                  <Input
-                    id="add-machine-relay"
-                    aria-label="Relay Origin"
-                    type="text"
-                    autoComplete="off"
-                    disabled={busy}
-                    value={relayOrigin}
-                    placeholder={DEFAULT_RELAY_ORIGIN}
-                    onChange={e => handleRelayOriginChange(e.target.value)}
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    Default: <span className="font-mono">{DEFAULT_RELAY_ORIGIN}</span>. Enter a custom relay or paste an invite link below.
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="add-machine-pin" className="text-xs font-medium">
-                    Machine PIN
-                  </Label>
-                  <Input
-                    id="add-machine-pin"
-                    aria-label="Machine PIN"
-                    type="password"
-                    autoComplete="off"
-                    disabled={busy}
-                    required
-                    value={pin}
-                    placeholder="Enter 6-digit PIN"
-                    onChange={e => handlePinChange(e.target.value)}
-                  />
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button type="button" variant="outline" disabled={busy} onClick={handleClose}>
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={busy || !pin.trim()}>
-                    {busy ? "Verifying…" : "Pair Machine"}
-                  </Button>
-                </div>
-              </form>
-            ) : activeTab === "ssh" ? (
-              /* SSH Method */
+            {activeTab === "ssh" ? (
               <form className="space-y-3 pt-2" onSubmit={handleSshSubmit}>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">

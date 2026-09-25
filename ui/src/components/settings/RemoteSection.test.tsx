@@ -238,74 +238,221 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.getByRole("button", { name: "Forget Linux Build Box" })).toBeInTheDocument();
   });
 
-  it("propagates verified generation-bound state to row status and offers project upon PIN pairing success", async () => {
+  it("shows the sign-in form with email input when signed out", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
-    const negotiate = vi.fn().mockResolvedValue(undefined);
-    const onOpenProject = vi.fn();
 
     await act(async () => {
-      render(<RemoteSection store={store} inventory={inventory} negotiate={negotiate} onOpenProject={onOpenProject} />);
+      render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
-    });
-
-    // Verification succeeded; modal offers project
-    expect(screen.getByText(/connected and verified/i)).toBeInTheDocument();
-    const offerProjectBtn = screen.getByRole("button", { name: "Add Project" });
-    expect(offerProjectBtn).toBeInTheDocument();
-
-    fireEvent.click(offerProjectBtn);
-    expect(onOpenProject).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "pairedDaemon", hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box") }),
-      expect.anything(),
-    );
-
-    // After modal closes, the newly added row shows Ready status (propagated verified state)
-    const newRowStatus = screen.getByText("Ready");
-    expect(newRowStatus).toBeInTheDocument();
+    const emailInput = screen.getByLabelText(/Email Address/i);
+    expect(emailInput).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Send Magic Link/i })).toBeInTheDocument();
   });
 
-  it("rechecks live paired generation/auth after await negotiate; fails if credentials revoked or changed", async () => {
+  it("asserts PIN issuance is no longer offered on this surface", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
 
-    // Negotiate hook alters the store state mid-request (simulating stale generation)
-    const negotiate = vi.fn().mockImplementation(async () => {
-      store.setState(s => ({
-        ...s,
-        hosts: {
-          ...s.hosts,
-          [remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box")]: {
-            ...s.hosts[remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box")],
-            generation: "99", // Generation changed mid-request!
-          },
-        },
-      }));
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    await act(async () => {
-      render(<RemoteSection store={store} inventory={inventory} negotiate={negotiate} />);
-    });
+    expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Generate PIN/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
+    const dialog = screen.getByRole("dialog", { name: "Add Machine" });
+    expect(dialog).toBeInTheDocument();
+
+    expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
+    expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+  });
+
+  it("asserts an SSH machine row is still rendered", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
+      render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    // Must catch stale generation, display alert, and retain PIN
-    expect(screen.getByRole("alert")).toBeInTheDocument();
-    expect(screen.getByText(/Credentials changed during this request/i)).toBeInTheDocument();
-    expect(screen.getByLabelText("Machine PIN")).toHaveValue("valid-pin");
-    // No project offer
-    expect(screen.queryByText(/connected and verified/i)).toBeNull();
+    expect(screen.getByText("Dev Server")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeInTheDocument();
+  });
+
+  it("lists one machine from a stubbed account API with a signed-in fixture and enables Add Project only when grant scope is machine", async () => {
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+    const onOpenProject = vi.fn();
+
+    const machineHost = {
+      machineRecordId: "rec-machine-1",
+      machineId: "acc-box-1",
+      displayName: "Enrolled Box",
+      publicKey: "pub1",
+      attachPublicKey: "att1",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      platform: "linux",
+      online: true,
+      enrollmentEpoch: "1",
+      lastSeenAt: Date.now(),
+      grantScope: "machine" as const,
+    };
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [machineHost],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { unmount } = render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          onOpenProject={onOpenProject}
+          accountSessionToken="test-session-token"
+        />
+      );
+
+      expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
+      const addProjectBtn = screen.getByRole("button", { name: "Add Project on Enrolled Box" });
+      expect(addProjectBtn).toBeInTheDocument();
+      expect(addProjectBtn).not.toBeDisabled();
+
+      fireEvent.click(addProjectBtn);
+      expect(onOpenProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "pairedDaemon",
+          hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "acc-box-1"),
+        }),
+        expect.anything(),
+      );
+
+      unmount();
+
+      const mirrorHost = { ...machineHost, grantScope: "mirror" as const };
+      fetchMock.mockImplementation(async (url: string) => {
+        if (url.includes("/api/account/v1/machines")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [mirrorHost],
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      });
+
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          onOpenProject={onOpenProject}
+          accountSessionToken="test-session-token"
+        />
+      );
+
+      expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
+      const disabledAddBtn = screen.getByRole("button", { name: "Add Project on Enrolled Box" });
+      expect(disabledAddBtn).toBeDisabled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("issues an enrollment code and displays the exact CLI command", async () => {
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+        };
+      }
+      if (url.includes("/api/account/v1/enrollment-codes") && opts?.method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: "enr_code_xyz", expiresAt: Date.now() + 600000 }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountSessionToken="test-session-token"
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
+        />
+      );
+
+      const issueBtn = await screen.findByRole("button", { name: /Issue Enrollment Code/i });
+      expect(issueBtn).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(issueBtn);
+      });
+
+      expect(screen.getByText("enr_code_xyz")).toBeInTheDocument();
+      const expectedCommand = `ferryx-cli account enroll --code enr_code_xyz --origin ${DEFAULT_RELAY_ORIGIN}`;
+      expect(screen.getByText(expectedCommand)).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("displays empty state copy stating the other machine has to enroll first when signed in with no machines", async () => {
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_ssh_list_hosts") return [];
+      return undefined;
+    });
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountSessionToken="test-session-token"
+        />
+      );
+
+      expect(await screen.findByText(/The other machine has to enroll first/i)).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("config import separates imported-not-verified result with NO ready/project offer", async () => {
@@ -546,7 +693,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(document.activeElement).toBe(addBtn);
   });
 
-  it("resets dismissed state on reopen: open-close-reopen pairing succeeds and is not discarded", async () => {
+  it("resets dismissed state on reopen: open-close-reopen SSH connection succeeds and is not discarded", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
     const negotiate = vi.fn().mockResolvedValue(undefined);
@@ -565,10 +712,11 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
     expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
 
-    // 3. Enter PIN and submit
-    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
+    // 3. Connect via SSH and submit
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Reopened Box" } });
+    fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "192.168.1.100" } });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
+      fireEvent.click(screen.getByRole("button", { name: "Connect SSH Machine" }));
     });
 
     // 4. Must successfully verify and offer project (not discarded!)

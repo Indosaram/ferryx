@@ -2,15 +2,21 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import {
   AlertCircle,
+  Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Copy,
+  KeyRound,
+  LogOut,
   Plus,
   Server,
+  X,
 } from "lucide-react";
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
 import {
   DEFAULT_MACHINE_LABEL,
+  DEFAULT_RELAY_ORIGIN,
   pairedHostInventory,
 } from "../../lib/pairedHostInventory";
 import {
@@ -31,11 +37,22 @@ import {
   type SshRemoteEnvironment,
 } from "../../lib/sshHosts";
 import {
+  remoteHostKey,
   remoteHostStore,
   selectHostList,
   type HostEndpoint,
   type RemoteHostStore,
 } from "../../state/remoteHostStore";
+import {
+  AccountSessionError,
+  clearStoredAccountSessionToken,
+  getStoredAccountSessionToken,
+  issueEnrollmentCode,
+  listMachines,
+  type AccountMachineView,
+} from "../../remote/accountSession";
+import { AccountSignIn } from "./AccountSignIn";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { AddMachineModal, type HostFormData } from "./AddMachineModal";
 import { RemoteAccessSection } from "./RemoteAccessSection";
 import { Badge } from "../ui/badge";
@@ -104,6 +121,8 @@ export interface RemoteSectionProps {
   store?: RemoteHostStore;
   inventory?: typeof pairedHostInventory;
   negotiate?: (context: PairedHostContext) => Promise<unknown>;
+  accountSessionToken?: string | null;
+  accountOrigin?: string;
 }
 
 export function RemoteSection({
@@ -114,7 +133,104 @@ export function RemoteSection({
   store = remoteHostStore,
   inventory = pairedHostInventory,
   negotiate = defaultNegotiate,
+  accountSessionToken: accountSessionTokenProp,
+  accountOrigin = DEFAULT_RELAY_ORIGIN,
 }: RemoteSectionProps) {
+  const [accountToken, setAccountToken] = useState<string | null>(() => {
+    if (accountSessionTokenProp !== undefined) return accountSessionTokenProp;
+    return getStoredAccountSessionToken();
+  });
+
+  useEffect(() => {
+    if (accountSessionTokenProp !== undefined) {
+      setAccountToken(accountSessionTokenProp);
+    }
+  }, [accountSessionTokenProp]);
+
+  const [accountMachines, setAccountMachines] = useState<AccountMachineView[]>([]);
+  const [accountMachinesLoading, setAccountMachinesLoading] = useState(false);
+  const [issuedCode, setIssuedCode] = useState<string | null>(null);
+  const [isIssuingCode, setIsIssuingCode] = useState(false);
+  const [copiedEnrollCommand, setCopiedEnrollCommand] = useState(false);
+
+  useEffect(() => {
+    if (!accountToken) {
+      setAccountMachines([]);
+      return;
+    }
+    let active = true;
+    setAccountMachinesLoading(true);
+    listMachines(accountOrigin, accountToken)
+      .then((machines) => {
+        if (!active) return;
+        setAccountMachines(machines);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        if (
+          err instanceof AccountSessionError &&
+          (err.code === "UNAUTHORIZED" || err.status === 401)
+        ) {
+          clearStoredAccountSessionToken();
+          setAccountToken(null);
+          return;
+        }
+        if (err instanceof AccountSessionError) {
+          setActionError(err.message);
+        } else if (
+          err &&
+          typeof err === "object" &&
+          "code" in err &&
+          typeof (err as { code: string }).code === "string"
+        ) {
+          const typed = err as { code: string; message?: string };
+          setActionError(typed.message || typed.code);
+        } else if (err instanceof Error) {
+          setActionError(err.message);
+        }
+      })
+      .finally(() => {
+        if (active) setAccountMachinesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [accountToken, accountOrigin]);
+
+  const handleIssueEnrollmentCode = async () => {
+    if (!accountToken || isIssuingCode) return;
+    setIsIssuingCode(true);
+    setActionError(null);
+    try {
+      const res = await issueEnrollmentCode(accountOrigin, accountToken);
+      setIssuedCode(res.code);
+    } catch (err: unknown) {
+      if (err instanceof AccountSessionError) {
+        setActionError(err.message);
+      } else if (
+        err &&
+        typeof err === "object" &&
+        "code" in err &&
+        typeof (err as { code: string }).code === "string"
+      ) {
+        const typed = err as { code: string; message?: string };
+        setActionError(typed.message || typed.code);
+      } else if (err instanceof Error) {
+        setActionError(err.message);
+      } else {
+        setActionError("Failed to issue enrollment code");
+      }
+    } finally {
+      setIsIssuingCode(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    clearStoredAccountSessionToken();
+    setAccountToken(null);
+    setAccountMachines([]);
+    setIssuedCode(null);
+  };
   const [context] = useState<RemoteContext>(
     initialContext ?? { page: "machines", filter: legacySsh ? "ssh" : "all" },
   );
@@ -192,6 +308,11 @@ export function RemoteSection({
   const handleRefreshAll = () => {
     if (isTauri()) void inventory.refresh();
     resetSshHostsCache();
+    if (accountToken) {
+      void listMachines(accountOrigin, accountToken)
+        .then(setAccountMachines)
+        .catch(() => {});
+    }
   };
 
   const toggleDetails = (key: string) => {
@@ -390,21 +511,53 @@ export function RemoteSection({
     }
   };
 
-  // Build the ONE mixed machine list
   const pairedHosts = selectHostList(state);
+
+  const accountHostEndpoints: HostEndpoint[] = accountMachines.map((m) => {
+    const hostId = m.machineId
+      ? remoteHostKey(m.relayOrigin || accountOrigin, m.machineId)
+      : m.machineRecordId;
+    const local =
+      state.hosts[hostId] ??
+      Object.values(state.hosts).find((h) => h.machineId === m.machineId);
+    return {
+      hostId: local?.hostId ?? hostId,
+      name: m.displayName || local?.name || DEFAULT_MACHINE_LABEL,
+      address: m.relayOrigin || accountOrigin,
+      transport: "relay",
+      authStatus: "paired",
+      online: m.online,
+      machineId: m.machineId,
+      displayName: m.displayName,
+      relayOrigin: m.relayOrigin || accountOrigin,
+      generation: local?.generation ?? String(m.enrollmentEpoch ?? "1"),
+      grantScope: m.grantScope ?? local?.grantScope ?? "machine",
+      lastSeenAt: m.lastSeenAt,
+    };
+  });
+
+  const mergedPairedHosts: HostEndpoint[] = [
+    ...accountHostEndpoints,
+    ...pairedHosts.filter(
+      (ph) =>
+        !accountHostEndpoints.some(
+          (ah) => ah.machineId === ph.machineId || ah.hostId === ph.hostId,
+        ),
+    ),
+  ];
 
   type MixedItem =
     | { kind: "paired"; id: string; name: string; host: HostEndpoint }
     | { kind: "ssh"; id: string; name: string; host: SshHost };
 
   const mixedItems: MixedItem[] = [
-    ...pairedHosts.map(h => ({
+    ...mergedPairedHosts.map((h) => ({
       kind: "paired" as const,
       id: h.hostId,
       name: h.name || DEFAULT_MACHINE_LABEL,
       host: h,
     })),
-    ...sshHosts.map(h => ({
+    ...sshHosts.map((h) => ({
       kind: "ssh" as const,
       id: h.id,
       name: h.label || h.hostname,
@@ -433,6 +586,117 @@ export function RemoteSection({
   return (
     <section aria-label="Remote" className="space-y-5">
       <h1 className="text-xl font-semibold">Remote</h1>
+
+      {!accountToken ? (
+        <AccountSignIn
+          origin={accountOrigin}
+          onSignIn={(tok) => setAccountToken(tok)}
+        />
+      ) : (
+        <div
+          data-testid="account-status-bar"
+          className="rounded-lg border border-border bg-card p-4 space-y-3"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-primary/10 text-primary border-primary/30">
+                  Account Active
+                </Badge>
+                <span>Ferryx Account</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Enrolled machines on this account are automatically listed below.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isIssuingCode}
+                onClick={handleIssueEnrollmentCode}
+              >
+                <KeyRound className="mr-1 size-3.5" />
+                {isIssuingCode ? "Issuing…" : "Issue Enrollment Code"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={handleSignOut}
+                aria-label="Sign Out"
+              >
+                <LogOut className="mr-1 size-3.5" />
+                Sign Out
+              </Button>
+            </div>
+          </div>
+
+          {issuedCode ? (
+            <div
+              data-testid="issued-enrollment-card"
+              className="rounded-md border border-primary/40 bg-accent/20 p-3 space-y-2 text-xs"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-foreground">
+                  Enrollment Code Issued: <span className="font-mono text-primary font-bold">{issuedCode}</span>
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="size-6 p-0"
+                  onClick={() => setIssuedCode(null)}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Run this command on the headless machine to enroll it:
+              </p>
+              <div className="flex items-center gap-2">
+                <code
+                  data-testid="enrollment-command"
+                  className="block flex-1 rounded bg-muted/80 px-2.5 py-1.5 font-mono text-[11px] text-foreground select-all break-all border border-border"
+                >
+                  {`ferryx-cli account enroll --code ${issuedCode} --origin ${accountOrigin}`}
+                </code>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs shrink-0"
+                  onClick={() => {
+                    void copyTextToClipboard(
+                      `ferryx-cli account enroll --code ${issuedCode} --origin ${accountOrigin}`,
+                    );
+                    setCopiedEnrollCommand(true);
+                    setTimeout(() => setCopiedEnrollCommand(false), 2000);
+                  }}
+                >
+                  {copiedEnrollCommand ? (
+                    <>
+                      <Check className="mr-1 size-3" /> Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="mr-1 size-3" /> Copy
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {accountMachines.length === 0 && !accountMachinesLoading ? (
+            <p className="text-[11px] text-muted-foreground">
+              No account machines enrolled yet. The other machine has to enroll first.
+            </p>
+          ) : null}
+        </div>
+      )}
+
       {(
         <div className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -489,7 +753,7 @@ export function RemoteSection({
               </p>
               <p className="text-xs text-muted-foreground mt-1">
                 {mixedItems.length === 0
-                  ? "Use the Add Machine button above to connect via PIN pairing or SSH."
+                  ? "The other machine has to enroll first. Issue an enrollment code above to enroll a machine, or use Add Machine to connect via SSH."
                   : "Try clearing your search query to see all machines."}
               </p>
             </div>
@@ -503,15 +767,21 @@ export function RemoteSection({
                 if (item.kind === "paired") {
                   const host = item.host;
                   const result = checks[host.hostId];
-                  const code = state.nativeStatus !== "ready"
-                    ? "NATIVE_CONTEXT_REQUIRED"
-                    : host.authStatus !== "paired" || host.grantScope !== "machine"
-                    ? "MACHINE_GRANT_REQUIRED"
-                    : !host.online
-                    ? "OFFLINE"
-                    : result?.generation === host.generation
-                    ? result.code
-                    : "UNCHECKED";
+                  const isEnrolledAccountMachine = accountMachines.some(
+                    (m) => m.machineId === host.machineId,
+                  );
+                  const code =
+                    state.nativeStatus !== "ready" && !isEnrolledAccountMachine
+                      ? "NATIVE_CONTEXT_REQUIRED"
+                      : host.authStatus !== "paired" || host.grantScope !== "machine"
+                      ? "MACHINE_GRANT_REQUIRED"
+                      : !host.online
+                      ? "OFFLINE"
+                      : result?.generation === host.generation
+                      ? result.code
+                      : isEnrolledAccountMachine
+                      ? "READY"
+                      : "UNCHECKED";
 
                   return (
                     <div
@@ -1072,13 +1342,14 @@ export function RemoteSection({
         </div>
       </details>
 
-      {/* ONE Add Machine opens real unified modal with PIN, SSH, and Config Import */}
+      {/* ONE Add Machine opens real unified modal with SSH and Config Import */}
       <AddMachineModal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         inventory={inventory}
         store={store}
         negotiate={negotiate}
+        initialRelayOrigin={accountOrigin}
         onSuccess={result => {
           if (result.kind === "pairedDaemon") {
             // Propagate verified generation-bound state

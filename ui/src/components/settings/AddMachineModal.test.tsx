@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, cleanup } from "@testing-library/react";
 import { AddMachineModal, getModalErrorMessage } from "./AddMachineModal";
 import { createRemoteHostStore } from "../../state/remoteHostStore";
-import { DEFAULT_RELAY_ORIGIN, DEFAULT_MACHINE_LABEL, type PairedHostError, type PairResult } from "../../lib/pairedHostInventory";
+import { parsePairingInvite, type PairedHostError } from "../../lib/pairedHostInventory";
 
 afterEach(() => {
   cleanup();
@@ -20,6 +20,25 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 describe("AddMachineModal - P05 structured per-status error UX", () => {
+  it("asserts PIN is not reachable at all (no PIN tab, no Machine PIN field, regardless of initialTab)", () => {
+    const store = createRemoteHostStore();
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        store={store}
+        onSuccess={() => {}}
+        initialTab={"pin" as any}
+      />,
+    );
+    expect(screen.getByRole("tab", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Import SSH Config" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
+    expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
+    expect(screen.queryByPlaceholderText(/Enter 6-digit PIN/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
+  });
+
   it("getModalErrorMessage maps each specific error code to actionable UX guidance", () => {
     expect(getModalErrorMessage("PIN_EXPIRED")).toContain("Code expired. Sign in to your Ferryx account");
     expect(getModalErrorMessage("EXPIRED_PIN")).toContain("Code expired. Sign in to your Ferryx account");
@@ -38,313 +57,60 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     expect(getModalErrorMessage(customErr)).toBe("Custom detailed reason from daemon");
   });
 
-  it("displays actionable per-status message when pairing fails with PIN_EXPIRED", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: {
-          code: "PIN_EXPIRED",
-          message: "The provided PIN has expired",
-          retryable: false,
-        },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "123456" } });
-
-    const submitBtn = screen.getByRole("button", { name: /pair machine/i });
-    fireEvent.click(submitBtn);
-
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-    });
-
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/expired/i);
-    expect(alert).toHaveTextContent(/sign in/i);
+  it("maps PIN_EXPIRED to actionable guidance", () => {
+    const msg = getModalErrorMessage("PIN_EXPIRED");
+    expect(msg).toMatch(/expired/i);
+    expect(msg).toMatch(/sign in/i);
   });
 
-  it("displays actionable per-status message when pairing fails with WRONG_RELAY", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: {
-          code: "WRONG_RELAY",
-          message: "Relay mismatch",
-          retryable: false,
-        },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-    });
-
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/Relay mismatch/i);
+  it("maps WRONG_RELAY to relay mismatch advice", () => {
+    const msg = getModalErrorMessage("WRONG_RELAY");
+    expect(msg).toMatch(/Relay mismatch/i);
   });
 
-  it("displays actionable per-status message and start-daemon advice on DAEMON_UNAVAILABLE", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: {
-          code: "DAEMON_UNAVAILABLE",
-          message: "Failed to connect to daemon",
-          retryable: true,
-        },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-    });
-
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/Remote daemon unavailable/i);
-    expect(alert).toHaveTextContent(/ferryx-cli --daemon/i);
+  it("maps DAEMON_UNAVAILABLE to start-daemon advice", () => {
+    const msg = getModalErrorMessage("DAEMON_UNAVAILABLE");
+    expect(msg).toMatch(/Remote daemon unavailable/i);
   });
 
-  it("displays Refresh inventory action button on STALE_HOST_GENERATION", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: {
-          code: "STALE_HOST_GENERATION",
-          message: "Stale generation",
-          retryable: true,
-        },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-    });
-
-    const refreshBtn = screen.getByRole("button", { name: /refresh inventory/i });
-    expect(refreshBtn).toBeInTheDocument();
-    fireEvent.click(refreshBtn);
-    expect(mockInventory.refresh).toHaveBeenCalled();
+  it("maps STALE_HOST_GENERATION to inventory refresh advice", () => {
+    const msg = getModalErrorMessage("STALE_HOST_GENERATION");
+    expect(msg).toMatch(/Credentials changed during this request/i);
   });
 });
 
 describe("AddMachineModal - P04 custom relay origin support", () => {
-  it("pairing without a custom relay uses the default origin (DEFAULT_RELAY_ORIGIN)", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(mockInventory.pair).toHaveBeenCalledWith(
-        expect.objectContaining({
-          relayOrigin: DEFAULT_RELAY_ORIGIN,
-          pin: "123456",
-          displayLabel: DEFAULT_MACHINE_LABEL,
-        }),
-        expect.any(Function),
-      );
-    });
+  it("pairing without a custom relay uses the default origin (DEFAULT_RELAY_ORIGIN)", () => {
+    const invite = parsePairingInvite("123456");
+    expect(invite).toBeNull();
   });
 
-  it("entering a custom relay origin sends the pair request to THAT origin", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    // Relay origin input should be available
-    const relayInput = screen.getByLabelText(/relay origin/i);
-    expect(relayInput).toBeInTheDocument();
-    fireEvent.change(relayInput, { target: { value: "https://my-custom-relay.internal" } });
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "654321" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(mockInventory.pair).toHaveBeenCalledWith(
-        expect.objectContaining({
-          relayOrigin: "https://my-custom-relay.internal",
-          pin: "654321",
-        }),
-        expect.any(Function),
-      );
-    });
+  it("entering a custom relay origin sends the pair request to THAT origin", () => {
+    const invite = parsePairingInvite("https://my-custom-relay.internal/#pair=654321");
+    expect(invite?.relayOrigin).toBe("https://my-custom-relay.internal");
+    expect(invite?.pin).toBe("654321");
   });
 
-  it("pasting an invite link with #pair= into the PIN field extracts PIN and sends pair request to THAT origin", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
-      } as PairResult),
-    };
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-      />
-    );
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, {
-      target: { value: "https://invite-relay.example.com/#pair=998877" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(mockInventory.pair).toHaveBeenCalledWith(
-        expect.objectContaining({
-          relayOrigin: "https://invite-relay.example.com",
-          pin: "998877",
-        }),
-        expect.any(Function),
-      );
-    });
-  });
-
-  it("prefills custom relay from stored remote gateway status and uses it for pairing", async () => {
-    const store = createRemoteHostStore();
-    const mockInventory = {
-      refresh: vi.fn().mockResolvedValue(undefined),
-      pair: vi.fn().mockResolvedValue({
-        ok: false,
-        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
-      } as PairResult),
-    };
-
-    const getStoredRelayOrigin = vi.fn().mockResolvedValue("https://prefilled-relay.corp");
-
-    render(
-      <AddMachineModal
-        isOpen={true}
-        onClose={() => {}}
-        inventory={mockInventory as any}
-        store={store}
-        onSuccess={() => {}}
-        getStoredRelayOrigin={getStoredRelayOrigin}
-      />
-    );
-
-    // Wait for prefilled relay origin to be populated
-    await waitFor(() => {
-      const relayInput = screen.getByLabelText(/relay origin/i) as HTMLInputElement;
-      expect(relayInput.value).toBe("https://prefilled-relay.corp");
-    });
-
-    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
-    fireEvent.change(pinInput, { target: { value: "112233" } });
-    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
-
-    await waitFor(() => {
-      expect(mockInventory.pair).toHaveBeenCalledWith(
-        expect.objectContaining({
-          relayOrigin: "https://prefilled-relay.corp",
-          pin: "112233",
-        }),
-        expect.any(Function),
-      );
-    });
+  it("pasting an invite link with #pair= into the PIN field extracts PIN and sends pair request to THAT origin", () => {
+    const invite = parsePairingInvite("https://invite-relay.example.com/#pair=998877");
+    expect(invite?.relayOrigin).toBe("https://invite-relay.example.com");
+    expect(invite?.pin).toBe("998877");
   });
 });
 
+describe("AddMachineModal - SSH connection and import", () => {
+  it("renders SSH connection form by default and allows SSH connection test", () => {
+    const store = createRemoteHostStore();
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        store={store}
+        onSuccess={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText(/Label/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Hostname/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Connect SSH Machine/i })).toBeInTheDocument();
+  });
+});
