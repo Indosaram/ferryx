@@ -1,0 +1,30 @@
+VERDICT: BLOCK
+
+BLOCKERS:
+1. `src-tauri/src/browser/screenshot.rs:120` — `cmd_browser_snapshot_capability` is dead plumbing. The full diff shows neither registration in Tauri’s command handler nor any frontend invocation/consumption, despite its comment claiming the frontend disables unsupported controls. Therefore the non-macOS element-picking affordance remains enabled and the added capability command cannot affect behavior.
+2. `src-tauri/src/native_terminal/platform/linux.rs:235-252,467-478,505-538` — the no-child fallback fabricates child-surface capabilities. `descriptor()` always reports `pointer_transparent: true` and `layer_backed: true` even when rendering through the parent GTK window. Geometry is only applied to `LinuxChild`; with `child == None`, there is no operation that positions the parent surface at the terminal pane. This merely bypasses composition validation and can render at the parent-window origin or interfere with the main webview rather than providing a working fallback.
+3. `src-tauri/src/daemon/server.rs:2125-2132`; `src-tauri/src/terminal/pty.rs:80-112,259-268` — daemon readiness is published before the Windows agent-state listener creates its rendezvous files, while each PTY reads those files only once during spawn. A client released by the ready signal can create a pane in that gap; the pane receives neither `FERRYX_AGENT_STATE_PORT` nor `FERRYX_AGENT_STATE_TOKEN` and never retries. The claimed Windows ingress is therefore racy and can remain disabled for the pane’s lifetime.
+4. `src-tauri/src/terminal/shell.rs:382-389` — the Linux fallback returns `"/bin/sh"` when `/bin/sh` does not exist but a bare `sh` is found on `PATH`. That guarantees failure on the exact nonstandard layouts the branch claims to support; it must return `"sh"` in the `is_on_path("sh")` case. The added test codifies the broken result.
+5. `src-tauri/src/daemon/client.rs:1266-1305` — the Windows `HandshakeOk` protocol-mismatch path still deletes `daemon.port` and `daemon.lock` after `terminate_stale_daemon_process_windows`, even though that function returns no success indication and can decline termination when `tasklist` fails or the image check does not match. A live predecessor can consequently lose its published endpoint, recreating the unreachable-daemon failure that the neighboring `ProtocolMismatch` branch explicitly avoids.
+
+P1 ISSUES:
+1. `src-tauri/src/ipc/native_terminal.rs:548-570` — Linux text probing invokes `wl-paste --no-newline` or plain `xclip -o` without requesting a text MIME type. For an image-only clipboard, those commands can return image bytes; `decode_linux_clipboard_text` converts them lossily into nonempty text, and `classify_linux_clipboard` prioritizes that text over the advertised `image/*` type. Image paste can therefore send corrupted binary-derived text instead of taking the image path.
+2. `src-tauri/src/daemon/server.rs:1736-1780`; `src-tauri/src/terminal/pty.rs:80-112` — agent-state rendezvous publication is not an atomic pair and stale files are not removed. The server writes the new port before replacing the old token, so a concurrent PTY can permanently inherit a new-port/old-token pair. Listener setup failure can likewise leave a previous boot’s files available.
+3. `ui/src/components/settings/GeneralSection.tsx:78-91`; `src-tauri/src/ipc/updater.rs:28-40` — `updatesManagedExternally()` is true for Linux deb/rpm packages as well as Windows Store installs, but the UI always says “Updates are managed by the Microsoft Store.” This is a cross-file contract mismatch and gives Linux users incorrect update instructions.
+4. `src-tauri/src/daemon/server.rs:953-1015` — the rendezvous tests are vacuous with respect to the Windows implementation. They only assert filename derivation and initial in-memory state; they never run the non-Unix listener, verify files are published before readiness, spawn a PTY that consumes them, or send an authenticated report. They would pass if the listener call or PTY environment export were removed.
+5. `ui/src/lib/agentSessionDiscovery.ts:35-39` — Windows suffix handling was added, but command tokenization still uses `split(/\s+/)[0]`. A quoted executable under `C:\Program Files\...` is split at the embedded space and will not match. The new tests cover unquoted npm shim paths only, so this remaining Windows case is untested.
+
+NOTES:
+- The shortcut guard is on the live matching path and checks terminal ancestry before `preventDefault`; the shown tests would fail if that guard were reverted.
+- The three shown lock conversions use `File::lock()` without Unix gating in `account/store.rs`, `remote/attach_identity.rs`, and `remote/auth.rs`. The diff does not show enough surrounding transaction code to establish that every auth read-modify-write sequence holds the same lock.
+- The daemon transport token is added to the shown handshake send sites and checked before dispatch on non-Unix. I cannot prove every external or separately implemented daemon client uses those sites from this diff alone.
+- No Linux compile result was supplied, so Linux-only FFI, GTK, and helper paths remain statically reviewed rather than compiler-verified.
+
+EVIDENCE:
+- Read the changed command definition, frontend files, and absence of any corresponding command registration or capability consumer in the full diff.
+- Traced Linux compositor construction, descriptor reporting, surface-handle fallback, and child-only geometry application.
+- Traced daemon startup ordering into the one-shot PTY rendezvous-file reader.
+- Traced Linux shell selection through all fallback branches and its new unit tests.
+- Traced both Windows protocol-mismatch branches and the stale-process termination helper’s return contract.
+- Traced Linux clipboard type discovery, untyped payload reads, lossy decoding, and text-first classification.
+- Compared updater backend ownership semantics with the frontend’s fixed Microsoft Store message.

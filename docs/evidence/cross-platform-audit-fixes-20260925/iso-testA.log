@@ -1,0 +1,6 @@
+
+running 1 test
+test ipc::tests::test_p11_start_cleanup_reaper_schedules_background_resolution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2120 filtered out; finished in 121.49s
+

@@ -1,0 +1,29 @@
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -874,9 +874,10 @@
+ 
+ /// Publishes this boot's loopback rendezvous pair in the order a reader depends on: the previous
+ /// boot's token is dropped first, this boot's token is written second, and the port is published
+-/// last. A port on disk is therefore never ahead of the credential beside it: a reader that finds
+-/// a port always finds a token that is already written, so its first attempt can only fail on a
+-/// port a previous boot left behind.
++/// last. The ordering guarantees that this boot's port is never on disk before this boot's token.
++/// It does not extend to a port a predecessor left behind: while this boot is republishing, a
++/// reader can still find that port with no token beside it, an interval that is harmless because
++/// the daemon rejects a credential it did not mint and `DaemonClient` re-reads both halves once.
+ ///
+ /// The stale port is dropped by the caller, not here: `remove_stale_socket_after_lock` removes it
+ /// under the instance lock before the listener binds. The ordering does not make the pair atomic,
+@@ -968,6 +969,12 @@
+ 
+ /// Publishes the ingress endpoint as one record renamed into place: a reader can never observe
+ /// this boot's port beside a previous boot's token, or the reverse.
++///
++/// `fs::rename` replaces an existing destination on every target: Unix `rename(2)`, and Windows
++/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` (see `library/std/src/sys/fs/windows.rs`),
++/// matching the `std::fs::rename` documentation's "replacing the original file if `to` already
++/// exists". A Windows reader does not block the replace: std opens files with a default share
++/// mode of `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`.
+ #[cfg(any(not(unix), test))]
+ fn publish_agent_state_rendezvous(
+     runtime_dir: &Path,

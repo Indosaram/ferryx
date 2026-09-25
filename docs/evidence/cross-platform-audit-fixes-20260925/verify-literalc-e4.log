@@ -1,0 +1,572 @@
+   Compiling ferryx v2026.922.1 (/Volumes/T9-Mac/project/ferryx/src-tauri)
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:442:9
+    |
+442 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `path::PathBuf`
+  --> src/terminal/remote.rs:10:5
+   |
+10 |     path::PathBuf,
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:316:9
+    |
+316 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:19:25
+   |
+19 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:19:34
+   |
+19 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+   --> src/terminal/session.rs:975:27
+    |
+975 |         use std::os::fd::{AsRawFd, FromRawFd};
+    |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:1454:17
+     |
+1454 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:529:9
+    |
+529 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:543:26
+    |
+543 |         let mut cursor = 0usize;
+    |                          ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:569:14
+    |
+569 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:594:22
+    |
+594 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:591:41
+    |
+591 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:5360:13
+     |
+5360 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:5411:13
+     |
+5411 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src/native_terminal/surface_host.rs:8049:13
+     |
+8049 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src/native_terminal/surface_host.rs:8059:13
+     |
+8059 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1728:14
+     |
+1728 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: value assigned to `desired_size` is never read
+   --> src/terminal/remote.rs:937:56
+    |
+937 |             let mut desired_size: Option<(u16, u16)> = None;
+    |                                                        ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1035:13
+     |
+1035 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: type `DaemonLockFiles` is more private than the item `handover_socket::adopt_authority`
+   --> src/daemon/handover_socket.rs:227:1
+    |
+227 | / pub fn adopt_authority(
+228 | |     authority: TransferredAuthority,
+229 | | ) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
+    | |_____________________________________________________________________________________^ function `handover_socket::adopt_authority` is reachable at visibility `pub`
+    |
+note: but type `DaemonLockFiles` is only usable at visibility `pub(crate)`
+   --> src/daemon/server.rs:733:1
+    |
+733 | pub(crate) struct DaemonLockFiles {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `agent_forward::Route` is more private than the item `agent_forward::resolve_report`
+   --> src/ssh/agent_forward.rs:176:1
+    |
+176 | / pub(crate) async fn resolve_report(
+177 | |     line: &str,
+178 | |     routes: &Arc<Mutex<HashMap<String, Route>>>,
+179 | | ) -> Option<(Arc<AgentStateHub>, AgentState)> {
+    | |_____________________________________________^ function `agent_forward::resolve_report` is reachable at visibility `pub(crate)`
+    |
+note: but type `agent_forward::Route` is only usable at visibility `pub(self)`
+   --> src/ssh/agent_forward.rs:51:1
+    |
+ 51 | struct Route {
+    | ^^^^^^^^^^^^
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src/terminal/output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src/terminal/machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src/terminal/paired_runtime.rs:702:5
+    |
+702 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src/terminal/paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::live_import`
+   --> src/terminal/remote.rs:752:5
+    |
+752 | /     pub fn live_import(
+753 | |         &self,
+754 | |         state: RemoteExportState,
+755 | |         transport: Option<Arc<dyn Transport>>,
+756 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:169:1
+    |
+169 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::import_transferred`
+   --> src/terminal/remote.rs:773:5
+    |
+773 | /     pub fn import_transferred(
+774 | |         &self,
+775 | |         state: RemoteExportState,
+776 | |         transport: Option<Arc<dyn Transport>>,
+777 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:169:1
+    |
+169 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `idle_upgrade_requested` is never used
+  --> src/daemon/handover.rs:33:15
+   |
+33 | pub(crate) fn idle_upgrade_requested() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:664:19
+    |
+357 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+664 |     pub(crate) fn machine_sessions(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:503:5
+    |
+498 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+503 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src/ipc/file_preview.rs:1074:4
+     |
+1074 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/ipc/file_preview.rs:1090:25
+     |
+1090 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:29:5
+   |
+28 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+29 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: field `0` is never read
+    --> src/remote/auth.rs:1215:18
+     |
+1215 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: struct `Held` is never constructed
+   --> src/remote/../../tests/support/machine_input_fixture.rs:152:12
+    |
+152 | pub struct Held {
+    |            ^^^^
+
+warning: associated items `start` and `drain` are never used
+   --> src/remote/../../tests/support/machine_input_fixture.rs:159:18
+    |
+158 | impl Held {
+    | --------- associated items in this implementation
+159 |     pub async fn start(fixture: &Fixture, session: &Value, socket: &mut Socket) -> Self {
+    |                  ^^^^^
+...
+210 |     pub async fn drain(mut self) {
+    |                  ^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:5845:12
+     |
+5845 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: function `test_persist_count` is never used
+   --> src/terminal/paired_runtime.rs:101:15
+    |
+101 | pub(crate) fn test_persist_count() -> usize {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `test_adopted_process_liveness_observation` is never used
+    --> src/terminal/session.rs:1216:8
+     |
+1216 |     fn test_adopted_process_liveness_observation() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> src/daemon/a03_owner_cli_fixture.rs:126:5
+    |
+126 | /     auth.register_scoped_pairing_capability(
+127 | |         &token,
+128 | |         crate::remote::auth::DevicePermission::Control,
+129 | |         expected,
+130 | |     );
+    | |_____^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+126 |     let _ = auth.register_scoped_pairing_capability(
+    |     +++++++
+
+warning: unused `std::result::Result` that must be used
+  --> src/remote/../../tests/support/machine_input_cancellation.rs:38:17
+   |
+38 |                 fixture.state.auth_manager.revoke_device(&fixture.device);
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+   |
+38 |                 let _ = fixture.state.auth_manager.revoke_device(&fixture.device);
+   |                 +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> src/remote/../../tests/support/machine_input_cancellation.rs:153:9
+    |
+153 |         fixture.state.auth_manager.revoke_device(&fixture.device);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+153 |         let _ = fixture.state.auth_manager.revoke_device(&fixture.device);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> src/remote/../../tests/support/machine_input_fixture.rs:119:9
+    |
+119 |         self.state.auth_manager.revoke_device(&self.device);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+119 |         let _ = self.state.auth_manager.revoke_device(&self.device);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src/remote/server.rs:5540:9
+     |
+5540 |         state.auth_manager.revoke_device(&device.id);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+5540 |         let _ = state.auth_manager.revoke_device(&device.id);
+     |         +++++++
+
+warning: `ferryx` (lib test) generated 67 warnings (1 duplicate) (run `cargo fix --lib -p ferryx --tests` to apply 22 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 13s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-cc8118d6c33ab9c1)
+
+running 9 tests
+test daemon::server::agent_state_transport_tests::transport_token_matches_only_the_exact_credential ... ok
+test daemon::server::agent_state_transport_tests::agent_state_rendezvous_record_sits_beside_the_socket ... ok
+test daemon::server::agent_state_transport_tests::the_port_is_published_only_after_the_token_that_authenticates_it ... ok
+test daemon::server::agent_state_transport_tests::transport_token_is_read_from_the_request_line ... ok
+test daemon::server::agent_state_transport_tests::rendezvous_publish_writes_the_port_and_the_token_as_one_file ... ok
+test daemon::server::agent_state_transport_tests::a_failed_rendezvous_publish_leaves_no_endpoint_to_report ... ok
+test daemon::server::agent_state_transport_tests::agent_state_endpoint_is_absent_until_the_ingress_binds ... ok
+test daemon::server::agent_state_transport_tests::readiness_is_released_only_after_the_ingress_failure_is_recorded ... ok
+test daemon::server::agent_state_transport_tests::a_bound_ingress_is_not_recorded_as_unavailable ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2121 filtered out; finished in 0.01s
+
+LITERAL_CE4_EXIT=0

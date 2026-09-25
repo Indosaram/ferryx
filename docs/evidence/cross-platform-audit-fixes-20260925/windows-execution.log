@@ -1,0 +1,24 @@
+WINDOWS=Microsoft Windows 11 Pro build 26200
+PROCESSOR_ARCHITECTURE=AMD64
+PROCESSOR_IDENTIFIER=AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD
+rustc host=host: x86_64-pc-windows-msvc
+rustc release=release: 1.97.0
+--- rerun for the record ---
+OS=windows ARCH=x86_64
+RUNTIME_DIR=C:\Users\sook\AppData\Local\Temp\ferryx-win-rename-exec-proof
+PUBLISH1=Ok(())
+RECORD1="41234\ntoken-abc\n"
+PUBLISH2=Ok(())
+RECORD2="41235\ntoken-def\n"
+STAGED_TMP_LEFT=false
+VERDICT=WINDOWS_REPLACE_CONFIRMED
+RUN_EXIT=0
+--- the record file on disk after the run ---
+
+Name                   Length
+----                   ------
+agent-state.rendezvous     16
+
+
+41235
+token-def

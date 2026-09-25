@@ -1,0 +1,5 @@
+=== START testA (watchdog [object Object]s) 09:32:11 ===
+DONE testA EXIT=0 ok=1 failed=0 [object Object]
+=== START testB (watchdog [object Object]s) 09:34:14 ===
+DONE testB EXIT=0 ok=1 failed=0 [object Object]
+=== START fullsuite (watchdog [object Object]s) 09:34:38 ===

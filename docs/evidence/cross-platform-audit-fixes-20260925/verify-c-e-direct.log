@@ -1,0 +1,19 @@
+# criterion C-E via the cargo-built test binary (direct execution, 2026-09-25)
+# binary: src-tauri/target/debug/deps/ferryx_lib-cc8118d6c33ab9c1  size=238380328  sha256=2b3872194b39cc976c6f254aff43266869f339bf56ccb6d7d8e404686c9a6a0c  built=01:28:23 (server.rs last edited 01:17:25)
+# invocation: DYLD_FALLBACK_LIBRARY_PATH=/Volumes/T9-Mac/project/ferryx/src-tauri/target/debug/build/ferryx-0853e38632fca60f/out/ghostty_vt/lib <binary> daemon::server::agent_state_transport_tests --test-threads=1
+
+
+running 9 tests
+test daemon::server::agent_state_transport_tests::a_bound_ingress_is_not_recorded_as_unavailable ... ok
+test daemon::server::agent_state_transport_tests::a_failed_rendezvous_publish_leaves_no_endpoint_to_report ... ok
+test daemon::server::agent_state_transport_tests::agent_state_endpoint_is_absent_until_the_ingress_binds ... ok
+test daemon::server::agent_state_transport_tests::agent_state_rendezvous_record_sits_beside_the_socket ... ok
+test daemon::server::agent_state_transport_tests::readiness_is_released_only_after_the_ingress_failure_is_recorded ... ok
+test daemon::server::agent_state_transport_tests::rendezvous_publish_writes_the_port_and_the_token_as_one_file ... ok
+test daemon::server::agent_state_transport_tests::the_port_is_published_only_after_the_token_that_authenticates_it ... ok
+test daemon::server::agent_state_transport_tests::transport_token_is_read_from_the_request_line ... ok
+test daemon::server::agent_state_transport_tests::transport_token_matches_only_the_exact_credential ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2112 filtered out; finished in 0.02s
+
+DIRECT_CE_EXIT=
