@@ -34,6 +34,39 @@ import { useNotificationCenter } from "./useNotificationCenter";
 
 export const POPOVER_WIDTH = 380;
 
+const PLACEMENT_GAP = 6;
+const VIEWPORT_MARGIN = 8;
+const MIN_POPOVER_HEIGHT = 120;
+
+export interface PopoverPlacement {
+  top?: number;
+  bottom?: number;
+  left: number;
+  maxHeight: number;
+}
+
+/**
+ * The popover must open toward the side with room. A trigger in the sidebar's top row leaves
+ * almost nothing above it, so anchoring upward (the original bottom-strip behaviour) would place
+ * the whole dialog off-screen and read as "the button does nothing".
+ */
+export function resolvePopoverPlacement(
+  anchor: { top: number; bottom: number; left: number },
+  viewport: { width: number; height: number },
+  popoverWidth: number,
+): PopoverPlacement {
+  const spaceAbove = anchor.top - PLACEMENT_GAP - VIEWPORT_MARGIN;
+  const spaceBelow = viewport.height - anchor.bottom - PLACEMENT_GAP - VIEWPORT_MARGIN;
+  const placeBelow = spaceBelow >= spaceAbove;
+  const maxLeft = Math.max(VIEWPORT_MARGIN, viewport.width - popoverWidth - VIEWPORT_MARGIN);
+  const left = Math.min(Math.max(VIEWPORT_MARGIN, anchor.left), maxLeft);
+  const maxHeight = Math.max(MIN_POPOVER_HEIGHT, placeBelow ? spaceBelow : spaceAbove);
+
+  return placeBelow
+    ? { top: anchor.bottom + PLACEMENT_GAP, left, maxHeight }
+    : { bottom: viewport.height - anchor.top + PLACEMENT_GAP, left, maxHeight };
+}
+
 export function formatNotificationLocation(workspaceLabel?: string, worktreeLabel?: string): string {
   const ws = workspaceLabel?.trim();
   const wt = worktreeLabel?.trim();
@@ -111,19 +144,23 @@ export function NotificationCenterPopover({
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties>({
     bottom: 42,
     left: 8,
+    maxHeight: 420,
   });
 
   const updatePosition = useCallback(() => {
     if (!anchorRef?.current) return;
     const rect = anchorRef.current.getBoundingClientRect();
-    const bottom = Math.max(8, window.innerHeight - rect.top + 6);
     const popoverWidth =
       modalRef.current?.getBoundingClientRect().width ||
       modalRef.current?.offsetWidth ||
       POPOVER_WIDTH;
-    const maxLeft = Math.max(8, window.innerWidth - popoverWidth - 8);
-    const left = Math.min(Math.max(8, rect.left), maxLeft);
-    setPopoverStyle({ bottom, left });
+    setPopoverStyle(
+      resolvePopoverPlacement(
+        { top: rect.top, bottom: rect.bottom, left: rect.left },
+        { width: window.innerWidth, height: window.innerHeight },
+        popoverWidth,
+      ),
+    );
   }, [anchorRef]);
 
   useLayoutEffect(() => {
@@ -312,9 +349,9 @@ export function NotificationCenterPopover({
 
         {/* Content */}
         {tab === "ask" ? (
-          <AttentionAskPanel className="flex min-h-0 flex-col" />
+          <AttentionAskPanel className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-sleek" />
         ) : tab === "agents" && attentionInventory ? (
-          <div className="min-h-0 flex-1 overflow-y-auto max-h-[380px] scrollbar-sleek">
+          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-sleek">
             <AttentionInbox
               snapshot={buildDesktopInventory(
                 attentionInventory.workspaces,
@@ -346,7 +383,7 @@ export function NotificationCenterPopover({
             Nothing matches this filter
           </div>
         ) : (
-          <div className="flex flex-col overflow-y-auto max-h-[380px] scrollbar-sleek">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-sleek">
             {groups.map((group) => (
               <section key={group.section} data-testid={`notification-section-${group.section}`}>
                 <h3 className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
