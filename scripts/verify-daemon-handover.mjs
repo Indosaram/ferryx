@@ -6,10 +6,16 @@ import net from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
 
-const binary = path.resolve(process.argv[2] ?? "src-tauri/target/debug/ferryx");
-const initialBinary = path.resolve(process.argv[3] ?? binary);
+// Positional arguments are the binaries; flags must not be mistaken for a path.
+const positional = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+const binary = path.resolve(positional[0] ?? "src-tauri/target/debug/ferryx");
+const initialBinary = path.resolve(positional[1] ?? binary);
 const noIntermediateSession = process.argv.includes("--no-intermediate-session");
 const verifyAgentState = process.argv.includes("--agent-state");
+// v4 routing is the default mode of this harness: the predecessor keeps the PTY descriptors and
+// must leave a durable legacy route. `--v5` asserts the ownership-transfer contract instead
+// (predecessor retires immediately, no legacy route).
+const v5Mode = process.argv.includes("--v5");
 const root = await mkdtemp("/tmp/fx-handover-");
 const runtime = path.join(root, "runtime");
 const canonical = path.join(runtime, "daemon.sock");
@@ -20,14 +26,33 @@ const sessions = [];
 let stderr = "";
 let initial;
 
+// Cold-start budget for a privately spawned daemon. This was 10s, which is not enough when the
+// machine is loaded (a concurrent Rust/Chromium build pushes a first daemon start past it): the wait
+// expires before any assertion is reached. Only this unrelated cold-start wait grows.
+const READY_TIMEOUT_MS = 90_000;
+
 function bounded(promise, label) {
   let timer;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Timed out: ${label}\n${stderr}`)), 10000);
+      timer = setTimeout(() => reject(new Error(`Timed out: ${label}\n${stderr}`)), READY_TIMEOUT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/// Resolves true once the process is gone. Polling a pid is the only signal available for a
+/// daemon that exits without a child handle; the caller bounds the wait.
+async function waitForProcessExit(pid) {
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return true;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 async function connect(socketPath) {
@@ -87,7 +112,9 @@ async function connect(socketPath) {
     socket.write(`${JSON.stringify(request)}\n`);
     return response;
   };
-  const handshake = await call({ type: "handshake", version: 3 });
+  // Must match `DAEMON_PROTOCOL_VERSION` in src-tauri/src/daemon/protocol.rs; the daemon answers a
+  // stale handshake with `protocolMismatch` instead of `handshakeOk`.
+  const handshake = await call({ type: "handshake", version: 5 });
   assert.equal(handshake.type, "handshakeOk", JSON.stringify(handshake));
   ownedPids.add(handshake.pid);
   return {
@@ -180,6 +207,11 @@ try {
   await mkdir(runtime, { mode: 0o700 });
   await mkdir(repository);
   await mkdir(path.join(root, "home"));
+  // The daemon locks its durable remote-persistence sidecar inside FERRYX_DATA_DIR and writes
+  // session state into FERRYX_SESSION_DIR, so both must exist before it starts.
+  await mkdir(path.join(root, "data"), { recursive: true });
+  await mkdir(path.join(root, "sessions"), { recursive: true });
+  await mkdir(path.join(root, "config"), { recursive: true });
   execFileSync("git", ["init", "-q", repository]);
   initial = spawn(initialBinary, ["--daemon"], {
     env: {
@@ -190,6 +222,9 @@ try {
       FERRYX_SESSION_DIR: path.join(root, "sessions"),
       XDG_CONFIG_HOME: path.join(root, "config"),
       XDG_DATA_HOME: path.join(root, "data"),
+      // v4 mode pins the opt-out so this harness always exercises legacy routing; v5 mode leaves
+      // the variable absent so the compiled-in default (ownership transfer) is what runs.
+      ...(v5Mode ? {} : { FERRYX_HANDOVER_V5: "0" }),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -245,17 +280,34 @@ try {
     }
 
     const replacement = nextCanonical(control.handshake.epoch);
+    const predecessorPid = control.handshake.pid;
     const upgrade = await control.call({ type: "upgradeBinary", newBinaryPath: binary });
     assert.equal(upgrade.type, "upgradeScheduled", JSON.stringify(upgrade));
     control.close();
     control = await replacement;
-    const manifest = JSON.parse(await readFile(path.join(runtime, "handover_routes.json"), "utf8"));
+    let manifest = await readFile(path.join(runtime, "handover_routes.json"), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => null);
+    if (v5Mode) {
+      // Ownership transfer: the predecessor must retire on its own once the successor owns the
+      // descriptors, and it must not leave a route that could keep it serving stale sessions.
+      const retired = await bounded(waitForProcessExit(predecessorPid), `predecessor ${predecessorPid} retirement`);
+      assert.ok(retired, `predecessor ${predecessorPid} must exit after a v5 handover`);
+      console.log(`PASS predecessor ${predecessorPid} retired immediately after v5 commit`);
+    }
     const listed = await control.call({ type: "listSessions" });
     assert.equal(listed.type, "listSessionsOk", JSON.stringify(listed));
     for (const sessionId of sessions) {
       assert.ok(listed.sessions.includes(sessionId), `missing original PTY ${sessionId}`);
-      assert.ok(manifest.routes.some((route) => route.sessions.includes(sessionId)),
-        `original PTY ${sessionId} has no durable legacy route`);
+      if (v5Mode) {
+        assert.ok(
+          !manifest?.routes?.some((route) => route.sessions.includes(sessionId)),
+          `original PTY ${sessionId} must not carry a durable legacy route under v5`,
+        );
+      } else {
+        assert.ok(manifest.routes.some((route) => route.sessions.includes(sessionId)),
+          `original PTY ${sessionId} has no durable legacy route`);
+      }
       const attached = await connect(canonical);
       const snapshot = await attached.call({ type: "attach", sessionId, afterSequence: 0 });
       assert.equal(snapshot.type, "attachOk", JSON.stringify(snapshot));
@@ -298,6 +350,7 @@ try {
     } catch {}
   }
   for (const pid of ownedPids) {
+    if (typeof pid !== "number") continue;
     try { process.kill(pid, "SIGTERM"); } catch (error) {
       if (error.code !== "ESRCH") throw error;
     }

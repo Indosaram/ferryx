@@ -20,6 +20,11 @@ import path from "node:path";
 
 export const REQUIRED_TEAM_ID = "5DUM8WPB4C";
 export const UNSIGNED_OVERRIDE_ENV = "FERRYX_ALLOW_UNSIGNED_INSTALL";
+/**
+ * Escape hatch for deliberately reinstalling the SAME version (e.g. re-verifying one
+ * build). Normal installs must advance the version; see `evaluateVersionProgression`.
+ */
+export const VERSION_REUSE_OVERRIDE_ENV = "FERRYX_ALLOW_VERSION_REUSE_INSTALL";
 export const DEFAULT_DEST = "/Applications/Ferryx.app";
 
 /**
@@ -50,6 +55,79 @@ export function evaluateNotarizationEvidence({
     failures.push("xcrun stapler validate did not pass (no notarization ticket)");
   }
   return { ok: failures.length === 0, failures };
+}
+
+/**
+ * Numeric comparator for the dotted versions this repo ships (`2026.924.1`). Returns
+ * `null` when either side is not a plain dotted-numeric version, so the caller can fall
+ * back to an equality-only check instead of guessing an order.
+ */
+export function compareVersions(left, right) {
+  const parse = (value) => {
+    if (typeof value !== "string") return null;
+    const parts = value.trim().replace(/^v/, "").split(".");
+    if (parts.length < 2) return null;
+    const numbers = [];
+    for (const part of parts) {
+      if (!/^\d+$/.test(part)) return null;
+      numbers.push(Number(part));
+    }
+    return numbers;
+  };
+  const a = parse(left);
+  const b = parse(right);
+  if (!a || !b) return null;
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const l = a[i] ?? 0;
+    const r = b[i] ?? 0;
+    if (l !== r) return l < r ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Pure version-progression decision for a local install.
+ *
+ * A local install must ADVANCE the app version. Replacing the installed bundle with one
+ * carrying the same `CFBundleShortVersionString` leaves the daemon's upgrade detection
+ * with nothing but binary mtimes to compare, which is how a same-version replacement
+ * reached /Applications on 2026-09-24 and forced an mtime-based handover instead of a
+ * version-based one.
+ */
+export function evaluateVersionProgression({
+  incomingVersion = "",
+  installedVersion = "",
+  reuseOverride = false,
+} = {}) {
+  const failures = [];
+  if (reuseOverride) return { ok: true, failures };
+  if (!incomingVersion) {
+    failures.push(
+      "incoming bundle has no CFBundleShortVersionString, so the version cannot be proven to advance",
+    );
+    return { ok: false, failures };
+  }
+  if (!installedVersion) return { ok: true, failures };
+  const order = compareVersions(incomingVersion, installedVersion);
+  if (order === 0) {
+    failures.push(
+      `incoming bundle version ${incomingVersion} equals the installed version; ` +
+        "bump the version before installing so upgrade detection does not fall back to mtimes",
+    );
+  } else if (order !== null && order < 0) {
+    failures.push(
+      `incoming bundle version ${incomingVersion} is older than the installed version ${installedVersion}`,
+    );
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+/** Reads a bundle's marketing version from its Info.plist. */
+export function bundleVersionCommand(bundle) {
+  return [
+    "/usr/libexec/PlistBuddy",
+    ["-c", "Print :CFBundleShortVersionString", path.join(bundle, "Contents", "Info.plist")],
+  ];
 }
 
 /**
@@ -157,6 +235,37 @@ export function main(argv = process.argv.slice(2), { exec = run, env = process.e
         "Gatekeeper/TCC re-prompts on every rebuild. Record why this is necessary.",
     );
   }
+
+  // A local install must advance the app version. Replacing the bundle with the same
+  // version leaves daemon upgrade detection with only binary mtimes to compare.
+  const incomingVersionResult = exec(...bundleVersionCommand(options.bundle));
+  const incomingVersion = incomingVersionResult.exit === 0 ? incomingVersionResult.out.trim() : "";
+  const installedVersionResult = existsSync(options.dest)
+    ? exec(...bundleVersionCommand(options.dest))
+    : { exit: 1, out: "" };
+  const installedVersion = installedVersionResult.exit === 0 ? installedVersionResult.out.trim() : "";
+  const reuseOverride = env[VERSION_REUSE_OVERRIDE_ENV] === "1";
+  const progression = evaluateVersionProgression({
+    incomingVersion,
+    installedVersion,
+    reuseOverride,
+  });
+  if (!progression.ok) {
+    console.error("Refusing to install: the bundle does not advance the app version.");
+    for (const failure of progression.failures) console.error(`  - ${failure}`);
+    console.error(
+      "Bump the version in src-tauri/Cargo.toml and src-tauri/tauri.conf.json before installing, " +
+        `or set ${VERSION_REUSE_OVERRIDE_ENV}=1 to reuse the version deliberately.`,
+    );
+    process.exit(1);
+  }
+  if (reuseOverride) {
+    console.error(
+      `WARNING: version-reuse override active (${VERSION_REUSE_OVERRIDE_ENV}=1); installing ` +
+        `${incomingVersion} over ${installedVersion}. Upgrade detection will fall back to mtimes.`,
+    );
+  }
+  console.log(`Version progression: ${installedVersion || "<none>"} -> ${incomingVersion}`);
 
   const liveCmd = liveExecutorCommand(options.dest);
   const liveExecutors = exec(liveCmd[0], liveCmd.slice(1)).out

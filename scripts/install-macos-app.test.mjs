@@ -2,11 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  bundleVersionCommand,
+  compareVersions,
   decideInstallStrategy,
   evaluateNotarizationEvidence,
+  evaluateVersionProgression,
   liveExecutorCommand,
   timestampedBackupDir,
   UNSIGNED_OVERRIDE_ENV,
+  VERSION_REUSE_OVERRIDE_ENV,
 } from "./install-macos-app.mjs";
 
 const NOTARIZED_DV = [
@@ -93,4 +97,68 @@ test("timestampedBackupDir is inode-safe and timestamped under /Applications", (
 
 test("unsigned override requires both the env var and the CLI flag together", () => {
   assert.equal(UNSIGNED_OVERRIDE_ENV, "FERRYX_ALLOW_UNSIGNED_INSTALL");
+});
+
+test("evaluateVersionProgression rejects reinstalling the same version", () => {
+  // This is the 2026-09-24 regression: 2026.922.1 was installed over 2026.922.1, leaving
+  // daemon upgrade detection with nothing but binary mtimes to compare.
+  const verdict = evaluateVersionProgression({
+    incomingVersion: "2026.922.1",
+    installedVersion: "2026.922.1",
+  });
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.failures.join("\n"), /equals the installed version/);
+});
+
+test("evaluateVersionProgression accepts an advanced version", () => {
+  const verdict = evaluateVersionProgression({
+    incomingVersion: "2026.924.1",
+    installedVersion: "2026.922.1",
+  });
+  assert.deepEqual(verdict.failures, []);
+  assert.equal(verdict.ok, true);
+});
+
+test("evaluateVersionProgression rejects an older version and a version-less bundle", () => {
+  const older = evaluateVersionProgression({
+    incomingVersion: "2026.920.1",
+    installedVersion: "2026.922.1",
+  });
+  assert.equal(older.ok, false);
+  assert.match(older.failures.join("\n"), /is older than the installed version/);
+
+  const unversioned = evaluateVersionProgression({ incomingVersion: "", installedVersion: "2026.922.1" });
+  assert.equal(unversioned.ok, false);
+  assert.match(unversioned.failures.join("\n"), /no CFBundleShortVersionString/);
+});
+
+test("evaluateVersionProgression installs over a fresh machine and honours the override", () => {
+  const first = evaluateVersionProgression({ incomingVersion: "2026.924.1", installedVersion: "" });
+  assert.equal(first.ok, true);
+
+  const forced = evaluateVersionProgression({
+    incomingVersion: "2026.922.1",
+    installedVersion: "2026.922.1",
+    reuseOverride: true,
+  });
+  assert.equal(forced.ok, true);
+  assert.equal(VERSION_REUSE_OVERRIDE_ENV, "FERRYX_ALLOW_VERSION_REUSE_INSTALL");
+});
+
+test("compareVersions orders dotted numeric versions and abstains on others", () => {
+  assert.equal(compareVersions("2026.924.1", "2026.922.1"), 1);
+  assert.equal(compareVersions("2026.922.1", "2026.924.1"), -1);
+  assert.equal(compareVersions("2026.922.1", "2026.922.1"), 0);
+  assert.equal(compareVersions("2026.1000.0", "2026.999.0"), 1);
+  assert.equal(compareVersions("not-a-version", "2026.922.1"), null);
+});
+
+test("bundleVersionCommand reads the marketing version from the bundle's Info.plist", () => {
+  const command = bundleVersionCommand("/Applications/Ferryx.app");
+  assert.equal(command[0], "/usr/libexec/PlistBuddy");
+  assert.deepEqual(command[1], [
+    "-c",
+    "Print :CFBundleShortVersionString",
+    "/Applications/Ferryx.app/Contents/Info.plist",
+  ]);
 });

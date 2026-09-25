@@ -29,7 +29,7 @@ async fn a24_rollback_waits_for_drain_and_preserves_unrelated_owner() {
     let mut other_committed = unrelated.subscribe_client_abort();
     std::fs::write(root.path().join("unrelated.sock"), b"unrelated-owner-route").unwrap();
     std::fs::write(root.path().join("credentials"), b"fixture-credential-bytes").unwrap();
-    old.commit_handover(&terminals).unwrap();
+    old.commit_handover_v4(&terminals).unwrap();
     committed.try_recv().unwrap();
     drop(connection);
     old.check_retirement_if_empty(&terminals);

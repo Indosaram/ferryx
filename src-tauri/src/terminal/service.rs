@@ -216,6 +216,39 @@ impl TerminalService {
         (session_id, lifecycle_rx)
     }
 
+    /// Drains an ADOPTED session's PTY output into the hub.
+    ///
+    /// A handover transfers the PTY master to the successor, which adopts the session and gets a
+    /// fresh output receiver. That receiver must be held and pumped for as long as the child runs:
+    /// the lifecycle watcher treats a closed receiver as "the owner went away" and closes the
+    /// session, which kills the very child the handover was supposed to preserve. Unlike
+    /// `register_output`, the hub state is already present (the predecessor's snapshot was
+    /// imported during adoption), so this must not register the session again or record a new
+    /// initial size.
+    pub(crate) fn pump_adopted_output(
+        &self,
+        session_id: String,
+        mut pty_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let output_hub = Arc::clone(&self.output_hub);
+        let lifecycle = Arc::clone(&self.lifecycle);
+        tokio::spawn(async move {
+            while let Some(chunk) = pty_rx.recv().await {
+                let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
+                    &session_id,
+                    chunk.len(),
+                );
+                output_hub.publish_with_read_timestamp(&session_id, chunk, read_unix_micros);
+            }
+            crate::terminal::metrics::clear_pty_read_timestamps(&session_id);
+            output_hub.remove_session(&session_id);
+            let mut registry = lifecycle.lock();
+            if registry.state(&session_id) != Some(SessionProcessState::Hibernated) {
+                registry.remove(&session_id);
+            }
+        });
+    }
+
     pub fn attach(
         &self,
         session_id: &str,

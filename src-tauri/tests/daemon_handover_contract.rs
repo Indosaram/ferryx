@@ -13,6 +13,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
+/// Cold-start readiness budget for a privately spawned daemon. The previous 15s is not enough when
+/// this machine is loaded (a concurrent Rust/Chromium build pushes a first daemon start past it), so
+/// the WAIT expired before any assertion ran. Only this unrelated cold-start budget changes.
+const DAEMON_READY_BUDGET: Duration = Duration::from_secs(90);
+
 struct TestDaemonClient {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
@@ -29,6 +34,7 @@ impl TestDaemonClient {
 
         let hs = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: None,
         };
         let mut hs_json = serde_json::to_string(&hs)?;
         hs_json.push('\n');
@@ -192,6 +198,7 @@ impl TestAttachStream {
 
         let hs = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
+            token: None,
         };
         let mut hs_json = serde_json::to_string(&hs)?;
         hs_json.push('\n');
@@ -329,6 +336,10 @@ impl PrivateDaemons {
             command.env(key, self.root.path().join(name));
         }
         command
+            // This contract asserts the legacy v4 routing path (a durable route in
+            // `handover_routes.json` that keeps the predecessor draining), so opt out of the
+            // default-on v5 ownership transfer explicitly.
+            .env("FERRYX_HANDOVER_V5", "0")
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("SHELL", "/bin/sh")
             .env("LANG", "C")
@@ -414,7 +425,7 @@ impl PrivateDaemons {
         }));
         if legacy.is_some() {
             let mut observed_events = Vec::new();
-            timeout(Duration::from_secs(15), async {
+            timeout(DAEMON_READY_BUDGET, async {
                 loop {
                     let event = events
                         .recv()
@@ -443,7 +454,7 @@ impl PrivateDaemons {
             });
         } else {
             assert_eq!(
-                timeout(Duration::from_secs(15), rx).await.unwrap_or_else(|error| {
+                timeout(DAEMON_READY_BUDGET, rx).await.unwrap_or_else(|error| {
                     while let Ok(event) = events.try_recv() {
                         eprintln!("V02 initial timeout filesystem event: {event:?}");
                     }

@@ -69,7 +69,10 @@ async fn original_target_remains_running_when_gateway_hands_over() {
             }
         });
         let predecessor = old.clone();
-        tokio::task::spawn_blocking(move || predecessor.handover_manager.commit_handover(predecessor.terminal_service())).await.expect("commit worker").expect("commit handover");
+        // This contract proves the legacy v4 routing path (durable route + predecessor keeps the
+        // live PTY), so it commits through `commit_handover_v4` explicitly instead of relying on
+        // the environment-dependent dispatcher.
+        tokio::task::spawn_blocking(move || predecessor.handover_manager.commit_handover_v4(predecessor.terminal_service())).await.expect("commit worker").expect("commit handover");
         let path = root.path().to_owned();
         let new = tokio::task::spawn_blocking(move || Arc::new(DaemonServer::new_with_paths(Some(path.join("config")), Some(path.join("auth"))))).await.expect("new owner");
         let owner_epoch = session["target"]["daemonEpoch"].as_str().expect("epoch").parse::<u64>().expect("numeric epoch");

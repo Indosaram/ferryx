@@ -73,7 +73,8 @@ pub enum HandoverStatus {
 #[cfg(test)]
 mod upgrade_action_tests {
     use super::{
-        idle_upgrade_enabled, successor_lock_wait, upgrade_action, UpgradeAction,
+        idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
+        UpgradeAction,
     };
 
     #[test]
@@ -115,14 +116,123 @@ mod upgrade_action_tests {
         assert_eq!(successor_lock_wait(None), None);
         assert_eq!(successor_lock_wait(Some("no")), None);
     }
+
+    /// Serializes every test that mutates `FERRYX_HANDOVER_V5`; the process environment is
+    /// global, so parallel mutation would make the gate unobservable.
+    static V5_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores the previous flag value on drop, including while unwinding from a panic.
+    struct V5EnvGuard {
+        /// Held while this guard owns the lock; `None` when the caller already holds it (see
+        /// `set_locked`), which keeps the guard usable inside a fully serialized test body.
+        _serialized: Option<std::sync::MutexGuard<'static, ()>>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl V5EnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let serialized = V5_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Self::install(Some(serialized), value)
+        }
+
+        /// Installs `value` assuming the caller already holds `V5_ENV_LOCK`. Used by tests that must
+        /// keep the lock across their own read/assert/restore so no other env test can interleave.
+        fn set_locked(value: Option<&str>) -> Self {
+            Self::install(None, value)
+        }
+
+        fn install(
+            serialized: Option<std::sync::MutexGuard<'static, ()>>,
+            value: Option<&str>,
+        ) -> Self {
+            let previous = std::env::var_os("FERRYX_HANDOVER_V5");
+            match value {
+                Some(value) => std::env::set_var("FERRYX_HANDOVER_V5", value),
+                None => std::env::remove_var("FERRYX_HANDOVER_V5"),
+            }
+            Self {
+                _serialized: serialized,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for V5EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("FERRYX_HANDOVER_V5", previous),
+                None => std::env::remove_var("FERRYX_HANDOVER_V5"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_flag_enables_v5_ownership_transfer() {
+        let _env = V5EnvGuard::set(None);
+        assert!(is_v5_ownership_transfer_enabled());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_zero_or_false_opts_out_to_legacy_routing() {
+        for opt_out in ["0", "false", "FALSE", "no", ""] {
+            let _env = V5EnvGuard::set(Some(opt_out));
+            assert!(
+                !is_v5_ownership_transfer_enabled(),
+                "{opt_out:?} must opt out of v5 ownership transfer"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_affirmative_values_enable_v5_ownership_transfer() {
+        for opt_in in ["1", "true", "TRUE", "True"] {
+            let _env = V5EnvGuard::set(Some(opt_in));
+            assert!(
+                is_v5_ownership_transfer_enabled(),
+                "{opt_in:?} must enable v5 ownership transfer"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flag_guard_restores_the_previous_value() {
+        // The whole body holds the serialization lock: reading the flag outside it would race another
+        // env-mutating test and make the restoration assertion non-deterministic.
+        let serialized = V5_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = std::env::var_os("FERRYX_HANDOVER_V5");
+        {
+            let _env = V5EnvGuard::set_locked(Some("0"));
+            assert!(!is_v5_ownership_transfer_enabled());
+        }
+        assert_eq!(std::env::var_os("FERRYX_HANDOVER_V5"), before);
+        drop(serialized);
+    }
 }
 
+/// Whether a handover transfers PTY ownership (v5) instead of only routing through a draining
+/// predecessor (v4).
+///
+/// Default ON on unix. A v5 handover moves the PTY master descriptors to the successor over
+/// `SCM_RIGHTS` and retires the predecessor immediately, so a predecessor can never keep
+/// serving live sessions on a stale binary. Set `FERRYX_HANDOVER_V5=0` (or any value other than
+/// `1`/`true`) to force the legacy v4 routing path, where the predecessor retains its
+/// descriptors and retires only once its last session ends.
+///
+/// The successor inherits the predecessor's environment (`spawn_legacy_handover_daemon` does not
+/// `env_clear`) and each generation picks its own commit path from its own environment, so a
+/// predecessor and its successor must agree on this flag.
 pub fn is_v5_ownership_transfer_enabled() -> bool {
     #[cfg(unix)]
     {
-        std::env::var("FERRYX_HANDOVER_V5")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false)
+        match std::env::var("FERRYX_HANDOVER_V5") {
+            // Default ON: an absent flag means ownership transfer.
+            Err(_) => true,
+            Ok(value) => value == "1" || value.eq_ignore_ascii_case("true"),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -203,7 +313,9 @@ mod tests {
 
         // When: handover commits and the new owner replaces the canonical socket.
         let _runtime_guard = runtime.enter();
-        manager.commit_handover(&service).expect("commit handover");
+        manager
+            .commit_handover_v4(&service)
+            .expect("commit handover");
         drop(old_listener);
         if path.exists() {
             fs::remove_file(&path).expect("new owner's stale socket cleanup");
@@ -239,7 +351,7 @@ mod tests {
         let mut committed = manager.subscribe_client_abort();
 
         manager
-            .commit_handover(&Arc::new(TerminalService::default()))
+            .commit_handover_v4(&Arc::new(TerminalService::default()))
             .expect("commit with persisted route");
 
         committed.try_recv().expect("clients may reconnect");
@@ -306,7 +418,7 @@ mod tests {
         let mut disconnected = manager.subscribe_client_abort();
 
         assert!(manager
-            .commit_handover(&Arc::new(TerminalService::default()))
+            .commit_handover_v4(&Arc::new(TerminalService::default()))
             .is_err());
 
         assert_eq!(manager.status(), HandoverStatus::Prepared);
@@ -462,6 +574,13 @@ impl HandoverManager {
         if is_v5_ownership_transfer_enabled() {
             return self.commit_handover_v5(terminal_service);
         }
+        self.commit_handover_v4(terminal_service)
+    }
+
+    /// Legacy v4 commit: persist a durable route to this daemon's private socket and keep serving
+    /// the live sessions behind it while draining. The predecessor keeps every PTY master
+    /// descriptor, so it retires only once its last session ends (`check_retirement_if_empty`).
+    pub fn commit_handover_v4(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(

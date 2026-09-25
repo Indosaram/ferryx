@@ -2343,10 +2343,17 @@ impl DaemonServer {
                 for export in exports {
                     tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
                     let (master, snapshot) = export.into_parts();
-                    self.terminal_service
+                    let session_id = snapshot.session_id.clone();
+                    let output_rx = self
+                        .terminal_service
                         .pty_manager()
                         .adopt_transferred_session(master, snapshot)
                         .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                    // The receiver must be held and pumped for as long as the adopted child runs.
+                    // Dropping it here marks the session's output channel closed, and the lifecycle
+                    // watcher would then close the session -- terminating the very child this
+                    // handover exists to preserve.
+                    self.terminal_service.pump_adopted_output(session_id, output_rx);
                 }
 
                 let commit_resp = legacy_peer
