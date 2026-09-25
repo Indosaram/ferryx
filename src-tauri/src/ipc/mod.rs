@@ -1,9 +1,11 @@
+pub mod agent_history;
 pub mod agents;
 pub mod browser;
 pub mod browser_cli;
 pub mod cli_install;
 pub mod dag;
 pub mod debug;
+pub mod design_feedback;
 pub mod diagnostics;
 pub mod error;
 pub mod file_link;

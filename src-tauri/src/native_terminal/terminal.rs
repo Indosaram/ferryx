@@ -1241,6 +1241,62 @@ mod tests {
         assert_eq!(terminal.selection_range().unwrap(), Some((0, 10, 3, 10)));
     }
 
+    /// The user's selection must survive a heavy output burst. Streaming thousands of lines
+    /// through a pane must never silently clear or rewrite the retained selection; that
+    /// behaviour (aggressive redraw discarding selections) is exactly why power users reject
+    /// other multiplexers, so it is pinned here as a regression test.
+    /// Heavy output burst: thousands of lines arrive while the selection is active.
+    /// The retained selection text is unchanged by the burst.
+    #[test]
+    fn selection_survives_a_heavy_output_burst() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        for i in 0..200 {
+            terminal.feed(format!("prelude line {}\r\n", i).as_bytes()).unwrap();
+        }
+        // Same viewport geometry and gesture shape as the drag-selection test above.
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, y, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // Drag from column 0 to column 12 on viewport row 10 to install a selection.
+        terminal.handle_mouse_gesture(&event(MouseAction::Press, 0.0, 10.0 * 20.0 + 10.0, 1_000_000_000)).unwrap();
+        terminal.handle_mouse_gesture(&event(MouseAction::Motion, 12.0 * 10.0, 10.0 * 20.0 + 10.0, 1_050_000_000)).unwrap();
+        terminal.handle_mouse_gesture(&event(MouseAction::Release, 12.0 * 10.0, 10.0 * 20.0 + 10.0, 1_060_000_000)).unwrap();
+
+        let before = terminal.selection_text().expect("query selection text");
+        assert!(before.is_some(), "the drag gesture must install a selection before the burst");
+
+        // Heavy output burst: thousands of lines arrive while the selection is active.
+        for i in 0..5_000 {
+            terminal.feed(format!("burst line {}\r\n", i).as_bytes()).unwrap();
+        }
+
+        assert_eq!(
+            terminal.selection_text().unwrap(),
+            before,
+            "a heavy output burst must not alter the retained selection",
+        );
+
+        // Clearing must still be possible and observable once the user asks for it.
+        terminal.clear_selection().unwrap();
+        assert_eq!(terminal.selection_text().unwrap(), None);
+    }
+
     #[test]
     fn test_line_text_at_reads_unwrapped_line_without_modifying_selection() {
         let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");

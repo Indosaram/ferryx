@@ -15,8 +15,13 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
+import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
+import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
+import { AttentionInboxDialog } from "./components/AttentionInboxDialog";
+import { resolveLocalSessionKey, type DesktopWorkspace } from "./features/ferryx/control/desktopInventory";
+import type { AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
@@ -1546,6 +1551,25 @@ function WorkspaceApp({
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
+  const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
+  const [attentionInboxOpen, setAttentionInboxOpen] = useState(false);
+  const desktopWorkspaces = useMemo<DesktopWorkspace[]>(() => {
+    const spaces: DesktopWorkspace[] = [];
+    for (const project of projects) {
+      const projectState =
+        project.workspaceId === activeProject.workspaceId
+          ? state
+          : getHmrWorkspaceState(project.workspaceId) ?? getWorkspaceSnapshot(project.workspaceId);
+      if (!projectState) continue;
+      const target = project.target;
+      const hostId = target && (target.kind === "ssh" || target.kind === "pairedDaemon") ? target.hostId : "local";
+      spaces.push({ workspaceId: project.workspaceId, hostId, state: projectState });
+    }
+    return spaces;
+  }, [activeProject.workspaceId, projects, state]);
+  // Projects whose workspace state could not be resolved are reported instead of hidden, so the
+  // inbox can say the list is partial rather than claiming it is complete.
+  const unavailableHosts = useMemo( () => Array.from( new Set( projects .filter((project) => project.workspaceId !== activeProject.workspaceId) .filter((project) => !(getHmrWorkspaceState(project.workspaceId) ?? getWorkspaceSnapshot(project.workspaceId))) .map((project) => (project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") && project.target?.hostId ? project.target.hostId : "local") ) ), [activeProject.workspaceId, projects], );
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -1610,6 +1634,9 @@ function WorkspaceApp({
 
   const handleSelectProject = useCallback(
     (project: RegisteredProject) => {
+      if (project.target?.kind === "pairedDaemon" && remoteHostStore.getState().nativeStatus === "unavailable") {
+        void pairedHostInventory.refresh();
+      }
       const current = activeProjectRef.current;
       if (project.workspaceId === current.workspaceId) {
         switchDebug("project.select.noop", {
@@ -1715,6 +1742,11 @@ function WorkspaceApp({
       });
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
+        setPendingWorktree(worktree);
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().nativeStatus === "unavailable") {
+        void pairedHostInventory.refresh();
         setPendingWorktree(worktree);
         return;
       }
@@ -2902,6 +2934,8 @@ function WorkspaceApp({
           onDeleteWorktree={handleDeleteWorktree}
           onResetAgentState={handleResetWorktreeAgentState}
           onManageDisk={setDiskManageProject}
+          onOpenHistory={setHistoryProject}
+          onOpenAttentionInbox={() => setAttentionInboxOpen(true)}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -3196,6 +3230,52 @@ function WorkspaceApp({
           projectName={diskManageProject.workspaceId}
           onClose={() => setDiskManageProject(null)}
         />
+      ) : null}
+      {historyProject ? (
+        <AgentHistoryDialog
+          workspaceId={historyProject.workspaceId}
+          projectName={historyProject.workspaceId}
+          cwd={historyProject.repoRoot || null}
+          onClose={() => setHistoryProject(null)}
+          onResume={async (entry: AgentHistoryEntry) => {
+            const project = historyProject;
+            try {
+              const targetWorktree =
+                (project.workspaceId === activeProjectRef.current.workspaceId ? activeWorktreeRef.current : null) ??
+                stateRef.current.worktrees.find((wt) => resolveWorktreeOwnerId(wt, projectsRef.current, project.workspaceId) === project.workspaceId) ??
+                stateRef.current.worktrees[0];
+              await ensureTerminalEvents().catch(() => undefined);
+              const backendSessionId = await spawnTerminal({
+                workspaceId: project.workspaceId,
+                worktree: targetWorktree ? worktreeIdentity(targetWorktree) : null,
+                cwd: entry.cwd || targetWorktree?.path || project.repoRoot,
+                startup: {
+                  kind: "agentResume",
+                  agentType: entry.provider,
+                  // AgentProviderSession rejects an explicit null transcriptPath, so drop it
+                  // rather than widening the wire type for one optional field.
+                  providerSession: {
+                    key: entry.providerSession.key,
+                    id: entry.providerSession.id,
+                    ...(typeof entry.providerSession.transcriptPath === "string"
+                      ? { transcriptPath: entry.providerSession.transcriptPath }
+                      : {}),
+                  },
+                },
+              });
+              const label = entry.provider.charAt(0).toUpperCase() + entry.provider.slice(1);
+              if (targetWorktree) {
+                await openTab(targetWorktree, label, backendSessionId);
+              }
+              setHistoryProject(null);
+            } catch (error) {
+              reportRuntimeError(error);
+            }
+          }}
+        />
+      ) : null}
+      {attentionInboxOpen ? (
+        <AttentionInboxDialog workspaces={desktopWorkspaces} unavailableHosts={unavailableHosts} onSelect={(agent) => { setAttentionInboxOpen(false); const localKey = resolveLocalSessionKey(agent, desktopWorkspaces); handleNotificationTarget({ workspaceId: agent.workspaceId, sessionId: localKey ?? agent.target.backendSessionId }); }} onClose={() => setAttentionInboxOpen(false)} />
       ) : null}
     </div>
   );

@@ -132,6 +132,25 @@ export type BrowserFindResult = {
   found: boolean;
 };
 
+export type BrowserSnapshotCapability = {
+  supported: boolean;
+  formats: string[];
+};
+export type BrowserDesignDomElement = { id: string; tag: string; bounds: [number, number, number, number]; text?: string | null };
+export type BrowserDesignSnapshot = {
+  session_id: string;
+  timestamp_ms: number;
+  screenshot_png_base64: string;
+  outer_html?: string;
+  css?: string;
+  dom_elements: BrowserDesignDomElement[];
+};
+export type DesignFeedbackDelivery = { pngPath: string; prompt: string; bytesWritten: number };
+export type DesignFeedbackTarget = { sessionId: string; label: string };
+export async function deliverDesignFeedback(request: { sessionId: string; memo: string; snapshot: BrowserDesignSnapshot }): Promise<DesignFeedbackDelivery> {
+  return invoke<DesignFeedbackDelivery>("cmd_design_feedback_deliver", request);
+}
+
 const browserLifecycleQueues = new Map<string, Promise<void>>();
 
 function enqueueBrowserLifecycle(browserId: string, operation: () => Promise<void>): Promise<void> {
@@ -247,8 +266,14 @@ export async function removeBrowserElementPicker(browserId: string): Promise<voi
   return invoke<void>("cmd_browser_remove_element_picker", { browserId });
 }
 
-export async function finishBrowserElementPick(browserId: string): Promise<void> {
-  return invoke<void>("cmd_browser_finish_element_pick", { browserId });
+export async function finishBrowserElementPick(browserId: string): Promise<BrowserDesignSnapshot> {
+  return invoke<BrowserDesignSnapshot>("cmd_browser_finish_element_pick", { browserId });
+}
+
+/** Reports whether this build can capture native webview snapshots (macOS today) and which
+ * encodings it supports, so platform-limited affordances can be gated instead of offered dead. */
+export async function getBrowserSnapshotCapability(): Promise<BrowserSnapshotCapability> {
+  return invoke<BrowserSnapshotCapability>("cmd_browser_snapshot_capability");
 }
 
 export async function getBrowserState(browserId: string): Promise<BrowserState> {

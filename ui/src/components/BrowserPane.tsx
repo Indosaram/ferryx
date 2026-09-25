@@ -16,6 +16,7 @@ import {
   type BrowserFindResult,
   type BrowserShortcutAction,
   type BrowserShortcutDomEvent,
+  type DesignFeedbackTarget,
 } from "../lib/browserTauri";
 import { recordBrowserHistory } from "../lib/browserHistory";
 import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
@@ -28,6 +29,7 @@ interface BrowserPaneProps {
   visible?: boolean;
   onNavigate: (url: string) => void;
   onReload: () => void;
+  designFeedbackTargets?: DesignFeedbackTarget[];
 }
 
 type BrowserStateChangedPayload = {
@@ -67,7 +69,13 @@ function extractDroppedHttpUrl(dataTransfer: DataTransfer): string | null {
   }
 }
 
-export function BrowserPane({ tab, visible = true, onNavigate, onReload }: BrowserPaneProps) {
+export function BrowserPane({
+  tab,
+  visible = true,
+  onNavigate,
+  onReload,
+  designFeedbackTargets = [],
+}: BrowserPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
@@ -294,7 +302,7 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
   return (
     <div className="flex flex-col w-full h-full bg-[#4b4b4b] overflow-hidden">
       <div ref={toolbarRef}>
-        <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} />
+        <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input

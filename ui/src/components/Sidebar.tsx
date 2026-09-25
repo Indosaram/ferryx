@@ -16,8 +16,10 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
+  Bell,
   ChevronRight,
   Folder,
+  History,
   PanelLeftClose,
   Plus,
   Settings2,
@@ -31,6 +33,7 @@ import { cn } from "../lib/cn";
 import { workspaceName } from "../lib/branchFilter";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
 import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
@@ -99,6 +102,8 @@ type SidebarProps = {
   onDeleteWorktree?: (worktree: Worktree) => void;
   onResetAgentState?: (worktree: Worktree) => void;
   onManageDisk?: (project: RegisteredProject) => void;
+  onOpenHistory?: (project: RegisteredProject) => void;
+  onOpenAttentionInbox?: () => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
@@ -131,6 +136,8 @@ export function Sidebar({
   onDeleteWorktree = () => undefined,
   onResetAgentState,
   onManageDisk,
+  onOpenHistory,
+  onOpenAttentionInbox,
   onOpenSettings,
   onToggle,
   onHide,
@@ -375,7 +382,7 @@ export function Sidebar({
         <div
           data-testid="sidebar-drag-region"
           data-tauri-drag-region
-          className="drag-region flex h-titlebar shrink-0 items-center px-2 gap-0.5"
+          className="flex h-titlebar shrink-0 items-center px-2 gap-0.5"
         >
           {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           <IconButton
@@ -431,6 +438,9 @@ export function Sidebar({
                 const standaloneHostLabel = standaloneHost?.label ?? project.hostLabel ?? standaloneRemote?.hostId;
                 const standaloneRootWorktree = projectWorktrees[0] ?? projectRootWorktree(project, standaloneHostLabel);
                 const standaloneDisplayName = workspaceName(standaloneRootWorktree);
+                const isLocal =
+                  !isRemoteWorkspaceId(project.workspaceId) &&
+                  !isPairedWorkspaceId(project.workspaceId);
                 const header = (
                   <ProjectHeader
                     project={project}
@@ -446,6 +456,8 @@ export function Sidebar({
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                     onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
+                    onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
+                    onOpenAttentionInbox={onOpenAttentionInbox}
                     isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
                     staleSummary={staleSummary}
                   />
@@ -609,6 +621,8 @@ type ProjectHeaderProps = {
   onCreateWorktree?: () => void;
   onRemoveProject?: () => void;
   onManageDisk?: () => void;
+  onOpenHistory?: () => void;
+  onOpenAttentionInbox?: () => void;
   inert?: boolean;
   isStandaloneRemote?: boolean;
   staleSummary?: string;
@@ -625,6 +639,8 @@ function ProjectHeader({
   onCreateWorktree,
   onRemoveProject,
   onManageDisk,
+  onOpenHistory,
+  onOpenAttentionInbox,
   inert = false,
   isStandaloneRemote = true,
   staleSummary,
@@ -657,6 +673,8 @@ function ProjectHeader({
     const items: NativeMenuEntry[] = [
       { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
       { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
+      { kind: "item", id: "past-conversations", label: "Past Conversations…", enabled: Boolean(onOpenHistory), icon: "history" },
+      { kind: "item", id: "attention-inbox", label: "Agents Needing Attention…", enabled: Boolean(onOpenAttentionInbox), icon: "bell" },
       { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: "Copy Project Path" },
       { kind: "separator" },
@@ -674,6 +692,8 @@ function ProjectHeader({
         menuUnlistenRef.current = null;
         if (id === "add-worktree") onCreateWorktree?.();
         else if (id === "manage-disk") onManageDisk?.();
+        else if (id === "past-conversations") onOpenHistory?.();
+        else if (id === "attention-inbox") onOpenAttentionInbox?.();
         else if (id === "reveal" && !remote) {
           revealPath(project.repoRoot).catch((err: unknown) => {
             toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
@@ -754,6 +774,32 @@ function ProjectHeader({
             onPointerDown={(event) => event.stopPropagation()}
           >
             <Plus className="size-3.5" />
+          </IconButton>
+        ) : null}
+        {onOpenAttentionInbox ? (
+          <IconButton
+            label="Agents needing attention"
+            aria-label="Agents needing attention"
+            size="sm"
+            disabled={inert}
+            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+            onClick={onOpenAttentionInbox}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <Bell className="size-3" />
+          </IconButton>
+        ) : null}
+        {onOpenHistory ? (
+          <IconButton
+            label="Past conversations"
+            aria-label="Past conversations"
+            size="sm"
+            disabled={inert}
+            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+            onClick={onOpenHistory}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <History className="size-3" />
           </IconButton>
         ) : null}
         {onRemoveProject ? (

@@ -1254,6 +1254,17 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 />
               );
             case "browser": {
+              const designFeedbackTargetsForTab = Object.values(sessions)
+                .filter(
+                  (candidateSession) =>
+                    !candidateSession.workspaceId.startsWith("ssh:") &&
+                    !candidateSession.workspaceId.startsWith("daemon:"),
+                )
+                .map((candidateSession) => ({
+                  sessionId: candidateSession.id,
+                  label:
+                    "sessionId" in tab && tab.sessionId === candidateSession.id ? tab.label : candidateSession.id,
+                }));
               const browserState = content.browser ?? {
                 browserId: content.browserId ?? "",
                 url: content.url ?? "about:blank",
@@ -1290,6 +1301,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   visible={browserPanesVisible}
                   onNavigate={(url) => onNavigateBrowserTab(tab.id, url, browserTab.browserId)}
                   onReload={() => onReloadBrowserTab(tab.id, browserTab.browserId)}
+                  designFeedbackTargets={designFeedbackTargetsForTab}
                 />
               );
             }

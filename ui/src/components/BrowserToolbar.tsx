@@ -16,8 +16,10 @@ import {
   BROWSER_SHORTCUT_EVENT,
   focusBrowser,
   getBrowserState,
+  getBrowserSnapshotCapability,
   goBackBrowser,
   goForwardBrowser,
+  deliverDesignFeedback,
   finishBrowserElementPick,
   injectBrowserElementPicker,
   onBrowserElementPicked,
@@ -26,9 +28,13 @@ import {
   removeBrowserElementPicker,
   openExternalUrl,
   setBrowserZoom,
+  type BrowserDesignSnapshot,
   type BrowserShortcutAction,
   type BrowserShortcutDomEvent,
+  type BrowserSnapshotCapability,
+  type DesignFeedbackTarget,
 } from "../lib/browserTauri";
+import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
 import {
   BROWSER_HISTORY_EVENT,
   clearBrowserHistory,
@@ -51,6 +57,7 @@ interface BrowserToolbarProps {
   onGoForward?: () => void;
   onToggleElementPick?: () => void;
   elementPicking?: boolean;
+  designFeedbackTargets?: DesignFeedbackTarget[];
 }
 
 export function BrowserToolbar({
@@ -61,6 +68,7 @@ export function BrowserToolbar({
   onGoForward,
   onToggleElementPick,
   elementPicking = false,
+  designFeedbackTargets = [],
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [inputUrl, setInputUrl] = useState(tab.url);
@@ -70,7 +78,17 @@ export function BrowserToolbar({
   const [omniboxOpen, setOmniboxOpen] = useState(false);
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
   const [historyEntries, setHistoryEntries] = useState<BrowserHistoryEntry[]>(loadBrowserHistory);
+  const [snapshotCapability, setSnapshotCapability] = useState<BrowserSnapshotCapability | null>(null);
+  const [elementPickError, setElementPickError] = useState<string | null>(null);
+  const [designSnapshot, setDesignSnapshot] = useState<BrowserDesignSnapshot | null>(null);
+  const [designSending, setDesignSending] = useState(false);
+  const [designError, setDesignError] = useState<string | null>(null);
   const { settings, updateSettings } = useBrowserSettings();
+
+  // Native snapshot capture is a build/platform capability (macOS today). An unknown capability
+  // (an older backend without the command) keeps the control as-is instead of removing a working
+  // affordance, so only an explicit `supported: false` disables element picking.
+  const elementPickSupported = snapshotCapability?.supported !== false;
 
   const omniboxEntries = useMemo(() => {
     if (!settings.rememberBrowsingHistory) return [];
@@ -102,6 +120,25 @@ export function BrowserToolbar({
     return () => {
       window.removeEventListener(BROWSER_HISTORY_EVENT, syncHistory);
       window.removeEventListener("storage", syncHistory);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    // The IPC binding may be unavailable or partial (missing export, non-function, sync throw),
+    // and toolbar rendering must never break over it. Deferring the call into the promise chain
+    // routes any such failure into the catch below. The capability only decides whether one
+    // control is offered, so an unknown capability must leave the control as it is today.
+    void Promise.resolve()
+      .then(() => getBrowserSnapshotCapability())
+      .then((capability) => {
+        if (!disposed) setSnapshotCapability(capability);
+      })
+      .catch(() => {
+        // Older backends do not expose the capability command; leave the control untouched.
+      });
+    return () => {
+      disposed = true;
     };
   }, []);
 
@@ -182,7 +219,17 @@ export function BrowserToolbar({
     let unlisten: (() => void) | undefined;
     void onBrowserElementPicked((payload) => {
       if (payload.browserId !== tab.browserId) return;
-      void finishBrowserElementPick(tab.browserId);
+      // A completion that cannot snapshot must not vanish as an unhandled rejection: the
+      // capability gate keeps the picker from being armed off macOS, and anything that still
+      // slips through surfaces below the toolbar instead of leaving the pick silently dead.
+      void finishBrowserElementPick(tab.browserId)
+        .then((snapshot) => {
+          setElementPickError(null);
+          setDesignSnapshot(snapshot);
+        })
+        .catch((error) => {
+          setElementPickError(error instanceof Error ? error.message : "Element pick failed");
+        });
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -393,15 +440,16 @@ export function BrowserToolbar({
           </button>
           <button
             type="button"
+            disabled={!elementPickSupported}
             onClick={() => {
               if (elementPicking) void removeBrowserElementPicker(tab.browserId);
               else void injectBrowserElementPicker(tab.browserId);
               onToggleElementPick?.();
             }}
-            title="Select element"
+            title={elementPickSupported ? "Select element" : "Select element (unavailable on this platform)"}
             aria-label="Select element"
             aria-pressed={elementPicking}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
           >
             <MousePointer2 className="w-3.5 h-3.5" />
           </button>
@@ -410,6 +458,33 @@ export function BrowserToolbar({
           </button>
         </div>
       </div>
+
+      {elementPickError ? (
+        <div role="alert" className="border-t border-border/70 px-3 py-1 text-[10px] text-destructive">
+          {elementPickError}
+        </div>
+      ) : null}
+      {designSnapshot ? (
+        <BrowserDesignFeedbackPopover
+          snapshot={designSnapshot}
+          targets={designFeedbackTargets}
+          sending={designSending}
+          error={designError}
+          onSend={(request) => {
+            const snapshot = designSnapshot;
+            if (!snapshot) return;
+            setDesignSending(true);
+            setDesignError(null);
+            void deliverDesignFeedback({ sessionId: request.sessionId, memo: request.memo, snapshot })
+              .then(() => { setDesignSnapshot(null); setDesignSending(false); })
+              .catch((error) => {
+                setDesignError(error instanceof Error ? error.message : String(error));
+                setDesignSending(false);
+              });
+          }}
+          onCancel={() => { setDesignSnapshot(null); setDesignError(null); }}
+        />
+      ) : null}
 
       {settings.rememberBrowsingHistory && omniboxOpen && omniboxEntries.length > 0 ? (
         <div id="browser-omnibox-history" role="listbox" aria-label="Address bar history" className="border-t border-border/70 bg-popover px-3 py-1">

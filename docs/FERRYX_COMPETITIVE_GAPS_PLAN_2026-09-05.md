@@ -1,7 +1,20 @@
 # Ferryx 기능 도입 계획 - 기존 기반·Design Mode·모바일
 
 조사 및 개정일: 2026-09-05
-상태: 범위 정정 / 제품 코드 구현 전. 구현 대상은 **기존 기반 완성, 브라우저 Design Mode, 모바일 작업 완성**이다. 최신 사용자 요청에 따라 PR·checks·실패 로그·GitHub/Linear 이슈 연계를 제외한다. 이전 번호 해석 오류로 추가했던 전체 Git GUI·파일 편집기·음성·E2EE relay도 구현 대상으로 취급하지 않는다.
+현황 점검일: 2026-09-25
+상태: 2026-09-05 당시 범위 정정 / 제품 코드 구현 전 상태였으나, 2026-09-25 소스 코드 감사 결과 주요 기반 기능(A2 SSH, Browser Design Mode Phase 1 등)이 구현 완료되었거나 진행 중임.
+
+> ### 2026-09-25 현황 업데이트 (실제 코드 감사 기준)
+>
+> 2026-09-05 작성 당시 "제품 코드 미구현" 상태였던 항목 중 다수가 구현되었습니다.
+> - **A2 (SSH 설정과 Run on) [구현 완료]**: `ui/src/components/settings/SshSection.tsx`, `ui/src/lib/sshHosts.ts`, `ui/src/components/ProjectDialogs.tsx`(원격/SSH 실행 대상 선택 UI), Tauri 명령 `cmd_ssh_list_hosts`/`cmd_ssh_import_config`/`cmd_ssh_update_host`/`cmd_ssh_delete_host`/`cmd_ssh_test_connection`/`cmd_ssh_set_password`/`cmd_ssh_prepare_integration`이 `src-tauri/src/lib.rs`에 등록되어 완전히 동작합니다.
+> - **브라우저 Design Mode Phase 1 (inspect/pick) [구현 완료] / Phase 2~3 [진행 중]**:
+>   - Phase 1: `src-tauri/src/browser/picker.rs`, `src-tauri/src/lib.rs`(~1413행)의 `cmd_browser_inject_element_picker`/`cmd_browser_remove_element_picker`/`cmd_browser_finish_element_pick`, `ui/src/components/BrowserToolbar.tsx`의 "Select element" 툴바 버튼, `cmd_browser_snapshot_capability` 게이트(현재 macOS 지원)가 구현 완료되었습니다.
+>   - Phase 2~3 (메모 다이얼로그 및 PTY/에이전트 인계): 별도 변경 작업으로 진행 중 (2026-09-25).
+> - **A1 (전체 프로젝트 대기 작업 모아보기) [데스크톱 배선 완료]**: 원격 웹 클라이언트에는 attention inventory와 attention badge가 있고, 데스크톱에는 `ui/src/components/AttentionInboxDialog.tsx`가 `ui/src/features/ferryx/control/desktopInventory.ts`(순수 빌더)를 통해 등록된 워크스페이스 전체를 한 목록으로 보여주며 클릭 시 해당 세션으로 이동합니다(Sidebar 진입점). 다만 `src-tauri/src/ferryx_scope/control/`(공개 제어 API 서비스·라우터)는 여전히 미배선입니다 — `ControlBackend`의 `TaskLauncher`(에이전트 생성/시작/중지) 구현이 없어 배선하려면 별도 작업이 필요합니다.
+> - **A3 (과거 대화 검색·재개) [백엔드 구현 완료·UI 미연결]**: Rust 백엔드 구현체(`src-tauri/src/ferryx_scope/history/mod.rs`에 search/read/resume 및 테스트)는 완성되어 있으나 아직 커맨드 및 화면에 와이어링되지 않았습니다.
+> - **C1/C2/C4 (모바일) [미착수]**: 모바일 전용 화면/푸시는 미착수 상태입니다. 서버에는 Web Push 발송기가 없고(`src-tauri/src/remote/push.rs`는 구독 저장소와 페이로드 포맷터뿐, VAPID/RFC8291 미구현) 자격 증명 방식 결정이 선행돼야 합니다. 데스크톱 채팅 스켈레톤(`ui/src/features/ferryx/chat/`)과 설계 스켈레톤(`ui/src/features/ferryx/design/`, `src-tauri/src/ferryx_scope/{chat,design}/`)은 마운트되지 않은 채로 보류 중입니다(삭제 여부 미결정).
+> - **워크트리 디스크 관리 (별도 2026-09-12 범위 문서) [구현 완료]**: `src-tauri/src/lib.rs`의 `cmd_worktree_disk_scan_start`/`cmd_worktree_disk_scan_cancel`/`cmd_worktree_disk_scan_result`, `ui/src/App.tsx`에 마운트된 `ui/src/components/WorktreeDiskDialog.tsx`로 완전 구현되었습니다.
 
 ## 1. 개요 및 범위 결정
 
@@ -49,17 +62,17 @@
 
 ### Phase 1. 기존 기반 완성
 
-- [ ] A1. 전체 프로젝트의 대기 작업 모아보기
+- [ ] A1. 전체 프로젝트의 대기 작업 모아보기 (원격 웹 클라이언트 반영, 데스크톱 인박스 미연결, 2026-09-25)
   - **기반/대상**: `src-tauri/src/remote/server.rs`, remote protocol, daemon session inventory, `ui/src/remote/RemoteApp.tsx`, Sidebar. 기존 waiting 탐지와 모바일 이동 UI를 재사용한다.
   - **구현 내용**: 현재 desktop 선택과 전체 작업 상태 집계를 분리한다. host/workspace/tab/backend session으로 이동 대상을 식별하고 unread와 waiting을 구분한다.
   - **완료/검증**: 서로 다른 두 프로젝트의 실제 PTY를 waiting 상태로 만들면 현재 선택과 무관하게 모두 표시된다. 항목 선택 시 정확한 pane으로 이동하며 종료된 대상에 대한 입력은 다른 세션으로 전달되지 않는다. 상태 전이 테스트와 실제 remote API를 확인한다.
 
-- [ ] A2. SSH 설정과 Run on
+- [x] A2. SSH 설정과 Run on (구현 완료, 2026-09-25)
   - **기반/대상**: `src-tauri/src/ipc/ssh.rs`의 import/list/update/test/remote worktree 명령, Settings, `ProjectDialogs.tsx`.
   - **구현 내용**: SSH host 등록·설정 가져오기·연결 테스트, 프로젝트/새 작업의 Local 또는 SSH 실행 위치 선택, 원격 worktree와 PTY 수명주기를 연결한다. 기존 SSH backend를 중복 작성하지 않는다.
   - **완료/검증**: 격리된 SSH host에서 작업 생성→원격 cwd 확인→실제 명령 출력→연결 중단/재접속까지 검증한다. host key 변경·인증 실패·권한 없음·daemon 부재를 구분한다. 단순 socket 연결 성공을 원격 실행 완료로 세지 않는다.
 
-- [ ] A3. 과거 대화 검색·재개
+- [ ] A3. 과거 대화 검색·재개 (백엔드 Rust 구현 완료·UI 미연결, 2026-09-25)
   - **기반/대상**: `ui/src/lib/agentResumeAffordance.ts`, provider session 계약, 기존 command palette와 별도의 대화 기록 화면.
   - **구현 내용**: 프로젝트·에이전트·검색어로 과거 기록을 찾고, 페이지 단위로 대화를 읽고 선택 재개한다. 열린 탭 검색이나 터미널 find와 구분한다.
   - **완료/검증**: provider별 fixture와 격리된 실제 agent에서 종료→검색→대화 열람→원래 cwd/session ID로 재개를 확인한다. 대형/손상/삭제 로그를 처리하며 Ferryx가 agent session ID를 생성·주입하지 않는다.
@@ -68,7 +81,7 @@
 
 기존 기반과 독립적으로 구현할 수 있으며 C1의 내부 대상 선택·전달 계약을 재사용한다. 공개 API 전체 출시를 기다릴 필요는 없다. 아래 1→2→3 순서로 연결한다.
 
-- [ ] 1. 브라우저 인스펙트 오버레이 및 선택 엔진 구현
+- [x] 1. 브라우저 인스펙트 오버레이 및 선택 엔진 구현 (구현 완료, 2026-09-25)
   - **대상 파일**: `ui/src/components/BrowserPane.tsx`, `ui/src/lib/browserTauri.ts`, `src-tauri/src/` (웹뷰 IPC)
   - **구현 내용**:
     - 브라우저 툴바에 Design Mode 활성화 토글 추가.
@@ -76,7 +89,7 @@
     - 사각형 드래그 영역 선택 UI 추가.
   - **완료 조건**: Design Mode 활성화 시 브라우저 요소에 하이라이트가 반응하고, 클릭 시 해당 요소의 DOM/CSS 정보가 프론트엔드로 전달된다.
 
-- [ ] 2. 스크린샷 캡처 및 피드백 작성 모달
+- [ ] 2. 스크린샷 캡처 및 피드백 작성 모달 (진행 중, 2026-09-25)
   - **대상 파일**: `ui/src/components/BrowserDesignFeedbackModal.tsx` (신규), `ui/src/lib/browserTauri.ts`
   - **구현 내용**:
     - 선택된 요소 또는 드래그 영역의 뷰포트 캡처 (웹뷰 스크린샷 API 또는 캔버스 추출).
@@ -84,7 +97,7 @@
     - 대상 터미널 세션 선택기(현재 활성 pane 기본값).
   - **완료 조건**: 요소 선택 즉시 미리보기와 함께 메모를 작성할 수 있는 팝업이 뜨고 취소/전송이 정상 동작한다.
 
-- [ ] 3. 터미널/에이전트 PTY 피드백 주입 브리지
+- [ ] 3. 터미널/에이전트 PTY 피드백 주입 브리지 (진행 중, 2026-09-25)
   - **대상 파일**: `ui/src/lib/tauri.ts`, `src-tauri/src/ipc/`
   - **구현 내용**:
     - 스크린샷 이미지를 임시 파일(`.ferryx/design-feedback/<id>.png`)로 저장.
@@ -99,23 +112,23 @@
 
 휴대폰에서 작업을 시작하고, 대화를 읽고, 승인에 응답하고, 알림에서 돌아오는 흐름을 완성한다. 공개 제어 API는 서버 전체를 무인증 공개한다는 의미가 아니라 문서화된 인증·권한 계약을 제공한다는 의미다.
 
-- [ ] C1. 공개 에이전트 제어 API
+- [ ] C1. 공개 에이전트 제어 API (미착수, 2026-09-25)
   - **기반/대상**: daemon command/event 계약, remote gateway, `main.rs`의 기존 browser CLI 옆 workspace/pane/agent 제어 명령. raw PTY 입력과 의미 있는 agent 제어를 구분한다.
   - **구현 내용**: create/list/start/prompt/read/wait/stop, 안정된 JSON 결과·오류 코드·권한 검사·event subscription을 제공한다. UI와 외부 client가 동일한 서비스를 사용한다.
   - **완료/검증**: 앱 내부 함수를 직접 호출하지 않고 실제 CLI/API client로 agent 시작→prompt→working→응답 대기/완료를 관측한다. 취소·timeout·unknown·view-only·폐기된 token·종료된 대상·중복 전송을 검증한다. 완료 상태를 추측하거나 고정 sleep에 의존하지 않는다.
 
-- [ ] C2. 모바일 채팅·승인·질문 (C1 의존)
+- [ ] C2. 모바일 채팅·승인·질문 (C1 의존, 미착수, 2026-09-25)
   - **기반/대상**: provider capability adapter, transcript/composer/permission card, 기존 `RemoteTerminal.tsx`와의 전환.
   - **구현 내용**: 읽기 쉬운 대화·도구 실행 결과, 명시적인 승인/거절·질문 선택지, 사진/파일 첨부와 미전송 draft 유지. 요청 ID와 session identity로 응답을 묶는다.
   - **완료/검증**: 지원 provider의 실제 질문·승인·거절·중단을 휴대폰에서 처리하고 terminal과 이어진다. 두 client의 동시 응답·오래된 요청·reconnect·첨부 실패·IME 입력을 확인한다. 구조화된 계약이 없는 agent는 terminal로 남기며 출력 문자열만 보고 승인 버튼을 추측하지 않는다.
 
-- [ ] C3. 독립 원격 관리 (A1, A2, C1 의존)
+- [ ] C3. 독립 원격 관리 (A1, A2, C1 의존, 원격 웹 클라이언트 일부 지원, 2026-09-25)
   - **기반/대상**: `RemoteApp.tsx`, remote session 목록, 기존 worktree 생성 REST handler와 `RemoteClient.createWorktree`. desktop 선택과 remote client 선택을 분리한다.
   - **구현 내용**: host/workspace 목록·연결 상태, 원격 작업 생성·agent 실행·중지, host 전환·재접속. 기존 worktree API는 DTO와 실제 동작을 검증해 연결하며 backend spawn 없는 임시 session 문자열을 실행 성공으로 세지 않는다.
   - **완료/검증**: desktop 창 없이 phone/web에서 목록 조회→작업 생성→실제 PTY/agent 실행→재접속한다. 두 격리 host에서 같은 local session ID가 충돌하지 않고 desktop과 phone이 독립적으로 탐색한다. control 충돌·device revoke·작업 삭제를 검증한다.
   - **경계**: C2 전체 UI는 이 관리 기능의 선행 조건이 아니다. LAN/Tailscale 등 도달 가능한 host 경로로 구현하며 E2EE relay나 Cloud VM provisioner를 요구하지 않는다.
 
-- [ ] C4. 모바일 푸시와 정확한 작업 복귀 (A1, C3 의존)
+- [ ] C4. 모바일 푸시와 정확한 작업 복귀 (A1, C3 의존, 미착수, 2026-09-25)
   - **기반/대상**: agent notification event, device subscription, service worker 또는 native notification bridge, host/workspace/session deep link.
   - **구현 내용**: 작업 완료·응답/승인 대기를 background push로 알리고, 알림을 누르면 해당 작업으로 이동한다. 권한 요청·알림 설정·구독 해제·token 폐기·본문 노출 설정을 제공한다.
   - **완료/검증**: iOS/Android 실기기의 잠금/백그라운드 상태에서 알림을 받고 정확한 작업으로 복귀한다. 종료된 작업·권한 거부·만료 구독·기기 폐기·중복 알림을 처리한다. 열린 페이지의 waiting 배너나 desktop 알림만으로 완료 처리하지 않는다.
@@ -136,7 +149,8 @@
   - 동작 변경은 해당 경계에서 실패하는 회귀 테스트부터 작성한다. 비동기 검증은 정확한 event를 먼저 구독하고 bounded timeout으로 기다린다.
   - 실제 worktree·PTY·SSH host·remote client·지원 agent로 완료 조건을 검증한다. desktop 수동 QA는 debug 앱을 정확히 `bun tauri dev`로 실행하며 사용자의 직접 조작을 요청한다. 모바일 푸시는 실기기 QA 전에는 완료라고 하지 않는다.
 - **범위와 진행 상태**:
-  - 이 문서는 범위와 검증 조건의 복원이다. 제품 코드는 구현하지 않았고 위 checkbox는 모두 미완료다. 조사 시점 소스·공식 문서 근거이며 구현 착수 전 현재 코드를 다시 확인한다.
+  - 이 문서는 2026-09-05 초기 작성 당시 범위와 검증 조건의 복원 문서였다.
+  - 2026-09-25 코드 감사 결과, A2(SSH 설정과 Run on), 브라우저 Design Mode Phase 1(inspect/pick), 워크트리 디스크 관리(`cmd_worktree_disk_scan_*`, `WorktreeDiskDialog.tsx`) 등이 이미 제품 코드에 구현 완료되었고, 브라우저 Design Mode Phase 2~3은 진행 중이며, A1/A3는 부분/백엔드 구현 상태이다(상단 2026-09-25 현황 업데이트 블록 참조).
   - 문서의 LSP 진단은 daemon socket 연결 실패로 사용할 수 없었다. 제품 동작 변경이 없으므로 이번 범위 정정에서 빌드/제품 테스트는 실행하지 않는다.
 
 ## 5. 비교 근거

@@ -32,6 +32,13 @@ impl History {
         if query.len() > 4096 { return Err(HistoryError::InvalidRequest); }
         let mut warnings = vec![]; let mut files = vec![]; let mut visited = 0;
         for (_, root) in self.roots.iter().filter(|(p,_)| *p == provider) {
+            // A configured root that is itself a symlink would silently redirect every read to
+            // another tree, so it is refused by name instead of being followed.
+            match std::fs::symlink_metadata(root) {
+                Ok(meta) if meta.file_type().is_symlink() => { warnings.push("ROOT_SYMLINK_REJECTED".into()); continue; }
+                Ok(_) => {}
+                Err(_) => { warnings.push("ROOT_UNAVAILABLE".into()); continue; }
+            }
             match root.canonicalize() { Ok(root) => walk(&root, &root, &mut files, &mut visited, &mut warnings), Err(_) => warnings.push("ROOT_UNAVAILABLE".into()) }
         }
         files.sort();
@@ -74,6 +81,11 @@ impl History {
     }
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+// Layered containment defences:
+// 1. The walk never descends into symlinked entries (`SYMLINK_REJECTED`).
+// 2. `load` rejects a symlink in ANY component of the relative path and additionally requires
+//    the canonicalized file to stay inside the canonicalized root.
+// 3. A residual check-then-open race remains inherent to path-based std::fs (accepted, not silent).
 fn walk(root: &Path, dir: &Path, files: &mut Vec<(PathBuf,PathBuf)>, visited: &mut usize, warnings: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) { Ok(v) => v, Err(_) => {warnings.push("DIRECTORY_UNAVAILABLE".into()); return;} };
     for entry in entries {

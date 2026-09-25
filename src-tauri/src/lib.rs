@@ -15,6 +15,7 @@ pub mod permissions;
 pub mod remote;
 #[cfg(test)]
 mod rollout_tests;
+pub mod agent_history;
 pub mod scoped_contracts;
 pub mod session;
 #[cfg(any(target_os = "macos", test))]
@@ -1098,6 +1099,20 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 {
                     service.close_window(window.label());
                 }
+                // R6: the Linux overlay store is keyed by window label, so a
+                // destroyed window must drop its overlay (and every webview it
+                // holds) or the entry survives for the process lifetime. A
+                // label that never had an overlay is a no-op, not a failure.
+                #[cfg(target_os = "linux")]
+                if let Err(error) =
+                    crate::browser::linux::implementation::remove_overlay_for_window(window.label())
+                {
+                    tracing::warn!(
+                        "Failed to remove browser overlay for window {}: {}",
+                        window.label(),
+                        error
+                    );
+                }
             }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
@@ -1399,6 +1414,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_inject_element_picker,
         cmd_browser_remove_element_picker,
         cmd_browser_finish_element_pick,
+        ipc::design_feedback::cmd_design_feedback_deliver,
+        ipc::agent_history::cmd_agent_history_search,
+        ipc::agent_history::cmd_agent_history_read,
+        crate::browser::screenshot::cmd_browser_snapshot_capability,
         cmd_browser_navigate,
         cmd_browser_go_back,
         cmd_browser_go_forward,

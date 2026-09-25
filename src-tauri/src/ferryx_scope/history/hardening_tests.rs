@@ -51,3 +51,17 @@ fn symlink_roots_and_files_are_rejected() {
     let p = h.search("codex",None,"",None,100).unwrap();
     assert!(p.warnings.contains(&"ROOT_SYMLINK_REJECTED".into()),"configured symlink root must not silently redirect");
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_file_inside_root_is_not_searched() {
+    use std::os::unix::fs::symlink;
+    let (root, mut h) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    let header = json!({"type":"session_meta","payload":{"id":"019ec598-c800-7000-8000-000000000002","cwd":outside.path(),"cli_version":"0.153.2"}});
+    let msg = json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"escaped-symlink-sentinel"}]}});
+    fs::write(outside.path().join("target.jsonl"), format!("{header}\n{msg}\n")).unwrap();
+    symlink(outside.path().join("target.jsonl"), root.path().join("symlinked.jsonl")).unwrap();
+    let p = h.search("codex", None, "escaped-symlink-sentinel", None, 100).unwrap();
+    assert_eq!(p.items.len(), 0, "symlinked file inside root must not be traversed");
+}
