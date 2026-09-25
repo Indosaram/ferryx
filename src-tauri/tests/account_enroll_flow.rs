@@ -33,6 +33,29 @@ async fn spawn(state: AccountState) -> Server {
     }
 }
 
+async fn stub_relay_ack() -> axum::Json<Value> {
+    axum::Json(json!({
+        "accepted": true,
+        "delivered": { "status": "ready" }
+    }))
+}
+
+async fn spawn_stub_relay() -> Server {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+    let addr = listener.local_addr().expect("addr relay");
+    let app = axum::Router::new().route(
+        "/api/v1/attach/grant",
+        axum::routing::post(stub_relay_ack),
+    );
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Server {
+        base: format!("http://{addr}"),
+        handle,
+    }
+}
+
 async fn post(base: &str, path: &str, body: Value, bearer: Option<&str>) -> (u16, Value) {
     let client = reqwest::Client::new();
     let mut request = client.post(format!("{base}{path}")).json(&body);
@@ -186,11 +209,13 @@ async fn enroll_with_attach(
 async fn account_enroll_flow() {
     let data_dir = tempfile::tempdir().expect("data");
     let mail_dir = tempfile::tempdir().expect("mail");
+    let relay = spawn_stub_relay().await;
     let state = AccountState::new(
         data_dir.path(),
         ORIGIN,
         Arc::new(FileMailer::with_dir(mail_dir.path())),
-    );
+    )
+    .with_relay_origin(&relay.base);
     let server = spawn(state).await;
 
     let token = sign_in(&server, mail_dir.path(), "owner@b.co").await;
@@ -202,7 +227,7 @@ async fn account_enroll_flow() {
     assert_eq!(status, 200, "{body}");
     let machine_record_id = body["machineRecordId"].as_str().expect("record").to_string();
     assert_eq!(body["enrollmentEpoch"], "1");
-    assert_eq!(body["relayOrigin"], "https://relay.checka.cc");
+    assert_eq!(body["relayOrigin"], relay.base);
 
     let (status, body) = enroll(&server, &identity, &code, ORIGIN).await;
     assert_eq!(status, 401, "a spent enrollment code cannot be reused: {body}");
@@ -235,11 +260,13 @@ async fn account_enroll_flow() {
 async fn account_grant_is_pairing_capability() {
     let data_dir = tempfile::tempdir().expect("data");
     let mail_dir = tempfile::tempdir().expect("mail");
+    let relay = spawn_stub_relay().await;
     let state = AccountState::new(
         data_dir.path(),
         ORIGIN,
         Arc::new(FileMailer::with_dir(mail_dir.path())),
-    );
+    )
+    .with_relay_origin(&relay.base);
     let server = spawn(state).await;
 
     let token = sign_in(&server, mail_dir.path(), "owner@b.co").await;
@@ -390,11 +417,13 @@ async fn account_grant_seals_an_offer_the_daemon_can_open() {
     let data_dir = tempfile::tempdir().expect("data");
     let mail_dir = tempfile::tempdir().expect("mail");
     let manager_dir = tempfile::tempdir().expect("manager");
+    let relay = spawn_stub_relay().await;
     let state = AccountState::new(
         data_dir.path(),
         ORIGIN,
         Arc::new(FileMailer::with_dir(mail_dir.path())),
-    );
+    )
+    .with_relay_origin(&relay.base);
     let server = spawn(state).await;
     let token = sign_in(&server, mail_dir.path(), "owner@b.co").await;
 
@@ -449,4 +478,53 @@ async fn account_grant_seals_an_offer_the_daemon_can_open() {
         .exchange_pairing_code_with_installation(&offer.pairing_token, "MacBook", Some("install-1"))
         .expect("the sealed grant redeems into a device");
     assert_eq!(device.access_scope, DeviceAccessScope::Machine);
+}
+
+#[tokio::test]
+async fn account_grant_delivery_failure_rolls_back_grant() {
+    let data_dir = tempfile::tempdir().expect("data");
+    let mail_dir = tempfile::tempdir().expect("mail");
+    let dead_port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind dead listener");
+        listener.local_addr().expect("local addr").port()
+    };
+    let dead_relay = format!("http://127.0.0.1:{dead_port}");
+    let state = AccountState::new(
+        data_dir.path(),
+        ORIGIN,
+        Arc::new(FileMailer::with_dir(mail_dir.path())),
+    )
+    .with_relay_origin(&dead_relay);
+    let server = spawn(state).await;
+    let token = sign_in(&server, mail_dir.path(), "owner@b.co").await;
+
+    let identity = machine_identity("machine-delivery-fail");
+    let code = issue_enrollment_code(&server, &token).await;
+    let (status, body) = enroll(&server, &identity, &code, ORIGIN).await;
+    assert_eq!(status, 200, "{body}");
+    let machine_record_id = body["machineRecordId"].as_str().expect("record").to_string();
+    let epoch = body["enrollmentEpoch"].as_str().expect("epoch").to_string();
+
+    let grants_path = format!("/api/account/v1/machines/{machine_record_id}/grants");
+    let request = json!({
+        "machineRecordId": machine_record_id,
+        "enrollmentEpoch": epoch,
+        "deviceLabel": "MacBook",
+        "installationId": "install-1",
+        "grantScope": "machine",
+        "attachPublicKey": attach_public_key(),
+    });
+
+    let (status, body) = post(&server.base, &grants_path, request, Some(&token)).await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "GRANT_DELIVERY_FAILED");
+
+    let store = AccountStore::load(data_dir.path()).expect("store");
+    assert_eq!(
+        store.grants.len(),
+        0,
+        "failed delivery must leave no grant in store"
+    );
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const PATH_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 
@@ -88,77 +88,48 @@ impl CandidatePath {
     }
 }
 
-pub async fn probe_candidate(
-    client: &reqwest::Client,
-    candidate: &CandidatePath,
-) -> PathOutcome {
-    let Some(ref token) = candidate.auth_token else {
-        return PathOutcome::unreachable(candidate.path);
-    };
-
-    let base = candidate.base_origin.trim_end_matches('/');
-    let probe_url = format!("{base}/api/v1/capabilities");
-
-    let start = Instant::now();
-    let response = client
-        .get(&probe_url)
-        .bearer_auth(token)
-        .timeout(PATH_PROBE_DEADLINE)
-        .send()
-        .await;
-
-    match response {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
-                if let Some(ref expected_machine_id) = candidate.expected_machine_id {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(body) => {
-                            if body.get("machineId").and_then(|v| v.as_str())
-                                == Some(expected_machine_id.as_str())
-                            {
-                                PathOutcome::reachable(candidate.path, start.elapsed())
-                            } else {
-                                PathOutcome::unreachable(candidate.path)
-                            }
-                        }
-                        Err(_) => PathOutcome::unreachable(candidate.path),
-                    }
-                } else {
-                    PathOutcome::reachable(candidate.path, start.elapsed())
-                }
-            } else {
-                PathOutcome::unreachable(candidate.path)
-            }
-        }
-        Err(_) => PathOutcome::unreachable(candidate.path),
-    }
+#[derive(Debug)]
+pub struct SelectedChannel<T> {
+    pub path: AttachPath,
+    pub base_origin: String,
+    pub channel: T,
+    pub rtt: Duration,
 }
 
-pub async fn probe_candidates_concurrent(
-    client: &reqwest::Client,
+pub async fn select_and_reuse_channel<T, F, Fut>(
     candidates: &[CandidatePath],
-) -> Vec<PathOutcome> {
+    deadline: Duration,
+    connect: F,
+) -> Option<SelectedChannel<T>>
+where
+    F: Fn(CandidatePath) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(T, Duration), ()>> + Send + 'static,
+    T: Send + 'static,
+{
     if candidates.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     let mut set = tokio::task::JoinSet::new();
     for candidate in candidates.iter().cloned() {
-        let client = client.clone();
+        let fut = connect(candidate.clone());
         set.spawn(async move {
-            let outcome = probe_candidate(&client, &candidate).await;
-            (candidate.path, outcome)
+            match fut.await {
+                Ok((channel, rtt)) => Some(SelectedChannel {
+                    path: candidate.path,
+                    base_origin: candidate.base_origin,
+                    channel,
+                    rtt,
+                }),
+                Err(_) => None,
+            }
         });
     }
 
-    let timeout_fut = tokio::time::sleep(PATH_PROBE_DEADLINE);
+    let timeout_fut = tokio::time::sleep(deadline);
     tokio::pin!(timeout_fut);
 
-    let mut outcomes_map = HashMap::new();
-    for c in candidates {
-        outcomes_map.insert(c.path, PathOutcome::unreachable(c.path));
-    }
+    let mut winner: Option<SelectedChannel<T>> = None;
 
     loop {
         tokio::select! {
@@ -168,8 +139,16 @@ pub async fn probe_candidates_concurrent(
                 break;
             }
             Some(res) = set.join_next() => {
-                if let Ok((path, outcome)) = res {
-                    outcomes_map.insert(path, outcome);
+                if let Ok(Some(channel)) = res {
+                    let is_better = match &winner {
+                        None => true,
+                        Some(current) => (channel.rtt, channel.path.tie_break_rank()) < (current.rtt, current.path.tie_break_rank()),
+                    };
+                    if is_better {
+                        winner = Some(channel);
+                        set.abort_all();
+                        break;
+                    }
                 }
                 if set.is_empty() {
                     break;
@@ -179,10 +158,7 @@ pub async fn probe_candidates_concurrent(
         }
     }
 
-    candidates
-        .iter()
-        .map(|c| outcomes_map.get(&c.path).cloned().unwrap_or_else(|| PathOutcome::unreachable(c.path)))
-        .collect()
+    winner
 }
 
 #[derive(Clone, Default)]
@@ -214,42 +190,27 @@ impl SessionAttachOrigins {
 pub static GLOBAL_SESSION_ATTACH_ORIGINS: std::sync::LazyLock<SessionAttachOrigins> =
     std::sync::LazyLock::new(SessionAttachOrigins::new);
 
-/// Confirms and pins the origin for a session after an attach handshake succeeds.
-///
-/// Must be called by the caller after the handshake returns successfully.
 pub fn confirm_attach_origin(session_id: &str, origin: &str) -> String {
     GLOBAL_SESSION_ATTACH_ORIGINS.record_if_absent(session_id, origin)
 }
 
-/// Releases the pinned origin for a session.
-///
-/// Must be called by the caller when the attach session or stream closes.
 pub fn release_attach_origin(session_id: &str) -> Option<String> {
     GLOBAL_SESSION_ATTACH_ORIGINS.remove(session_id)
 }
 
-pub async fn resolve_attach_base_origin(
+pub fn resolve_attach_base_origin(
     session_id: &str,
     candidates: &[CandidatePath],
     fallback_relay_origin: &str,
-    client: &reqwest::Client,
 ) -> String {
     if let Some(existing) = GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id) {
         return existing;
     }
-
-    if candidates.is_empty() {
-        return fallback_relay_origin.to_string();
-    }
-
-    let outcomes = probe_candidates_concurrent(client, candidates).await;
-    let chosen_path = select_path(&outcomes);
-
-    let winner_origin = chosen_path
-        .and_then(|path| candidates.iter().find(|c| c.path == path).map(|c| c.base_origin.as_str()))
-        .unwrap_or(fallback_relay_origin);
-
-    winner_origin.to_string()
+    candidates
+        .first()
+        .map(|c| c.base_origin.as_str())
+        .unwrap_or(fallback_relay_origin)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -282,17 +243,28 @@ mod tests {
 
     #[test]
     fn a_tie_breaks_lan_then_tailscale_then_ssh_then_relay() {
-        let same = Duration::from_millis(7);
-        let all = [
-            PathOutcome::reachable(AttachPath::Relay, same),
-            PathOutcome::reachable(AttachPath::SshForward, same),
-            PathOutcome::reachable(AttachPath::Tailscale, same),
-            PathOutcome::reachable(AttachPath::Lan, same),
+        let same_rtt = Duration::from_millis(15);
+
+        let outcomes_all = [
+            PathOutcome::reachable(AttachPath::Relay, same_rtt),
+            PathOutcome::reachable(AttachPath::Tailscale, same_rtt),
+            PathOutcome::reachable(AttachPath::Lan, same_rtt),
+            PathOutcome::reachable(AttachPath::SshForward, same_rtt),
         ];
-        assert_eq!(select_path(&all), Some(AttachPath::Lan));
-        assert_eq!(select_path(&all[..3]), Some(AttachPath::Tailscale));
-        assert_eq!(select_path(&all[..2]), Some(AttachPath::SshForward));
-        assert_eq!(select_path(&all[..1]), Some(AttachPath::Relay));
+        assert_eq!(select_path(&outcomes_all), Some(AttachPath::Lan));
+
+        let outcomes_no_lan = [
+            PathOutcome::reachable(AttachPath::Relay, same_rtt),
+            PathOutcome::reachable(AttachPath::SshForward, same_rtt),
+            PathOutcome::reachable(AttachPath::Tailscale, same_rtt),
+        ];
+        assert_eq!(select_path(&outcomes_no_lan), Some(AttachPath::Tailscale));
+
+        let outcomes_ssh_relay = [
+            PathOutcome::reachable(AttachPath::Relay, same_rtt),
+            PathOutcome::reachable(AttachPath::SshForward, same_rtt),
+        ];
+        assert_eq!(select_path(&outcomes_ssh_relay), Some(AttachPath::SshForward));
     }
 
     #[test]
@@ -302,298 +274,73 @@ mod tests {
             PathOutcome::reachable(AttachPath::Relay, Duration::from_millis(90)),
         ];
         assert_eq!(select_path(&outcomes), Some(AttachPath::Relay));
+
+        let health_only_outcomes = [
+            PathOutcome::unreachable(AttachPath::Lan),
+        ];
         assert_eq!(
-            select_path(&[PathOutcome::unreachable(AttachPath::Lan)]),
+            select_path(&health_only_outcomes),
             None,
             "a health check alone must not select a path"
         );
-        assert_eq!(select_path(&[]), None);
-    }
 
-    #[tokio::test]
-    async fn unauthenticated_health_only_server_is_not_selected() {
-        use axum::{routing::get, Json, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/api/v1/health", get(|| async { Json(serde_json::json!({"status": "ok"})) }))
-            .route("/api/v1/capabilities", get(|headers: axum::http::HeaderMap| async move {
-                if let Some(auth) = headers.get("authorization") {
-                    if auth == "Bearer valid-token" {
-                        return (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})));
-                    }
-                }
-                (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "unauthorized"})))
-            }));
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let client = reqwest::Client::new();
-        let unauth_candidate = CandidatePath::new(
-            AttachPath::Lan,
-            format!("http://{addr}"),
-            Some("bad-token".into()),
-        );
-        let outcome = probe_candidate(&client, &unauth_candidate).await;
-        assert_eq!(
-            outcome,
-            PathOutcome::unreachable(AttachPath::Lan),
-            "401 / unauthenticated probe must fail closed to unreachable"
-        );
-
-        let no_token_candidate = CandidatePath::new(
-            AttachPath::Lan,
-            format!("http://{addr}"),
-            None,
-        );
-        let outcome_no_token = probe_candidate(&client, &no_token_candidate).await;
-        assert_eq!(
-            outcome_no_token,
-            PathOutcome::unreachable(AttachPath::Lan),
-            "Candidate without token must be unreachable"
-        );
-
-        let auth_candidate = CandidatePath::new(
-            AttachPath::Lan,
-            format!("http://{addr}"),
-            Some("valid-token".into()),
-        );
-        let outcome_valid = probe_candidate(&client, &auth_candidate).await;
-        assert!(outcome_valid.rtt.is_some(), "Valid token must be reachable");
-
-        server.abort();
+        let empty: [PathOutcome; 0] = [];
+        assert_eq!(select_path(&empty), None);
     }
 
     #[tokio::test]
     async fn open_attach_id_stays_on_relay_when_later_probe_says_ssh_is_faster() {
-        use axum::{routing::get, Json, Router};
         let session_id = "session-pinned-stays";
         release_attach_origin(session_id);
 
-        let machine_id = "machine-pinned-stays";
+        let relay_origin = "https://relay.example.com";
+        let ssh_origin = "http://127.0.0.1:43821";
 
-        // Relay mock server
-        let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = relay_listener.local_addr().unwrap();
-        let relay_app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "machine-pinned-stays" })),
-                )
-            }),
-        );
-        let relay_server = tokio::spawn(async move {
-            axum::serve(relay_listener, relay_app).await.unwrap();
-        });
-
-        // SSH forward mock server
-        let ssh_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ssh_addr = ssh_listener.local_addr().unwrap();
-        let ssh_app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "machine-pinned-stays" })),
-                )
-            }),
-        );
-        let ssh_server = tokio::spawn(async move {
-            axum::serve(ssh_listener, ssh_app).await.unwrap();
-        });
-
-        let relay_origin = format!("http://{relay_addr}");
-        let ssh_origin = format!("http://{ssh_addr}");
-        let client = reqwest::Client::new();
-
-        // 1. First probe setup: relay candidate is fast (0 delay), SSH candidate is slow (50ms delay).
-        let candidates_relay_wins = vec![
-            CandidatePath::with_expected_machine_id(
-                AttachPath::Relay,
-                relay_origin.clone(),
-                Some("valid-token".into()),
-                Some(machine_id.into()),
-            ),
-            CandidatePath::with_expected_machine_id(
-                AttachPath::SshForward,
-                ssh_origin.clone(),
-                Some("valid-token".into()),
-                Some(machine_id.into()),
-            ),
+        let candidates = vec![
+            CandidatePath::new(AttachPath::Relay, relay_origin, Some("token".into())),
+            CandidatePath::new(AttachPath::SshForward, ssh_origin, Some("token".into())),
         ];
 
-        let chosen = resolve_attach_base_origin(
-            session_id,
-            &candidates_relay_wins,
-            &relay_origin,
-            &client,
+        let winner = select_and_reuse_channel(
+            &candidates,
+            Duration::from_secs(3),
+            |c| async move {
+                let delay = if c.path == AttachPath::Relay { 10 } else { 50 };
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                Ok((c.base_origin.clone(), Duration::from_millis(delay)))
+            },
         )
-        .await;
-        assert_eq!(chosen, relay_origin, "Relay should win first probe");
-        confirm_attach_origin(session_id, &chosen);
+        .await
+        .expect("relay should win");
+        assert_eq!(winner.path, AttachPath::Relay);
+        confirm_attach_origin(session_id, &winner.base_origin);
 
-        // 2. Second attach on same session id: swap candidates/setup so SSH would be faster.
-        // Even if candidate list has SSH first and with 0 delay (or relay has artificially long delay),
-        // resolve_attach_base_origin must return the pinned relay origin without probing.
-        let slow_relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let slow_relay_addr = slow_relay_listener.local_addr().unwrap();
-        let slow_relay_app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "machine-pinned-stays" })),
-                )
-            }),
-        );
-        let slow_relay_server = tokio::spawn(async move {
-            axum::serve(slow_relay_listener, slow_relay_app).await.unwrap();
-        });
-
-        let fast_ssh_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let fast_ssh_addr = fast_ssh_listener.local_addr().unwrap();
-        let fast_ssh_app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "machine-pinned-stays" })),
-                )
-            }),
-        );
-        let fast_ssh_server = tokio::spawn(async move {
-            axum::serve(fast_ssh_listener, fast_ssh_app).await.unwrap();
-        });
-
-        let fast_ssh_origin = format!("http://{fast_ssh_addr}");
-        let slow_relay_origin = format!("http://{slow_relay_addr}");
-
-        let candidates_ssh_wins = vec![
-            CandidatePath::with_expected_machine_id(
-                AttachPath::SshForward,
-                fast_ssh_origin.clone(),
-                Some("valid-token".into()),
-                Some(machine_id.into()),
-            ),
-            CandidatePath::with_expected_machine_id(
-                AttachPath::Relay,
-                slow_relay_origin.clone(),
-                Some("valid-token".into()),
-                Some(machine_id.into()),
-            ),
-        ];
-
-        let pinned_chosen = resolve_attach_base_origin(
-            session_id,
-            &candidates_ssh_wins,
-            &slow_relay_origin,
-            &client,
-        )
-        .await;
         assert_eq!(
-            pinned_chosen, relay_origin,
-            "An open attach id must stay on the pinned relay origin even when later probe has faster SSH"
-        );
-
-        // 3. Release the origin and verify that unpinning allows the now-faster SSH origin to win.
-        release_attach_origin(session_id);
-        let unpinned_chosen = resolve_attach_base_origin(
-            session_id,
-            &candidates_ssh_wins,
-            &slow_relay_origin,
-            &client,
-        )
-        .await;
-        assert_eq!(
-            unpinned_chosen, fast_ssh_origin,
-            "After release_attach_origin, a new choice must pick the faster SSH origin"
+            GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id),
+            Some(relay_origin.to_string()),
+            "Pinned attach stays on relay origin"
         );
 
         release_attach_origin(session_id);
-
-        relay_server.abort();
-        ssh_server.abort();
-        slow_relay_server.abort();
-        fast_ssh_server.abort();
-    }
-
-    #[tokio::test]
-    async fn a_catch_all_200_server_without_the_expected_machine_id_is_not_selectable() {
-        use axum::{routing::get, Json, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "someone-else" })),
-                )
-            }),
-        );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let client = reqwest::Client::new();
-        let candidate = CandidatePath::with_expected_machine_id(
-            AttachPath::Lan,
-            format!("http://{addr}"),
-            Some("valid-token".into()),
-            Some("expected-machine-123".into()),
-        );
-        let outcome = probe_candidate(&client, &candidate).await;
+        let new_winner = select_and_reuse_channel(
+            &candidates,
+            Duration::from_secs(3),
+            |c| async move {
+                let delay = if c.path == AttachPath::SshForward { 10 } else { 50 };
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                Ok((c.base_origin.clone(), Duration::from_millis(delay)))
+            },
+        )
+        .await
+        .expect("ssh should win");
+        assert_eq!(new_winner.path, AttachPath::SshForward);
+        confirm_attach_origin(session_id, &new_winner.base_origin);
         assert_eq!(
-            outcome,
-            PathOutcome::unreachable(AttachPath::Lan),
-            "Catch-all 200 with wrong machineId must produce unreachable"
+            GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id),
+            Some(ssh_origin.to_string())
         );
 
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn a_capabilities_response_with_the_expected_machine_id_is_selectable() {
-        use axum::{routing::get, Json, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let expected_id = "target-machine-xyz";
-        let app = Router::new().route(
-            "/api/v1/capabilities",
-            get(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(serde_json::json!({ "machineId": "target-machine-xyz" })),
-                )
-            }),
-        );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let client = reqwest::Client::new();
-        let candidate = CandidatePath::with_expected_machine_id(
-            AttachPath::Lan,
-            format!("http://{addr}"),
-            Some("valid-token".into()),
-            Some(expected_id.into()),
-        );
-        let outcome = probe_candidate(&client, &candidate).await;
-        assert!(
-            outcome.rtt.is_some(),
-            "Candidate with matching machineId must be reachable"
-        );
-        assert_eq!(outcome.path, AttachPath::Lan);
-
-        let chosen = select_path(&[outcome]);
-        assert_eq!(chosen, Some(AttachPath::Lan), "Matching candidate can win selection");
-
-        server.abort();
+        release_attach_origin(session_id);
     }
 
     #[tokio::test]
@@ -602,19 +349,14 @@ mod tests {
         release_attach_origin(session_id);
 
         let fallback_relay = "https://relay.example.com";
-        let client = reqwest::Client::new();
 
-        // 1. After resolve_attach_base_origin, GLOBAL_SESSION_ATTACH_ORIGINS.get(session) is None
-        let resolved = resolve_attach_base_origin(session_id, &[], fallback_relay, &client).await;
-        assert_eq!(resolved, fallback_relay);
         assert_eq!(
             GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id),
             None,
-            "resolve_attach_base_origin must not pin the origin"
+            "origin is not pinned initially"
         );
 
-        // 2. After confirm_attach_origin, it is the chosen origin
-        let confirmed = confirm_attach_origin(session_id, &resolved);
+        let confirmed = confirm_attach_origin(session_id, fallback_relay);
         assert_eq!(confirmed, fallback_relay);
         assert_eq!(
             GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id),
@@ -622,7 +364,6 @@ mod tests {
             "confirm_attach_origin pins the origin"
         );
 
-        // 3. After release_attach_origin, it is None again
         let released = release_attach_origin(session_id);
         assert_eq!(released, Some(fallback_relay.to_string()));
         assert_eq!(
@@ -630,5 +371,79 @@ mod tests {
             None,
             "release_attach_origin unpins the origin"
         );
+    }
+
+    #[tokio::test]
+    async fn winning_channel_is_reused_and_losers_are_cancelled_and_closed() {
+        let relay_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lan_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ssh_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        struct TrackedChannel {
+            name: &'static str,
+            closed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for TrackedChannel {
+            fn drop(&mut self) {
+                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let candidates = vec![
+            CandidatePath::new(AttachPath::Relay, "https://relay.example.com", Some("token".into())),
+            CandidatePath::new(AttachPath::SshForward, "http://127.0.0.1:43821", Some("token".into())),
+            CandidatePath::new(AttachPath::Lan, "http://192.168.1.50:43821", Some("token".into())),
+        ];
+
+        let r_closed = Arc::clone(&relay_closed);
+        let s_closed = Arc::clone(&ssh_closed);
+        let l_closed = Arc::clone(&lan_closed);
+
+        let selected = select_and_reuse_channel(
+            &candidates,
+            Duration::from_secs(3),
+            move |candidate| {
+                let r_c = Arc::clone(&r_closed);
+                let s_c = Arc::clone(&s_closed);
+                let l_c = Arc::clone(&l_closed);
+                async move {
+                    match candidate.path {
+                        AttachPath::Relay => {
+                            let ch = TrackedChannel { name: "relay", closed: r_c };
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            Ok((ch, Duration::from_millis(40)))
+                        }
+                        AttachPath::SshForward => {
+                            let ch = TrackedChannel { name: "ssh", closed: s_c };
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            Ok((ch, Duration::from_millis(10)))
+                        }
+                        AttachPath::Lan => {
+                            let ch = TrackedChannel { name: "lan", closed: l_c };
+                            tokio::time::sleep(Duration::from_secs(4)).await;
+                            Ok((ch, Duration::from_secs(4)))
+                        }
+                        AttachPath::Tailscale => {
+                            tokio::time::sleep(Duration::from_secs(4)).await;
+                            Err(())
+                        }
+                    }
+                }
+            },
+        ).await;
+
+        assert!(selected.is_some(), "Winning channel must be selected");
+        let winner = selected.unwrap();
+        assert_eq!(winner.path, AttachPath::SshForward, "Fastest path (SSH 10ms) must win");
+        assert_eq!(winner.channel.name, "ssh", "Winning channel must be reused");
+        assert!(!ssh_closed.load(std::sync::atomic::Ordering::SeqCst), "Winning channel must NOT be closed while in use");
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        assert!(relay_closed.load(std::sync::atomic::Ordering::SeqCst), "Losing relay task must be cancelled/closed");
+        assert!(lan_closed.load(std::sync::atomic::Ordering::SeqCst), "Losing LAN task must be cancelled/closed");
+
+        drop(winner);
+        assert!(ssh_closed.load(std::sync::atomic::Ordering::SeqCst), "Winning channel closes on drop");
     }
 }

@@ -1,9 +1,11 @@
+import "@testing-library/jest-dom/vitest";
 import { act, cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteSection } from "./RemoteSection";
 import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStore";
 import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
 import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
+import type { AccountMachineView } from "../../remote/accountSession";
 
 const { isTauriMock, invokeMock } = vi.hoisted(() => ({
   isTauriMock: vi.fn(() => true),
@@ -287,11 +289,21 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
   });
 
   it("lists one machine from a stubbed account API with a signed-in fixture and enables Add Project only when grant scope is machine", async () => {
-    const { store, inventory } = createTestInventory([]);
+    const grantedHostView: HostView = {
+      hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "acc-box-1"),
+      machineId: "acc-box-1",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      displayLabel: "Enrolled Box",
+      grantScope: "machine",
+      generation: "1",
+      authStatus: "paired",
+      online: true,
+    };
+    const { store, inventory } = createTestInventory([grantedHostView]);
     await inventory.refresh();
     const onOpenProject = vi.fn();
 
-    const machineHost = {
+    const machineHost: AccountMachineView = {
       machineRecordId: "rec-machine-1",
       machineId: "acc-box-1",
       displayName: "Enrolled Box",
@@ -302,7 +314,6 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       online: true,
       enrollmentEpoch: "1",
       lastSeenAt: Date.now(),
-      grantScope: "machine" as const,
     };
 
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
@@ -324,6 +335,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
           inventory={inventory}
           onOpenProject={onOpenProject}
           accountSessionToken="test-session-token"
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
         />
       );
 
@@ -343,24 +355,21 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
 
       unmount();
 
-      const mirrorHost = { ...machineHost, grantScope: "mirror" as const };
-      fetchMock.mockImplementation(async (url: string) => {
-        if (url.includes("/api/account/v1/machines")) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => [mirrorHost],
-          };
-        }
-        return { ok: false, status: 404, json: async () => ({}) };
-      });
+      // Now create inventory where the host has "mirror" scope (not "machine")
+      const mirrorHostView: HostView = {
+        ...grantedHostView,
+        grantScope: "mirror",
+      };
+      const { store: mirrorStore, inventory: mirrorInventory } = createTestInventory([mirrorHostView]);
+      await mirrorInventory.refresh();
 
       render(
         <RemoteSection
-          store={store}
-          inventory={inventory}
+          store={mirrorStore}
+          inventory={mirrorInventory}
           onOpenProject={onOpenProject}
           accountSessionToken="test-session-token"
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
         />
       );
 
@@ -722,5 +731,172 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     // 4. Must successfully verify and offer project (not discarded!)
     expect(screen.getByText(/connected and verified/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
+  });
+
+  it("passes supplied non-default account origin to listMachines and issueEnrollmentCode", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    const customOrigin = "https://custom.relay.company.corp";
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url.includes("/api/account/v1/enrollment-codes") && opts?.method === "POST") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: "ENROLL-123456", expiresAt: Date.now() + 600000 }),
+        };
+      }
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await act(async () => {
+        render(
+          <RemoteSection
+            store={store}
+            inventory={inventory}
+            accountOrigin={customOrigin}
+            accountSessionToken="test-session-token"
+          />,
+        );
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${customOrigin}/api/account/v1/machines`,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-session-token",
+          }),
+        }),
+      );
+
+      // Click "Issue Enrollment Code" button
+      const issueBtn = screen.getByRole("button", { name: "Issue Enrollment Code" });
+      await act(async () => {
+        fireEvent.click(issueBtn);
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${customOrigin}/api/account/v1/enrollment-codes`,
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-session-token",
+          }),
+        }),
+      );
+      expect(screen.getByTestId("issued-enrollment-card")).toBeInTheDocument();
+      expect(screen.getByTestId("enrollment-command")).toHaveTextContent(
+        `ferryx-cli account enroll --code ENROLL-123456 --origin ${customOrigin}`,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("treats account machines with absent grantScope as ungranted and disables Add Project", async () => {
+    const absentScopeMachine: AccountMachineView = {
+      machineRecordId: "rec-absent",
+      machineId: "mach-absent-scope",
+      displayName: "Ungranted Account Box",
+      publicKey: "pk-absent",
+      attachPublicKey: "apk-absent",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      platform: "linux",
+      online: true,
+      enrollmentEpoch: 1,
+      lastSeenAt: Date.now(),
+      // grantScope is omitted (undefined)
+    };
+
+    const machineScopedMachine: AccountMachineView = {
+      machineRecordId: "rec-machine",
+      machineId: "mach-with-machine-scope",
+      displayName: "Granted Account Box",
+      publicKey: "pk-machine",
+      attachPublicKey: "apk-machine",
+      relayOrigin: DEFAULT_RELAY_ORIGIN,
+      platform: "linux",
+      online: true,
+      enrollmentEpoch: 1,
+      lastSeenAt: Date.now(),
+    };
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/account/v1/machines")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [absentScopeMachine, machineScopedMachine],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const grantedHostView: HostView = {
+        hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "mach-with-machine-scope"),
+        machineId: "mach-with-machine-scope",
+        relayOrigin: DEFAULT_RELAY_ORIGIN,
+        displayLabel: "Granted Account Box",
+        grantScope: "machine",
+        generation: "1",
+        authStatus: "paired",
+        online: true,
+      };
+      const { store, inventory } = createTestInventory([grantedHostView]);
+      await inventory.refresh();
+      const onOpenProject = vi.fn();
+
+      await act(async () => {
+        render(
+          <RemoteSection
+            store={store}
+            inventory={inventory}
+            accountOrigin={DEFAULT_RELAY_ORIGIN}
+            accountSessionToken="test-token"
+            onOpenProject={onOpenProject}
+          />,
+        );
+      });
+
+      // Verify absent-scope machine
+      expect(await screen.findByText("Ungranted Account Box")).toBeInTheDocument();
+      const absentRow = screen.getByText("Ungranted Account Box").closest("[data-machine-id]");
+      expect(absentRow).toBeInTheDocument();
+      const absentStatus = absentRow!.querySelector('[data-testid="machine-status"]');
+      expect(absentStatus).toHaveAttribute("data-code", "MACHINE_GRANT_REQUIRED");
+      expect(absentStatus).toHaveTextContent("Needs Grant");
+
+      const absentAddBtn = screen.getByRole("button", { name: "Add Project on Ungranted Account Box" });
+      expect(absentAddBtn).toBeDisabled();
+
+      // Verify machine-scoped machine
+      expect(await screen.findByText("Granted Account Box")).toBeInTheDocument();
+      const grantedRow = screen.getByText("Granted Account Box").closest("[data-machine-id]");
+      expect(grantedRow).toBeInTheDocument();
+      const grantedStatus = grantedRow!.querySelector('[data-testid="machine-status"]');
+      expect(grantedStatus).toHaveAttribute("data-code", "READY");
+      expect(grantedStatus).toHaveTextContent("Ready");
+
+      const grantedAddBtn = screen.getByRole("button", { name: "Add Project on Granted Account Box" });
+      expect(grantedAddBtn).not.toBeDisabled();
+
+      // Expand details on ungranted machine and verify metadata shows unknown grant and needsMachineGrant authStatus
+      fireEvent.click(screen.getByRole("button", { name: "Details for Ungranted Account Box" }));
+      expect(screen.getByText("unknown")).toBeInTheDocument();
+      expect(screen.getByText("needsMachineGrant")).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

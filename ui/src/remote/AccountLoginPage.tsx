@@ -8,13 +8,11 @@ import {
 interface AccountLoginPageProps {
   relayUrl: string;
   onLoginSuccess: (token: string, email: string) => void;
-  onUseLegacyPin: () => void;
 }
 
 export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   relayUrl,
   onLoginSuccess,
-  onUseLegacyPin,
 }) => {
   const [email, setEmail] = useState("");
   const [tokenInput, setTokenInput] = useState("");
@@ -192,17 +190,6 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
             </button>
           </form>
         )}
-
-        <div className="pt-2 border-t border-border flex flex-col items-center">
-          <button
-            type="button"
-            data-testid="use-legacy-pin-btn"
-            onClick={onUseLegacyPin}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Pair with device PIN instead
-          </button>
-        </div>
       </div>
     </div>
   );

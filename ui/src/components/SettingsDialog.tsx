@@ -22,6 +22,7 @@ import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { RemoteSection } from "./settings/RemoteSection";
 import type { MachineProjectTarget, RemoteContext } from "../lib/machineNavigation";
+import { getConfiguredAccountOrigin } from "../remote/accountSession";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
 import { TerminalSection } from "./settings/TerminalSection";
 import type { SectionId } from "./settings/types";
@@ -33,6 +34,7 @@ export type SettingsDialogProps = {
   remoteContext?: RemoteContext;
   onOpenMachineProject?: (target: MachineProjectTarget, context: RemoteContext) => void;
   onOpenSshProject?: (hostId: string) => void;
+  accountOrigin?: string;
 };
 
 export function SettingsDialog({
@@ -66,7 +68,7 @@ function sanitizeSectionId(candidate: unknown): SectionId {
   return "general";
 }
 
-function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, remoteContext }: SettingsDialogBodyProps) {
+function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, remoteContext, accountOrigin }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [section, setSection] = useState<SectionId>(sanitizeSectionId(initialSection));
   const isMac = isMacShortcutPlatform();
@@ -190,7 +192,15 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
-          {section === "remote" ? <RemoteSection initialContext={remoteContext} legacySsh={initialSection === "ssh"} onOpenProject={onOpenMachineProject} onOpenSshProject={onOpenSshProject} /> : null}
+          {section === "remote" ? (
+            <RemoteSection
+              initialContext={remoteContext}
+              legacySsh={initialSection === "ssh"}
+              onOpenProject={onOpenMachineProject}
+              onOpenSshProject={onOpenSshProject}
+              accountOrigin={accountOrigin ?? getConfiguredAccountOrigin()}
+            />
+          ) : null}
         </div>
       </main>
     </div>

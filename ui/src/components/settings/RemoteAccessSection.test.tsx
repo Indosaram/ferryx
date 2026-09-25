@@ -33,7 +33,6 @@ const createPairingCode = vi.fn();
 const enableRemoteGateway = vi.fn();
 const disableRemoteGateway = vi.fn();
 const revokeRemoteDevice = vi.fn();
-const toDataURL = vi.fn();
 
 vi.mock("../../lib/tauri", () => ({
   getRemoteStatus: () => getRemoteStatus(),
@@ -45,11 +44,7 @@ vi.mock("../../lib/tauri", () => ({
   revokeRemoteDevice: (id: string) => revokeRemoteDevice(id),
 }));
 
-vi.mock("qrcode", () => ({
-  default: { toDataURL: (url: string, options: unknown) => toDataURL(url, options) },
-}));
-
-const { RemoteAccessSection, buildPairingUrl } = await import("./RemoteAccessSection");
+const { RemoteAccessSection } = await import("./RemoteAccessSection");
 
 const enabledStatus = {
   enabled: true,
@@ -86,7 +81,6 @@ describe("RemoteAccessSection", () => {
     enableRemoteGateway.mockResolvedValue(enabledStatus);
     disableRemoteGateway.mockResolvedValue(disabledStatus);
     revokeRemoteDevice.mockResolvedValue(true);
-    toDataURL.mockResolvedValue("data:image/png;base64,QR");
   });
 
   afterEach(() => {
@@ -94,36 +88,12 @@ describe("RemoteAccessSection", () => {
     vi.useRealTimers();
   });
 
-  it("counts down from 60 seconds, removes expired credentials, and regenerates", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-10T12:00:00Z"));
-    await act(async () => { render(<RemoteAccessSection />); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Generate QR Code" })); });
-
-    expect(screen.getByRole("timer")).toHaveTextContent("Expires in 60s");
-    expect(screen.getByRole("button", { name: "Copy pairing PIN 123456" })).toBeInTheDocument();
-    act(() => { vi.advanceTimersByTime(1000); });
-    expect(screen.getByRole("timer")).toHaveTextContent("Expires in 59s");
-    act(() => { vi.advanceTimersByTime(59000); });
-    expect(screen.getByRole("timer")).toHaveTextContent("Pairing code expired");
+  it("must not render a Generate QR button", async () => {
+    render(<RemoteAccessSection />);
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
+    expect(screen.queryByAltText(/pairing qr code/i)).toBeNull();
     expect(screen.queryByTestId("remote-pairing-code")).toBeNull();
     expect(screen.queryByTestId("pairing-url")).toBeNull();
-    expect(screen.queryByAltText("Pairing QR Code")).toBeNull();
-
-    createPairingCode.mockResolvedValue({ code: "654321", expiresInSeconds: 60 });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Regenerate" })); });
-    expect(screen.getByRole("timer")).toHaveTextContent("Expires in 60s");
-    expect(screen.getByRole("button", { name: "Copy pairing PIN 654321" })).toBeInTheDocument();
-  });
-
-  it("uses the response lifetime when shorter than 60 seconds and cleans up its timer", async () => {
-    vi.useFakeTimers();
-    createPairingCode.mockResolvedValue({ code: "123456", expiresInSeconds: 30 });
-    const view = await act(async () => render(<RemoteAccessSection />));
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Generate QR Code" })); });
-    expect(screen.getByRole("timer")).toHaveTextContent("Expires in 30s");
-    view.unmount();
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("never exposes a manual machine secret or token input", async () => {
@@ -148,26 +118,8 @@ describe("RemoteAccessSection", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Relay Ready");
   });
 
-  it("encodes the pairing token rather than the PIN when the gateway supplies it", async () => {
-    getRemoteStatus.mockResolvedValue(relayStatus);
-    createPairingCode.mockResolvedValue({
-      code: "001234", expiresInSeconds: 60, pairingToken: "opaque-token", machineId: "desktop-1",
-    });
-    await act(async () => { render(<RemoteAccessSection />); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Generate QR Code" })); });
-    const url = new URL(toDataURL.mock.calls[0][0]);
-    const fields = new URLSearchParams(url.hash.slice(1));
-    expect(fields.get("pair")).toBe("opaque-token");
-    expect(fields.get("relay")).toBe(relayStatus.relayUrl);
-    expect(fields.get("machine")).toBe("desktop-1");
-    expect(fields.get("hints")).toBe("http://192.168.0.5:43821");
-    expect(screen.getByRole("button", { name: "Copy pairing PIN 001234" })).toBeInTheDocument();
-  });
-
   it("does not probe for or display Tailscale detection", async () => {
     render(<RemoteAccessSection />);
-
-    await screen.findByRole("button", { name: "Generate QR Code" });
 
     expect(getTailscaleStatus).not.toHaveBeenCalled();
     expect(screen.queryByText("Tailscale Status")).toBeNull();
@@ -198,73 +150,9 @@ describe("RemoteAccessSection", () => {
   it("does not automatically mint a pairing code when mounting with remote access enabled", async () => {
     render(<RemoteAccessSection />);
 
-    const button = await screen.findByRole("button", { name: "Generate QR Code" });
-    expect(button).toBeInTheDocument();
     expect(getRemoteStatus).toHaveBeenCalledTimes(1);
     expect(createPairingCode).not.toHaveBeenCalled();
-  });
-
-  // Test B (C7): click the "Generate QR Code" button and assert createPairingCode WAS called.
-  it("creates a pairing code when the user explicitly clicks Generate QR Code", async () => {
-    render(<RemoteAccessSection />);
-
-    const button = await screen.findByRole("button", { name: "Generate QR Code" });
-    fireEvent.click(button);
-
-    await waitFor(() => {
-      expect(createPairingCode).toHaveBeenCalledWith("control");
-    });
-    await screen.findByAltText("Pairing QR Code");
-  });
-
-  it("encodes the relay URL, PIN and direct hints into one universal QR link", async () => {
-    getRemoteStatus.mockResolvedValue(relayStatus);
-
-    render(<RemoteAccessSection />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Generate QR Code" }));
-
-    await waitFor(() => expect(toDataURL).toHaveBeenCalled());
-    const expected = `https://relay.checka.cc/#pair=123456&relay=${encodeURIComponent("https://relay.checka.cc")}&machine=desktop-1&hints=${encodeURIComponent(
-      "http://192.168.0.5:43821",
-    )}`;
-    expect(toDataURL).toHaveBeenCalledWith(expected, { width: 180, margin: 4 });
-    expect(await screen.findByTestId("pairing-url")).toHaveTextContent(expected);
-  });
-
-  it("falls back to the host address link when no relay is configured", async () => {
-    render(<RemoteAccessSection />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Generate QR Code" }));
-
-    await waitFor(() => expect(toDataURL).toHaveBeenCalled());
-    expect(toDataURL).toHaveBeenCalledWith("http://192.168.0.5:43821/#pair=123456", { width: 180, margin: 4 });
-  });
-
-  it("builds relay and fallback pairing URLs from status and typed relay URL", () => {
-    expect(buildPairingUrl(enabledStatus, "", "111222")).toBe(
-      "http://192.168.0.5:43821/#pair=111222",
-    );
-    expect(buildPairingUrl(null, "", "111222")).toBe("http://localhost:43821/#pair=111222");
-    expect(buildPairingUrl(enabledStatus, "https://relay.example.com/", "111222")).toBe(
-      `https://relay.example.com/#pair=111222&relay=${encodeURIComponent("https://relay.example.com")}&machine=&hints=${encodeURIComponent(
-        "http://192.168.0.5:43821",
-      )}`,
-    );
-    expect(buildPairingUrl(relayStatus, "https://ignored.example.com", "111222")).toContain(
-      "https://relay.checka.cc/#pair=111222",
-    );
-  });
-
-  it("preserves an existing bound-address port in fallback links and relay hints", () => {
-    const status = { ...enabledStatus, localIp: null, boundAddress: "100.64.0.5:43821" };
-    expect(buildPairingUrl(status, "", "111222")).toBe(
-      "http://100.64.0.5:43821/#pair=111222",
-    );
-    const url = new URL(buildPairingUrl(status, "https://relay.example.com", "111222"));
-    expect(new URLSearchParams(url.hash.slice(1)).get("hints")).toBe(
-      "http://100.64.0.5:43821",
-    );
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
   });
 
   it("sends the typed relay URL when enabling remote access", async () => {
@@ -371,8 +259,10 @@ describe("RemoteAccessSection", () => {
 
     fireEvent.click(toggle);
 
-    await screen.findByRole("button", { name: "Generate QR Code" });
-    expect(enableRemoteGateway).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(enableRemoteGateway).toHaveBeenCalled();
+    });
     expect(createPairingCode).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
   });
 });

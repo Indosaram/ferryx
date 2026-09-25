@@ -809,7 +809,7 @@ function createTunnelWebSocketInstance(
 
 export async function openAccountTunnel(
   opts: OpenAccountTunnelOpts,
-): Promise<{ transport: TunnelTransport; close(): void }> {
+): Promise<{ transport: TunnelTransport; stream?: TunnelByteStream; close(): void }> {
   if (!opts.socketUrl) {
     throw new Error("MISSING_SOCKET_URL: socketUrl is required");
   }
@@ -1058,6 +1058,7 @@ export async function openAccountTunnel(
   const transport = createTunnelTransport(tunnelByteStream);
   return {
     transport,
+    stream: tunnelByteStream,
     close: () => tunnelByteStream.close(),
   };
 }

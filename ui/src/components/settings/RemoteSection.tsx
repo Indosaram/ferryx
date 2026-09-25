@@ -16,7 +16,6 @@ import {
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
 import {
   DEFAULT_MACHINE_LABEL,
-  DEFAULT_RELAY_ORIGIN,
   pairedHostInventory,
 } from "../../lib/pairedHostInventory";
 import {
@@ -46,6 +45,7 @@ import {
 import {
   AccountSessionError,
   clearStoredAccountSessionToken,
+  getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   issueEnrollmentCode,
   listMachines,
@@ -123,6 +123,7 @@ export interface RemoteSectionProps {
   negotiate?: (context: PairedHostContext) => Promise<unknown>;
   accountSessionToken?: string | null;
   accountOrigin?: string;
+  accountOriginResolver?: () => string;
 }
 
 export function RemoteSection({
@@ -134,8 +135,10 @@ export function RemoteSection({
   inventory = pairedHostInventory,
   negotiate = defaultNegotiate,
   accountSessionToken: accountSessionTokenProp,
-  accountOrigin = DEFAULT_RELAY_ORIGIN,
+  accountOrigin: accountOriginProp,
+  accountOriginResolver = getConfiguredAccountOrigin,
 }: RemoteSectionProps) {
+  const accountOrigin = accountOriginProp ?? accountOriginResolver();
   const [accountToken, setAccountToken] = useState<string | null>(() => {
     if (accountSessionTokenProp !== undefined) return accountSessionTokenProp;
     return getStoredAccountSessionToken();
@@ -520,18 +523,20 @@ export function RemoteSection({
     const local =
       state.hosts[hostId] ??
       Object.values(state.hosts).find((h) => h.machineId === m.machineId);
+    const effectiveScope = local?.grantScope;
+    const isPaired = effectiveScope === "machine" && (local ? local.authStatus === "paired" : true);
     return {
       hostId: local?.hostId ?? hostId,
       name: m.displayName || local?.name || DEFAULT_MACHINE_LABEL,
       address: m.relayOrigin || accountOrigin,
       transport: "relay",
-      authStatus: "paired",
+      authStatus: isPaired ? "paired" : (local?.authStatus ?? "needsMachineGrant"),
       online: m.online,
       machineId: m.machineId,
       displayName: m.displayName,
       relayOrigin: m.relayOrigin || accountOrigin,
       generation: local?.generation ?? String(m.enrollmentEpoch ?? "1"),
-      grantScope: m.grantScope ?? local?.grantScope ?? "machine",
+      grantScope: effectiveScope,
       lastSeenAt: m.lastSeenAt,
     };
   });

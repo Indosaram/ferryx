@@ -25,6 +25,10 @@ fn ssh_candidate_absent_without_explicit_link() {
         candidate, None,
         "an SSH config host with matching hostname and no sshHostId produces no candidate"
     );
+
+    let candidates = ferryx_lib::paired_host::attach::build_host_candidates(&row, Some("test-device-token"));
+    assert_eq!(candidates.len(), 1, "only relay candidate when ssh_host_id is absent");
+    assert_eq!(candidates[0].path, ferryx_lib::paired_host::path_select::AttachPath::Relay);
 }
 
 #[test]
@@ -53,6 +57,12 @@ fn ssh_candidate_present_with_explicit_link() {
         "SSH forward candidate points to daemon gateway forward"
     );
 
+    let candidates = ferryx_lib::paired_host::attach::build_host_candidates(&list[0], Some("test-device-token"));
+    assert_eq!(candidates.len(), 2, "both relay and SSH forward candidate when ssh_host_id is present");
+    assert_eq!(candidates[0].path, ferryx_lib::paired_host::path_select::AttachPath::Relay);
+    assert_eq!(candidates[1].path, ferryx_lib::paired_host::path_select::AttachPath::SshForward);
+    assert_eq!(candidates[1].base_origin, "http://127.0.0.1:43821");
+
     store
         .set_ssh_host_id(&row.host_id, row.generation, None)
         .expect("clear ssh host id");
@@ -61,4 +71,8 @@ fn ssh_candidate_present_with_explicit_link() {
         None,
         "clearing link removes candidate"
     );
+
+    let candidates_cleared = ferryx_lib::paired_host::attach::build_host_candidates(&store.list()[0], Some("test-device-token"));
+    assert_eq!(candidates_cleared.len(), 1, "only relay candidate after link is cleared");
+    assert_eq!(candidates_cleared[0].path, ferryx_lib::paired_host::path_select::AttachPath::Relay);
 }

@@ -37,13 +37,11 @@ describe("AccountLoginPage", () => {
     });
 
     const onLoginSuccess = vi.fn();
-    const onUseLegacyPin = vi.fn();
 
     render(
       <AccountLoginPage
         relayUrl={relayUrl}
         onLoginSuccess={onLoginSuccess}
-        onUseLegacyPin={onUseLegacyPin}
       />
     );
 
@@ -72,13 +70,11 @@ describe("AccountLoginPage", () => {
     });
 
     const onLoginSuccess = vi.fn();
-    const onUseLegacyPin = vi.fn();
 
     render(
       <AccountLoginPage
         relayUrl={relayUrl}
         onLoginSuccess={onLoginSuccess}
-        onUseLegacyPin={onUseLegacyPin}
       />
     );
 
@@ -107,13 +103,11 @@ describe("AccountLoginPage", () => {
     });
 
     const onLoginSuccess = vi.fn();
-    const onUseLegacyPin = vi.fn();
 
     render(
       <AccountLoginPage
         relayUrl={relayUrl}
         onLoginSuccess={onLoginSuccess}
-        onUseLegacyPin={onUseLegacyPin}
       />
     );
 
@@ -142,13 +136,11 @@ describe("AccountLoginPage", () => {
     });
 
     const onLoginSuccess = vi.fn();
-    const onUseLegacyPin = vi.fn();
 
     render(
       <AccountLoginPage
         relayUrl={relayUrl}
         onLoginSuccess={onLoginSuccess}
-        onUseLegacyPin={onUseLegacyPin}
       />
     );
 
@@ -157,5 +149,16 @@ describe("AccountLoginPage", () => {
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyToken);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-000", "dave@example.com");
     });
+  });
+
+  it("does not render the legacy device PIN pairing button", () => {
+    const onLoginSuccess = vi.fn();
+    const { queryByTestId } = render(
+      <AccountLoginPage
+        relayUrl={relayUrl}
+        onLoginSuccess={onLoginSuccess}
+      />
+    );
+    expect(queryByTestId("use-legacy-pin-btn")).toBeNull();
   });
 });

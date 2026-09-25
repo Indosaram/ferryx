@@ -52,7 +52,6 @@ export interface AccountMachineView {
   online: boolean;
   enrollmentEpoch: string | number;
   lastSeenAt: number;
-  grantScope?: "mirror" | "machine";
 }
 
 export interface AccountGrantRequest {

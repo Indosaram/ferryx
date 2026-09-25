@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import {
@@ -8,6 +8,14 @@ import {
   WS_CLOSED,
   type TunnelByteStream,
 } from "./attachTunnel";
+import {
+  attachPrologue,
+  encodeFrame,
+  decodeFrames,
+  type NoisePrimitives,
+} from "./attachFraming";
+import { createNoisePrimitives } from "./noisePrimitives";
+import { getOrCreateAttachKey } from "./accountAttach";
 
 class ScriptedByteStream implements TunnelByteStream {
   public written: Uint8Array[] = [];
@@ -480,5 +488,366 @@ describe("attachTunnel security & validation constraints", () => {
         sessionId: "",
       }),
     ).rejects.toThrow(/MISSING_SESSION_ID/);
+  });
+});
+
+const NOISE_PROTOCOL_NAME = new TextEncoder().encode("Noise_IK_25519_ChaChaPoly_BLAKE2s");
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function containsSubarray(haystack: Uint8Array, needle: Uint8Array): boolean {
+  if (needle.length === 0 || haystack.length < needle.length) return false;
+  for (let i = 0; i <= haystack.length - needle.length; i++) {
+    let match = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
+function unmaskClientFrame(frame: Uint8Array): Uint8Array {
+  const hasMask = (frame[1] & 0x80) !== 0;
+  let payloadLen = frame[1] & 0x7f;
+  let offset = 2;
+  if (payloadLen === 126) {
+    offset = 4;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    payloadLen = view.getUint16(2, false);
+  } else if (payloadLen === 127) {
+    offset = 10;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    payloadLen = Number(view.getBigUint64(2, false));
+  }
+  if (!hasMask) {
+    return frame.subarray(offset, offset + payloadLen);
+  }
+  const mask = frame.subarray(offset, offset + 4);
+  offset += 4;
+  const rawPayload = frame.subarray(offset, offset + payloadLen);
+  const unmasked = new Uint8Array(rawPayload.length);
+  for (let i = 0; i < rawPayload.length; i++) {
+    unmasked[i] = rawPayload[i] ^ mask[i % 4];
+  }
+  return unmasked;
+}
+
+class TestNoiseResponder {
+  private primitives: NoisePrimitives;
+  private responderPriv: Uint8Array;
+  private responderPub: Uint8Array;
+  private prologue: Uint8Array;
+  private txKey: Uint8Array | null = null;
+  private rxKey: Uint8Array | null = null;
+  private txNonce = 0;
+  private rxNonce = 0;
+
+  constructor(
+    primitives: NoisePrimitives,
+    responderPriv: Uint8Array,
+    responderPub: Uint8Array,
+    prologue: Uint8Array,
+  ) {
+    this.primitives = primitives;
+    this.responderPriv = responderPriv;
+    this.responderPub = responderPub;
+    this.prologue = prologue;
+  }
+
+  async accept(
+    msg1: Uint8Array,
+    authorize: (initiatorPub: Uint8Array) => boolean,
+  ): Promise<{ msg2: Uint8Array; initiatorStaticPub: Uint8Array }> {
+    if (msg1.length !== 96) {
+      throw new Error(`RESPONDER_BAD_MSG1_LEN: expected 96, got ${msg1.length}`);
+    }
+
+    const hkdf = this.primitives.hkdf!.bind(this.primitives);
+
+    let h: Uint8Array = await this.primitives.hash(NOISE_PROTOCOL_NAME);
+    let ck: Uint8Array = new Uint8Array(h);
+
+    h = await this.primitives.hash(concatAll([h, this.prologue]));
+    h = await this.primitives.hash(concatAll([h, this.responderPub]));
+
+    const e_init = msg1.subarray(0, 32);
+    h = await this.primitives.hash(concatAll([h, e_init]));
+
+    const dh_es = await this.primitives.x25519(this.responderPriv, e_init);
+    const [ck1, k1] = await hkdf(ck, dh_es);
+    ck = ck1;
+    let n1 = 0;
+
+    const ct_s = msg1.subarray(32, 80);
+    const initiatorStaticPub = await this.primitives.aeadDecrypt(k1, n1++, h, ct_s);
+    h = await this.primitives.hash(concatAll([h, ct_s]));
+
+    if (!authorize(initiatorStaticPub)) {
+      throw new Error("UNAUTHORIZED_INITIATOR_KEY");
+    }
+
+    const dh_ss = await this.primitives.x25519(this.responderPriv, initiatorStaticPub);
+    const [ck2, k2] = await hkdf(ck, dh_ss);
+    ck = ck2;
+    let n2 = 0;
+
+    const ct_p = msg1.subarray(80, 96);
+    await this.primitives.aeadDecrypt(k2, n2++, h, ct_p);
+    h = await this.primitives.hash(concatAll([h, ct_p]));
+
+    const re_resp = await this.primitives.generateEphemeralKey();
+    h = await this.primitives.hash(concatAll([h, re_resp.publicKey]));
+
+    const dh_ee = await this.primitives.x25519(re_resp.privateKey, e_init);
+    const [ck3] = await hkdf(ck, dh_ee);
+    ck = ck3;
+
+    const dh_se = await this.primitives.x25519(re_resp.privateKey, initiatorStaticPub);
+    const [ck4, k4] = await hkdf(ck, dh_se);
+    ck = ck4;
+    let n4 = 0;
+
+    const ct_p2 = await this.primitives.aeadEncrypt(k4, n4++, h, new Uint8Array(0));
+    h = await this.primitives.hash(concatAll([h, ct_p2]));
+
+    const msg2 = concatAll([re_resp.publicKey, ct_p2]);
+
+    const [rx, tx] = await hkdf(ck, new Uint8Array(0));
+    this.rxKey = rx;
+    this.txKey = tx;
+    this.txNonce = 0;
+    this.rxNonce = 0;
+
+    return { msg2, initiatorStaticPub };
+  }
+
+  async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+    if (!this.txKey) throw new Error("NOT_IN_TRANSPORT_MODE");
+    return this.primitives.aeadEncrypt(this.txKey, this.txNonce++, new Uint8Array(0), plaintext);
+  }
+
+  async decrypt(ciphertext: Uint8Array): Promise<Uint8Array> {
+    if (!this.rxKey) throw new Error("NOT_IN_TRANSPORT_MODE");
+    return this.primitives.aeadDecrypt(this.rxKey, this.rxNonce++, new Uint8Array(0), ciphertext);
+  }
+}
+
+class MockEncryptedAttachWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+
+  public url: string;
+  public readyState: number = MockEncryptedAttachWebSocket.CONNECTING;
+  public binaryType: string = "arraybuffer";
+  public onopen: (() => void) | null = null;
+  public onclose: ((event?: unknown) => void) | null = null;
+  public onmessage: ((event: { data: ArrayBuffer | string }) => void) | null = null;
+  public onerror: ((event?: unknown) => void) | null = null;
+
+  public sentRawPayloads: Uint8Array[] = [];
+  public onSend: ((data: Uint8Array) => Promise<void> | void) | null = null;
+
+  constructor(url: string) {
+    this.url = url;
+    queueMicrotask(() => {
+      if (this.readyState === MockEncryptedAttachWebSocket.CONNECTING) {
+        this.readyState = MockEncryptedAttachWebSocket.OPEN;
+        this.onopen?.();
+      }
+    });
+  }
+
+  send(data: string | Uint8Array | ArrayBuffer) {
+    const raw =
+      typeof data === "string"
+        ? new TextEncoder().encode(data)
+        : data instanceof Uint8Array
+        ? new Uint8Array(data)
+        : new Uint8Array(data);
+    this.sentRawPayloads.push(raw);
+    if (this.onSend) {
+      void this.onSend(raw);
+    }
+  }
+
+  pushServerMessage(bytes: Uint8Array) {
+    const copy = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    this.onmessage?.({ data: copy.buffer });
+  }
+
+  close() {
+    this.readyState = MockEncryptedAttachWebSocket.CLOSED;
+    this.onclose?.({ code: 1000, reason: "normal", wasClean: true });
+  }
+}
+
+describe("attachTunnel encrypted channel (P19 / F3)", () => {
+  it("drives full Noise handshake, transmits PHONE_INPUT_MARKER exclusively as ciphertext over mock WebSocket, and recovers marker on peer side", async () => {
+    const PHONE_INPUT_MARKER = "PHONE_INPUT_MARKER_9981";
+    const markerBytes = new TextEncoder().encode(PHONE_INPUT_MARKER);
+
+    // 1. Obtain real local attach keypair (initiator) and machine attach public key (responder)
+    const primitives = createNoisePrimitives();
+    const localKeyPair = await getOrCreateAttachKey();
+    const responderKeys = await primitives.generateEphemeralKey();
+    const machineAttachPublicKey = bytesToBase64(responderKeys.publicKey);
+
+    const machineId = "mach-phone-encrypted-1";
+    const sessionId = "sess-phone-encrypted-1";
+    const enrollmentEpoch = "1";
+    const prologue = attachPrologue(machineId, sessionId, enrollmentEpoch);
+
+    const responder = new TestNoiseResponder(
+      primitives,
+      responderKeys.privateKey,
+      responderKeys.publicKey,
+      prologue,
+    );
+
+    let activeSocket: MockEncryptedAttachWebSocket | null = null;
+    let handshakeCompleted = false;
+    let upgradeCompleted = false;
+    const decryptedPayloadsFromInitiator: Uint8Array[] = [];
+
+    vi.stubGlobal(
+      "WebSocket",
+      class extends MockEncryptedAttachWebSocket {
+        constructor(url: string) {
+          super(url);
+          activeSocket = this;
+          this.onSend = async (raw: Uint8Array) => {
+            const { messages } = decodeFrames(raw);
+            for (const msg of messages) {
+              if (!handshakeCompleted) {
+                // Handshake message 1 from initiator (96 bytes)
+                const { msg2, initiatorStaticPub } = await responder.accept(msg, () => true);
+                expect(bytesToBase64(initiatorStaticPub)).toBe(localKeyPair.publicKey);
+                handshakeCompleted = true;
+                const frame2 = encodeFrame(msg2);
+                this.pushServerMessage(frame2);
+              } else if (!upgradeCompleted) {
+                // Encrypted HTTP Upgrade request
+                const decryptedHttpReq = await responder.decrypt(msg);
+                decryptedPayloadsFromInitiator.push(decryptedHttpReq);
+                const reqText = new TextDecoder().decode(decryptedHttpReq);
+                expect(reqText).toContain("Upgrade: websocket");
+                const secKeyMatch = reqText.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i);
+                expect(secKeyMatch).not.toBeNull();
+                const secKey = secKeyMatch![1].trim();
+                const acceptKey = await computeAcceptKey(secKey);
+                upgradeCompleted = true;
+                const resText = `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey}\r\n\r\n`;
+                const ct101 = await responder.encrypt(new TextEncoder().encode(resText));
+                this.pushServerMessage(encodeFrame(ct101));
+              } else {
+                // Transport messages (encrypted WebSocket frame or direct stream write)
+                const decryptedMsg = await responder.decrypt(msg);
+                decryptedPayloadsFromInitiator.push(decryptedMsg);
+              }
+            }
+          };
+        }
+      },
+    );
+
+    try {
+      // 2. Open account tunnel over mock WebSocket
+      const tunnel = await openAccountTunnel({
+        socketUrl: `wss://relay.example.com/tunnel/opaque/${sessionId}`,
+        machineId,
+        enrollmentEpoch,
+        machineAttachPublicKey,
+        localKeyPair,
+        sessionId,
+      });
+
+      expect(handshakeCompleted).toBe(true);
+      expect(activeSocket).not.toBeNull();
+
+      // 3. Open WebSocket on transport with marker in path, and send marker via socket and stream
+      const tunnelWs = await tunnel.transport.openWebSocket(
+        `/api/v1/terminal/${sessionId}?marker=${encodeURIComponent(PHONE_INPUT_MARKER)}`,
+      );
+      expect(upgradeCompleted).toBe(true);
+
+      // Write marker through returned WebSocket
+      tunnelWs.send(PHONE_INPUT_MARKER);
+
+      // Write marker through returned stream
+      await tunnel.stream!.write(markerBytes);
+
+      // Wait until all decrypted frames are processed by responder
+      await vi.waitFor(() => {
+        expect(decryptedPayloadsFromInitiator.length).toBeGreaterThanOrEqual(3);
+      });
+
+      // 4. Assert: NONE of the raw frames sent over the mock WebSocket contain PHONE_INPUT_MARKER in plaintext
+      expect(activeSocket!.sentRawPayloads.length).toBeGreaterThan(0);
+      for (const rawPayload of activeSocket!.sentRawPayloads) {
+        expect(containsSubarray(rawPayload, markerBytes)).toBe(false);
+        const decoded = new TextDecoder("utf-8", { fatal: false }).decode(rawPayload);
+        expect(decoded.includes(PHONE_INPUT_MARKER)).toBe(false);
+      }
+
+      // 5. Assert: PHONE_INPUT_MARKER IS recoverable after decrypting on the peer (responder) side
+      // Identify payloads by CONTENT, never by index, ensuring robustness to arrival order:
+      const isHttpUpgrade = (payload: Uint8Array): boolean => {
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(payload);
+        return text.startsWith("GET ") && text.includes("Upgrade: websocket");
+      };
+
+      const isMaskedWsFrame = (payload: Uint8Array): boolean => {
+        if (payload.length < 6) return false;
+        const b0 = payload[0];
+        const opcode = b0 & 0x0f;
+        const isTextOrBinary = opcode === 0x1 || opcode === 0x2;
+        const isMasked = (payload[1] & 0x80) !== 0;
+        return isTextOrBinary && isMasked;
+      };
+
+      const isRawStreamPayload = (payload: Uint8Array): boolean => {
+        if (payload.length !== markerBytes.length) return false;
+        for (let i = 0; i < payload.length; i++) {
+          if (payload[i] !== markerBytes[i]) return false;
+        }
+        return true;
+      };
+
+      const httpUpgradePayloads = decryptedPayloadsFromInitiator.filter(isHttpUpgrade);
+      const wsFramePayloads = decryptedPayloadsFromInitiator.filter(isMaskedWsFrame);
+      const rawStreamPayloads = decryptedPayloadsFromInitiator.filter(isRawStreamPayload);
+
+      expect(httpUpgradePayloads).toHaveLength(1);
+      expect(wsFramePayloads).toHaveLength(1);
+      expect(rawStreamPayloads).toHaveLength(1);
+
+      // 5a. Recover from HTTP Upgrade request
+      const decryptedHttpText = new TextDecoder().decode(httpUpgradePayloads[0]);
+      expect(decryptedHttpText).toContain(PHONE_INPUT_MARKER);
+
+      // 5b. Recover from WebSocket frame (unmask RFC6455 frame)
+      const unmaskedWsPayload = unmaskClientFrame(wsFramePayloads[0]);
+      expect(new TextDecoder().decode(unmaskedWsPayload)).toBe(PHONE_INPUT_MARKER);
+
+      // 5c. Recover from direct stream write
+      expect(new TextDecoder().decode(rawStreamPayloads[0])).toBe(PHONE_INPUT_MARKER);
+
+      tunnel.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
