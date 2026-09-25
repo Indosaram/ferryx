@@ -700,24 +700,22 @@ impl RelayState {
         let (grant_tx, grant_rx) = mpsc::channel(1);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         // One lock order everywhere: `control_channels` before `grant_channels`.
-        self.inner
-            .control_channels
-            .lock()
-            .insert(machine_id.clone(), ControlChannel { generation, tx });
-        self.inner.grant_channels.lock().insert(machine_id, grant_tx);
+        let mut channels = self.inner.control_channels.lock();
+        let mut grants = self.inner.grant_channels.lock();
+        channels.insert(machine_id.clone(), ControlChannel { generation, tx });
+        grants.insert(machine_id, grant_tx);
         (generation, rx, grant_rx)
     }
 
     fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
         let mut channels = self.inner.control_channels.lock();
+        let mut grants = self.inner.grant_channels.lock();
         let retired: Vec<String> = channels
             .iter()
             .filter(|(_, channel)| channel.generation == generation)
             .map(|(machine, _)| machine.clone())
             .collect();
         channels.retain(|_, channel| channel.generation != generation);
-        drop(channels);
-        let mut grants = self.inner.grant_channels.lock();
         for machine in retired {
             grants.remove(&machine);
         }
@@ -6824,5 +6822,100 @@ mod tests {
         assert!(notice.opaque);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_unregister_control_channel_interleaving_preserves_reconnected_grant_channel() {
+        let state = test_state(vec![]);
+        let (gen_1, _notices_1, _grants_1) =
+            state.register_control_channel("reconnect-machine".into());
+
+        // Concurrency interleaving regression test:
+        // When unregister_control_channel drops `control_channels` before acquiring `grant_channels`,
+        // a daemon reconnect can slip into that window, registering generation N+1.
+        // The unregister loop then resumes and evicts the newly registered grant channel by name.
+        //
+        // Force the interleaving: hold `grant_channels` lock so the unregister task cannot proceed
+        // past the gap between drop(control_channels) and grant_channels.lock().
+        let mut grant_hold = state.inner.grant_channels.lock();
+
+        let unregister_handle = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                state.unregister_control_channel("reconnect-machine", gen_1);
+            })
+        };
+
+        // If the defect is present (drop(channels) before grant_channels lock),
+        // Thread A drops `control_channels`, allowing us to acquire it and observe
+        // that "reconnect-machine" was removed from `control_channels` while Thread A
+        // is suspended waiting for `grant_channels`.
+        let mut defect_gap_detected = false;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(30) {
+            if let Some(mut controls) = state.inner.control_channels.try_lock() {
+                if !controls.contains_key("reconnect-machine") {
+                    defect_gap_detected = true;
+                    // Reconnect occurs inside the gap: registers generation N+1 in both maps
+                    let (tx2, _rx2) = tokio::sync::mpsc::channel(100);
+                    let (gtx2, _grx2) = tokio::sync::mpsc::channel(1);
+                    controls.insert(
+                        "reconnect-machine".into(),
+                        ControlChannel {
+                            generation: gen_1 + 1,
+                            tx: tx2,
+                        },
+                    );
+                    grant_hold.insert("reconnect-machine".into(), gtx2);
+                    break;
+                }
+            }
+            std::thread::yield_now();
+        }
+
+        // Release grant_channels so Thread A can proceed
+        drop(grant_hold);
+        unregister_handle.join().expect("unregister thread panicked");
+
+        if !defect_gap_detected {
+            // Under the fix: control_channels was never dropped before grant_channels was acquired;
+            // Thread A held both locks atomically so no gap existed. Simulate reconnect now:
+            let (_gen_2, _notices_2, _grants_2) =
+                state.register_control_channel("reconnect-machine".into());
+        }
+
+        // In the buggy code: Thread A woke up and removed "reconnect-machine" from grant_channels,
+        // leaving the machine without a usable grant channel (404 NOT_FOUND).
+        // In the fixed code: the machine still has a usable grant channel.
+        let grant_present = state
+            .inner
+            .grant_channels
+            .lock()
+            .contains_key("reconnect-machine");
+        assert!(
+            grant_present,
+            "reconnected grant channel must not be evicted by stale unregister"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unregister_control_channel_preserves_already_reconnected_grant_channel() {
+        let state = test_state(vec![]);
+        let (gen_1, _notices_1, _grants_1) =
+            state.register_control_channel("already-reconnected".into());
+        let (gen_2, _notices_2, _grants_2) =
+            state.register_control_channel("already-reconnected".into());
+        assert_eq!(gen_2, gen_1 + 1);
+
+        state.unregister_control_channel("already-reconnected", gen_1);
+
+        assert!(
+            state
+                .inner
+                .grant_channels
+                .lock()
+                .contains_key("already-reconnected"),
+            "grant channel for generation N+1 must survive unregister of generation N"
+        );
     }
 }
