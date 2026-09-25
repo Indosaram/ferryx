@@ -15,7 +15,6 @@ import {
 import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { hostAgentTotals, MobileHostDrawer } from "./MobileHostDrawer";
-import { PairingPage } from "./PairingPage";
 import { suggestDeviceName } from "./deviceIdentity";
 import {
   contextName,
@@ -26,8 +25,11 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
+import { decodeRemoteTerminalFrame, stripTerminalControlSequences } from "./remoteTerminalFrames";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { MobileChatWorkspace } from "./chat/MobileChatWorkspace";
+import { MobileChatThreadList } from "./chat/MobileChatThreadList";
+import type { ThreadListRow } from "./chat/MobileChatThreadList";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
 import type { ChatAttachment as ComponentAttachment } from "./chat/MobileChatComponents";
@@ -38,9 +40,10 @@ import { AccountMachinesPage } from "./AccountMachinesPage";
 import {
   getStoredAccountSessionToken,
   clearStoredAccountSessionToken,
-  type AccountMachineView,
+  createAccountConnection,
+  type AccountConnection,
 } from "./accountSession";
-import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
+import type { TunnelWebSocket } from "./attachTunnel";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
@@ -338,7 +341,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("terminal");
+  const [viewMode, setViewMode] = useState<"threads" | "chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "threads" : "terminal"));
   const [chatMessages, setChatMessages] = useState<MobileChatMessageProps[]>([]);
   const [chatIsRunning, setChatIsRunning] = useState(false);
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
@@ -360,19 +363,56 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const confirmationInFlightRef = useRef(false);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSubmittedPromptRef = useRef<string | null>(null);
 
   const [accountSessionToken, setAccountSessionToken] = useState<string | null>(
     () => getStoredAccountSessionToken(),
   );
-  const [useLegacyPin, setUseLegacyPin] = useState(
-    () => Boolean(readUrlHints && /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(window.location.hash)),
-  );
-  const [activeTunnelConnection, setActiveTunnelConnection] = useState<{
-    transport: TunnelTransport;
-    close: () => void;
-    machine: AccountMachineView;
-    deviceToken: string;
-  } | null>(null);
+  const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
+
+  const sessionEpochsRef = useRef<Map<string, string>>(new Map());
+  const sessionEpochMissesRef = useRef<Map<string, number>>(new Map());
+
+  const getSessionDaemonEpoch = useCallback(async (sessionId: string): Promise<string | null> => {
+    const cached = sessionEpochsRef.current.get(sessionId);
+    if (cached) return cached;
+
+    const now = Date.now();
+    const lastMiss = sessionEpochMissesRef.current.get(sessionId);
+    if (lastMiss && now - lastMiss < 5000) {
+      return null;
+    }
+
+    if (activeTunnelConnection && token) {
+      try {
+        const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (sessRes.status >= 200 && sessRes.status < 300) {
+          const sessText = new TextDecoder().decode(sessRes.body);
+          const sessData = JSON.parse(sessText);
+          const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
+          for (const s of rows) {
+            const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
+            const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
+            if (sid && epoch !== undefined && epoch !== null) {
+              sessionEpochsRef.current.set(sid, String(epoch));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to fetch session daemonEpoch", err);
+      }
+    }
+
+    const resolved = sessionEpochsRef.current.get(sessionId);
+    if (resolved) {
+      sessionEpochMissesRef.current.delete(sessionId);
+      return resolved;
+    }
+    sessionEpochMissesRef.current.set(sessionId, now);
+    return null;
+  }, [activeTunnelConnection, token]);
 
   const terminalSocketRef = useRef<WebSocketLike | WebSocket | null>(null);
   const terminalSocketSessionIdRef = useRef<string | null>(null);
@@ -476,6 +516,23 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           return null;
         }
         if (res.status < 200 || res.status >= 300) return null;
+        try {
+          const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (sessRes.status >= 200 && sessRes.status < 300) {
+            const sessText = new TextDecoder().decode(sessRes.body);
+            const sessData = JSON.parse(sessText);
+            const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
+            for (const s of rows) {
+              const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
+              const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
+              if (sid && epoch !== undefined && epoch !== null) {
+                sessionEpochsRef.current.set(sid, String(epoch));
+              }
+            }
+          }
+        } catch {}
         const text = new TextDecoder().decode(res.body);
         return normalizeRemoteWorkspaceState(JSON.parse(text));
       }
@@ -687,9 +744,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       let current: WebSocket | TunnelWebSocket;
       try {
         if (activeTunnelConnection) {
-          current = await activeTunnelConnection.transport.openWebSocket("/api/v1/events", {
-            Authorization: `Bearer ${token}`,
-          });
+          current = await activeTunnelConnection.openWebSocket("/api/v1/events");
         } else {
           const url = await remoteSocketUrl(transportBaseUrl, "/api/v1/events", token, abort.signal);
           if (disposed) return;
@@ -916,28 +971,59 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
       if (!raw) return;
 
-      let displayText = raw;
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed?.type === "output" && typeof parsed.data === "string") {
-          displayText = parsed.data;
-        } else if (parsed?.type === "agentTurn" || parsed?.type === "toolOutput") {
-          displayText = parsed.content ?? parsed.output ?? JSON.stringify(parsed);
-        } else if (parsed?.type === "grid" || parsed?.type === "remoteStatus") {
-          return;
+      let displayText: string | null = null;
+      const frame = decodeRemoteTerminalFrame(raw);
+      if (frame) {
+        if (frame.kind === "replayGap") return;
+        if (frame.kind === "output" || frame.kind === "replay") {
+          displayText = frame.payload;
         }
-      } catch {
-        // Plain text / raw terminal chunk
+      } else {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed?.type === "output" && typeof parsed.data === "string") {
+            displayText = parsed.data;
+          } else if (parsed?.type === "agentTurn" || parsed?.type === "toolOutput") {
+            displayText = parsed.content ?? parsed.output ?? JSON.stringify(parsed);
+          } else if (parsed?.type === "grid" || parsed?.type === "remoteStatus") {
+            return;
+          }
+        } catch {
+          // Plain text / raw terminal chunk
+        }
+        if (displayText === null) {
+          displayText = raw;
+        }
+      }
+
+      if (displayText === null) return;
+      const chunk = stripTerminalControlSequences(displayText);
+      if (!chunk.trim()) return;
+
+      const submitted = lastSubmittedPromptRef.current;
+      let finalChunk = chunk;
+      if (submitted) {
+        const lines = chunk.split("\n");
+        const firstNonEmpty = lines.findIndex((line) => line.trim().length > 0);
+        if (firstNonEmpty >= 0 && lines[firstNonEmpty].trim() === submitted.trim()) {
+          lines.splice(firstNonEmpty, 1);
+          lastSubmittedPromptRef.current = null;
+          finalChunk = lines.join("\n");
+          if (!finalChunk.trim()) return;
+        }
       }
 
       setChatMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.role === "assistant") {
+          if (last.content.endsWith(finalChunk)) return prev;
+          const combined = `${last.content}${finalChunk}`;
+          const bounded = combined.length > 12000 ? combined.slice(combined.length - 12000) : combined;
           return [
             ...prev.slice(0, -1),
             {
               ...last,
-              content: `${last.content}${displayText}`,
+              content: bounded,
               timestamp: Date.now(),
             },
           ];
@@ -947,7 +1033,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           {
             id: `assistant-${Date.now()}`,
             role: "assistant",
-            content: displayText,
+            content: finalChunk,
             timestamp: Date.now(),
           },
         ];
@@ -955,35 +1041,47 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     };
 
     if (activeTunnelConnection) {
-      const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(effectiveSessionId)}`;
-      activeTunnelConnection.transport
-        .openWebSocket(pathAndQuery, { Authorization: `Bearer ${token}` })
-        .then((ws) => {
-          if (disposed) {
-            ws.close();
-            return;
-          }
-          terminalSocketRef.current = ws;
-          terminalSocketSessionIdRef.current = effectiveSessionId;
-          ws.onmessage = (event) => handleMessage(event.data);
-          ws.onclose = () => {
-            if (terminalSocketRef.current === ws) {
-              terminalSocketRef.current = null;
-              terminalSocketSessionIdRef.current = null;
-              setChatIsRunning(false);
+      getSessionDaemonEpoch(effectiveSessionId).then((epoch) => {
+        if (disposed) return;
+        if (!epoch) {
+          const errMsg = `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`;
+          console.error(errMsg);
+          setCreationError(errMsg);
+          setChatIsRunning(false);
+          return;
+        }
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(effectiveSessionId)}?daemonEpoch=${encodeURIComponent(epoch)}`;
+        activeTunnelConnection
+          .openWebSocket(pathAndQuery)
+          .then((ws) => {
+            if (disposed) {
+              ws.close();
+              return;
             }
-          };
-          ws.onerror = () => {
-            if (terminalSocketRef.current === ws) {
-              terminalSocketRef.current = null;
-              terminalSocketSessionIdRef.current = null;
-              setChatIsRunning(false);
-            }
-          };
-        })
-        .catch((err) => {
-          console.warn("Failed to connect terminal WebSocket via tunnel", err);
-        });
+            terminalSocketRef.current = ws;
+            terminalSocketSessionIdRef.current = effectiveSessionId;
+            ws.onmessage = (event) => handleMessage(event.data);
+            ws.onclose = () => {
+              if (terminalSocketRef.current === ws) {
+                terminalSocketRef.current = null;
+                terminalSocketSessionIdRef.current = null;
+                setChatIsRunning(false);
+              }
+            };
+            ws.onerror = () => {
+              if (terminalSocketRef.current === ws) {
+                terminalSocketRef.current = null;
+                terminalSocketSessionIdRef.current = null;
+                setChatIsRunning(false);
+              }
+            };
+          })
+          .catch((err) => {
+            console.warn("Failed to connect terminal WebSocket via tunnel", err);
+            setCreationError(err instanceof Error ? err.message : String(err));
+            setChatIsRunning(false);
+          });
+      });
     } else {
       remoteSocketUrl(transportBaseUrl, `/api/v1/terminal/${encodeURIComponent(effectiveSessionId)}`, token, abort.signal)
         .then((url) => {
@@ -1026,14 +1124,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, [effectiveSessionId, token, activeTunnelConnection, transportBaseUrl, viewMode]);
 
   if (!token) {
-    if (useLegacyPin) {
-      return (
-        <PairingPage
-          onPaired={handlePaired}
-          transportUrl={pairingBaseUrl}
-        />
-      );
-    }
     if (!accountSessionToken) {
       return (
         <AccountLoginPage
@@ -1041,7 +1131,6 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           onLoginSuccess={(tok) => {
             setAccountSessionToken(tok);
           }}
-          onUseLegacyPin={() => setUseLegacyPin(true)}
         />
       );
     }
@@ -1050,7 +1139,15 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         relayUrl={relayUrl}
         accountSessionToken={accountSessionToken}
         onConnect={(conn) => {
-          setActiveTunnelConnection(conn);
+          const accountConn = createAccountConnection({
+            relayUrl,
+            accountSessionToken: accountSessionToken!,
+            machine: conn.machine,
+            deviceToken: conn.deviceToken,
+            httpTransport: conn.transport,
+            httpClose: conn.close,
+          });
+          setActiveTunnelConnection(accountConn);
           setToken(conn.deviceToken);
         }}
         onLogout={handleLogout}
@@ -1064,6 +1161,21 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const attentionAriaLabel = firstWaiting
     ? formatAttentionAriaLabel(firstWaiting, model.context, waitingCount)
     : "";
+
+  const threadRows: ThreadListRow[] = model.context.terminalTabs && model.context.terminalTabs.length > 0
+    ? model.context.terminalTabs.map((tab) => ({
+        id: tab.id,
+        title: tab.label,
+        worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel ?? null,
+        agentLabel: tab.agentType ?? null,
+        status: tab.activityState,
+      }))
+    : model.options.map((option) => ({
+        id: option.tabId ?? option.sessionId ?? `${option.workspaceId}:${option.worktreeSlug ?? "root"}`,
+        title: option.sessionLabel ?? option.worktreeLabel ?? option.worktreeSlug ?? "Primary worktree",
+        worktreeLabel: option.worktreeLabel,
+        status: option.attention,
+      }));
 
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
@@ -1222,6 +1334,18 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           <div className="flex items-center gap-1 border-l border-border/40 pl-2">
             <button
               type="button"
+              data-testid="remote-view-mode-threads"
+              onClick={() => setViewMode("threads")}
+              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+                viewMode === "threads"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Threads
+            </button>
+            <button
+              type="button"
               data-testid="remote-view-mode-chat"
               onClick={() => setViewMode("chat")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
@@ -1275,7 +1399,33 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         }}
         creationError={creationError}
       >
-        {viewMode === "chat" ? (
+        {viewMode === "threads" ? (
+          <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+            <MobileChatThreadList
+              rows={threadRows}
+              activeRowId={model.context.activeTabId ?? null}
+              workspaceLabel={model.context.workspaceId ?? null}
+              onSelectRow={(row) => {
+                const tab = (model.context.terminalTabs ?? []).find((t) => t.id === row.id);
+                if (tab) {
+                  void selectContext({
+                    workspaceId: model.context.workspaceId ?? "",
+                    worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
+                    worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
+                    tabId: tab.id,
+                    sessionId: tab.sessionId,
+                  });
+                } else {
+                  const option = model.options.find(
+                    (o) => (o.tabId ?? o.sessionId ?? `${o.workspaceId}:${o.worktreeSlug ?? "root"}`) === row.id,
+                  );
+                  if (option) void selectContext(option);
+                }
+                setViewMode("chat");
+              }}
+            />
+          </div>
+        ) : viewMode === "chat" ? (
           <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
             <MobileChatWorkspace
               messages={chatMessages}
@@ -1302,6 +1452,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                   const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
                   const ws = terminalSocketRef.current;
                   if (ws && ws.readyState === 1 /* OPEN */) {
+                    lastSubmittedPromptRef.current = text;
                     ws.send(commandPayload);
                   } else {
                     console.warn("Terminal WebSocket is not open for input");
@@ -1326,10 +1477,20 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               isAccountSession={Boolean(activeTunnelConnection)}
               createWebSocket={
                 activeTunnelConnection
-                  ? (path) =>
-                      activeTunnelConnection.transport.openWebSocket(path, {
-                        Authorization: `Bearer ${token}`,
-                      })
+                  ? async (path) => {
+                      let targetPath = path;
+                      if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
+                        const epoch = await getSessionDaemonEpoch(effectiveSessionId);
+                        if (!epoch) {
+                          throw new Error(
+                            `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
+                          );
+                        }
+                        const sep = targetPath.includes("?") ? "&" : "?";
+                        targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
+                      }
+                      return activeTunnelConnection.openWebSocket(targetPath);
+                    }
                   : undefined
               }
             />
@@ -1412,12 +1573,23 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             onSwipeNextTab={handleSwipeNextTab}
             onSocketLifecycle={handleTerminalSocketLifecycle}
             isAccountSession={Boolean(activeTunnelConnection)}
+            daemonEpoch={sessionEpochsRef.current.get(effectiveSessionId)}
             createWebSocket={
               activeTunnelConnection
-                ? (path) =>
-                    activeTunnelConnection.transport.openWebSocket(path, {
-                      Authorization: `Bearer ${token}`,
-                    })
+                ? async (path) => {
+                    let targetPath = path;
+                    if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
+                      const epoch = await getSessionDaemonEpoch(effectiveSessionId);
+                      if (!epoch) {
+                        throw new Error(
+                          `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
+                        );
+                      }
+                      const sep = targetPath.includes("?") ? "&" : "?";
+                      targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
+                    }
+                    return activeTunnelConnection.openWebSocket(targetPath);
+                  }
                 : undefined
             }
           />
