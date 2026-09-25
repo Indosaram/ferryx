@@ -371,6 +371,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
 
   const sessionEpochsRef = useRef<Map<string, string>>(new Map());
+  const [sessionEpochs, setSessionEpochs] = useState<Record<string, string>>({});
   const sessionEpochMissesRef = useRef<Map<string, number>>(new Map());
 
   const getSessionDaemonEpoch = useCallback(async (sessionId: string): Promise<string | null> => {
@@ -392,12 +393,17 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           const sessText = new TextDecoder().decode(sessRes.body);
           const sessData = JSON.parse(sessText);
           const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
+          const newEpochs: Record<string, string> = {};
           for (const s of rows) {
             const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
             const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
             if (sid && epoch !== undefined && epoch !== null) {
               sessionEpochsRef.current.set(sid, String(epoch));
+              newEpochs[sid] = String(epoch);
             }
+          }
+          if (Object.keys(newEpochs).length > 0) {
+            setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
           }
         }
       } catch (err) {
@@ -408,6 +414,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     const resolved = sessionEpochsRef.current.get(sessionId);
     if (resolved) {
       sessionEpochMissesRef.current.delete(sessionId);
+      setSessionEpochs((prev) => (prev[sessionId] === resolved ? prev : { ...prev, [sessionId]: resolved }));
       return resolved;
     }
     sessionEpochMissesRef.current.set(sessionId, now);
@@ -524,12 +531,17 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             const sessText = new TextDecoder().decode(sessRes.body);
             const sessData = JSON.parse(sessText);
             const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
+            const newEpochs: Record<string, string> = {};
             for (const s of rows) {
               const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
               const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
               if (sid && epoch !== undefined && epoch !== null) {
                 sessionEpochsRef.current.set(sid, String(epoch));
+                newEpochs[sid] = String(epoch);
               }
+            }
+            if (Object.keys(newEpochs).length > 0) {
+              setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
             }
           }
         } catch {}
@@ -937,6 +949,12 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
+
+  useEffect(() => {
+    if (activeTunnelConnection && effectiveSessionId && !(sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId))) {
+      void getSessionDaemonEpoch(effectiveSessionId);
+    }
+  }, [activeTunnelConnection, effectiveSessionId, getSessionDaemonEpoch, sessionEpochs]);
 
   useEffect(() => {
     if (!effectiveSessionId || !token || viewMode !== "chat") {
@@ -1573,7 +1591,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             onSwipeNextTab={handleSwipeNextTab}
             onSocketLifecycle={handleTerminalSocketLifecycle}
             isAccountSession={Boolean(activeTunnelConnection)}
-            daemonEpoch={sessionEpochsRef.current.get(effectiveSessionId)}
+            daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
             createWebSocket={
               activeTunnelConnection
                 ? async (path) => {
