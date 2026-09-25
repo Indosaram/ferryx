@@ -514,3 +514,10 @@ rename-windows-evidence.md · delta-round4-to-round5.diff · review5-gpt-5.6-sol
 - Report updated (§14 limit sentence replaced by the execution result; §15 row + verdict line record the upgrade). File now 929 lines. NOTE: the report edit was done by the orchestrator because the delegated lane died on a 503 (all deepseek pool accounts daily-exhausted, retry-after ~971s); the report is documentation, not code, and earlier sessions also had the orchestrator write report sections.
 - CLEANUP RECEIPTS: remote maho-win `win-exec-proof/`, `win-exec-proof.tgz`, `%TEMP%\ferryx-win-rename-exec-proof` removed and verified GONE; local `/tmp/win-exec-proof*`, `/tmp/{probe,win-run,win-verify,win-clean}.ps1` removed and verified GONE.
 - MEMORY: new fact note `notes/facts/maho-win-windows-execution-host.md` (how to reach it, what can/cannot be verified there, mandatory teardown) + the audit note updated with the execution confirmation and the APPROVE upgrade.
+
+## 커밋 기록 (2026-09-25)
+
+- `6df7f4c4` fix(cross-platform): repair non-macOS paths the 2026-09-24 audit found silently dead — 캠페인 소스 67파일(+5616/−560). `ui/src/lib/contextMenuGuard.ts`는 캠페인 이전 커밋(8aa2821c, 2026-09-05)에 이미 반영돼 변경 없음.
+- `a77afa0d` docs(cross-platform): publish the 2026-09-24 audit report with its review and execution evidence — 리포트 + 이 증적 미러 20파일(+5724).
+- 사후 감사: 두 커밋의 파일 목록 88건 전부 우리 범위이며 외부(타 세션) 파일 0건. 커밋 후 남은 dirty 114파일은 전부 타 세션 작업(README/docs/scripts/ui 등)으로 손대지 않았습니다.
+- 스테일 `.git/index.lock`(2026-09-25 01:07, 0바이트, 보유 프로세스 없음)을 제거하고 커밋했습니다.

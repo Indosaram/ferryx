@@ -932,3 +932,5 @@ Windows 실행 검증 완료(2026-09-25): maho-win(**Windows 11 Pro build 26200,
 
 - 작업 중 원본 증적: `.omo/evidence/cross-platform-audit-fixes-2026-09-24/` (에이전트 스크래치 영역, `.gitignore`의 `.omo/` 규칙으로 커밋되지 않음).
 - 저장소 관례에 따라 **커밋된 미러**: `docs/evidence/cross-platform-audit-fixes-20260925/` — 외부 리뷰 원문 6건(review ~ review5b), Windows 실행 로그(`windows-execution.log`), rename 반증 전문(`rename-windows-evidence.md`), 라운드4→5 델타(`delta-round4-to-round5.diff`), C-E 증거(`verify-round5.log`, `verify-literalc-e4.log`, `verify-c-e-direct.log`), 격리·전체 스위트 로그(`iso-*.log`, `iso-fullsuite2.log`), 레인 편집 로그, 세션 노트패드.
+
+커밋: `6df7f4c4`(캠페인 소스 67파일) · `a77afa0d`(본 리포트 + 증적 미러 20파일).
