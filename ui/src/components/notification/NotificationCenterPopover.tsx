@@ -10,13 +10,26 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Bell, TerminalSquare, X } from "lucide-react";
+import { Bell, TerminalSquare, Trash2, X } from "lucide-react";
 
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
 import { notificationCenterStore, type NotificationCenterStore } from "../../lib/notificationCenter/notificationCenterStore";
+import {
+  filterEntries,
+  groupEntries,
+  type AttentionFilter,
+} from "../../lib/notificationCenter/attentionView";
 import type { NotificationEntry } from "../../lib/notificationCenter/types";
 import { StatusDot, type StatusDotState } from "../ui/StatusDot";
+import { AttentionInbox } from "../../features/ferryx/control/AttentionInbox";
+import { targetKey, type Agent } from "../../features/ferryx/control/client";
+import {
+  buildDesktopInventory,
+  isUnreadAgent,
+  type DesktopWorkspace,
+} from "../../features/ferryx/control/desktopInventory";
+import { AttentionAskPanel } from "./AttentionAskPanel";
 import { useNotificationCenter } from "./useNotificationCenter";
 
 export const POPOVER_WIDTH = 380;
@@ -65,6 +78,11 @@ export interface NotificationCenterPopoverProps {
   onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
   isSessionNavigable?: IsSessionNavigable;
   store?: NotificationCenterStore;
+  attentionInventory?: {
+    workspaces: DesktopWorkspace[];
+    unavailableHosts?: readonly string[];
+    onSelectAgent: (agent: Agent) => void;
+  };
 }
 
 function reasonToStatusDotState(reason: NotificationEntry["reason"]): StatusDotState {
@@ -80,8 +98,13 @@ export function NotificationCenterPopover({
   onNavigateToSession,
   isSessionNavigable,
   store = notificationCenterStore,
+  attentionInventory,
 }: NotificationCenterPopoverProps): ReactNode {
-  const { entries, unreadCount, markAllRead } = useNotificationCenter(store);
+  const { entries, unreadCount, markAllRead, dismissEntry } = useNotificationCenter(store);
+  const [tab, setTab] = useState<"attention" | "ask" | "agents">("attention");
+  const [filter, setFilter] = useState<AttentionFilter>("all");
+  const visibleEntries = filterEntries(entries, filter);
+  const groups = groupEntries(visibleEntries);
   const modalRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
@@ -196,14 +219,16 @@ export function NotificationCenterPopover({
             ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <button
-              type="button"
-              onClick={() => markAllRead()}
-              disabled={unreadCount === 0}
-              className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 transition-colors"
-            >
-              Mark all read
-            </button>
+            {tab === "attention" ? (
+              <button
+                type="button"
+                onClick={() => markAllRead()}
+                disabled={unreadCount === 0}
+                className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 transition-colors"
+              >
+                Mark all read
+              </button>
+            ) : null}
             <button
               type="button"
               aria-label="Close notifications"
@@ -215,17 +240,120 @@ export function NotificationCenterPopover({
           </div>
         </div>
 
+        {/* Tabs */}
+        <div className="flex items-center gap-1 border-b border-border px-3 py-1.5">
+          <button
+            type="button"
+            data-testid="notification-tab-attention"
+            aria-pressed={tab === "attention"}
+            onClick={() => setTab("attention")}
+            className={
+              tab === "attention"
+                ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
+                : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            }
+          >
+            Needs you
+          </button>
+          <button
+            type="button"
+            data-testid="notification-tab-ask"
+            aria-pressed={tab === "ask"}
+            onClick={() => setTab("ask")}
+            className={
+              tab === "ask"
+                ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
+                : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            }
+          >
+            Ask
+          </button>
+          {attentionInventory ? (
+            <button
+              type="button"
+              data-testid="notification-tab-agents"
+              aria-pressed={tab === "agents"}
+              onClick={() => setTab("agents")}
+              className={
+                tab === "agents"
+                  ? "rounded px-2 py-0.5 text-[11px] font-medium bg-primary/15 text-primary"
+                  : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+              }
+            >
+              All agents
+            </button>
+          ) : null}
+        </div>
+
+        {tab === "attention" ? (
+          <div className="flex items-center gap-1 px-3 py-1.5" role="group" aria-label="Filter">
+            {([
+              ["all", "All"],
+              ["unread", "Unread"],
+              ["needs-you", "Needs you"],
+            ] as [AttentionFilter, string][]).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                data-testid={`notification-filter-${id}`}
+                aria-pressed={filter === id}
+                onClick={() => setFilter(id)}
+                className={
+                  filter === id
+                    ? "rounded px-2 py-0.5 text-[11px] bg-accent text-foreground"
+                    : "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {/* Content */}
-        {entries.length === 0 ? (
+        {tab === "ask" ? (
+          <AttentionAskPanel className="flex min-h-0 flex-col" />
+        ) : tab === "agents" && attentionInventory ? (
+          <div className="min-h-0 flex-1 overflow-y-auto max-h-[380px] scrollbar-sleek">
+            <AttentionInbox
+              snapshot={buildDesktopInventory(
+                attentionInventory.workspaces,
+                attentionInventory.unavailableHosts ?? [],
+              )}
+              onSelect={(target) => {
+                const live = buildDesktopInventory(
+                  attentionInventory.workspaces,
+                  attentionInventory.unavailableHosts ?? [],
+                );
+                const agent = live.items.find((item) => targetKey(item.target) === targetKey(target));
+                if (agent) attentionInventory.onSelectAgent(agent);
+              }}
+              isUnread={(agent) => isUnreadAgent(agent, attentionInventory.workspaces)}
+            />
+          </div>
+        ) : entries.length === 0 ? (
           <div
             data-testid="notification-empty-state"
             className="flex flex-col items-center justify-center p-8 text-center text-xs text-muted-foreground"
           >
             No new notifications
           </div>
+        ) : groups.length === 0 ? (
+          <div
+            data-testid="notification-filter-empty-state"
+            className="flex flex-col items-center justify-center p-8 text-center text-xs text-muted-foreground"
+          >
+            Nothing matches this filter
+          </div>
         ) : (
-          <div className="flex flex-col divide-y divide-border/40 overflow-y-auto max-h-[380px] scrollbar-sleek">
-            {entries.map((entry) => {
+          <div className="flex flex-col overflow-y-auto max-h-[380px] scrollbar-sleek">
+            {groups.map((group) => (
+              <section key={group.section} data-testid={`notification-section-${group.section}`}>
+                <h3 className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {group.title} <span className="font-normal">{group.items.length}</span>
+                </h3>
+                <div className="flex flex-col divide-y divide-border/40">
+                  {group.items.map((entry) => {
               const isNavigable = checkSessionNavigable(isSessionNavigable, entry.workspaceId, entry.sessionId);
               const isUnread = "unread" in entry.read;
               const location = formatNotificationLocation(entry.labels.workspaceLabel, entry.labels.worktreeLabel);
@@ -320,8 +448,20 @@ export function NotificationCenterPopover({
                     ) : null}
                   </div>
 
-                  {/* Right: Unread indicator / bell indicator */}
+                  {/* Right: dismiss / unread indicator / bell indicator */}
                   <div className="flex shrink-0 items-center gap-1.5 self-center ml-1">
+                    <button
+                      type="button"
+                      data-testid={`notification-dismiss-${entry.id}`}
+                      aria-label="Dismiss notification"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        dismissEntry(entry.id);
+                      }}
+                      className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                    >
+                      <Trash2 className="size-3" />
+                    </button>
                     {isUnread ? (
                       <span
                         data-testid="unread-indicator"
@@ -339,7 +479,10 @@ export function NotificationCenterPopover({
                   </div>
                 </div>
               );
-            })}
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
         )}
       </div>

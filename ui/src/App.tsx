@@ -9,6 +9,7 @@ import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
+import { NotificationCenterButton } from "./components/notification/NotificationCenterButton";
 import { NotificationCenterPopover } from "./components/notification/NotificationCenterPopover";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
@@ -19,7 +20,6 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { AttentionInboxDialog } from "./components/AttentionInboxDialog";
 import { resolveLocalSessionKey, type DesktopWorkspace } from "./features/ferryx/control/desktopInventory";
 import type { AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
@@ -1552,7 +1552,6 @@ function WorkspaceApp({
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
-  const [attentionInboxOpen, setAttentionInboxOpen] = useState(false);
   const desktopWorkspaces = useMemo<DesktopWorkspace[]>(() => {
     const spaces: DesktopWorkspace[] = [];
     for (const project of projects) {
@@ -2935,7 +2934,17 @@ function WorkspaceApp({
           onResetAgentState={handleResetWorktreeAgentState}
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
-          onOpenAttentionInbox={() => setAttentionInboxOpen(true)}
+          attentionInventory={{
+            workspaces: desktopWorkspaces,
+            unavailableHosts,
+            onSelectAgent: (agent) => {
+              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
+              handleNotificationTarget({
+                workspaceId: agent.workspaceId,
+                sessionId: localKey ?? agent.target.backendSessionId,
+              });
+            },
+          }}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -2958,6 +2967,12 @@ function WorkspaceApp({
             <IconButton data-shortcut="sidebar.left.toggle" label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
               <PanelLeft className="size-3.5" />
             </IconButton>
+            <NotificationCenterButton
+              isNotificationCenterOpen={isNotificationCenterOpen}
+              onOpenChangeNotificationCenter={setIsNotificationCenterOpen}
+              onNavigateToSession={handleNotificationTarget}
+              renderPopover={false}
+            />
           </div>
         </div>
       )}
@@ -3115,6 +3130,17 @@ function WorkspaceApp({
           open={true}
           onClose={handleCloseNotificationCenter}
           onNavigateToSession={handleNotificationTarget}
+          attentionInventory={{
+            workspaces: desktopWorkspaces,
+            unavailableHosts,
+            onSelectAgent: (agent) => {
+              const localKey = resolveLocalSessionKey(agent, desktopWorkspaces);
+              handleNotificationTarget({
+                workspaceId: agent.workspaceId,
+                sessionId: localKey ?? agent.target.backendSessionId,
+              });
+            },
+          }}
           isSessionNavigable={(workspaceId, sessionId) => {
             if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
             const snapshot = workspaceId === activeProjectRef.current.workspaceId
@@ -3273,9 +3299,6 @@ function WorkspaceApp({
             }
           }}
         />
-      ) : null}
-      {attentionInboxOpen ? (
-        <AttentionInboxDialog workspaces={desktopWorkspaces} unavailableHosts={unavailableHosts} onSelect={(agent) => { setAttentionInboxOpen(false); const localKey = resolveLocalSessionKey(agent, desktopWorkspaces); handleNotificationTarget({ workspaceId: agent.workspaceId, sessionId: localKey ?? agent.target.backendSessionId }); }} onClose={() => setAttentionInboxOpen(false)} />
       ) : null}
     </div>
   );

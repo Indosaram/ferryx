@@ -13,7 +13,7 @@ pub enum HistoryError { Unsupported, InvalidRequest, NotFound, SourceChanged, Ou
 pub type Result<T> = std::result::Result<T, HistoryError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Entry { pub entry_key: String, pub provider: CanonicalProvider, pub provider_session: AgentProviderSession, pub cwd: String, pub version: Option<String>, pub parent_id: Option<String> }
+pub struct Entry { pub entry_key: String, pub provider: CanonicalProvider, pub provider_session: AgentProviderSession, pub cwd: String, pub version: Option<String>, pub parent_id: Option<String>, pub modified_ms: Option<u64> }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message { pub ordinal: usize, pub role: String, pub text: String, pub id: Option<String>, pub parent_id: Option<String> }
@@ -49,6 +49,9 @@ impl History {
             budget -= bytes.len();
             let hash = digest(&bytes); fingerprints.push_str(&hash);
             let (mut entry, messages, issues) = match parse(provider, &bytes) { Ok(v) => v, Err(e) => {warnings.push(format!("{e:?}")); continue;} };
+            // Transcript formats do not carry a per-message timestamp we can rely on, so the file's
+            // own modification time is the honest activity signal for range filtering.
+            entry.modified_ms = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis() as u64);
             warnings.extend(issues);
             let key = digest(format!("{:?}:{}:{hash}",provider,path.display()).as_bytes()); entry.entry_key = key.clone();
             if cwd.is_none_or(|cwd| cwd == entry.cwd) && (query.is_empty() || messages.iter().any(|m| m.text.to_lowercase().contains(&query.to_lowercase()))) { items.push(entry.clone()); }
@@ -149,7 +152,7 @@ fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message
         messages.retain(|message| active.contains(&message.ordinal));
     }
     let (id,cwd) = identity.ok_or(HistoryError::InvalidIdentity)?;
-    Ok((Entry {entry_key:String::new(),provider,provider_session:AgentProviderSession {key:AgentProviderSessionKey::SessionId,id,transcript_path:None},cwd,version,parent_id},messages,warnings))
+    Ok((Entry {entry_key:String::new(),provider,provider_session:AgentProviderSession {key:AgentProviderSessionKey::SessionId,id,transcript_path:None},cwd,version,parent_id,modified_ms:None},messages,warnings))
 }
 fn page<T: Clone>(items: Vec<T>, cursor: Option<&str>, limit: usize, stamp: &str, warnings: Vec<String>) -> Result<Page<T>> {
     if limit == 0 || limit > 100 { return Err(HistoryError::InvalidRequest); }

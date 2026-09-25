@@ -9,6 +9,7 @@ export type AgentHistoryEntry = {
   cwd: string;
   version?: string | null;
   parentId?: string | null;
+  modifiedMs?: number | null;
 };
 
 export type AgentHistoryMessage = {

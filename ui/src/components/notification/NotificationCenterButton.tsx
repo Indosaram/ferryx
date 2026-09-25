@@ -6,6 +6,9 @@ import {
   notificationCenterStore,
   type NotificationCenterStore,
 } from "../../lib/notificationCenter/notificationCenterStore";
+import { actionableCount } from "../../lib/notificationCenter/attentionView";
+import type { Agent } from "../../features/ferryx/control/client";
+import type { DesktopWorkspace } from "../../features/ferryx/control/desktopInventory";
 import { IconButton } from "../ui/IconButton";
 import { NotificationCenterPopover, type IsSessionNavigable } from "./NotificationCenterPopover";
 import { useNotificationCenter } from "./useNotificationCenter";
@@ -20,6 +23,13 @@ export interface NotificationCenterButtonProps {
   onOpenChange?: (open: boolean) => void;
   isNotificationCenterOpen?: boolean;
   onOpenChangeNotificationCenter?: (open: boolean) => void;
+  attentionInventory?: {
+    workspaces: DesktopWorkspace[];
+    unavailableHosts?: readonly string[];
+    onSelectAgent: (agent: Agent) => void;
+  };
+  /** False when the caller renders the popover itself, so the dialog is never mounted twice. */
+  renderPopover?: boolean;
 }
 
 export function NotificationCenterButton({
@@ -32,6 +42,8 @@ export function NotificationCenterButton({
   onOpenChange,
   isNotificationCenterOpen,
   onOpenChangeNotificationCenter,
+  attentionInventory,
+  renderPopover = true,
 }: NotificationCenterButtonProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   // When embedded in Sidebar, props may include Sidebar's own `open` prop (whether the sidebar itself is open).
@@ -66,7 +78,10 @@ export function NotificationCenterButton({
 
   const internalAnchorRef = useRef<HTMLDivElement>(null);
   const anchorRef = externalAnchorRef ?? internalAnchorRef;
-  const { unreadCount } = useNotificationCenter(store);
+  const { state } = useNotificationCenter(store);
+  // The badge answers "does anything need me?", so it counts blocked-on-you work and finished
+  // work nobody has looked at — never plain mentions, or it would stay lit permanently.
+  const actionable = actionableCount(state.entries);
 
   return (
     <div ref={internalAnchorRef} className="no-drag relative inline-flex">
@@ -85,22 +100,23 @@ export function NotificationCenterButton({
         }}
       >
         <Bell className="size-3.5" />
-        {unreadCount > 0 ? (
+        {actionable > 0 ? (
           <span
             data-testid="notification-center-badge"
             className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] font-semibold text-primary-foreground leading-none"
           >
-            {unreadCount > 99 ? "99+" : unreadCount}
+            {actionable > 99 ? "99+" : actionable}
           </span>
         ) : null}
       </IconButton>
-      {open ? (
+      {open && renderPopover ? (
         <NotificationCenterPopover
           anchorRef={anchorRef}
           onClose={handleClose}
           onNavigateToSession={onNavigateToSession}
           isSessionNavigable={isSessionNavigable}
           store={store}
+          attentionInventory={attentionInventory}
         />
       ) : null}
     </div>

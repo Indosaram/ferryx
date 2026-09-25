@@ -16,7 +16,6 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
-  Bell,
   ChevronRight,
   Folder,
   History,
@@ -45,6 +44,8 @@ import {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
 import { revealPath, type RegisteredProject } from "../lib/tauri";
+import type { Agent } from "../features/ferryx/control/client";
+import type { DesktopWorkspace } from "../features/ferryx/control/desktopInventory";
 import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
@@ -103,7 +104,11 @@ type SidebarProps = {
   onResetAgentState?: (worktree: Worktree) => void;
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
-  onOpenAttentionInbox?: () => void;
+  attentionInventory?: {
+    workspaces: DesktopWorkspace[];
+    unavailableHosts?: readonly string[];
+    onSelectAgent: (agent: Agent) => void;
+  };
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
@@ -137,7 +142,6 @@ export function Sidebar({
   onResetAgentState,
   onManageDisk,
   onOpenHistory,
-  onOpenAttentionInbox,
   onOpenSettings,
   onToggle,
   onHide,
@@ -145,6 +149,7 @@ export function Sidebar({
   isSessionNavigable,
   isNotificationCenterOpen,
   onOpenChangeNotificationCenter,
+  attentionInventory,
 }: SidebarProps) {
   const worktreeRegionRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -403,6 +408,15 @@ export function Sidebar({
           >
             <Plus className="size-3.5" />
           </IconButton>
+          <div className="ml-auto flex items-center">
+            <NotificationCenterButton
+              isNotificationCenterOpen={isNotificationCenterOpen}
+              onOpenChangeNotificationCenter={onOpenChangeNotificationCenter}
+              onNavigateToSession={onNavigateToSession}
+              isSessionNavigable={isSessionNavigable}
+              attentionInventory={attentionInventory}
+            />
+          </div>
         </div>
 
         <div ref={worktreeRegionRef} tabIndex={-1} data-testid="worktree-region" className="flex min-h-0 flex-1 flex-col outline-none">
@@ -457,7 +471,6 @@ export function Sidebar({
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                     onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
                     onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
-                    onOpenAttentionInbox={onOpenAttentionInbox}
                     isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
                     staleSummary={staleSummary}
                   />
@@ -540,12 +553,6 @@ export function Sidebar({
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
-          <NotificationCenterButton
-            isNotificationCenterOpen={isNotificationCenterOpen}
-            onOpenChangeNotificationCenter={onOpenChangeNotificationCenter}
-            onNavigateToSession={onNavigateToSession}
-            isSessionNavigable={isSessionNavigable}
-          />
           <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
             <Settings2 className="size-3.5" />
           </IconButton>
@@ -622,7 +629,6 @@ type ProjectHeaderProps = {
   onRemoveProject?: () => void;
   onManageDisk?: () => void;
   onOpenHistory?: () => void;
-  onOpenAttentionInbox?: () => void;
   inert?: boolean;
   isStandaloneRemote?: boolean;
   staleSummary?: string;
@@ -640,7 +646,6 @@ function ProjectHeader({
   onRemoveProject,
   onManageDisk,
   onOpenHistory,
-  onOpenAttentionInbox,
   inert = false,
   isStandaloneRemote = true,
   staleSummary,
@@ -674,7 +679,6 @@ function ProjectHeader({
       { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
       { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
       { kind: "item", id: "past-conversations", label: "Past Conversations…", enabled: Boolean(onOpenHistory), icon: "history" },
-      { kind: "item", id: "attention-inbox", label: "Agents Needing Attention…", enabled: Boolean(onOpenAttentionInbox), icon: "bell" },
       { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: "Copy Project Path" },
       { kind: "separator" },
@@ -693,7 +697,6 @@ function ProjectHeader({
         if (id === "add-worktree") onCreateWorktree?.();
         else if (id === "manage-disk") onManageDisk?.();
         else if (id === "past-conversations") onOpenHistory?.();
-        else if (id === "attention-inbox") onOpenAttentionInbox?.();
         else if (id === "reveal" && !remote) {
           revealPath(project.repoRoot).catch((err: unknown) => {
             toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
@@ -774,19 +777,6 @@ function ProjectHeader({
             onPointerDown={(event) => event.stopPropagation()}
           >
             <Plus className="size-3.5" />
-          </IconButton>
-        ) : null}
-        {onOpenAttentionInbox ? (
-          <IconButton
-            label="Agents needing attention"
-            aria-label="Agents needing attention"
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-            onClick={onOpenAttentionInbox}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Bell className="size-3" />
           </IconButton>
         ) : null}
         {onOpenHistory ? (
