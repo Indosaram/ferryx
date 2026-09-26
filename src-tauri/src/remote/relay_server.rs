@@ -544,7 +544,25 @@ impl RelayState {
         }
     }
 
+    /// True when this relay serves an account service and that account store already holds
+    /// this exact machine id bound to this exact public key.
+    ///
+    /// This is the account-based equivalent of an operator-issued enrollment token: the
+    /// machine proved ownership of the key when it enrolled, so re-demanding a hand-issued
+    /// token would leave `ferryx account enroll` unable to open a control tunnel at all.
+    fn is_account_enrolled_machine(&self, machine_id: &str, public_key: &str) -> bool {
+        let Some(account) = self.account_state() else {
+            return false;
+        };
+        crate::account::service::enrolled_machine_by_id(&account, machine_id)
+            .is_some_and(|record| record.public_key == public_key)
+    }
+
     fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
+        // Resolve the account-enrollment alternative before taking the ownership lock so the
+        // two locks are never held at the same time.
+        let account_enrolled =
+            self.is_account_enrolled_machine(&auth.machine_id, &auth.public_key);
         // Serialize ownership checks and durable enrollment under the same lock.
         let mut keys = self.inner.machine_public_keys.lock();
         if let Some(key) = keys.get(&auth.machine_id) {
@@ -554,11 +572,15 @@ impl RelayState {
                 Err("Machine ID already claimed by another public key".into())
             };
         }
+        // A private relay requires an operator-issued enrollment token. An account-enrolled
+        // machine on an account-enabled relay satisfies that requirement with the key it
+        // enrolled instead, because the account store already pins this machine id to it.
         if !self.inner.machine_tokens.is_empty()
             && !auth
                 .enrollment_token
                 .as_deref()
                 .is_some_and(|token| self.validate_machine_token(token))
+            && !account_enrolled
         {
             return Err("Enrollment token required for private relay".into());
         }
@@ -2881,6 +2903,201 @@ mod tests {
         assert!(restarted
             .bind_machine_key(&auth(43, "alpha-machine"))
             .is_err());
+    }
+
+    /// A machine that enrolled itself with its account must be able to open its control
+    /// tunnel on an account-enabled private relay without an operator-issued static token.
+    #[test]
+    fn account_enrolled_machine_binds_without_a_static_enrollment_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Private relay (tokens configured) that also serves an account service. The key
+        // store is a temp path so the test never touches the operator's real store.
+        let state =
+            RelayState::new_with_key_store(vec!["operator-token".into()], tmp.path().join("keys.json"))
+                .unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        // The account store pins machine "owned-machine" to public key "pubkey-1".
+        state.set_account_state(account);
+
+        let enrolled = ControlAuth {
+            machine_id: "owned-machine".into(),
+            public_key: "pubkey-1".into(),
+            display_name: "Owned Machine".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        state
+            .bind_machine_key(&enrolled)
+            .expect("an account-enrolled machine must bind without a static token");
+    }
+
+    /// The account alternative must not admit a machine the account store does not hold,
+    /// and must not admit an enrolled machine id presented with a different key.
+    #[test]
+    fn account_enrollment_admission_rejects_unknown_machine_and_mismatched_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            RelayState::new_with_key_store(vec!["operator-token".into()], tmp.path().join("keys.json"))
+                .unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        state.set_account_state(account);
+
+        let stranger = ControlAuth {
+            machine_id: "never-enrolled".into(),
+            public_key: "pubkey-1".into(),
+            display_name: "Stranger".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        assert!(
+            state.bind_machine_key(&stranger).is_err(),
+            "a machine absent from the account store must not bind"
+        );
+
+        let impostor = ControlAuth {
+            machine_id: "owned-machine".into(),
+            public_key: "not-the-enrolled-key".into(),
+            display_name: "Impostor".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        assert!(
+            state.bind_machine_key(&impostor).is_err(),
+            "an enrolled machine id with a different key must not bind"
+        );
+    }
+
+    /// Without an account service the private-relay token requirement is unchanged.
+    #[test]
+    fn private_relay_without_an_account_service_still_requires_an_enrollment_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            RelayState::new_with_key_store(vec!["operator-token".into()], tmp.path().join("keys.json"))
+                .unwrap();
+        let auth = ControlAuth {
+            machine_id: "owned-machine".into(),
+            public_key: "pubkey-1".into(),
+            display_name: "Owned Machine".into(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        assert!(
+            state.bind_machine_key(&auth).is_err(),
+            "a token-only private relay must still refuse a tokenless machine"
+        );
+
+        let with_token = ControlAuth {
+            enrollment_token: Some("operator-token".into()),
+            ..auth
+        };
+        state
+            .bind_machine_key(&with_token)
+            .expect("the operator token must still be accepted");
+    }
+
+    /// End to end: an account-enrolled daemon with NO operator token opens its control tunnel
+    /// against an account-enabled private relay, because the relay already pins its machine id
+    /// to the key it enrolled. This is the gap that made `ferryx account enroll` insufficient.
+    #[tokio::test]
+    async fn account_enrolled_daemon_opens_its_control_tunnel_without_an_operator_token() {
+        use crate::remote::relay_client::RelayClient;
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            RelayState::new_with_key_store(vec!["operator-token".into()], tmp.path().join("keys.json"))
+                .unwrap();
+        let ident = identity(23, "owned-machine");
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        // Pin the enrolled record to the key the daemon will actually present.
+        account
+            .mutate(|store| {
+                store
+                    .machines
+                    .get_mut("rec-owned")
+                    .expect("rec-owned fixture")
+                    .public_key = ident.public_key.clone();
+                Ok(())
+            })
+            .expect("pin enrolled public key");
+        let (base, relay) = spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+
+        // No `.with_enrollment_token(..)` on purpose: this is the account path.
+        let client = RelayClient::with_identity(&base, ident, "127.0.0.1:1".to_string());
+        let control = tokio::spawn(async move { client.run().await });
+
+        let mut bound = false;
+        for _ in 0..100 {
+            if state.inner.machine_public_keys.lock().contains_key("owned-machine") {
+                bound = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        control.abort();
+        relay.abort();
+        assert!(
+            bound,
+            "an account-enrolled daemon must open its control tunnel without an operator token"
+        );
+    }
+
+    /// The same end-to-end path must NOT admit a daemon whose machine id is absent from the
+    /// account store, even though it presents a well-formed key and no token.
+    #[tokio::test]
+    async fn unenrolled_daemon_cannot_open_a_control_tunnel_on_a_private_relay() {
+        use crate::remote::relay_client::RelayClient;
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            RelayState::new_with_key_store(vec!["operator-token".into()], tmp.path().join("keys.json"))
+                .unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        let (base, relay) = spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+
+        let client = RelayClient::with_identity(
+            &base,
+            identity(29, "stranger-machine"),
+            "127.0.0.1:1".to_string(),
+        );
+        let control = tokio::spawn(async move { client.run().await });
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let bound = state
+            .inner
+            .machine_public_keys
+            .lock()
+            .contains_key("stranger-machine");
+        control.abort();
+        relay.abort();
+        assert!(
+            !bound,
+            "a machine absent from the account store must not open a control tunnel"
+        );
     }
 
     #[test]

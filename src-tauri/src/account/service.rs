@@ -371,6 +371,25 @@ pub(crate) fn machine_for_owner(
         .flatten()
 }
 
+/// Looks up an enrolled machine by the daemon's own machine id, regardless of owner.
+///
+/// The relay's control-channel admission uses this: on an account-enabled relay a machine
+/// that enrolled itself with its account may open its control tunnel using the machine key
+/// it enrolled, without the operator having to hand out a static enrollment token for it.
+/// Ownership is proven by the exact `machine_id` + `public_key` pair recorded at enrollment.
+pub fn enrolled_machine_by_id(state: &AccountState, machine_id: &str) -> Option<MachineRecord> {
+    state
+        .read(|store| {
+            Ok(store
+                .machines
+                .values()
+                .find(|m| m.machine_id == machine_id)
+                .cloned())
+        })
+        .ok()
+        .flatten()
+}
+
 async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(&body)
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()))
