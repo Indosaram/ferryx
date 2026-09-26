@@ -2331,14 +2331,27 @@ impl DaemonServer {
                     .await
                     .map_err(|e| format!("TransferSessions request failed: {e}"))?;
 
-                if !matches!(transfer_resp, DaemonResponse::TransferSessionsOk { .. }) {
-                    return Err(format!("TransferSessions failed: {transfer_resp:?}"));
-                }
+                let offered = match transfer_resp {
+                    DaemonResponse::TransferSessionsOk { transferred_count } => transferred_count,
+                    other => return Err(format!("TransferSessions failed: {other:?}")),
+                };
 
                 let exports = accept_handle
                     .await
                     .map_err(|e| format!("Handover worker panicked: {e}"))?
                     .map_err(|e| format!("Handover socket receive error: {e}"))?;
+                let accepted = exports.len();
+                // A predecessor that reports more than it delivered is the shape of a lossy
+                // handover: the sessions missing from `accepted` are the ones that lose their
+                // PTY owner when the predecessor retires.
+                tracing::info!(offered, accepted, "Received session exports over the handover socket");
+                if accepted != offered {
+                    tracing::warn!(
+                        offered,
+                        accepted,
+                        "Handover socket delivered fewer sessions than the predecessor reported"
+                    );
+                }
 
                 for export in exports {
                     tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
@@ -2364,6 +2377,10 @@ impl DaemonServer {
                 if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                     return Err(format!("CommitHandover failed: {commit_resp:?}"));
                 }
+                tracing::info!(
+                    accepted,
+                    "Handover committed after adopting the transferred sessions"
+                );
             } else {
                 let sessions = legacy_peer.list_sessions().await?;
                 let route = crate::daemon::manifest::HandoverRoute {
@@ -3444,6 +3461,7 @@ impl DaemonServer {
                         match crate::daemon::handover_socket::connect_handover_socket(&path) {
                             Ok((stream, _creds)) => {
                                 let sessions = self.terminal_service.list_sessions();
+                                let requested = sessions.len();
                                 let mut count = 0;
                                 let transfer_id = uuid::Uuid::new_v4().to_string();
                                 let mut seq = 1;
@@ -3456,6 +3474,13 @@ impl DaemonServer {
                                     }
                                 }
                                 let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                // The gap between what this predecessor was asked for and what it
+                                // could actually export is the shape of a lossy handover.
+                                tracing::info!(
+                                    requested,
+                                    transferred = count,
+                                    "Transferred sessions to the successor over the handover socket"
+                                );
                                 DaemonResponse::TransferSessionsOk {
                                     transferred_count: count,
                                 }
@@ -3758,6 +3783,14 @@ impl DaemonServer {
         listener: UnixListener,
         exe: PathBuf,
     ) {
+        // The successor's stdout is `/dev/null` and its stderr is the pipe this process inherited,
+        // so nothing it prints reaches a terminal: the durable log file is the only record of what
+        // it was asked to take over.
+        tracing::info!(
+            successor = %exe.display(),
+            legacy_socket = %legacy_path.display(),
+            "Spawning successor daemon for handover"
+        );
         tokio::spawn(async move {
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon")
@@ -3826,6 +3859,14 @@ impl DaemonServer {
         }
 
         let active_sessions = self.terminal_service.list_sessions();
+        // One line per accepted request, so a handover that fires twice stays visible: the desktop's
+        // staleness probe and the installer both pass their own binary path, while `None` means the
+        // caller left the choice of executable to this daemon.
+        tracing::info!(
+            requested_binary = ?new_binary_path,
+            active_sessions = active_sessions.len(),
+            "UpgradeBinary accepted"
+        );
         if active_sessions.is_empty() {
             let exe = target_exe.clone();
             tokio::spawn(async move {

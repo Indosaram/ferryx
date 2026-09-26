@@ -1075,6 +1075,14 @@ pub fn run_daemon_headless(
             let hub = crate::daemon::agent_state::AgentStateHub::default();
             hub.release_manual("logging-fixture-session");
             hub.release_foreground("logging-fixture-session");
+            // A record from a different target than the agent-state diagnostics: the daemon's
+            // handover and lifecycle records are the ones an incident needs, so the sink must not
+            // be restricted to one target.
+            tracing::info!(
+                target: "ferryx_lib::daemon::server",
+                marker = "handover-probe",
+                "fixture lifecycle record"
+            );
             if let Some(logging) = logging {
                 logging.finish().await?;
             }
@@ -1215,6 +1223,11 @@ mod tests {
             );
         }
         assert!(text.len() <= 1024 * 1024);
+        assert!(
+            text.lines().any(|line| line.contains("ferryx_lib::daemon::server")
+                && line.contains("marker=\"handover-probe\"")),
+            "daemon log still drops records from targets other than agent-state: {text}"
+        );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("reason="));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("reason="));
         #[cfg(unix)]

@@ -282,7 +282,7 @@ journalctl --user -u ferryx-daemon.service -b --no-pager
 ```
 
 You should see `FERRYX_DAEMON_READY` in the log stream.
-Headless daemon execution initializes a dedicated, bounded file subscriber for agent-state diagnostics (`src-tauri/src/daemon/logging.rs:33-80`, `src-tauri/src/cli.rs:479`), capped at 1 MiB under `~/.ferryx/logs/daemon.log` or `$FERRYX_DATA_DIR/logs/daemon.log`. General daemon tracing log statements remain silenced to stdout/journald. Fatal startup errors appear on standard error (`src-tauri/src/main.rs:39`).
+Headless daemon execution installs one bounded file subscriber that admits every record at INFO or below, from every target (`src-tauri/src/daemon/logging.rs:47-77`, `src-tauri/src/cli.rs:1055-1066`), capped at 1 MiB under `~/.ferryx/logs/daemon.log` or `$FERRYX_DATA_DIR/logs/daemon.log`. The daemon's own stdout and stderr are not durable (the desktop spawns it with a pipe it never drains, and a handover successor inherits that dead pipe), so this file is the daemon's whole log. Fatal startup errors appear on standard error (`src-tauri/src/main.rs:39`).
 
 ### Alternative: System-Wide Unit File
 
@@ -627,7 +627,7 @@ journalctl --user -u ferryx-daemon.service -f
 journalctl --user -u ferryx-daemon.service -b
 ```
 
-The headless daemon entry point initializes a filtered subscriber strictly for agent-state release events (`src-tauri/src/daemon/logging.rs:33-80`, `src-tauri/src/cli.rs:479`), recording to a private, bounded log file (`daemon.log`, max 1 MiB, mode 0600) rather than stdout. Journald captures the readiness token `FERRYX_DAEMON_READY` on stdout (`:536`) and fatal startup errors on stderr (`src-tauri/src/main.rs:39`).
+The headless daemon entry point installs one bounded file subscriber that admits every record at INFO or below, from every target (`src-tauri/src/daemon/logging.rs:47-77`, `src-tauri/src/cli.rs:1055-1066`), recording to a private, bounded log file (`daemon.log`, max 1 MiB, mode 0600) rather than stdout. Journald captures the readiness token `FERRYX_DAEMON_READY` on stdout (`:536`) and fatal startup errors on stderr (`src-tauri/src/main.rs:39`).
 
 ### Storage Categories on Disk
 

@@ -1,4 +1,10 @@
-//! Headless agent-state diagnostics: private, bounded, and independent of stderr pipes.
+//! Headless daemon log: private, bounded, and independent of stderr pipes.
+//!
+//! The daemon's stderr is not durable anywhere: the desktop spawns it with a pipe it never
+//! drains, and a handover successor inherits that dead pipe while the spawner points its stdout
+//! at `/dev/null`. This file is therefore the only surface that can carry a daemon death, a
+//! refused transfer, or an unexpected second handover, so it admits every record at INFO or
+//! below -- not only agent-state diagnostics.
 use std::io::{self, Seek, Write};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -58,9 +64,13 @@ impl DaemonLogging {
                 tracing_subscriber::fmt::layer()
                     .with_ansi(false)
                     .with_writer(move || writer.clone())
+                    // Every target at INFO or below. Restricting this to one target once made a
+                    // handover invisible: the successor logged `Starting daemon with handover
+                    // from ...` and one line per adopted session, and all of it was dropped by
+                    // this filter, so the 2026-09-26 handover that lost 26 of 37 sessions left no
+                    // primary evidence at all.
                     .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
-                        meta.target() == "ferryx_lib::daemon::agent_state"
-                            && *meta.level() <= tracing::Level::INFO
+                        *meta.level() <= tracing::Level::INFO
                     })),
             )
             .try_init()?;
