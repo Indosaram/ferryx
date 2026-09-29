@@ -1215,6 +1215,13 @@ async fn get_agent_history(
                             &home,
                             &target_session_id,
                         )
+                    }).or_else(|| {
+                        // A daemon that took over by handover knows no agent's conversation until
+                        // that agent next changes state; the agent's own process says which it is.
+                        crate::ipc::agents::omo_session_id_for_ferryx_session(&target_session_id)
+                            .and_then(|id| {
+                                crate::agent_transcript::transcript_path_for_session(&home, &id)
+                            })
                     }) {
                         Some(transcript_path) => Some(transcript_path),
                         None => {
@@ -4543,6 +4550,60 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
+    /// Prepare a replacement without changing the active listener or relay publication.
+    pub(crate) async fn prepare_relay(
+        state: Arc<RemoteGatewayState>,
+        relay_url: Option<&str>,
+        address: SocketAddr,
+    ) -> Result<crate::remote::relay_client::RelayClient, String> {
+        let url = relay_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        crate::remote::relay_client::validate_relay_url(
+            url,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
+        .map_err(|error| format!("Invalid relay configuration: {error}"))?;
+        let identity = load_gateway_identity(Arc::clone(&state))
+            .await
+            .map_err(|_| "Machine identity unavailable".to_string())?;
+        let client = match std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url, token, address.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url, identity.clone(), address.to_string(),
+            ),
+        };
+        Ok(client
+            .with_machine_id(&identity.machine_id)
+            .with_auth_manager((*state.auth_manager).clone()))
+    }
+
+    /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
+    pub(crate) fn replace_relay(
+        &mut self,
+        state: Arc<RemoteGatewayState>,
+        client: crate::remote::relay_client::RelayClient,
+    ) {
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
+        let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch,
+        });
+        *state.relay_client.write() = Some(client.clone());
+        self.published_pairing = Some((state, epoch));
+        self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+    }
+
     pub fn is_external_bound(&self) -> bool {
         !self._extra_shutdown_txs.is_empty()
     }

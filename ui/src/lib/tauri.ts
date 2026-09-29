@@ -1298,32 +1298,6 @@ export type DagWatchProjectResult = {
 
 export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
   if (!isTauri()) return { projectPath, runs: [] };
-export type AccountEnrollmentStatus = {
-  enrolled: boolean;
-  accountOrigin: string | null;
-  enrolledAt: number | null;
-};
-
-export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    return { enrolled: false, accountOrigin: null, enrolledAt: null };
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
-}
-
-export async function enrollThisMachine(
-  origin: string,
-  enrollmentCode: string,
-): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    throw new Error("Linking this computer is available only in the desktop app");
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
-    origin,
-    enrollmentCode,
-  });
-}
-
   return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }
 
@@ -1377,4 +1351,30 @@ export async function browserRemoteReclaim(): Promise<number> {
 export async function browserRemoteRevoke(): Promise<number> {
   if (!isTauri()) return 0;
   return invokeCommand<number>("cmd_browser_remote_revoke");
+}
+
+export type AccountEnrollmentStatus = {
+  enrolled: boolean;
+  accountOrigin: string | null;
+  enrolledAt: number | null;
+};
+
+export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    return { enrolled: false, accountOrigin: null, enrolledAt: null };
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
+}
+
+export async function enrollThisMachine(
+  origin: string,
+  enrollmentCode: string,
+): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    throw new Error("Linking this computer is available only in the desktop app");
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
+    origin,
+    enrollmentCode,
+  });
 }
