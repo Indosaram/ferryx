@@ -1,0 +1,5 @@
+utc=2026-09-29T10:38:57.2259199Z
+cwd=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\src\ui
+cmd=bun install --frozen-lockfile
+timeoutSec=1800
+processExit=0

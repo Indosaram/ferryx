@@ -1,0 +1,6 @@
+{"pid":17612,"creationUtc":"2026-09-29T09:26:41.1209460Z","exe":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","parentPid":3292,"role":"launcher:ui-install"}
+{"pid":12772,"creationUtc":"2026-09-29T09:26:41.4984680Z","exe":"C:\\Windows\\System32\\cmd.exe","parentPid":17612,"role":"step:ui-install"}
+{"pid":20292,"creationUtc":"2026-09-29T09:27:31.8325280Z","exe":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","parentPid":10820,"role":"launcher:ui-build"}
+{"pid":8064,"creationUtc":"2026-09-29T09:27:32.1922360Z","exe":"C:\\Windows\\System32\\cmd.exe","parentPid":20292,"role":"step:ui-build"}
+{"pid":17992,"creationUtc":"2026-09-29T09:27:46.8181520Z","exe":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","parentPid":20020,"role":"launcher:build-bin"}
+{"pid":19304,"creationUtc":"2026-09-29T09:27:47.2357520Z","exe":"C:\\Windows\\System32\\cmd.exe","parentPid":17992,"role":"step:build-bin"}

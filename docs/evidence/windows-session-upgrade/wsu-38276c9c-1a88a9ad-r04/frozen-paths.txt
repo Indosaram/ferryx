@@ -1,0 +1,7 @@
+run=wsu-38276c9c-1a88a9ad-r04
+checkout=/Volumes/T9-Mac/project/ferryx-windows-session-upgrade
+localStage=/tmp/ferryx-wsu/wsu-38276c9c-1a88a9ad-r04/remote/in
+remoteRoot=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1a88a9ad-r04
+ghosttyJunction=src\src-tauri\vendor\ghostty -> C:\Users\sook\ferryx-ghostty @ 6a508fd5e34c7e222c052a6d00bb3891ff3feace
+contractFixture=src-tauri/tests/windows_session_host_contract.rs (present in delta)
+steps=preflight checkout ui-install ui-build build-bin lib-session-host lib-output-hub contract lib-full cleanup

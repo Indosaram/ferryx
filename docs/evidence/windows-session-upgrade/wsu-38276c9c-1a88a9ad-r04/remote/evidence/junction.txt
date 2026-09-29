@@ -1,0 +1,3 @@
+junction=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1a88a9ad-r04\src\src-tauri\vendor\ghostty
+target=C:\Users\sook\ferryx-ghostty
+head=6a508fd5e34c7e222c052a6d00bb3891ff3feace

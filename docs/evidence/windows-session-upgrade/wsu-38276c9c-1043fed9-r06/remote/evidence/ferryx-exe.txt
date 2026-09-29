@@ -1,0 +1,4 @@
+path=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\ferryx.exe
+sha256=b296b72e003c9eb9814cd2c9870921c4130f52264b86e664b60691397f5b3398
+bytes=88163328
+mtimeUtc=2026-09-29T10:45:43.7834445Z

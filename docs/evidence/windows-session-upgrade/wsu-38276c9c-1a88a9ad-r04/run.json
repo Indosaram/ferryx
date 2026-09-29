@@ -1,0 +1,12 @@
+{
+  "run": "wsu-38276c9c-1a88a9ad-r04",
+  "phase": "phase1-foundation",
+  "parentSha": "38276c9c584221122efc2274852e457c080a449b",
+  "featureBaseSha": "38276c9c584221122efc2274852e457c080a449b",
+  "deltaManifestSha256": "1a88a9ad3170c776f56072e30ec896b7bd78642c4172069990374f65b3b56696",
+  "testedTreeSha": "1d6b3f0c09a33c910093cec5549381cb3605dbe8",
+  "bundleSha256": "cec3047751c2649e9fa81b4936d9342901ba95b473706e6eaf3fb3b6a339b4d9",
+  "deltaTarSha256": "bb86cb216e871792cf5477f467e3a9fa453c6bc881a8536a239af3b3a5cb995d",
+  "remoteRoot": "C:\\Users\\sook\\ferryx-wsu\\wsu-38276c9c-1a88a9ad-r04",
+  "stagedUtc": "2026-09-29T10:08:56Z"
+}

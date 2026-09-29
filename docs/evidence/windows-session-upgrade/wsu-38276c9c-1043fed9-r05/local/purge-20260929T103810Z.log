@@ -1,0 +1,5 @@
+# rfile purge.ps1 utc=2026-09-29T10:38:10Z
+ghostty-before head=6a508fd5e34c7e222c052a6d00bb3891ff3feace dirty=0
+rmdir-exit=0 ghostty-after head=6a508fd5e34c7e222c052a6d00bb3891ff3feace dirty=0
+WSU wsu-38276c9c-1043fed9-r05 purge EXIT=0
+WSU wsu-38276c9c-1043fed9-r05 local:purge EXIT=0

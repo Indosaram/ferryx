@@ -1,0 +1,3 @@
+# rfile step.ps1 -Step build-bin utc=2026-09-29T10:39:58Z
+WSU wsu-38276c9c-1043fed9-r06 build-bin EXIT=0
+WSU wsu-38276c9c-1043fed9-r06 local:build-bin EXIT=0

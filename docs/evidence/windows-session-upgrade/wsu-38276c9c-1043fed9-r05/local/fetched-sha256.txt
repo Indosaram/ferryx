@@ -1,0 +1,6 @@
+07b5bd94b549f25a0b544c9a4c99bb105209e5b9e8a492a5ac317cae10ab5fba  ./cleanup/cleanup-20260929T103529056Z.jsonl
+54fad3d90203c2cb708a3770b8a6e3402044b9899c35743fa73b353f5c4d77f1  ./cleanup/cleanup-exit.log
+50f3db8260f6d3f432b05c9d3cc950b801a8705a71c69b159df6fb287dc34237  ./cleanup/cleanup-history.log
+4bf4fca02e6eeaf7f1c510b82c756e7f8a3c567a230bae1094b254adc774f38b  ./logs/preflight-exit.log
+e1b1ad88eb67861021a1849bffdb48222c3310f8250a8dcaa6299e7c1635f232  ./logs/preflight.log
+e2ecd9bcecf3712abde59ff19fa7447db93128e5afd5dc9ed2ec03bbde5fa89b  ./run-start.txt

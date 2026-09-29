@@ -1,0 +1,3 @@
+# rfile checkout.ps1 utc=2026-09-29T09:46:33Z
+WSU wsu-38276c9c-bc182611-r03 checkout EXIT=0
+WSU wsu-38276c9c-bc182611-r03 local:checkout EXIT=0

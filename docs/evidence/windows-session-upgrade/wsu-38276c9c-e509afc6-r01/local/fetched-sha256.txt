@@ -1,0 +1,9 @@
+d4545586cb38d9a7088fd117538beee4fcfd7c1a5ac1be373e5b27d612dfddbf  ./cleanup/cleanup-20260929T092342656Z.jsonl
+32d139464fe29bc5a915933f7673f7612ea3615d0218af98b720bbcaa8c64256  ./cleanup/cleanup-exit.log
+46eac08e7b6134ac7ef4fa8e5ba2d70bbe58bbd87afc58556c0188cf21b3f915  ./cleanup/cleanup-history.log
+c5db75faa7a1e8e599d2c42287e1b46034e01a9861fa3874adec7580b9536837  ./evidence/toolchain.txt
+4bf4fca02e6eeaf7f1c510b82c756e7f8a3c567a230bae1094b254adc774f38b  ./logs/checkout-exit.log
+36795d9bc176479ea65a96fbe8dee416d8f5f6f9df0c24f0fc556a821a3307bb  ./logs/checkout.log
+418a5c17f33c70e99b0cc0a07fce69191489cfedc94164bfa903785777c5bd4b  ./logs/preflight-exit.log
+23b854354871fe11a232f4ee55497eb7f99d25bd6cd0fe3b89d9d5c2f487baaa  ./logs/preflight.log
+8f02e9be1b8aabbca4fafa1039b3e9466d7fd94e68c8f1f494349ec4f6e450bd  ./run-start.txt

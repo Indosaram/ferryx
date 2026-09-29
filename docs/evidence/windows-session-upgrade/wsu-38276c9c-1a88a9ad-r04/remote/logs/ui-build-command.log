@@ -1,0 +1,5 @@
+utc=2026-09-29T10:12:27.0212233Z
+cwd=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1a88a9ad-r04\src\ui
+cmd=bun run build
+timeoutSec=1800
+processExit=0

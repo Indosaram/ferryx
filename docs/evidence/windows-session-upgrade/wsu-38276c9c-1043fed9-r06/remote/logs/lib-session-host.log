@@ -1,0 +1,673 @@
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\src\src-tauri)
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `is_v5_ownership_transfer_enabled`
+  --> src\daemon\handover.rs:76:31
+   |
+76 |         idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+ --> src\daemon\server.rs:7:5
+  |
+7 | use crate::daemon::protocol::AgentProviderSessionKey;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:306:9
+    |
+306 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src\native_terminal\renderer\color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src\remote\attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src\remote\attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::terminal::session::PtySessionSnapshot`
+ --> src\terminal\pty.rs:4:5
+  |
+4 | use crate::terminal::session::PtySessionSnapshot;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `path::PathBuf`
+  --> src\terminal\remote.rs:10:5
+   |
+10 |     path::PathBuf,
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1590:9
+     |
+1590 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1591:9
+     |
+1591 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1592:9
+     |
+1592 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src\remote\account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `pid`
+   --> src\ssh\bridge.rs:686:36
+    |
+686 |                 } else if let Some(pid) = self.child_pid {
+    |                                    ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `handover_socket_path`
+    --> src\daemon\server.rs:3683:54
+     |
+3683 |                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+     |                                                      ^^^^^^^^^^^^^^^^^^^^ help: try ignoring the field: `handover_socket_path: _`
+
+warning: unused variable: `super_key`
+   --> src\native_terminal\input.rs:372:13
+    |
+372 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:5438:13
+     |
+5438 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:5489:13
+     |
+5489 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src\native_terminal\surface_host.rs:8132:13
+     |
+8132 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src\native_terminal\surface_host.rs:8142:13
+     |
+8142 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: unused variable: `hook`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1154:13
+     |
+1154 |         let hook = root.path().join("repo/.git/hooks/post-checkout");
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1155:13
+     |
+1155 |         let port = ready.local_addr().unwrap().port();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:644:9
+    |
+644 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:692:9
+    |
+692 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2025:13
+     |
+2025 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2055:13
+     |
+2055 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `c_pid`
+    --> src\ssh\bridge.rs:2093:13
+     |
+2093 |         let c_pid = c_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_pid`
+
+warning: unused variable: `r_pid`
+    --> src\ssh\bridge.rs:2094:13
+     |
+2094 |         let r_pid = r_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_r_pid`
+
+warning: unused variable: `initial_len`
+   --> src\ssh\projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: value assigned to `desired_size` is never read
+   --> src\terminal\remote.rs:937:56
+    |
+937 |               let mut desired_size: Option<(u16, u16)> = None;
+    |                                                          ^^^^ this value is reassigned later and never used
+...
+949 | /                     desired_size = Some(
+950 | |                         s.pending_size
+951 | |                             .take()
+952 | |                             .map(|(c, r, _)| (c, r))
+953 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+954 | |                     );
+    | |_____________________- `desired_size` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pid1`
+    --> src\terminal\remote.rs:1515:13
+     |
+1515 |         let pid1 = child1.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid1`
+
+warning: unused variable: `pid2`
+    --> src\terminal\remote.rs:1516:13
+     |
+1516 |         let pid2 = child2.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid2`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src\lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: type `agent_forward::Route` is more private than the item `agent_forward::resolve_report`
+   --> src\ssh\agent_forward.rs:178:1
+    |
+178 | / pub(crate) async fn resolve_report(
+179 | |     line: &str,
+180 | |     routes: &Arc<Mutex<HashMap<String, Route>>>,
+181 | | ) -> Option<(Arc<AgentStateHub>, AgentState)> {
+    | |_____________________________________________^ function `agent_forward::resolve_report` is reachable at visibility `pub(crate)`
+    |
+note: but type `agent_forward::Route` is only usable at visibility `pub(self)`
+   --> src\ssh\agent_forward.rs:53:1
+    |
+ 53 | struct Route {
+    | ^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src\terminal\output_hub.rs:724:5
+    |
+724 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src\terminal\machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src\terminal\paired_runtime.rs:702:5
+    |
+702 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src\terminal\paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::live_import`
+   --> src\terminal\remote.rs:752:5
+    |
+752 | /     pub fn live_import(
+753 | |         &self,
+754 | |         state: RemoteExportState,
+755 | |         transport: Option<Arc<dyn Transport>>,
+756 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:169:1
+    |
+169 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::import_transferred`
+   --> src\terminal\remote.rs:773:5
+    |
+773 | /     pub fn import_transferred(
+774 | |         &self,
+775 | |         state: RemoteExportState,
+776 | |         transport: Option<Arc<dyn Transport>>,
+777 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:169:1
+    |
+169 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `webview_unreachable` is never used
+  --> src\browser\hard_reload.rs:98:4
+   |
+98 | fn webview_unreachable(error: tauri::Error) -> IpcError {
+   |    ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `app` and `timeout` are never read
+   --> src\browser\snapshot_source.rs:339:5
+    |
+338 | pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    |            -------------------------- fields in this struct
+339 |     app: AppHandle<R>,
+    |     ^^^
+340 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: static `V5_ENV_LOCK` is never used
+   --> src\daemon\handover.rs:122:12
+    |
+122 |     static V5_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    |            ^^^^^^^^^^^
+
+warning: struct `V5EnvGuard` is never constructed
+   --> src\daemon\handover.rs:125:12
+    |
+125 |     struct V5EnvGuard {
+    |            ^^^^^^^^^^
+
+warning: associated functions `set`, `set_locked`, and `install` are never used
+   --> src\daemon\handover.rs:133:12
+    |
+132 |     impl V5EnvGuard {
+    |     --------------- associated functions in this implementation
+133 |         fn set(value: Option<&str>) -> Self {
+    |            ^^^
+...
+140 |         fn set_locked(value: Option<&str>) -> Self {
+    |            ^^^^^^^^^^
+...
+144 |         fn install(
+    |            ^^^^^^^
+
+warning: associated function `from_locked_file` is never used
+   --> src\daemon\server.rs:678:19
+    |
+629 | impl DaemonLockFile {
+    | ------------------- associated function in this implementation
+...
+678 |     pub(crate) fn from_locked_file(file: File) -> Self {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: associated function `from_locked_files` is never used
+   --> src\daemon\server.rs:749:19
+    |
+738 | impl DaemonLockFiles {
+    | -------------------- associated function in this implementation
+...
+749 |     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict` is never used
+    --> src\daemon\server.rs:1655:15
+     |
+1655 | pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict_owned` is never used
+    --> src\daemon\server.rs:1676:15
+     |
+1676 | pub(crate) fn handover_delivery_verdict_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_restorable_unexported` is never used
+    --> src\daemon\server.rs:1695:15
+     |
+1695 | pub(crate) fn handover_restorable_unexported(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_effective_owned` is never used
+    --> src\daemon\server.rs:1714:15
+     |
+1714 | pub(crate) fn handover_effective_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_spawn_relative_path` is never used
+    --> src\daemon\server.rs:4829:4
+     |
+4829 | fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `contains` is never used
+   --> src\daemon\session_service.rs:166:19
+    |
+164 | impl SpawnError {
+    | --------------- method in this implementation
+165 |     #[cfg(test)]
+166 |     pub(super) fn contains(&self, needle: &str) -> bool {
+    |                   ^^^^^^^^
+
+warning: methods `machine_sessions`, `expire_spawn_request_for_test`, `spawn_cache_len_for_test`, `provider_claim_len_for_test`, and `reserve_provider_claim_for_test` are never used
+    --> src\daemon\session_service.rs:700:19
+     |
+ 358 | impl DaemonSessionService {
+     | ------------------------- methods in this implementation
+...
+ 700 |     pub(crate) fn machine_sessions(
+     |                   ^^^^^^^^^^^^^^^^
+...
+2273 |     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2284 |     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2289 |     pub(super) fn provider_claim_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2294 |     pub(super) fn reserve_provider_claim_for_test(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `desktop_application_dirs` is never used
+   --> src\ipc\file_open_with.rs:103:15
+    |
+103 | pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src\ipc\file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src\ipc\file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\ipc\file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: method `test_capture` is never used
+   --> src\paired_host\service.rs:359:25
+    |
+321 | impl PairedHostService {
+    | ---------------------- method in this implementation
+...
+359 |     pub(crate) async fn test_capture(
+    |                         ^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\remote\auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `local_credential` is never read
+   --> src\remote\browser_backend.rs:423:5
+    |
+421 | pub struct LocalIpcBrowserBackend {
+    |            ---------------------- field in this struct
+422 |     socket_path: String,
+423 |     local_credential: Option<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: struct `Observation` is never constructed
+  --> src\remote\machine_input_probe.rs:18:19
+   |
+18 | pub(super) struct Observation(pub watch::Receiver<Progress>, String);
+   |                   ^^^^^^^^^^^
+
+warning: associated function `register` is never used
+  --> src\remote\machine_input_probe.rs:20:12
+   |
+19 | impl Observation {
+   | ---------------- associated function in this implementation
+20 |     pub fn register(id: &str) -> Self {
+   |            ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src\remote\server.rs:6340:12
+     |
+6340 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: function `probe_tailscale_cli` is never used
+   --> src\remote\state.rs:215:4
+    |
+215 | fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_snapshot_post_build_hook` is never used
+    --> src\remote\state.rs:1140:19
+     |
+ 812 | impl RemoteGatewayState {
+     | ----------------------- method in this implementation
+...
+1140 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `stderr_fd` is never read
+   --> src\ssh\bridge.rs:532:5
+    |
+527 | pub struct BridgeConnection {
+    |            ---------------- field in this struct
+...
+532 |     stderr_fd: Option<RawFd>,
+    |     ^^^^^^^^^
+
+warning: function `inspect` is never used
+   --> src\terminal\foreground.rs:226:15
+    |
+226 | pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
+    |               ^^^^^^^
+
+warning: function `test_persist_count` is never used
+   --> src\terminal\paired_runtime.rs:101:15
+    |
+101 | pub(crate) fn test_persist_count() -> usize {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: method `entry_for_test` is never used
+   --> src\terminal\remote.rs:438:19
+    |
+286 | impl RemoteRuntime {
+    | ------------------ method in this implementation
+...
+438 |     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
+    |                   ^^^^^^^^^^^^^^
+
+warning: method `pump_adopted_output` is never used
+   --> src\terminal\service.rs:360:19
+    |
+120 | impl TerminalService {
+    | -------------------- method in this implementation
+...
+360 |     pub(crate) fn pump_adopted_output(
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Adopted` is never constructed
+   --> src\terminal\session.rs:168:5
+    |
+166 | pub(crate) enum ProcessHandle {
+    |                 ------------- variant in this enum
+167 |     Spawned(Box<dyn Child + Send + Sync>),
+168 |     Adopted(AdoptedProcess),
+    |     ^^^^^^^
+
+warning: methods `set_writer_for_test` and `wait_and_reap` are never used
+   --> src\terminal\session.rs:713:19
+    |
+378 | impl PtySession {
+    | --------------- methods in this implementation
+...
+713 |     pub(crate) fn set_writer_for_test(&self, writer: Box<dyn Write + Send>) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+974 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1596:12
+     |
+1596 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1598:12
+     |
+1598 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+    --> src\remote\server.rs:5959:9
+     |
+5959 |         state.auth_manager.revoke_device(&device.id);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+5959 |         let _ = state.auth_manager.revoke_device(&device.id);
+     |         +++++++
+
+warning: `ferryx` (lib test) generated 84 warnings (run `cargo fix --lib -p ferryx --tests` to apply 38 suggestions)
+error: could not compile `ferryx` (lib test); 84 warnings emitted
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name ferryx_lib --edition=2021 src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no --test --cfg "feature=\"default\"" --cfg "feature=\"native-terminal\"" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(\"default\", \"native-terminal\"))" -C metadata=7cfb01fe4d9bd23e -C extra-filename=-1729703641dcd1e2 --out-dir C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps -C strip=debuginfo -L dependency=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps --extern aes=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libaes-b7c6004e6fb80446.rlib --extern anyhow=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libanyhow-d809358d1e9b2fd4.rlib --extern axum=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libaxum-a6f1182f95b7b024.rlib --extern base64=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libbase64-34f4888dd5d89231.rlib --extern blake2=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libblake2-b109355657143031.rlib --extern bytemuck=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libbytemuck-2623492fe90b6512.rlib --extern bytes=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libbytes-4fa9afd47e835ba5.rlib --extern cbc=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libcbc-db738cd454821cff.rlib --extern chacha20poly1305=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libchacha20poly1305-19cbce90cf5dde52.rlib --extern cookie=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libcookie-9d2c2ea164993cdc.rlib --extern ed25519_dalek=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libed25519_dalek-09e313303852aa45.rlib --extern futures_util=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libfutures_util-51f68a919675659a.rlib --extern image=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libimage-ab13ca2153bc5e55.rlib --extern libc=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\liblibc-b38f7923a681b601.rlib --extern mime_guess=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libmime_guess-240b3484ec195048.rlib --extern notify=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libnotify-32c815256cbdb4f6.rlib --extern notify_rust=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libnotify_rust-cbddc829aca87167.rlib --extern parking_lot=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libparking_lot-dd0efbafaf4deeee.rlib --extern pbkdf2=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libpbkdf2-dc2ef11ea7fac2ee.rlib --extern png=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libpng-90dd68c2533a11a9.rlib --extern pollster=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libpollster-afcd3a42ee14f00e.rlib --extern portable_pty=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libportable_pty-2b338c1b572c5ac4.rlib --extern rand=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\librand-d43877aee311954a.rlib --extern raw_window_handle=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libraw_window_handle-078abfd55083d41c.rlib --extern regex=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libregex-141800306c099812.rlib --extern reqwest=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libreqwest-3c436badafd7b95f.rlib --extern rodio=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\librodio-feb695b34d774e99.rlib --extern rusqlite=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\librusqlite-fdd928332b258abe.rlib --extern serde=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libserde-8b5699397bb670ae.rlib --extern serde_json=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libserde_json-faa386a46e34d4ba.rlib --extern sha1=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libsha1-be415edd2c63ef90.rlib --extern sha2=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libsha2-b22c0e0d339fc892.rlib --extern snow=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libsnow-d74909a7cad9cbf2.rlib --extern tauri=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtauri-906e81d73ff8151f.rlib --extern tauri_plugin_dialog=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtauri_plugin_dialog-7e3000bbad496c6b.rlib --extern tauri_plugin_notification=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtauri_plugin_notification-335a5afaa6fb334c.rlib --extern tauri_plugin_process=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtauri_plugin_process-48b95be3233ea9f9.rlib --extern tauri_plugin_updater=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtauri_plugin_updater-c06a4a7fcc34e859.rlib --extern tempfile=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtempfile-2e390cd049ddff43.rlib --extern thiserror=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libthiserror-8efa30541d2be8c4.rlib --extern time=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtime-3f9da31a24544113.rlib --extern tokio=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtokio-98cfde34b84a5d19.rlib --extern tokio_test=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtokio_test-af27f2eec7dfdd2d.rlib --extern tokio_tungstenite=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtokio_tungstenite-db0addbac9c5d773.rlib --extern tokio_util=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtokio_util-a662a2d9a38c32fc.rlib --extern toml=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtoml-81a3622ea733d42d.rlib --extern tower_http=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtower_http-e9d318b506a89194.rlib --extern tracing=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtracing-6f20512ad6b85a70.rlib --extern tracing_subscriber=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libtracing_subscriber-e65ae5ab8cd37d2f.rlib --extern url=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\liburl-5ce6c76bf5f9d0cb.rlib --extern uuid=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libuuid-ed12545c0747c71b.rlib --extern wgpu=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libwgpu-3180187bb96c5005.rlib --extern windows_sys=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libwindows_sys-f25f441c4c0930f8.rlib --extern winit=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libwinit-1cead891b6abb321.rlib --extern x25519_dalek=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\deps\libx25519_dalek-8dd34c4f558ad8e4.rlib -L native=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\build\ferryx-7d25e11f5e48d9c3\out\ghostty_vt\lib -L native=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\build\ring-5756d51da350602c\out -L native=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\build\libsqlite3-sys-6101a9713f798258\out -L native=C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\build\webview2-com-sys-8eaf425e8ec9d947\out\x64 -L native=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.53.1\lib -L "native=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\atlmfc\lib\x64" -L native=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib -l static=ghostty-vt-static -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:C:\Users\sook\ferryx-wsu\wsu-38276c9c-1043fed9-r06\target\debug\build\ferryx-7d25e11f5e48d9c3\out\ferryx-app-manifest.xml --cfg desktop --cfg dev --check-cfg cfg(desktop) --check-cfg cfg(mobile) --check-cfg cfg(dev)` (exit code: 0xffffffff)

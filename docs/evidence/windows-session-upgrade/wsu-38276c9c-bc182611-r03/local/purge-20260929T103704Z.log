@@ -1,0 +1,6 @@
+# rfile purge.ps1 utc=2026-09-29T10:37:04Z
+ghostty-before head=6a508fd5e34c7e222c052a6d00bb3891ff3feace dirty=0
+junction-unlinked C:\Users\sook\ferryx-wsu\wsu-38276c9c-bc182611-r03\src\src-tauri\vendor\ghostty
+rmdir-exit=0 ghostty-after head=6a508fd5e34c7e222c052a6d00bb3891ff3feace dirty=0
+WSU wsu-38276c9c-bc182611-r03 purge EXIT=0
+WSU wsu-38276c9c-bc182611-r03 local:purge EXIT=0

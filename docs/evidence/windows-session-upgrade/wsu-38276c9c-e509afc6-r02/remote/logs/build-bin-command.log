@@ -1,0 +1,5 @@
+utc=2026-09-29T09:27:47.0806103Z
+cwd=C:\Users\sook\ferryx-wsu\wsu-38276c9c-e509afc6-r02\src
+cmd=cargo --config "C:\Users\sook\ferryx-wsu\wsu-38276c9c-e509afc6-r02\env\cargo-qa.toml" build --locked --manifest-path src-tauri\Cargo.toml --bin ferryx
+timeoutSec=5400
+processExit=101
