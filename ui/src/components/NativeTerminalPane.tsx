@@ -558,6 +558,8 @@ export function NativeTerminalPane({
   const { visible: surfaceVisible, interactive } = useNativeTerminalVisibilityState();
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const lastGateKeydownLogAtRef = useRef(0);
+  const lastSinkGateLogAtRef = useRef(0);
   const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
   const ensureStreamListenerRef = useRef<() => Promise<unknown>>(async () => undefined);
@@ -598,6 +600,17 @@ export function NativeTerminalPane({
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
   const paneIdentity = session?.id ?? sessionId;
+  useEffect(() => {
+    switchDebug("terminal.surface.input.gate.state", {
+      paneIdentity,
+      backendSessionId: session?.backendSessionId ?? targetSessionId,
+      visible,
+      interactive,
+      surfaceVisible,
+      suspended,
+      isExited,
+    });
+  }, [paneIdentity, session?.backendSessionId, targetSessionId, visible, interactive, surfaceVisible, suspended, isExited]);
   const [presentation, setPresentation] = useState<{
     readonly paneIdentity: string | undefined;
     readonly backendSessionId: string;
@@ -1200,10 +1213,28 @@ export function NativeTerminalPane({
     const generation = isRemote ? session?.remoteGeneration ?? null : null;
     const payloadBytes = estimateInputBytes(input);
 
+    const reportOwnerMismatch = (stage: string) => {
+      recordTerminalInputDrop("dropped");
+      switchDebug("terminal.surface.input.dropped.owner_mismatch", {
+        backendSessionId: currentSessionId,
+        stage,
+        capturedOwnerSessionId: owner?.sessionId ?? null,
+        currentOwnerSessionId: surfaceOwnerRef.current?.sessionId ?? null,
+        ownerReplaced: surfaceOwnerRef.current !== owner,
+      });
+    };
+
     const executeInput = async (isRetry = false): Promise<void> => {
-      if (!isCurrentOwner()) return;
+      if (!isCurrentOwner()) {
+        reportOwnerMismatch("before_enqueue");
+        return;
+      }
       if (quarantinedBindingRef.current?.sessionId === currentSessionId) {
         recordTerminalInputDrop("quarantined");
+        switchDebug("terminal.surface.input.dropped.quarantined", {
+          backendSessionId: currentSessionId,
+          stage: "before_enqueue",
+        });
         return;
       }
       try {
@@ -1222,7 +1253,10 @@ export function NativeTerminalPane({
             });
           },
         );
-        if (!isCurrentOwner()) return;
+        if (!isCurrentOwner()) {
+          reportOwnerMismatch("after_send");
+          return;
+        }
         switchDebug("terminal.surface.input.sent", {
           backendSessionId: currentSessionId,
           hasKeyEvent: "keyEvent" in input && Boolean(input.keyEvent),
@@ -1234,9 +1268,16 @@ export function NativeTerminalPane({
         });
         setError(null);
       } catch (error: unknown) {
-        if (!isCurrentOwner()) return;
+        if (!isCurrentOwner()) {
+          reportOwnerMismatch("after_error");
+          return;
+        }
         if (error instanceof NativeTerminalStaleGenerationError) {
           recordTerminalInputDrop("stale-generation");
+          switchDebug("terminal.surface.input.dropped.stale_generation", {
+            backendSessionId: currentSessionId,
+            generation,
+          });
           return;
         }
         if (error instanceof NativeTerminalQueueOverflowError) {
@@ -1783,6 +1824,32 @@ export function NativeTerminalPane({
           !isEditableElement(activeEl) ||
           activeEl === inputRef.current);
       const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
+      if (ownsInput) {
+        const now = Date.now();
+        if (now - lastGateKeydownLogAtRef.current >= 1000) {
+          lastGateKeydownLogAtRef.current = now;
+          // Key content is never logged: only its shape, so the trace shows whether the keydown
+          // reached the owning pane and which gate (focus, IME latch, editable owner) it met.
+          switchDebug("terminal.surface.input.gate.keydown", {
+            backendSessionId: targetSessionId,
+            paneIdentity,
+            keyLength: typeof event.key === "string" ? event.key.length : 0,
+            modifiers: event.metaKey || event.ctrlKey || event.altKey,
+            defaultPrevented: event.defaultPrevented,
+            eventComposing: Boolean(event.isComposing),
+            composingLatch: isComposingRef.current,
+            canClaimInput,
+            targetIsSink: targetEl === inputRef.current,
+            activeElement: activeElement.slice(0, 120),
+            documentFocused: typeof document !== "undefined" ? document.hasFocus() : null,
+            ownerSessionId: surfaceOwnerRef.current?.sessionId ?? null,
+            quarantined: quarantinedBindingRef.current?.sessionId === targetSessionId,
+            queuedEntries: terminalInputQueue.getQueuedCount(targetSessionId),
+            inFlightRequestId: terminalInputQueue.getInFlightRequestId(targetSessionId),
+            inFlightAgeMs: terminalInputQueue.getRunningAgeMs(targetSessionId),
+          });
+        }
+      }
       switchDebug("terminal.surface.input.capture", {
         key: typeof event.key === "string" ? event.key.slice(0, 120) : String(event.key).slice(0, 120),
         defaultPrevented: event.defaultPrevented,
@@ -2973,6 +3040,15 @@ export function NativeTerminalPane({
           }}
           onInput={(event) => {
             if (isComposingRef.current) {
+              const now = Date.now();
+              if (now - lastSinkGateLogAtRef.current >= 1000) {
+                lastSinkGateLogAtRef.current = now;
+                switchDebug("terminal.surface.input.gate.input_while_composing", {
+                  backendSessionId: targetSessionId,
+                  nativeComposing: Boolean((event.nativeEvent as InputEvent).isComposing),
+                  valueLength: event.currentTarget.value.length,
+                });
+              }
               return;
             }
 

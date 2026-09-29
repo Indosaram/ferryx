@@ -1485,20 +1485,120 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
     generation: Option<u64>,
+    request_id: Option<String>,
 ) -> Result<(), IpcError> {
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+    // Stage: 0 = encode (before the daemon write), 1 = daemon write, 2 = post-write receipt.
+    let stage = Arc::new(AtomicU8::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let started = std::time::Instant::now();
+    {
+        // Stall watchdog: a command that never returns holds the pane's serialized input
+        // queue forever, so report which stage it is stuck in at 1s and 5s.
+        let stage = Arc::clone(&stage);
+        let done = Arc::clone(&done);
+        let session_id = session_id.clone();
+        let request_id = request_id.clone();
+        tauri::async_runtime::spawn(async move {
+            for threshold_ms in [1_000u64, 5_000] {
+                let elapsed = started.elapsed().as_millis() as u64;
+                if threshold_ms > elapsed {
+                    tokio::time::sleep(std::time::Duration::from_millis(threshold_ms - elapsed)).await;
+                }
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                log_native_input_diagnostic(
+                    "terminal.surface.input.backend.stall",
+                    &session_id,
+                    request_id.as_deref(),
+                    native_input_stage_name(stage.load(Ordering::Acquire)),
+                    started.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
+        });
+    }
+
     let write_session_id = session_id.clone();
-    send_native_terminal_input_with_writer(
+    let writer_stage = Arc::clone(&stage);
+    let result = send_native_terminal_input_with_writer(
         &app,
         state.inner(),
         &session_id,
         &input,
         |bytes| async move {
-            daemon_client
+            writer_stage.store(1, Ordering::Release);
+            let written = daemon_client
                 .write_terminal_at_generation(&write_session_id, generation, bytes)
-                .await
+                .await;
+            writer_stage.store(2, Ordering::Release);
+            written
         },
     )
-    .await
+    .await;
+    done.store(true, Ordering::Release);
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let stage_name = native_input_stage_name(stage.load(Ordering::Acquire));
+    if let Err(error) = &result {
+        log_native_input_diagnostic(
+            "terminal.surface.input.backend.error",
+            &session_id,
+            request_id.as_deref(),
+            stage_name,
+            elapsed_ms,
+            Some(error.to_string()),
+        );
+    } else if elapsed_ms >= 250 {
+        log_native_input_diagnostic(
+            "terminal.surface.input.backend.slow",
+            &session_id,
+            request_id.as_deref(),
+            stage_name,
+            elapsed_ms,
+            None,
+        );
+    }
+    result
+}
+
+fn native_input_stage_name(stage: u8) -> &'static str {
+    match stage {
+        0 => "encode",
+        1 => "write",
+        _ => "post_write",
+    }
+}
+
+fn log_native_input_diagnostic(
+    event: &str,
+    session_id: &str,
+    request_id: Option<&str>,
+    stage: &str,
+    elapsed_ms: u64,
+    error: Option<String>,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let wall_time_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+        "runId": "rust-input",
+        "sequence": 0,
+        "event": event,
+        "wallTimeMs": wall_time_ms,
+        "details": {
+            "backendSessionId": session_id,
+            "requestId": request_id,
+            "stage": stage,
+            "elapsedMs": elapsed_ms,
+            "error": error,
+        }
+    }));
 }
 
 /// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
