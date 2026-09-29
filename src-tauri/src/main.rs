@@ -13,6 +13,15 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    {
+        use ferryx_lib::terminal::session_host::host;
+        match args.get(1).map(String::as_str) {
+            Some("--session-host") => std::process::exit(host::run_host(&args)),
+            Some("--session-host-client") => std::process::exit(host::run_probe_client(&args)),
+            _ => {}
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))

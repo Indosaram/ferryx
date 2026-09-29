@@ -752,3 +752,39 @@ fn writing_to_an_unknown_session_still_fails_synchronously() {
         "expected PtyError::SessionNotFound(\"nope\"), got: {err:?}"
     );
 }
+
+// `describe_session` resolves its owner when the future is built and reads it when polled,
+// as HEAD did with the held PTY `Arc`. A snapshot taken at construction would miss the
+// resize; a lookup deferred into the future would miss the session after removal.
+#[tokio::test]
+async fn describe_session_reads_held_owner_when_polled() {
+    use crate::remote::backend::RemoteSessionBackend;
+
+    let pty_manager = Arc::new(PtyManager::new());
+    let output_hub = Arc::new(TerminalOutputHub::new(1024));
+    let service = TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub));
+    let (session_id, _rx) = pty_manager.spawn(test_shell(), 80, 24).expect("spawn");
+    let _hub_rx = output_hub.register_session(&session_id);
+
+    // Given a describe future built before the resize, when it is polled after the resize,
+    // then it reports the resized dimensions.
+    let pending = RemoteSessionBackend::describe_session(&service, &session_id);
+    service.resize(&session_id, 100, 30).expect("resize");
+    let details = pending.await.expect("describe live session");
+    assert_eq!(details.session_id, session_id);
+    assert_eq!((details.cols, details.rows), (100, 30));
+    assert!(details.running);
+
+    // Given a describe future built while the session is registered, when the session is
+    // closed and removed before polling, then it still describes the same held owner.
+    let pending = RemoteSessionBackend::describe_session(&service, &session_id);
+    timeout(Duration::from_secs(10), pty_manager.close_session(&session_id))
+        .await
+        .expect("close within deadline")
+        .expect("close");
+    assert!(!pty_manager.has_session(&session_id));
+    let details = pending.await.expect("held owner survives registry removal");
+    assert_eq!(details.session_id, session_id);
+    assert_eq!((details.cols, details.rows), (100, 30));
+    assert!(!details.running);
+}

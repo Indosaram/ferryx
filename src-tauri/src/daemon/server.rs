@@ -2287,7 +2287,7 @@ impl DaemonServer {
                     .filter_map(|id| {
                         server
                             .terminal_service
-                            .get_session(&id)
+                            .foreground_source(&id)
                             .map(|session| (id, session))
                     })
                     .collect();
@@ -2305,9 +2305,7 @@ impl DaemonServer {
                         .map(|(id, session)| {
                             let observation = match &snapshot {
                                 Ok(snapshot) => {
-                                    crate::terminal::foreground::inspect_with_snapshot(
-                                        &session, snapshot,
-                                    )
+                                    session.inspect_with_snapshot(snapshot)
                                 }
                                 Err(error) => Err(std::io::Error::new(
                                     error.kind(),
@@ -2328,7 +2326,7 @@ impl DaemonServer {
                                         .entry(id.clone())
                                         .or_default()
                                         .observe(observation);
-                                    if server.terminal_service.get_session(&id).is_some() {
+                                    if server.terminal_service.has_native_pty_session(&id) {
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
@@ -3019,7 +3017,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
                         let mut response = self.handle_describe_session(&session_id);
-                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
+                        if let Some(pid) = self.terminal_service.session_pid(&session_id) {
                             let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
                                 Ok(crate::ipc::terminal::process_cwd(pid))
                             }).await;
@@ -3044,8 +3042,7 @@ impl DaemonServer {
                     if self.session_router.is_local_session(&session_id) {
                         let maybe_pid = self
                             .terminal_service
-                            .get_session(&session_id)
-                            .and_then(|session| session.pid());
+                            .session_pid(&session_id);
                         let provider_session_id = match maybe_pid {
                             Some(pid) => {
                                 let agent_type = agent_type.clone();
@@ -3249,8 +3246,8 @@ impl DaemonServer {
                                 }
                                 let (pty_cols, pty_rows) = self
                                     .terminal_service
-                                    .get_session(&session_id)
-                                    .map(|s| s.get_size())
+                                    .session_info(&session_id)
+                                    .map(|info| (info.cols, info.rows))
                                     .or_else(|| self.terminal_service.remote().details(&session_id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
                                     .map(|(c, r)| (Some(c), Some(r)))
                                     .unwrap_or((None, None));

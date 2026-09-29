@@ -235,6 +235,22 @@ pub(crate) fn inspect_with_snapshot(
     platform::inspect_with_snapshot(session, snapshot)
 }
 
+/// The session an observation tick classifies, resolved once per tick.
+pub(crate) enum ForegroundSource {
+    Local(std::sync::Arc<PtySession>),
+}
+
+impl ForegroundSource {
+    pub(crate) fn inspect_with_snapshot(
+        &self,
+        snapshot: &ProcessSnapshot,
+    ) -> std::io::Result<Option<Foreground>> {
+        match self {
+            Self::Local(session) => inspect_with_snapshot(session, snapshot),
+        }
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;

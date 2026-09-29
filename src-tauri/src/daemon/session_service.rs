@@ -471,18 +471,15 @@ impl DaemonSessionService {
         {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
-        let pty = self
+        let info = self
             .terminal_service
-            .get_session(&target.session_id)
+            .session_info(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
-        if !matches!(
-            pty.state(),
-            PtySessionState::Starting | PtySessionState::Running
-        ) {
+        if !info.is_live() {
             return Err("SESSION_EXPIRED".into());
         }
         let mut session = session.clone();
-        (session.cols, session.rows) = pty.get_size();
+        (session.cols, session.rows) = (info.cols, info.rows);
         Ok(session)
     }
 
@@ -524,8 +521,8 @@ impl DaemonSessionService {
         self.workspace_service.journal.owns_session(id)
     }
 
-    pub(crate) fn machine_pty(&self, id: &str) -> Option<Arc<crate::terminal::PtySession>> {
-        self.terminal_service.get_session(id)
+    pub(crate) fn machine_input(&self, id: &str) -> Option<crate::terminal::SessionInput> {
+        self.terminal_service.session_input(id)
     }
 
     pub(crate) async fn wait_machine_lifecycle(&self, id: &str) -> Result<(), String> {
@@ -670,24 +667,24 @@ impl DaemonSessionService {
                 target: record.session.target,
             });
         }
-        let Some(pty) = self.terminal_service.get_session(id) else {
+        let Some(info) = self.terminal_service.session_info(id) else {
             return Ok(SessionDetail::Expired {
                 target: record.session.target,
             });
         };
-        if let PtySessionState::Exited { code } = pty.state() {
+        if let PtySessionState::Exited { code } = info.state {
             record.session.running = false;
             return Ok(SessionDetail::Exited {
                 session: record.session,
                 exit: crate::remote::machine_protocol::ExitMetadata { code, signal: None },
             });
         }
-        if matches!(pty.state(), PtySessionState::Failed { .. }) {
+        if matches!(info.state, PtySessionState::Failed { .. }) {
             return Ok(SessionDetail::Expired {
                 target: record.session.target,
             });
         }
-        (record.session.cols, record.session.rows) = pty.get_size();
+        (record.session.cols, record.session.rows) = (info.cols, info.rows);
         let (start, end) = self
             .terminal_service
             .output_hub()
@@ -781,9 +778,9 @@ impl DaemonSessionService {
         if let Begin::Existing(_) = begin {
             return Ok(());
         }
-        let pty = self.terminal_service.get_session(id);
+        let status = self.terminal_service.session_status(id);
         if record.exit.is_none() {
-            if pty.is_none() {
+            if status.is_none() {
                 return Err("OPERATION_OUTCOME_UNKNOWN".into());
             }
             check()?;
@@ -791,12 +788,12 @@ impl DaemonSessionService {
                 .close_machine_session(id, check.clone())
                 .await
                 .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
-            if !pty.as_ref().is_some_and(|p| p.is_reaped()) {
+            if !status.as_ref().is_some_and(|s| s.is_reaped()) {
                 return Err("OPERATION_OUTCOME_UNKNOWN".into());
             }
             record.session.running = false;
             record.exit = Some(ExitMetadata {
-                code: pty.and_then(|p| match p.state() {
+                code: status.and_then(|s| match s.state() {
                     PtySessionState::Exited { code } => code,
                     _ => None,
                 }),
@@ -1766,7 +1763,7 @@ impl DaemonSessionService {
                             return Err("PARENT_SESSION_MISMATCH".to_string().into());
                         }
                         let parent = terminal_service
-                            .get_session(parent)
+                            .session_status(parent)
                             .ok_or("SESSION_EXPIRED".to_string())?;
                         if !matches!(parent.state(), PtySessionState::Running) {
                             return Err("SESSION_EXPIRED".to_string().into());
@@ -2034,7 +2031,7 @@ impl DaemonSessionService {
                 let cleanup_agent_states = Arc::clone(&agent_states);
                 let handover_manager = handover_manager.clone();
                 let terminal_service = Arc::clone(&terminal_service);
-                let exited_pty = terminal_service.get_session(&session_id);
+                let exited_status = terminal_service.session_status(&session_id);
                 let lifecycle_workspaces = workspace_service.clone();
                 let durable_exit = durable.clone();
                 let metadata_target = durable.as_ref().map(|record| record.session.target.clone());
@@ -2105,7 +2102,7 @@ impl DaemonSessionService {
                     if let Some(mut record) = durable_exit {
                         record.session.running = false;
                         record.exit = Some(crate::remote::machine_protocol::ExitMetadata {
-                            code: exited_pty.as_ref().and_then(|p| match p.state() {
+                            code: exited_status.as_ref().and_then(|s| match s.state() {
                                 PtySessionState::Exited { code } => code,
                                 _ => None,
                             }),
@@ -2233,13 +2230,8 @@ impl DaemonSessionService {
             return true;
         }
         self.terminal_service
-            .get_session(session_id)
-            .is_some_and(|session| {
-                matches!(
-                    session.state(),
-                    PtySessionState::Starting | PtySessionState::Running
-                )
-            })
+            .session_info(session_id)
+            .is_some_and(|info| info.is_live())
     }
 
     pub(super) fn release_session_ownership(&self, session_id: &str) {
@@ -2396,7 +2388,7 @@ impl DaemonSessionService {
                 };
             }
         }
-        let Some(pty_session) = self.terminal_service.get_session(session_id) else {
+        let Some(info) = self.terminal_service.session_info(session_id) else {
             return DaemonResponse::Error {
                 message: format!("Session '{session_id}' not found"),
                 code: Some("SESSION_NOT_FOUND".to_string()),
@@ -2408,11 +2400,8 @@ impl DaemonSessionService {
             };
         };
 
-        let (cols, rows) = pty_session.get_size();
-        let running = matches!(
-            pty_session.state(),
-            PtySessionState::Starting | PtySessionState::Running
-        );
+        let (cols, rows) = (info.cols, info.rows);
+        let running = info.is_live();
         let (start_sequence, end_sequence) = self
             .terminal_service
             .output_hub()
@@ -2420,8 +2409,8 @@ impl DaemonSessionService {
             .unwrap_or((None, None));
 
         let meta = self.session_metadata.read().get(session_id).cloned();
-        let worktree_cwd = pty_session
-            .worktree_path()
+        let worktree_cwd = info
+            .worktree_path
             .map(|p| p.to_string_lossy().to_string());
         let (workspace_id, worktree, cwd) = match meta {
             Some(m) => (
@@ -2443,7 +2432,7 @@ impl DaemonSessionService {
                 running,
                 start_sequence,
                 end_sequence,
-                last_output_age_ms: pty_session.last_output_age_ms(),
+                last_output_age_ms: info.last_output_age_ms,
             },
         }
     }

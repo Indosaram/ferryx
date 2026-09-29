@@ -9,8 +9,7 @@ use crate::daemon::protocol::{
 };
 use crate::remote::backend::{RemoteSessionBackend, RemoteSessionDetails};
 use crate::terminal::{
-    AttachmentSnapshot, OutputChunk, PtySessionState, SessionAttachment, TerminalService,
-    TerminalSignal,
+    AttachmentSnapshot, OutputChunk, SessionAttachment, TerminalService, TerminalSignal,
 };
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
@@ -772,7 +771,7 @@ impl SessionRouter {
     }
 
     pub fn is_local_session(&self, session_id: &str) -> bool {
-        self.terminal_service.get_session(session_id).is_some()
+        self.terminal_service.has_native_pty_session(session_id)
             || self.terminal_service.remote().contains(session_id)
             || crate::terminal::paired_runtime::Runtime::owns(session_id)
     }
@@ -913,16 +912,13 @@ impl RemoteSessionBackend for SessionRouter {
                 });
             }
             if self.is_local_session(&session_id) {
-                let session = self
+                let info = self
                     .terminal_service
-                    .get_session(&session_id)
+                    .session_info(&session_id)
                     .ok_or_else(|| format!("Session '{session_id}' not found"))?;
-                let (cols, rows) = session.get_size();
-                let running = matches!(
-                    session.state(),
-                    PtySessionState::Running | PtySessionState::Starting
-                );
-                let worktree_path = session.worktree_path();
+                let (cols, rows) = (info.cols, info.rows);
+                let running = info.is_live();
+                let worktree_path = info.worktree_path;
                 let workspace_id = self
                     .workspace_ids
                     .read()

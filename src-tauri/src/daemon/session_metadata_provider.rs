@@ -78,7 +78,7 @@ impl DaemonSessionService {
         }
         let pty = self
             .terminal_service
-            .get_session(&target.session_id)
+            .session_status(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
         let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
         let discovered = crate::ipc::agents::discover_agent_session_id(pid, agent)

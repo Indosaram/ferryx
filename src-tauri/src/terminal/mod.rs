@@ -40,6 +40,7 @@ mod remote_runtime_tests;
 pub(crate) mod resume_cwd;
 pub mod service;
 pub mod session;
+pub mod session_host;
 pub mod shell;
 
 pub use output_hub::*;

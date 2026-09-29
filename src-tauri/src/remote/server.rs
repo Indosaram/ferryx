@@ -782,12 +782,8 @@ pub(crate) async fn get_active_running_sessions(
                 continue;
             }
             let is_running_or_starting =
-                if let Some(session) = state.terminal_service.get_session(&session_id) {
-                    matches!(
-                        session.state(),
-                        crate::terminal::PtySessionState::Running
-                            | crate::terminal::PtySessionState::Starting
-                    )
+                if let Some(info) = state.terminal_service.session_info(&session_id) {
+                    info.is_live()
                 } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
                     matches!(
                         details.state,
@@ -803,8 +799,8 @@ pub(crate) async fn get_active_running_sessions(
 
             let worktree_path = state
                 .terminal_service
-                .get_session(&session_id)
-                .and_then(|s| s.worktree_path())
+                .session_info(&session_id)
+                .and_then(|info| info.worktree_path)
                 .or_else(|| {
                     state
                         .terminal_service
@@ -937,12 +933,8 @@ async fn get_workspace_state(
         }
         if live_session_id.is_none() {
             for sid in state.terminal_service.list_sessions() {
-                if let Some(session) = state.terminal_service.get_session(&sid) {
-                    if matches!(
-                        session.state(),
-                        crate::terminal::PtySessionState::Running
-                            | crate::terminal::PtySessionState::Starting
-                    ) {
+                if let Some(info) = state.terminal_service.session_info(&sid) {
+                    if info.is_live() {
                         live_session_id = Some(sid);
                         break;
                     }
@@ -1708,12 +1700,8 @@ async fn ws_terminal_handler(
     let is_session_valid = match state.session_backend.describe_session(&session_id).await {
         Ok(details) if details.running => true,
         _ => {
-            if let Some(session) = state.terminal_service.get_session(&session_id) {
-                matches!(
-                    session.state(),
-                    crate::terminal::PtySessionState::Running
-                        | crate::terminal::PtySessionState::Starting
-                )
+            if let Some(info) = state.terminal_service.session_info(&session_id) {
+                info.is_live()
             } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
                 matches!(
                     details.state,
@@ -1951,9 +1939,10 @@ async fn handle_machine_terminal_socket(
     use crate::scoped_contracts::Epoch;
     let services = state.machine_services.as_ref().expect("admitted services");
     let target = &session.target;
-    let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
+    let Some(session_input) = services.sessions.machine_input(&target.session_id) else {
         return;
     };
+    let session_status = session_input.status();
     let (mut sender, mut receiver) = socket.split();
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
@@ -2077,7 +2066,7 @@ async fn handle_machine_terminal_socket(
                     return
                 }
                 Err(crate::terminal::output_hub::machine_output::MachineOutputError::Closed) => {
-                    let status = match pty.state() {
+                    let status = match session_status.state() {
                         crate::terminal::PtySessionState::Exited { code } => {
                             serde_json::json!({"type":"exit","target":target,"exit":{"code":code,"signal":null}})
                         }
@@ -2173,7 +2162,7 @@ async fn handle_machine_terminal_socket(
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
-                        let input = pty.write_input_cancellable(&bytes);
+                        let input = session_input.write_cancellable(&bytes);
                         #[cfg(test)]
                         let input = machine_input_probe::observe(&target.session_id, input);
                         input.await.map_err(|error| error.to_string())

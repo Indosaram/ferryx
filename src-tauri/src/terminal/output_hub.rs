@@ -106,6 +106,30 @@ pub enum OutputHubSnapshotError {
     ReplayGapExceedsNextSequence(u64),
 }
 
+/// Failure applying host-authored state to a mirrored session. Every error leaves the
+/// mirror untouched, so the caller can recover with [`TerminalOutputHub::resync_mirror`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MirrorError {
+    #[error("mirrored session {0} is not registered")]
+    UnknownSession(String),
+
+    #[error("mirrored sequence mismatch: expected {expected}, got {got}")]
+    SequenceMismatch { expected: u64, got: u64 },
+
+    /// Gap boundaries and empty chunks do not advance a stream through the push path;
+    /// the host's post-gap state must arrive via resync instead.
+    #[error("mirrored chunk {sequence} is a gap or empty and requires resync")]
+    UnsupportedChunk { sequence: u64 },
+
+    /// Resync may only move a mirror forward; rewinding would re-emit sequences its
+    /// subscribers have already seen.
+    #[error("resync snapshot next_sequence {snapshot_next} is behind mirror next_sequence {mirror_next}")]
+    SnapshotBehindMirror { mirror_next: u64, snapshot_next: u64 },
+
+    #[error(transparent)]
+    Snapshot(#[from] OutputHubSnapshotError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHubSnapshot {
     #[serde(default)]
@@ -1072,6 +1096,134 @@ impl TerminalOutputHub {
             self.transport_owners.write().remove(session_id);
         }
 
+        Ok(())
+    }
+
+    fn mirrored_session(&self, session_id: &str) -> Result<Arc<RwLock<SessionHub>>, MirrorError> {
+        self.sessions
+            .read()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| MirrorError::UnknownSession(session_id.to_string()))
+    }
+
+    /// Applies a host-published chunk through the same push path as local output, so the
+    /// ring, retained VT state and bracketed-paste tracking evolve exactly as on the host.
+    /// The chunk is accepted only at the mirror's `next_sequence`.
+    pub fn apply_mirrored_chunk(
+        &self,
+        session_id: &str,
+        chunk: OutputChunk,
+    ) -> Result<(), MirrorError> {
+        let session_hub = self.mirrored_session(session_id)?;
+        let mut hub = session_hub.write();
+        let expected = hub.buffer.next_sequence;
+        if chunk.sequence != expected {
+            return Err(MirrorError::SequenceMismatch {
+                expected,
+                got: chunk.sequence,
+            });
+        }
+        if chunk.replay_gap.is_some() || chunk.bytes.is_empty() {
+            return Err(MirrorError::UnsupportedChunk {
+                sequence: chunk.sequence,
+            });
+        }
+        let applied = hub
+            .buffer
+            .push_with_read_timestamp(chunk.bytes.to_vec(), chunk.metrics_read_unix_micros)
+            .expect("non-empty chunk always pushes");
+        debug_assert_eq!(applied.sequence, chunk.sequence);
+        hub.machine_senders.retain(|sender| sender.publish(&applied));
+        let _ = hub.sender.send(applied.clone());
+        if hub.raw_sender.receiver_count() > 0 {
+            let _ = hub.raw_sender.send(applied.bytes.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Records a host resize marker at the host's sequence rather than allocating one, so
+    /// resize segmentation stays aligned with the host ledger.
+    pub fn apply_mirrored_resize(
+        &self,
+        session_id: &str,
+        point: ResizePoint,
+    ) -> Result<(), MirrorError> {
+        let session_hub = self.mirrored_session(session_id)?;
+        let mut hub = session_hub.write();
+        let expected = hub.buffer.next_sequence;
+        if point.sequence != expected {
+            return Err(MirrorError::SequenceMismatch {
+                expected,
+                got: point.sequence,
+            });
+        }
+        hub.buffer.allocate_sequence();
+        hub.buffer.retained.seal();
+        if hub.resize_ledger.len() >= RESIZE_LEDGER_CAPACITY {
+            hub.resize_ledger.remove(0);
+        }
+        hub.resize_ledger.push(point);
+        Ok(())
+    }
+
+    /// Replaces the mirror's stream state with the host snapshot in place. The broadcast
+    /// channels, machine senders and transport ownership survive, so live subscribers are
+    /// not dropped: they receive one gap boundary carrying the host's last used sequence
+    /// (no new sequence is allocated) and then continue with post-resync chunks.
+    /// A snapshot at the mirror's own `next_sequence` replaces state without any boundary:
+    /// subscribers already hold every sequence the host has used.
+    pub fn resync_mirror(
+        &self,
+        session_id: &str,
+        snapshot: SessionHubSnapshot,
+    ) -> Result<(), MirrorError> {
+        snapshot.validate_with_capacity(self.capacity)?;
+        let session_hub = self.mirrored_session(session_id)?;
+        let mut hub = session_hub.write();
+        let mirror_next = hub.buffer.next_sequence;
+        if snapshot.next_sequence < mirror_next {
+            return Err(MirrorError::SnapshotBehindMirror {
+                mirror_next,
+                snapshot_next: snapshot.next_sequence,
+            });
+        }
+
+        let capacity = if snapshot.capacity > 0 {
+            snapshot.capacity
+        } else {
+            self.capacity
+        };
+        let host_last_sequence = snapshot.next_sequence - 1;
+        let advanced = snapshot.next_sequence > mirror_next;
+        hub.buffer = BoundedBuffer::from_snapshot(
+            capacity,
+            snapshot.chunks,
+            snapshot.next_sequence,
+            snapshot.bracketed_paste_enabled,
+            snapshot.retained_state,
+        );
+        hub.resize_ledger = snapshot.resize_ledger;
+        hub.replay_gap = snapshot.replay_gap;
+
+        if !advanced {
+            return Ok(());
+        }
+
+        // Live subscribers resume at the host's next sequence; the retained ring stays
+        // available to any re-attach through the normal snapshot path.
+        let boundary = OutputChunk {
+            sequence: host_last_sequence,
+            bytes: Arc::from([]),
+            metrics_read_unix_micros: None,
+            replay_gap: Some(ReplayGap {
+                requested_after_sequence: mirror_next - 1,
+                available_from_sequence: snapshot.next_sequence,
+            }),
+        };
+        hub.machine_senders
+            .retain(|sender| sender.publish(&boundary));
+        let _ = hub.sender.send(boundary);
         Ok(())
     }
 
@@ -2126,5 +2278,374 @@ mod tests {
             snap_gap_future.validate(),
             Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
         );
+    }
+
+    const MIRROR_CAPACITY: usize = 64;
+
+    /// Feeds `bytes` to the host hub and forwards the published chunk to the mirror.
+    fn publish_and_mirror(
+        host: &TerminalOutputHub,
+        mirror: &TerminalOutputHub,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> OutputChunk {
+        let chunk = host.publish(session_id, bytes.to_vec()).expect("host publish");
+        mirror
+            .apply_mirrored_chunk(session_id, chunk.clone())
+            .expect("mirror apply");
+        chunk
+    }
+
+    fn flood(host: &TerminalOutputHub, mirror: Option<&TerminalOutputHub>, session_id: &str) {
+        for i in 0..200 {
+            let line = format!("flood line {i}\r\n").into_bytes();
+            match mirror {
+                Some(mirror) => {
+                    publish_and_mirror(host, mirror, session_id, &line);
+                }
+                None => {
+                    host.publish(session_id, line).expect("host publish");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_apply_matches_source_hub_including_retained_state_after_eviction() {
+        let session_id = "mirror-apply";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let _mirror_rx = mirror.register_session(session_id);
+
+        publish_and_mirror(&host, &mirror, session_id, b"\x1b[31m\x1b[?2004hprompt> ");
+        flood(&host, Some(&mirror), session_id);
+
+        let host_snapshot = host.export_session_state(session_id).expect("host export");
+        let mirror_snapshot = mirror
+            .export_session_state(session_id)
+            .expect("mirror export");
+        // Non-vacuous: the mode-setting chunk left the ring and retention folded it into state.
+        assert!(host_snapshot.chunks.first().expect("ring").sequence > 1);
+        assert!(!host_snapshot
+            .retained_state
+            .as_ref()
+            .expect("retained state")
+            .is_empty());
+        assert!(host_snapshot.bracketed_paste_enabled);
+        assert_eq!(mirror_snapshot, host_snapshot);
+
+        let host_attach = host
+            .subscribe_with_sequence(session_id, None)
+            .expect("host attach");
+        let mirror_attach = mirror
+            .subscribe_with_sequence(session_id, None)
+            .expect("mirror attach");
+        assert_eq!(mirror_attach.snapshot, host_attach.snapshot);
+    }
+
+    #[test]
+    fn mirror_apply_rejects_sequence_mismatch_without_mutation() {
+        let session_id = "mirror-mismatch";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let mut mirror_rx = mirror.register_session_with_sequence(session_id);
+
+        let first = host.publish(session_id, b"one".to_vec()).expect("seq 1");
+        let second = host.publish(session_id, b"two".to_vec()).expect("seq 2");
+        let before = mirror.export_session_state(session_id).expect("export");
+
+        assert_eq!(
+            mirror.apply_mirrored_chunk(session_id, second.clone()),
+            Err(MirrorError::SequenceMismatch {
+                expected: 1,
+                got: 2
+            })
+        );
+        assert_eq!(mirror.export_session_state(session_id), Some(before));
+        assert!(mirror_rx.try_recv().is_err());
+
+        mirror
+            .apply_mirrored_chunk(session_id, first.clone())
+            .expect("in-order apply");
+        // Replaying an already applied chunk is rejected rather than duplicated.
+        assert_eq!(
+            mirror.apply_mirrored_chunk(session_id, first),
+            Err(MirrorError::SequenceMismatch {
+                expected: 2,
+                got: 1
+            })
+        );
+        let gap_chunk = OutputChunk {
+            sequence: 2,
+            bytes: Arc::from([]),
+            metrics_read_unix_micros: None,
+            replay_gap: Some(ReplayGap {
+                requested_after_sequence: 1,
+                available_from_sequence: 3,
+            }),
+        };
+        assert_eq!(
+            mirror.apply_mirrored_chunk(session_id, gap_chunk),
+            Err(MirrorError::UnsupportedChunk { sequence: 2 })
+        );
+        assert_eq!(
+            mirror.apply_mirrored_chunk("missing", second.clone()),
+            Err(MirrorError::UnknownSession("missing".to_string()))
+        );
+        mirror
+            .apply_mirrored_chunk(session_id, second)
+            .expect("in-order apply");
+
+        assert_eq!(mirror_rx.try_recv().expect("chunk 1").sequence, 1);
+        assert_eq!(mirror_rx.try_recv().expect("chunk 2").sequence, 2);
+        assert!(mirror_rx.try_recv().is_err());
+        assert_eq!(
+            mirror.export_session_state(session_id),
+            host.export_session_state(session_id)
+        );
+    }
+
+    #[test]
+    fn mirror_resize_requires_host_sequence() {
+        let session_id = "mirror-resize";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let _mirror_rx = mirror.register_session(session_id);
+
+        publish_and_mirror(&host, &mirror, session_id, b"before");
+        let resize_sequence = host.record_resize(session_id, 120, 40).expect("resize");
+        let point = ResizePoint {
+            sequence: resize_sequence,
+            cols: 120,
+            rows: 40,
+        };
+        let before = mirror.export_session_state(session_id).expect("export");
+        assert_eq!(
+            mirror.apply_mirrored_resize(
+                session_id,
+                ResizePoint {
+                    sequence: resize_sequence + 1,
+                    ..point.clone()
+                }
+            ),
+            Err(MirrorError::SequenceMismatch {
+                expected: resize_sequence,
+                got: resize_sequence + 1
+            })
+        );
+        assert_eq!(mirror.export_session_state(session_id), Some(before));
+
+        mirror
+            .apply_mirrored_resize(session_id, point)
+            .expect("mirror resize");
+        publish_and_mirror(&host, &mirror, session_id, b"after");
+
+        assert_eq!(
+            mirror.export_session_state(session_id),
+            host.export_session_state(session_id)
+        );
+        assert_eq!(
+            mirror
+                .subscribe_with_sequence(session_id, None)
+                .expect("mirror attach")
+                .snapshot
+                .history_segments,
+            host.subscribe_with_sequence(session_id, None)
+                .expect("host attach")
+                .snapshot
+                .history_segments
+        );
+    }
+
+    #[test]
+    fn resync_mirror_keeps_subscriber_emits_gap_then_streams() {
+        let session_id = "mirror-resync";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let mut mirror_rx = mirror.register_session_with_sequence(session_id);
+
+        publish_and_mirror(&host, &mirror, session_id, b"\x1b[?2004hshared");
+        // The mirror misses a stretch long enough to evict its only chunk on the host.
+        flood(&host, None, session_id);
+        let host_snapshot = host.export_session_state(session_id).expect("host export");
+        let host_last = host_snapshot.next_sequence - 1;
+
+        mirror
+            .resync_mirror(session_id, host_snapshot.clone())
+            .expect("resync");
+
+        assert_eq!(mirror_rx.try_recv().expect("pre-resync chunk").sequence, 1);
+        let boundary = mirror_rx.try_recv().expect("gap boundary");
+        assert_eq!(boundary.sequence, host_last);
+        assert!(boundary.bytes.is_empty());
+        assert_eq!(
+            boundary.replay_gap,
+            Some(ReplayGap {
+                requested_after_sequence: 1,
+                available_from_sequence: host_snapshot.next_sequence,
+            })
+        );
+        assert!(mirror_rx.try_recv().is_err());
+        // No sequence was invented: the mirror sits exactly at the host's next sequence.
+        assert_eq!(mirror.export_session_state(session_id), Some(host_snapshot));
+
+        let next = publish_and_mirror(&host, &mirror, session_id, b"post-resync");
+        assert_eq!(next.sequence, host_last + 1);
+        let streamed = mirror_rx.try_recv().expect("post-resync chunk");
+        assert_eq!(streamed.sequence, next.sequence);
+        assert_eq!(&*streamed.bytes, b"post-resync");
+        assert_eq!(
+            mirror.export_session_state(session_id),
+            host.export_session_state(session_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_mirror_preserves_transport_owner_and_machine_senders() {
+        const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let session_id = "mirror-resync-owner";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let mut raw_rx = mirror.register_session(session_id);
+        assert!(mirror.claim_transport(session_id));
+        let mut machine = mirror
+            .subscribe_machine(session_id, None)
+            .expect("session")
+            .expect("machine attach");
+
+        publish_and_mirror(&host, &mirror, session_id, b"one");
+        host.publish(session_id, b"missed".to_vec()).expect("missed");
+        let host_snapshot = host.export_session_state(session_id).expect("host export");
+        assert!(!host_snapshot.transport_owner);
+
+        mirror
+            .resync_mirror(session_id, host_snapshot)
+            .expect("resync");
+
+        assert!(mirror.transport_owner(session_id));
+        let machine_senders = mirror
+            .sessions
+            .read()
+            .get(session_id)
+            .expect("session")
+            .read()
+            .machine_senders
+            .len();
+        assert_eq!(machine_senders, 1);
+
+        let first = tokio::time::timeout(EVENT_TIMEOUT, machine.receiver.recv())
+            .await
+            .expect("timed out waiting for chunk 1")
+            .expect("chunk 1")
+            .value;
+        assert_eq!(first.sequence, 1);
+        let boundary = tokio::time::timeout(EVENT_TIMEOUT, machine.receiver.recv())
+            .await
+            .expect("timed out waiting for gap boundary")
+            .expect("gap")
+            .value;
+        assert_eq!(boundary.sequence, 2);
+        assert_eq!(
+            boundary.replay_gap,
+            Some(ReplayGap {
+                requested_after_sequence: 1,
+                available_from_sequence: 3,
+            })
+        );
+        publish_and_mirror(&host, &mirror, session_id, b"three");
+        let streamed = tokio::time::timeout(EVENT_TIMEOUT, machine.receiver.recv())
+            .await
+            .expect("timed out waiting for chunk 3")
+            .expect("chunk 3")
+            .value;
+        assert_eq!(streamed.sequence, 3);
+
+        assert_eq!(raw_rx.try_recv().expect("raw one"), b"one".to_vec());
+        assert_eq!(raw_rx.try_recv().expect("raw three"), b"three".to_vec());
+        assert!(raw_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn resync_mirror_rejects_invalid_snapshot_in_place() {
+        let session_id = "mirror-resync-invalid";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let mut mirror_rx = mirror.register_session_with_sequence(session_id);
+        publish_and_mirror(&host, &mirror, session_id, b"one");
+        publish_and_mirror(&host, &mirror, session_id, b"two");
+        assert_eq!(mirror_rx.try_recv().expect("chunk 1").sequence, 1);
+        assert_eq!(mirror_rx.try_recv().expect("chunk 2").sequence, 2);
+        let before = mirror.export_session_state(session_id).expect("export");
+
+        let mut invalid = host.export_session_state(session_id).expect("export");
+        invalid.next_sequence = 0;
+        assert_eq!(
+            mirror.resync_mirror(session_id, invalid),
+            Err(MirrorError::Snapshot(
+                OutputHubSnapshotError::InvalidNextSequence(0)
+            ))
+        );
+
+        let behind = SessionHubSnapshot {
+            capacity: MIRROR_CAPACITY,
+            chunks: Vec::new(),
+            next_sequence: 2,
+            bracketed_paste_enabled: false,
+            resize_ledger: Vec::new(),
+            replay_gap: None,
+            transport_owner: false,
+            retained_state: None,
+        };
+        assert_eq!(
+            mirror.resync_mirror(session_id, behind),
+            Err(MirrorError::SnapshotBehindMirror {
+                mirror_next: 3,
+                snapshot_next: 2
+            })
+        );
+
+        assert_eq!(mirror.export_session_state(session_id), Some(before));
+        assert!(mirror_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn resync_mirror_at_same_next_sequence_replaces_state_without_duplicate_sequence() {
+        let session_id = "mirror-resync-same";
+        let host = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let mirror = TerminalOutputHub::new(MIRROR_CAPACITY);
+        let _host_rx = host.register_session(session_id);
+        let mut mirror_rx = mirror.register_session_with_sequence(session_id);
+
+        publish_and_mirror(&host, &mirror, session_id, b"\x1b[?2004hone");
+        assert_eq!(mirror_rx.try_recv().expect("chunk 1").sequence, 1);
+        assert!(mirror.is_bracketed_paste_enabled(session_id));
+
+        let mut corrected = host.export_session_state(session_id).expect("host export");
+        assert_eq!(
+            Some(corrected.next_sequence),
+            mirror.session_next_sequence(session_id)
+        );
+        corrected.bracketed_paste_enabled = false;
+
+        mirror
+            .resync_mirror(session_id, corrected.clone())
+            .expect("resync");
+
+        assert!(mirror_rx.try_recv().is_err());
+        assert!(!mirror.is_bracketed_paste_enabled(session_id));
+        assert_eq!(mirror.export_session_state(session_id), Some(corrected));
+
+        let next = publish_and_mirror(&host, &mirror, session_id, b"two");
+        assert_eq!(next.sequence, 2);
+        let streamed = mirror_rx.try_recv().expect("chunk 2");
+        assert_eq!(streamed.sequence, 2);
+        assert!(streamed.replay_gap.is_none());
+        assert!(mirror_rx.try_recv().is_err());
     }
 }

@@ -1,12 +1,103 @@
 use crate::daemon::session_lifecycle::{SessionLifecycleRegistry, SessionProcessState};
 use crate::terminal::output_hub::{HistoryRange, SessionAttachment, TerminalOutputHub};
-use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
+use crate::terminal::{PtyError, PtyManager, PtySession, PtySessionState, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
 use parking_lot::Mutex;
 use portable_pty::CommandBuilder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
+
+/// Owner-neutral snapshot of one daemon-local session. Reading it never takes the
+/// session's child handle, so it cannot wait behind a reap; the pid has its own accessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub state: PtySessionState,
+    pub cols: u16,
+    pub rows: u16,
+    pub worktree_path: Option<PathBuf>,
+    pub last_output_age_ms: Option<u64>,
+}
+
+impl SessionInfo {
+    pub fn is_live(&self) -> bool {
+        matches!(
+            self.state,
+            PtySessionState::Starting | PtySessionState::Running
+        )
+    }
+}
+
+/// The owner behind a held session handle. Phase 1 owners are daemon-local PTYs only.
+#[derive(Clone)]
+enum SessionOwner {
+    Local(Arc<PtySession>),
+}
+
+/// Input path held for a connection's lifetime. It writes to the owner the session had
+/// when the handle was resolved, exactly as the held PTY did.
+#[derive(Clone)]
+pub struct SessionInput(SessionOwner);
+
+impl SessionInput {
+    /// One frame of at most 64 KiB; dropping the future cancels the pending write.
+    pub async fn write_cancellable(&self, data: &[u8]) -> Result<(), PtyError> {
+        match &self.0 {
+            SessionOwner::Local(session) => session.write_input_cancellable(data).await,
+        }
+    }
+
+    /// Status of the same owner this input writes to.
+    pub fn status(&self) -> SessionStatus {
+        SessionStatus(self.0.clone())
+    }
+}
+
+/// Lifecycle status that stays readable after the session leaves the registry, so an
+/// exit code observed at close or natural exit is not lost to the removal.
+#[derive(Clone)]
+pub struct SessionStatus(SessionOwner);
+
+impl SessionStatus {
+    pub fn state(&self) -> PtySessionState {
+        match &self.0 {
+            SessionOwner::Local(session) => session.state(),
+        }
+    }
+
+    pub fn is_reaped(&self) -> bool {
+        match &self.0 {
+            SessionOwner::Local(session) => session.is_reaped(),
+        }
+    }
+
+    /// The shell's OS pid. This takes the session's child handle, which a reap holds.
+    pub fn pid(&self) -> Option<u32> {
+        match &self.0 {
+            SessionOwner::Local(session) => session.pid(),
+        }
+    }
+
+    /// Snapshot of this same held owner, read at the moment of the call. A caller that
+    /// resolved the handle before entering a future keeps HEAD's timing: the registry
+    /// lookup happens at resolution, the field reads happen here, on the same object.
+    pub fn info(&self) -> SessionInfo {
+        match &self.0 {
+            SessionOwner::Local(session) => {
+                let (cols, rows) = session.get_size();
+                SessionInfo {
+                    id: session.id().to_string(),
+                    state: session.state(),
+                    cols,
+                    rows,
+                    worktree_path: session.worktree_path(),
+                    last_output_age_ms: session.last_output_age_ms(),
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TerminalService {
@@ -516,5 +607,42 @@ impl TerminalService {
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {
         self.pty_manager.get_session(session_id)
+    }
+
+    /// Whether a native PTY this daemon owns is registered under this id. It is false
+    /// for every other owner, so a consumer asking "does this daemon serve the session"
+    /// must OR in those owners itself, as `SessionRouter::is_local_session` does.
+    pub fn has_native_pty_session(&self, session_id: &str) -> bool {
+        self.pty_manager.get_session(session_id).is_some()
+    }
+
+    pub fn session_info(&self, session_id: &str) -> Option<SessionInfo> {
+        self.session_status(session_id).map(|status| status.info())
+    }
+
+    /// The shell's OS pid. This takes the session's child handle, which a reap holds.
+    pub fn session_pid(&self, session_id: &str) -> Option<u32> {
+        self.pty_manager.get_session(session_id)?.pid()
+    }
+
+    pub fn session_input(&self, session_id: &str) -> Option<SessionInput> {
+        self.pty_manager
+            .get_session(session_id)
+            .map(|session| SessionInput(SessionOwner::Local(session)))
+    }
+
+    pub fn session_status(&self, session_id: &str) -> Option<SessionStatus> {
+        self.pty_manager
+            .get_session(session_id)
+            .map(|session| SessionStatus(SessionOwner::Local(session)))
+    }
+
+    pub(crate) fn foreground_source(
+        &self,
+        session_id: &str,
+    ) -> Option<super::foreground::ForegroundSource> {
+        self.pty_manager
+            .get_session(session_id)
+            .map(super::foreground::ForegroundSource::Local)
     }
 }

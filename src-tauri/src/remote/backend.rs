@@ -1,5 +1,5 @@
 use crate::terminal::remote::RemoteConnectionState;
-use crate::terminal::{PtySessionState, SessionAttachment, TerminalService, TerminalSignal};
+use crate::terminal::{SessionAttachment, TerminalService, TerminalSignal};
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
@@ -235,25 +235,23 @@ impl RemoteSessionBackend for TerminalService {
         &'a self,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
-        let session = self.get_session(session_id);
+        // Resolve and hold the owner now, as HEAD held the PTY `Arc`; read its state from
+        // that same owner when the future is polled.
+        let session = self.session_status(session_id);
         let id_owned = session_id.to_string();
         Box::pin(async move {
             match session {
-                Some(session) => {
-                    let (cols, rows) = session.get_size();
-                    let running = matches!(
-                        session.state(),
-                        PtySessionState::Running | PtySessionState::Starting
-                    );
-                    let worktree_path = session.worktree_path();
+                Some(status) => {
+                    let info = status.info();
+                    let running = info.is_live();
                     Ok(RemoteSessionDetails {
-                        session_id: session.id().to_string(),
+                        session_id: info.id,
                         workspace_id: None,
                         worktree_label: None,
-                        worktree_path,
+                        worktree_path: info.worktree_path,
                         running,
-                        cols,
-                        rows,
+                        cols: info.cols,
+                        rows: info.rows,
                     })
                 }
                 None => Err(format!("Session '{id_owned}' not found")),

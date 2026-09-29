@@ -118,11 +118,10 @@ impl MetadataOwner {
         {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
-        let pty = self
+        let pid = self
             .terminals
-            .get_session(&target.session_id)
+            .session_pid(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
-        let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
         let cwd = crate::ipc::terminal::process_cwd(pid).ok_or("CWD_UNAVAILABLE")?;
         let mut updated = session.clone();
         updated.cwd = cwd.to_str().ok_or("INVALID_PATH")?.to_owned();
