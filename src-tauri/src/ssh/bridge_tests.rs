@@ -1871,7 +1871,7 @@ async fn ssh_bridge_supervised_release_keeps_transport_for_this_process() {
 #[tokio::test]
 async fn ssh_bridge_supervision_attach_failure_leaves_no_supervisor() {
     let mut command = blocked_transport_command();
-    let owner = prepare_test_owner(&mut command, Some(std::path::Path::new("/bin/true")));
+    let owner = prepare_test_owner(&mut command, Some(std::path::Path::new("/usr/bin/true")));
     let mut child = command.spawn().expect("spawn supervisor");
     let supervisor_pid = child.id().expect("supervisor pid");
 

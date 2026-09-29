@@ -24,7 +24,7 @@ it("new local accepts an older epoch with fewer capabilities but never dispatche
 
 it.each([
   [{ apiVersion: 0, daemonEpoch: "1", capabilities: [] }, "INVALID_REQUEST"],
-  [{ capabilities: ["directoryBrowseV1", "futureV9"] }, "UNSUPPORTED_CAPABILITY"],
+  [{ permission: "view" }, "UNSUPPORTED_CAPABILITY"],
   [{ accessScope: "mirror" }, "UNSUPPORTED_CAPABILITY"],
   [{ machineId: "other-machine" }, "CROSS_HOST_RESULT"],
 ] as const)("failed renegotiation revokes prior admission: %j", async (peer, code) => {

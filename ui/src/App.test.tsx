@@ -203,6 +203,8 @@ vi.mock("./lib/tauri", () => ({
   getInitialProject: native.getInitialProject,
   getSystemPermissionsStatus: native.getSystemPermissionsStatus,
   getCliLauncherStatus: native.getCliLauncherStatus,
+  getAccountEnrollmentStatus: vi.fn(async () => ({ enrolled: false, accountOrigin: null, enrolledAt: null })),
+  enrollThisMachine: vi.fn(async () => ({ enrolled: true, accountOrigin: null, enrolledAt: null })),
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
   installCliLauncher: native.installCliLauncher,
   listProjectBranches: native.listProjectBranches,

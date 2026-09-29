@@ -204,7 +204,9 @@ describe("TerminalSearchOverlay native session search", () => {
   it("ignores an out-of-order stale search result and keeps the newest query's counts", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      // Selecting a match also scrolls the viewport; only search requests are tracked here.
+      if (cmd !== "cmd_native_terminal_search") return Promise.resolve(undefined);
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
@@ -251,7 +253,9 @@ describe("TerminalSearchOverlay native session search", () => {
   it("does not let a stale rejection overwrite a newer successful result", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      // Selecting a match also scrolls the viewport; only search requests are tracked here.
+      if (cmd !== "cmd_native_terminal_search") return Promise.resolve(undefined);
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
@@ -290,7 +294,9 @@ describe("TerminalSearchOverlay native session search", () => {
   it("resets stale counts and re-searches the new session on sessionId change", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      // Selecting a match also scrolls the viewport; only search requests are tracked here.
+      if (cmd !== "cmd_native_terminal_search") return Promise.resolve(undefined);
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {

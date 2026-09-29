@@ -290,6 +290,9 @@ async fn direct_ssh_real_transport_registration_and_pty() {
                 "--nocapture",
             ])
             .env(CHILD, dir.path())
+            // The libtest binary has no custom entry point, so SSH transport supervision must be
+            // routed through its ignored supervisor-entry test.
+            .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
             .env("PATH", std::env::join_paths(paths).unwrap())
             .kill_on_drop(true)
             .output(),

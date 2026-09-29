@@ -96,6 +96,9 @@ pub(super) async fn run(config_path: &Path) {
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env(CONFIG_ENV, config_path)
                 .env(CHILD_ENV, "1")
+                // libtest has no custom entry point; route transport supervision through its
+                // ignored supervisor-entry test.
+                .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
                 .env("PATH", std::env::join_paths(paths).unwrap())
                 .kill_on_drop(true)
                 .output(),

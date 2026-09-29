@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 
@@ -98,6 +98,12 @@ async function selectPaneFromWorktreeSheet(name: RegExp) {
 }
 
 describe("remoteAppChatFrames", () => {
+  // RemoteApp loads the chat workspace lazily. Its first cold import can outlast findBy's
+  // window, so resolve the chunk up front instead of racing the transform.
+  beforeAll(async () => {
+    await import("../remote/chat/MobileChatWorkspace");
+  });
+
   let originalInnerWidth: number;
 
   beforeEach(() => {

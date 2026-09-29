@@ -150,6 +150,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: tauriCoreMocks.isTauri,
 }));
 
+// The pane subscribes to `native_terminal_stream_ended` for output-stream recovery. Without this
+// mock the subscription reaches the real Tauri bridge, which is absent under jsdom, and the pane
+// renders its "recovery unavailable" error for every test.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
+
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onDragDropEvent: tauriWindowMocks.onDragDropEvent,
@@ -832,6 +839,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     const session = createSession("term-session-presize");
 
     render(<NativeTerminalPane sessionId="term-session-presize" session={session} />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
       sessionId: "term-session-presize",
@@ -863,6 +872,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 
     const session = createSession("term-session-fractional");
     render(<NativeTerminalPane sessionId="term-session-fractional" session={session} />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
       sessionId: "term-session-fractional",
@@ -888,6 +899,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 
     const session = createSession("term-session-zero");
     render(<NativeTerminalPane sessionId="term-session-zero" session={session} />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
       sessionId: "term-session-zero",
@@ -898,6 +911,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     const session = createSession("term-session-1");
 
     render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
       sessionId: "term-session-1",
@@ -5666,6 +5681,8 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     const { getByTestId, unmount } = render(
       <NativeTerminalPane sessionId={frontendId} session={session} />,
     );
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     // 1. Native attach must use backendSessionId
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -5739,8 +5756,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
   });
 
-  it("preserves fallback behavior when callers only supply sessionId without session object", () => {
+  it("preserves fallback behavior when callers only supply sessionId without session object", async () => {
     render(<NativeTerminalPane sessionId="legacy-caller-supplied-id" />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
       "cmd_native_terminal_attach",
@@ -5781,6 +5800,8 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     // 4. Rerender with rebound backendSessionId from daemon recovery
     const reboundSession = { ...sessionWithoutBackend, backendSessionId: "daemon-pty-fresh-123" };
     rerender(<NativeTerminalPane sessionId={frontendId} session={reboundSession} />);
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
 
     // Now it attaches exactly once with the rebound daemon ID, never with frontendId
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -7315,6 +7336,8 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     const { getByTestId } = render(
       <NativeTerminalPane sessionId="term-session-busy-no-attach" session={session} />,
     );
+    // Attach waits for the stream-ended listener registration, one microtask after mount.
+    await act(async () => {});
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
 
