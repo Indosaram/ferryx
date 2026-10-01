@@ -1,3 +1,4 @@
+pub mod billing;
 pub mod enroll_client;
 pub mod mailer;
 pub mod offer_sink;

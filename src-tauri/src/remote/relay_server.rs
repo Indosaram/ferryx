@@ -47,12 +47,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
 /// How long a session may sit waiting for its data or client half before
@@ -67,6 +67,73 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Interval on which the background reaper sweeps the session registry for
 /// entries that have exceeded [`SESSION_PAIRING_TIMEOUT`] without pairing.
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Interval on which the suspension sweeper re-evaluates the owners of every live control
+/// tunnel and relay session and ends remote access for owners whose grace period ended.
+/// One minute bounds how far a stopped owner's live streams can outlive the deadline
+/// without turning every paid account into a per-second billing query.
+const SUSPENSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The close reason every stream ended by the suspension sweeper carries. Clients branch on
+/// this exact string.
+pub const SUSPENSION_REASON: &str = "REMOTE_SUSPENDED";
+
+/// Arming handle for one session's or one control registration's suspension signal.
+///
+/// A `watch` channel rather than a queue, so a half that starts draining *after* the sweeper
+/// armed still observes the reason: the value is state, and a late reader reads it as its
+/// first observation instead of missing it.
+type SuspensionSignal = Arc<watch::Sender<Option<String>>>;
+
+fn new_suspension_signal() -> SuspensionSignal {
+    Arc::new(watch::channel(None).0)
+}
+
+/// Resolves with the reason the suspension sweeper armed for this signal.
+///
+/// A signal whose session or control registration ended on its own is dropped, which closes
+/// the channel; that is ordinary teardown, not a suspension, so this future then never
+/// resolves and the caller's normal path continues.
+async fn next_suspension_reason(signal: &mut watch::Receiver<Option<String>>) -> String {
+    loop {
+        if let Some(reason) = signal.borrow_and_update().clone() {
+            return reason;
+        }
+        if signal.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Resolves with an armed suspension reason, or never when this direction does not write to
+/// the browser half (which is the half that carries the exact reason).
+async fn await_suspension(signal: &mut Option<watch::Receiver<Option<String>>>) -> String {
+    match signal {
+        Some(signal) => next_suspension_reason(signal).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Which of the two spliced sockets faces the remote browser.
+///
+/// Only that half receives the exact suspension reason; the daemon half is torn down by the
+/// same close.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowserSide {
+    /// The half this task reserved first (`WaitingHalf.kind`), passed as `a` to
+    /// [`proxy_sockets`].
+    Own,
+    /// The half handed over by the opposite end, passed as `b` to [`proxy_sockets`].
+    Peer,
+}
+
+/// How a half's pairing wait ended.
+enum PairingWait {
+    /// The opposite half arrived; the session is live.
+    Paired(WebSocket),
+    /// The suspension sweeper ended the session before the opposite half arrived.
+    Suspended(String),
+}
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
@@ -122,6 +189,10 @@ struct WaitingHalf {
     opaque: bool,
     notify: Option<oneshot::Sender<WebSocket>>,
     active: bool,
+    /// Armed by the suspension sweeper when the owning account's grace period ended. A live
+    /// splice watches this instead of vanishing when its socket is dropped, so the browser
+    /// half still receives the exact reason.
+    suspension: SuspensionSignal,
 }
 
 #[derive(Clone)]
@@ -305,6 +376,9 @@ struct RelayInner {
     pairings: Mutex<HashMap<String, RegisteredPairing>>,
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
+    /// Suspension signals keyed by control generation, so that every alias of one control
+    /// tunnel resolves to the same live registration no matter which name the sweeper matched.
+    control_suspensions: Mutex<HashMap<u64, SuspensionSignal>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
@@ -397,6 +471,7 @@ impl RelayState {
                 pairings: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(1),
                 pending_sessions: Mutex::new(HashMap::new()),
+                control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
@@ -446,6 +521,7 @@ impl RelayState {
                 pairing_admission: Mutex::new(HashMap::new()),
                 pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
+                control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
@@ -474,6 +550,28 @@ impl RelayState {
 
     pub fn account_state(&self) -> Option<Arc<crate::account::service::AccountState>> {
         self.inner.account_state.lock().clone()
+    }
+
+    /// The suspension signal for one session, or a signal that never fires when the session
+    /// is already gone.
+    fn session_suspension_receiver(&self, session_id: &str) -> watch::Receiver<Option<String>> {
+        self.inner
+            .pending_sessions
+            .lock()
+            .get(session_id)
+            .map(|entry| entry.suspension.subscribe())
+            .unwrap_or_else(|| watch::channel(None).1)
+    }
+
+    /// The suspension signal for one control registration, or a signal that never fires when
+    /// the registration is gone.
+    fn control_suspension_receiver(&self, generation: u64) -> watch::Receiver<Option<String>> {
+        self.inner
+            .control_suspensions
+            .lock()
+            .get(&generation)
+            .map(|signal| signal.subscribe())
+            .unwrap_or_else(|| watch::channel(None).1)
     }
 
     pub fn register_device_token(&self, machine_id: &str, token: &str) {
@@ -559,10 +657,48 @@ impl RelayState {
     }
 
     fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
-        // Resolve the account-enrollment alternative before taking the ownership lock so the
-        // two locks are never held at the same time.
-        let account_enrolled =
-            self.is_account_enrolled_machine(&auth.machine_id, &auth.public_key);
+        let account_record = if let Some(account) = self.account_state() {
+            if account.deployment_mode.is_billing_enabled() {
+                crate::account::service::try_enrolled_machine_by_id(&account, &auth.machine_id)
+                    .map_err(|error| {
+                        format!(
+                            "ACCOUNT_ENTITLEMENT_UNAVAILABLE: {}: {}",
+                            error.code, error.message
+                        )
+                    })?
+            } else {
+                crate::account::service::enrolled_machine_by_id(&account, &auth.machine_id)
+            }
+        } else {
+            None
+        };
+        let account_enrolled = account_record
+            .as_ref()
+            .is_some_and(|record| record.public_key == auth.public_key);
+
+        if account_enrolled {
+            if let Some(account) = self.account_state() {
+                if account.deployment_mode.is_billing_enabled() {
+                    let record = account_record.as_ref().unwrap();
+                    let now = crate::account::billing::routes::billing_now();
+                    match crate::account::billing::routes::entitlement_for_user(
+                        &account,
+                        &record.owner_user_id,
+                        now,
+                    ) {
+                        Ok(entitlement) => {
+                            if entitlement.status == crate::account::billing::entitlement::EntitlementStatus::Stopped {
+                                return Err("REMOTE_SUSPENDED".into());
+                            }
+                        }
+                        Err(error) => {
+                            return Err(format!("ACCOUNT_ENTITLEMENT_UNAVAILABLE: {}: {}", error.code, error.message));
+                        }
+                    }
+                }
+            }
+        }
+
         // Serialize ownership checks and durable enrollment under the same lock.
         let mut keys = self.inner.machine_public_keys.lock();
         if let Some(key) = keys.get(&auth.machine_id) {
@@ -721,11 +857,17 @@ impl RelayState {
         let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
         let (grant_tx, grant_rx) = mpsc::channel(1);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
-        // One lock order everywhere: `control_channels` before `grant_channels`.
-        let mut channels = self.inner.control_channels.lock();
-        let mut grants = self.inner.grant_channels.lock();
-        channels.insert(machine_id.clone(), ControlChannel { generation, tx });
-        grants.insert(machine_id, grant_tx);
+        {
+            // One lock order everywhere: `control_channels` before `grant_channels`.
+            let mut channels = self.inner.control_channels.lock();
+            let mut grants = self.inner.grant_channels.lock();
+            channels.insert(machine_id.clone(), ControlChannel { generation, tx });
+            grants.insert(machine_id, grant_tx);
+        }
+        self.inner
+            .control_suspensions
+            .lock()
+            .insert(generation, new_suspension_signal());
         (generation, rx, grant_rx)
     }
 
@@ -741,6 +883,9 @@ impl RelayState {
         for machine in retired {
             grants.remove(&machine);
         }
+        drop(grants);
+        drop(channels);
+        self.inner.control_suspensions.lock().remove(&generation);
     }
 
     /// Hands one sealed grant to a machine's live control socket and waits for the
@@ -827,6 +972,7 @@ impl RelayState {
                 opaque,
                 notify: None,
                 active: false,
+                suspension: new_suspension_signal(),
             },
         );
         true
@@ -1152,6 +1298,7 @@ impl RelayState {
                     notify: Some(tx),
                     active: false,
                     opaque: false,
+                    suspension: new_suspension_signal(),
                 },
             );
             channel
@@ -1449,13 +1596,15 @@ async fn browser_socket(
         MAX_MESSAGE_SIZE
     };
     let (data, guard) = state.open_session_channel(&machine, None).await?;
+    let session_id = guard.session_id.clone();
+    let mut suspension = state.session_suspension_receiver(&session_id);
     Ok(ws
         .max_message_size(max_size)
         .max_frame_size(max_size)
         .on_upgrade(move |browser| async move {
             match timeout(
                 SESSION_TRANSFER_TIMEOUT,
-                bridge_browser_socket(browser, data, &target, &device_token),
+                bridge_browser_socket(browser, data, &target, &device_token, &mut suspension),
             )
             .await
             {
@@ -1475,6 +1624,7 @@ async fn bridge_browser_socket(
     mut data: WebSocket,
     target: &str,
     device_token: &str,
+    suspension: &mut watch::Receiver<Option<String>>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message as Wire;
@@ -1521,6 +1671,16 @@ async fn bridge_browser_socket(
         .await??;
         loop {
             tokio::select! {
+                reason = next_suspension_reason(suspension) => {
+                    // A stopped owner's browser stream ends with the exact reason rather than
+                    // being cut off by the tunnel dropping.
+                    let frame = axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::POLICY,
+                        reason: reason.into(),
+                    };
+                    timeout(TRANSFER_TIMEOUT, browser.send(Message::Close(Some(frame)))).await??;
+                    return Ok(());
+                }
                 frame = browser.recv() => {
                     let Some(frame) = frame else { return Ok::<(), anyhow::Error>(()); };
                     let frame = match frame? {
@@ -1622,11 +1782,6 @@ async fn attach_session_handler(
         .into_response();
     };
 
-    let user = match crate::account::service::authenticate_user(&account_state, &headers) {
-        Ok(user) => user,
-        Err(error) => return error.into_response(),
-    };
-
     let request: AttachSessionRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(error) => {
@@ -1639,18 +1794,67 @@ async fn attach_session_handler(
         }
     };
 
-    let machine = crate::account::service::machine_for_owner(
-        &account_state,
-        &user.user_id,
-        &request.machine_id,
-    );
-    if machine.is_none() {
-        return crate::account::service::ApiError::new(
-            StatusCode::NOT_FOUND,
-            "MACHINE_NOT_FOUND",
-            "no such machine on this account",
-        )
-        .into_response();
+    let auth_headers = headers.clone();
+    let auth_machine_id = request.machine_id.clone();
+    let account_state_clone = account_state.clone();
+
+    let auth_res: Result<(), crate::account::service::ApiError> =
+        crate::ipc::run_blocking(move || {
+            Ok((|| -> Result<(), crate::account::service::ApiError> {
+                let user = crate::account::service::authenticate_user(&account_state_clone, &auth_headers)?;
+                let machine = crate::account::service::machine_for_owner(
+                    &account_state_clone,
+                    &user.user_id,
+                    &auth_machine_id,
+                );
+                if machine.is_none() {
+                    return Err(crate::account::service::ApiError::new(
+                        StatusCode::NOT_FOUND,
+                        "MACHINE_NOT_FOUND",
+                        "no such machine on this account",
+                    ));
+                }
+                if account_state_clone.deployment_mode.is_billing_enabled() {
+                    let now = crate::account::billing::routes::billing_now();
+                    let entitlement = crate::account::billing::routes::entitlement_for_user(
+                        &account_state_clone,
+                        &user.user_id,
+                        now,
+                    )?;
+                    if !entitlement.remote_allowed {
+                        return Err(crate::account::service::ApiError::new(
+                            StatusCode::PAYMENT_REQUIRED,
+                            "REMOTE_SUSPENDED",
+                            "remote access is suspended for this account",
+                        )
+                        .with_details(serde_json::json!({
+                            "plan": match entitlement.effective_plan {
+                                crate::account::billing::entitlement::PlanKey::Free => "free",
+                                crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                            },
+                            "status": match entitlement.status {
+                                crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                            },
+                            "graceEndsAt": entitlement.grace_ends_at,
+                            "stoppedAt": crate::account::service::owner_stopped_at(&account_state_clone, &user.user_id),
+                        })));
+                    }
+                }
+                Ok(())
+            })())
+        })
+        .await
+        .map_err(|error| crate::account::service::ApiError::internal(error.to_string()))
+        .and_then(|res| res);
+
+    if let Err(error) = auth_res {
+        return error.into_response();
     }
 
     let channel = {
@@ -1705,16 +1909,161 @@ async fn host_http_handler(
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
     }
-    let uri_path = request
-        .uri()
+    let (parts, body) = request.into_parts();
+    if let Some(account_state) = state.account_state() {
+        let bearer_token = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+
+        let mut device_authorized = false;
+        if let Some(token) = bearer_token {
+            if state.authorize_device_token(&machine, token).await == Ok(true) {
+                device_authorized = true;
+            }
+        }
+
+        if device_authorized {
+            if account_state.deployment_mode.is_billing_enabled() {
+                let machine_clone = machine.clone();
+                let account_state_clone = account_state.clone();
+                let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
+                    crate::ipc::run_blocking(move || {
+                        Ok((|| -> Result<(), crate::account::service::ApiError> {
+                            if let Some(record) = crate::account::service::enrolled_machine_by_id(
+                                &account_state_clone,
+                                &machine_clone,
+                            ) {
+                                let now = crate::account::billing::routes::billing_now();
+                                let entitlement = crate::account::billing::routes::entitlement_for_user(
+                                    &account_state_clone,
+                                    &record.owner_user_id,
+                                    now,
+                                )?;
+                                if !entitlement.remote_allowed {
+                                    let stopped_at = crate::account::service::owner_stopped_at(
+                                        &account_state_clone,
+                                        &record.owner_user_id,
+                                    );
+                                    return Err(crate::account::service::ApiError::new(
+                                        StatusCode::PAYMENT_REQUIRED,
+                                        "REMOTE_SUSPENDED",
+                                        "remote access is suspended for this account",
+                                    )
+                                    .with_details(serde_json::json!({
+                                        "plan": match entitlement.effective_plan {
+                                            crate::account::billing::entitlement::PlanKey::Free => "free",
+                                            crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                            crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                            crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                            crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                                        },
+                                        "status": match entitlement.status {
+                                            crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                            crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                            crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                            crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                                        },
+                                        "graceEndsAt": entitlement.grace_ends_at,
+                                        "stoppedAt": stopped_at,
+                                    })));
+                                }
+                            }
+                            Ok(())
+                        })())
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+
+                match billing_res {
+                    Ok(Err(error)) => return Ok(error.into_response()),
+                    Err(status) => return Err(status),
+                    Ok(Ok(())) => {}
+                }
+            }
+        } else {
+            let auth_headers = parts.headers.clone();
+            let auth_machine = machine.clone();
+            let auth_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
+                crate::ipc::run_blocking(move || {
+                    Ok((|| -> Result<(), crate::account::service::ApiError> {
+                        let user = crate::account::service::authenticate_user(
+                            &account_state,
+                            &auth_headers,
+                        )?;
+                        let owned = crate::account::service::machine_for_owner(
+                            &account_state,
+                            &user.user_id,
+                            &auth_machine,
+                        );
+                        if owned.is_none() {
+                            return Err(crate::account::service::ApiError::new(
+                                StatusCode::NOT_FOUND,
+                                "MACHINE_NOT_FOUND",
+                                "no such machine on this account",
+                            ));
+                        }
+                        if account_state.deployment_mode.is_billing_enabled() {
+                            let now = crate::account::billing::routes::billing_now();
+                            let entitlement = crate::account::billing::routes::entitlement_for_user(
+                                &account_state,
+                                &user.user_id,
+                                now,
+                            )?;
+                            if !entitlement.remote_allowed {
+                                let stopped_at = crate::account::service::owner_stopped_at(
+                                    &account_state,
+                                    &user.user_id,
+                                );
+                                return Err(crate::account::service::ApiError::new(
+                                    StatusCode::PAYMENT_REQUIRED,
+                                    "REMOTE_SUSPENDED",
+                                    "remote access is suspended for this account",
+                                )
+                                .with_details(serde_json::json!({
+                                    "plan": match entitlement.effective_plan {
+                                        crate::account::billing::entitlement::PlanKey::Free => "free",
+                                        crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                        crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                        crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                        crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                                    },
+                                    "status": match entitlement.status {
+                                        crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                        crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                        crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                        crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                                    },
+                                    "graceEndsAt": entitlement.grace_ends_at,
+                                    "stoppedAt": stopped_at,
+                                })));
+                            }
+                        }
+                        Ok(())
+                    })())
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+
+            match auth_res {
+                Ok(Err(error)) => return Ok(error.into_response()),
+                Err(status) => return Err(status),
+                Ok(Ok(())) => {}
+            }
+        }
+    }
+    let uri_path = parts
+        .uri
         .path()
         .strip_prefix(&format!("/host/{machine}"))
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let target = match request.uri().query() {
+    let target = match parts.uri.query() {
         Some(query) => format!("{uri_path}?{query}"),
         None => uri_path.to_owned(),
     };
-    let (parts, body) = request.into_parts();
     let body = to_bytes(body, 64 * 1024)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
@@ -1929,6 +2278,70 @@ async fn exchange_http(
             serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_GATEWAY)?;
         if issued.token.is_empty() {
             return Err(StatusCode::BAD_GATEWAY);
+        }
+        if let Some(account_state) = state.account_state() {
+            if account_state.deployment_mode.is_billing_enabled() {
+                let machine_id = claim.machine_id.clone();
+                let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
+                    crate::ipc::run_blocking(move || {
+                        Ok((|| -> Result<(), crate::account::service::ApiError> {
+                            if let Some(record) = crate::account::service::enrolled_machine_by_id(
+                                &account_state,
+                                &machine_id,
+                            ) {
+                                let now = crate::account::billing::routes::billing_now();
+                                let entitlement = crate::account::billing::routes::entitlement_for_user(
+                                    &account_state,
+                                    &record.owner_user_id,
+                                    now,
+                                )?;
+                                if !entitlement.remote_allowed {
+                                    let stopped_at = crate::account::service::owner_stopped_at(
+                                        &account_state,
+                                        &record.owner_user_id,
+                                    );
+                                    return Err(crate::account::service::ApiError::new(
+                                        StatusCode::PAYMENT_REQUIRED,
+                                        "REMOTE_SUSPENDED",
+                                        "remote access is suspended for this account",
+                                    )
+                                    .with_details(serde_json::json!({
+                                        "plan": match entitlement.effective_plan {
+                                            crate::account::billing::entitlement::PlanKey::Free => "free",
+                                            crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                            crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                            crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                            crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                                        },
+                                        "status": match entitlement.status {
+                                            crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                            crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                            crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                            crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                                        },
+                                        "graceEndsAt": entitlement.grace_ends_at,
+                                        "stoppedAt": stopped_at,
+                                    })));
+                                }
+                            }
+                            Ok(())
+                        })())
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+
+                match billing_res {
+                    Ok(Err(error)) => {
+                        claim.rollback();
+                        return Ok(error.into_response());
+                    }
+                    Err(status) => {
+                        claim.rollback();
+                        return Err(status);
+                    }
+                    Ok(Ok(())) => {}
+                }
+            }
         }
         state.register_device_token(&claim.machine_id, &issued.token);
         claim.commit();
@@ -2279,6 +2692,223 @@ pub fn spawn_session_reaper(state: RelayState) {
     });
 }
 
+/// Spawns the background task that ends remote access for account owners whose grace
+/// period has ended.
+///
+/// Only a commercial relay that serves an account service enforces suspension, and only
+/// against machines enrolled with that account: every other deployment is a no-op. The task
+/// closes relay streams; it never touches a daemon process, a PTY or a stored record.
+pub fn spawn_suspension_sweeper(state: RelayState) -> tokio::task::JoinHandle<()> {
+    spawn_suspension_sweeper_with_interval(state, SUSPENSION_SWEEP_INTERVAL)
+}
+
+fn spawn_suspension_sweeper_with_interval(
+    state: RelayState,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let now = crate::account::billing::routes::billing_now();
+            match state.sweep_suspended_owners(now).await {
+                Ok(sweep) if sweep.stopped_owners > 0 => tracing::warn!(
+                    owners = sweep.stopped_owners,
+                    sessions = sweep.closed_sessions,
+                    controls = sweep.closed_controls,
+                    "remote access stopped for owners past their grace period"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::error!(
+                    code = error.code,
+                    message = %error.message,
+                    "suspension sweep failed; the next tick retries"
+                ),
+            }
+        }
+    })
+}
+
+/// Outcome of one suspension pass, for the caller's log line and for tests.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SuspensionSweep {
+    /// Distinct owners found to be `Stopped` at the injected clock.
+    pub stopped_owners: usize,
+    /// Live relay sessions whose browser and daemon halves were ended.
+    pub closed_sessions: usize,
+    /// Live control tunnels that were ended.
+    pub closed_controls: usize,
+}
+
+/// The account machines whose relay streams must end, with the owners behind them.
+#[derive(Debug, Default, Clone)]
+struct SuspensionTargets {
+    owners: HashSet<String>,
+    machines: HashSet<String>,
+}
+
+/// Blocking half of [`RelayState::sweep_suspended_owners`]: resolves every candidate machine
+/// to its account record, evaluates each distinct owner once at `now`, and returns the
+/// machines owned by an owner whose grace period has ended.
+///
+/// A store read error propagates instead of being defaulted: an owner the relay cannot
+/// evaluate is never silently treated as healthy, and the pass is retried.
+fn suspension_targets(
+    account: &crate::account::service::AccountState,
+    candidates: &[String],
+    now: u64,
+) -> Result<SuspensionTargets, crate::account::service::ApiError> {
+    let mut owned: Vec<(String, String)> = Vec::new();
+    for machine_id in candidates {
+        match crate::account::service::try_enrolled_machine_by_id(account, machine_id)? {
+            Some(record) => owned.push((record.machine_id, record.owner_user_id)),
+            // A machine that never enrolled with this account is outside billing, so the
+            // operator-token path stays exactly as it was.
+            None => continue,
+        }
+    }
+
+    let mut evaluated: HashSet<String> = HashSet::new();
+    let mut targets = SuspensionTargets::default();
+    for (machine_id, owner_user_id) in owned {
+        if evaluated.insert(owner_user_id.clone()) {
+            let entitlement = crate::account::billing::routes::entitlement_for_user(
+                account,
+                &owner_user_id,
+                now,
+            )?;
+            if entitlement.status
+                == crate::account::billing::entitlement::EntitlementStatus::Stopped
+            {
+                targets.owners.insert(owner_user_id.clone());
+            }
+        }
+        if targets.owners.contains(&owner_user_id) {
+            targets.machines.insert(machine_id);
+        }
+    }
+    Ok(targets)
+}
+
+impl RelayState {
+    /// Every machine that currently holds a live control tunnel or relay session.
+    fn suspension_candidates(&self) -> Vec<String> {
+        let mut candidates: HashSet<String> = self
+            .inner
+            .control_channels
+            .lock()
+            .keys()
+            .cloned()
+            .collect();
+        candidates.extend(
+            self.inner
+                .pending_sessions
+                .lock()
+                .values()
+                .map(|entry| entry.owner.clone()),
+        );
+        candidates.into_iter().collect()
+    }
+
+    /// One suspension pass over every account machine that currently holds a live control
+    /// tunnel or relay session: owners evaluated at `now` are `Stopped`, so their sessions
+    /// and control tunnels end with [`SUSPENSION_REASON`] and the stop is persisted through
+    /// the billing store.
+    ///
+    /// `now` is the billing clock ([`crate::account::billing::routes::billing_now`] in
+    /// production): the grace deadline is decided by it, so it is a parameter rather than an
+    /// ambient read. Account I/O is synchronous, so it runs on a blocking thread; no relay
+    /// lock is held across it, and no socket is written to while a map is locked.
+    async fn sweep_suspended_owners(
+        &self,
+        now: u64,
+    ) -> Result<SuspensionSweep, crate::account::service::ApiError> {
+        let Some(account) = self.account_state() else {
+            return Ok(SuspensionSweep::default());
+        };
+        if !account.deployment_mode.is_billing_enabled() {
+            return Ok(SuspensionSweep::default());
+        }
+        let candidates = self.suspension_candidates();
+        if candidates.is_empty() {
+            return Ok(SuspensionSweep::default());
+        }
+        let account_for_evaluation = Arc::clone(&account);
+        let targets = crate::ipc::run_blocking(move || {
+            Ok(suspension_targets(&account_for_evaluation, &candidates, now))
+        })
+        .await
+        .map_err(|error| crate::account::service::ApiError::internal(error.to_string()))??;
+        if targets.machines.is_empty() {
+            return Ok(SuspensionSweep {
+                stopped_owners: targets.owners.len(),
+                ..SuspensionSweep::default()
+            });
+        }
+
+        // One control tunnel may be registered under its machine id and under an alias.
+        // Both keys share a generation, so matching on the generation ends exactly one
+        // tunnel once, whichever name the account store knows the machine by.
+        let (stopped_generations, stopped_keys): (HashSet<u64>, HashSet<String>) = {
+            let channels = self.inner.control_channels.lock();
+            let generations: HashSet<u64> = channels
+                .iter()
+                .filter(|(key, _)| targets.machines.contains(*key))
+                .map(|(_, channel)| channel.generation)
+                .collect();
+            // A session outlives its control tunnel, so the stopped machines themselves are
+            // keys too: matching only on live channel names would leave a session that was
+            // already paired running with no control tunnel left to close.
+            let mut keys: HashSet<String> = targets.machines.clone();
+            keys.extend(
+                channels
+                    .iter()
+                    .filter(|(key, channel)| {
+                        targets.machines.contains(*key)
+                            || generations.contains(&channel.generation)
+                    })
+                    .map(|(key, _)| key.clone()),
+            );
+            (generations, keys)
+        };
+
+        let suspended_sessions: Vec<(String, SuspensionSignal)> = self
+            .inner
+            .pending_sessions
+            .lock()
+            .iter()
+            .filter(|(_, entry)| stopped_keys.contains(&entry.owner))
+            .map(|(session_id, entry)| (session_id.clone(), Arc::clone(&entry.suspension)))
+            .collect();
+        let suspended_controls: Vec<SuspensionSignal> = {
+            let signals = self.inner.control_suspensions.lock();
+            stopped_generations
+                .iter()
+                .filter_map(|generation| signals.get(generation).cloned())
+                .collect()
+        };
+
+        // Arm outside every lock: waking a splice task must never run while a relay map is
+        // locked.
+        for (session_id, signal) in &suspended_sessions {
+            tracing::warn!(
+                %session_id,
+                reason = SUSPENSION_REASON,
+                "closing relay session of a stopped account owner"
+            );
+            signal.send_replace(Some(SUSPENSION_REASON.to_string()));
+        }
+        for signal in &suspended_controls {
+            signal.send_replace(Some(SUSPENSION_REASON.to_string()));
+        }
+
+        Ok(SuspensionSweep {
+            stopped_owners: targets.owners.len(),
+            closed_sessions: suspended_sessions.len(),
+            closed_controls: suspended_controls.len(),
+        })
+    }
+}
+
 async fn install_script_handler() -> impl axum::response::IntoResponse {
     let script = include_str!("../../../scripts/install.sh");
     (
@@ -2469,7 +3099,11 @@ async fn authenticate_control_socket(
         {
             return Err("Invalid machine signature".to_string());
         }
-        state.bind_machine_key(&auth)?;
+        let auth_for_bind = auth.clone();
+        let state_for_bind = state.clone();
+        crate::ipc::run_blocking(move || Ok(state_for_bind.bind_machine_key(&auth_for_bind)))
+            .await
+            .map_err(|error| error.to_string())??;
         Ok(auth.machine_id)
     };
     let result = match timeout(CONTROL_AUTH_TIMEOUT, authenticate).await {
@@ -2496,8 +3130,23 @@ async fn authenticate_control_socket(
     }
     match result {
         Ok(machine_id) => handle_control_socket(socket, state, machine_id, None).await,
-        Err(_) => {
-            if !matches!(
+        Err(ref err) => {
+            if err == "REMOTE_SUSPENDED" {
+                let close_frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: "REMOTE_SUSPENDED".into(),
+                };
+                if !matches!(
+                    timeout(
+                        CONTROL_AUTH_TIMEOUT,
+                        socket.send(Message::Close(Some(close_frame)))
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::debug!("relay rejected control socket close failed or timed out");
+                }
+            } else if !matches!(
                 timeout(CONTROL_AUTH_TIMEOUT, socket.close()).await,
                 Ok(Ok(()))
             ) {
@@ -2520,8 +3169,24 @@ async fn handle_control_socket(
             state.bind_control_alias(&machine_token, id.clone());
         }
     }
+    let mut suspension = state.control_suspension_receiver(generation);
     loop {
         tokio::select! {
+            reason = next_suspension_reason(&mut suspension) => {
+                // The owner's grace period ended: end the tunnel with the exact reason
+                // instead of leaving a live control channel behind for a stopped account.
+                let close_frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: reason.into(),
+                };
+                if !matches!(
+                    timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(close_frame)))).await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::warn!("relay suspended control close failed or timed out");
+                }
+                break;
+            }
             grant = grants.recv() => {
                 let Some(GrantDeliveryRequest { delivery, ack }) = grant else { break };
                 let Ok(payload) = serde_json::to_string(&delivery) else { continue };
@@ -2541,7 +3206,21 @@ async fn handle_control_socket(
             }
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Flush tungstenite's queued close acknowledgement back to the client
+                        // so the client receives a clean close handshake rather than an abrupt drop.
+                        match timeout(TRANSFER_TIMEOUT, socket.flush()).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "relay control close flush IO error");
+                            }
+                            Err(_) => {
+                                tracing::warn!("relay control close flush timed out");
+                            }
+                        }
+                        break;
+                    }
+                    None => break,
                     Some(Ok(Message::Text(text))) => {
                         // The daemon answers a grant delivery with `AccountGrantOfferDelivered`;
                         // that frame fills the slot the caller of `deliver_grant_offer` waits on.
@@ -2676,7 +3355,7 @@ fn upgrade_half(
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_half_socket(socket, guard, outcome)))
+        .on_upgrade(move |socket| handle_half_socket(socket, guard, outcome, kind)))
 }
 
 /// Registers `socket` as one half of `session_id`'s pairing. If the
@@ -2689,6 +3368,7 @@ async fn handle_half_socket(
     mut socket: WebSocket,
     mut guard: SessionGuard,
     outcome: PairingOutcome,
+    kind: HalfKind,
 ) {
     match outcome {
         PairingOutcome::HandOff(tx) => {
@@ -2700,13 +3380,29 @@ async fn handle_half_socket(
             }
         }
         PairingOutcome::Waiting { mut rx } => {
+            let mut suspension = guard.state.session_suspension_receiver(&guard.session_id);
+            // Whoever reserves the first half drives the splice, so this task's own half is
+            // `kind` and the half that arrives second is the opposite one.
+            let browser_side = if matches!(kind, HalfKind::Data) {
+                BrowserSide::Peer
+            } else {
+                BrowserSide::Own
+            };
             let transfer = async {
                 let mut buffered = Vec::new();
                 let mut bytes = 0;
                 let pairing = async {
-                    loop {
+                    let mut suspended = suspension.borrow_and_update().clone();
+                    while suspended.is_none() {
                         tokio::select! {
-                            peer = &mut rx => return peer.map_err(anyhow::Error::from),
+                            peer = &mut rx => {
+                                return Ok::<PairingWait, anyhow::Error>(PairingWait::Paired(
+                                    peer.map_err(anyhow::Error::from)?,
+                                ));
+                            }
+                            reason = next_suspension_reason(&mut suspension) => {
+                                suspended = Some(reason);
+                            }
                             incoming = socket.recv() => {
                                 match incoming {
                                     Some(Ok(Message::Close(_))) | None => anyhow::bail!("pending peer disconnected"),
@@ -2726,8 +3422,22 @@ async fn handle_half_socket(
                             }
                         }
                     }
+                    // The `select!` above borrows `socket` for receiving, so the close frame is
+                    // sent here, where the socket is free to write again.
+                    Ok(PairingWait::Suspended(suspended.unwrap_or_default()))
                 };
-                let mut peer = timeout(SESSION_PAIRING_TIMEOUT, pairing).await??;
+                let pairing_result = timeout(SESSION_PAIRING_TIMEOUT, pairing).await;
+                let mut peer = match pairing_result?? {
+                    PairingWait::Paired(peer) => peer,
+                    PairingWait::Suspended(reason) => {
+                        if browser_side == BrowserSide::Own {
+                            close_suspended_browser(&mut socket, &reason).await;
+                        }
+                        anyhow::bail!(
+                            "relay session suspended before its halves paired: {reason}"
+                        );
+                    }
+                };
                 #[cfg(test)]
                 let tap = guard
                     .state
@@ -2750,6 +3460,8 @@ async fn handle_half_socket(
                 proxy_sockets(
                     socket,
                     peer,
+                    browser_side,
+                    suspension,
                     #[cfg(test)]
                     tap,
                 )
@@ -2765,11 +3477,31 @@ async fn handle_half_socket(
     }
 }
 
+/// Sends the exact suspension reason to a browser-facing socket before its session ends.
+async fn close_suspended_browser(socket: &mut WebSocket, reason: &str) {
+    let frame = axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::POLICY,
+        reason: reason.to_owned().into(),
+    };
+    if !matches!(
+        timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(frame)))).await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!("relay suspended close frame was not delivered");
+    }
+}
+
 /// Proxies WebSocket frames bidirectionally between `a` and `b` until
-/// either side closes or errors.
+/// either side closes or errors, or the suspension sweeper ends the session.
+///
+/// `browser_side` names the half that faces the remote browser. Only the direction that
+/// writes to that half watches `suspension`, so a suspended session ends with the exact
+/// reason on the browser's socket and the daemon half is torn down with it.
 async fn proxy_sockets(
     a: WebSocket,
     b: WebSocket,
+    browser_side: BrowserSide,
+    suspension: watch::Receiver<Option<String>>,
     #[cfg(test)] tap: Option<Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     let (mut a_tx, mut a_rx) = a.split();
@@ -2777,50 +3509,69 @@ async fn proxy_sockets(
 
     #[cfg(test)]
     let tap_a = tap.clone();
-    let a_to_b = async {
-        while let Some(msg) = a_rx.next().await {
-            let msg = msg?;
-            let is_close = matches!(msg, Message::Close(_));
-            #[cfg(test)]
-            if let Some(tap) = &tap_a {
-                match &msg {
-                    Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
-                    Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
-                    _ => {}
-                }
-            }
-            timeout(TRANSFER_TIMEOUT, b_tx.send(msg)).await??;
-            if is_close {
-                break;
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    };
+    // `a_to_b` writes to the peer half; `b_to_a` writes to this task's own half.
+    let mut peer_suspension = (browser_side == BrowserSide::Peer).then(|| suspension.clone());
+    let mut own_suspension = (browser_side == BrowserSide::Own).then_some(suspension);
+    let a_to_b = pump_relay_direction(
+        &mut a_rx,
+        &mut b_tx,
+        &mut peer_suspension,
+        #[cfg(test)]
+        tap_a.as_ref(),
+    );
     #[cfg(test)]
     let tap_b = tap;
-    let b_to_a = async {
-        while let Some(msg) = b_rx.next().await {
-            let msg = msg?;
-            let is_close = matches!(msg, Message::Close(_));
-            #[cfg(test)]
-            if let Some(tap) = &tap_b {
-                match &msg {
-                    Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
-                    Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
-                    _ => {}
-                }
-            }
-            timeout(TRANSFER_TIMEOUT, a_tx.send(msg)).await??;
-            if is_close {
-                break;
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    };
+    let b_to_a = pump_relay_direction(
+        &mut b_rx,
+        &mut a_tx,
+        &mut own_suspension,
+        #[cfg(test)]
+        tap_b.as_ref(),
+    );
 
     tokio::select! {
         result = a_to_b => result,
         result = b_to_a => result,
+    }
+}
+
+/// Pumps one direction of a relay session until either side closes, and — when this
+/// direction writes to the browser half — until the suspension sweeper arms `suspension`,
+/// at which point the exact reason is sent before the session is torn down.
+async fn pump_relay_direction(
+    rx: &mut futures_util::stream::SplitStream<WebSocket>,
+    tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    suspension: &mut Option<watch::Receiver<Option<String>>>,
+    #[cfg(test)] tap: Option<&Arc<Mutex<Vec<u8>>>>,
+) -> anyhow::Result<()> {
+    loop {
+        tokio::select! {
+            incoming = rx.next() => {
+                let Some(msg) = incoming else { return Ok(()) };
+                let msg = msg?;
+                let is_close = matches!(msg, Message::Close(_));
+                #[cfg(test)]
+                if let Some(tap) = tap {
+                    match &msg {
+                        Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
+                        Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                        _ => {}
+                    }
+                }
+                timeout(TRANSFER_TIMEOUT, tx.send(msg)).await??;
+                if is_close {
+                    return Ok(());
+                }
+            }
+            reason = await_suspension(suspension) => {
+                let frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: reason.into(),
+                };
+                timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -6854,6 +7605,11 @@ mod tests {
         (format!("ws://{addr}"), handle)
     }
 
+    /// Owner of the foreign machine in [`test_account_state`]. It needs its own `users` row
+    /// because `machines.user_id` is `REFERENCES users(user_id)` and the store enables
+    /// `PRAGMA foreign_keys = ON` (store_sqlite/schema.rs:11-12, 65-84).
+    const OTHER_MACHINE_OWNER_ID: &str = "another-user";
+
     fn test_account_state(
         temp_dir: &std::path::Path,
         user_id: &str,
@@ -6886,6 +7642,17 @@ mod tests {
                         expires_at: now + 3600,
                     },
                 );
+                // The foreign machine below is owned by a different user, so that user must exist
+                // before the machine row is written (foreign key) and its email must differ from
+                // the primary user's (unique index on users.email).
+                store.users.insert(
+                    OTHER_MACHINE_OWNER_ID.into(),
+                    crate::account::store::UserRecord {
+                        user_id: OTHER_MACHINE_OWNER_ID.into(),
+                        email: "other-owner@example.com".into(),
+                        created_at: now,
+                    },
+                );
                 store.machines.insert(
                     "rec-owned".into(),
                     crate::account::store::MachineRecord {
@@ -6906,7 +7673,7 @@ mod tests {
                     "rec-other".into(),
                     crate::account::store::MachineRecord {
                         machine_record_id: "rec-other".into(),
-                        owner_user_id: "another-user".into(),
+                        owner_user_id: OTHER_MACHINE_OWNER_ID.into(),
                         machine_id: other_machine_id.into(),
                         display_name: "Other Machine".into(),
                         public_key: "pubkey-2".into(),
@@ -7229,5 +7996,1495 @@ mod tests {
                 .contains_key("already-reconnected"),
             "grant channel for generation N+1 must survive unregister of generation N"
         );
+    }
+
+    /// Request line the relay's bearer probe uses before it consults account authorization.
+    const DEVICE_PROBE_REQUEST_LINE: &str = "GET /api/v1/devices HTTP/1.1";
+
+    /// Serves one machine-side tunnel session and returns the proxied request line with the
+    /// paired data socket. Both waits are bounded, so the fixture can never hang.
+    async fn next_machine_request(
+        base: &str,
+        notices: &mut mpsc::Receiver<IncomingSessionNotice>,
+    ) -> (String, TestSocket) {
+        let notice: IncomingSessionNotice = timeout(Duration::from_secs(5), notices.recv())
+            .await
+            .expect("timed out waiting for a machine session notice")
+            .expect("control channel closed before a machine session notice arrived");
+        assert!(!notice.opaque);
+        let (mut data, _) = tokio_tungstenite::connect_async(format!(
+            "{base}/tunnel/data/{}",
+            notice.session_id
+        ))
+        .await
+        .expect("machine data channel must connect");
+        let frame = timeout(Duration::from_secs(5), data.next())
+            .await
+            .expect("timed out waiting for the proxied request")
+            .expect("the data channel ended before the proxied request")
+            .expect("the data channel failed before the proxied request");
+        let raw = String::from_utf8(frame.into_data().to_vec()).expect("request bytes");
+        let line = raw
+            .lines()
+            .next()
+            .expect("the proxied request must carry a request line")
+            .to_string();
+        (line, data)
+    }
+
+    /// Answers a proxied HTTP request and asserts the relay releases the data half within 5s.
+    /// The relay drops that socket without a close handshake once it has parsed the response, so
+    /// only boundedness is asserted here rather than the shape of that close.
+    async fn reply_http(data: &mut TestSocket, status: StatusCode, body: &[u8]) {
+        let head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown"),
+            body.len()
+        );
+        data.send(TMessage::Binary(head.into_bytes().into()))
+            .await
+            .expect("send response head");
+        if !body.is_empty() {
+            data.send(TMessage::Binary(body.to_vec().into()))
+                .await
+                .expect("send response body");
+        }
+        let tail = timeout(Duration::from_secs(5), data.next()).await;
+        assert!(
+            tail.is_ok(),
+            "the relay must release the data half within 5s of the response"
+        );
+    }
+
+    /// Serves machine-side sessions until the spawned client request settles, classifying each
+    /// proxied request by its request line: the relay's bearer probe
+    /// ([`DEVICE_PROBE_REQUEST_LINE`]) is answered 401 so an account bearer falls through to
+    /// account authorization, and any other request is asserted to be `forwarded_request_line`
+    /// and answered with the scripted status/body.
+    ///
+    /// Terminating on the request itself - never on a sleep, a poll or a fixed session count -
+    /// keeps the fixture deterministic on both paths: with the authorization gate intact the
+    /// request settles right after the probe and no further session exists, while with the gate
+    /// removed the forwarded request is still answered, so the caller's status assertion fails
+    /// on the intended evidence instead of on a client timeout.
+    async fn serve_machine_sessions_until<F>(
+        base: &str,
+        notices: &mut mpsc::Receiver<IncomingSessionNotice>,
+        client_request: &mut F,
+        forwarded_request_line: &str,
+        forwarded_status: StatusCode,
+        forwarded_body: &[u8],
+    ) -> (usize, F::Output)
+    where
+        F: std::future::Future + Unpin,
+    {
+        let mut served = 0usize;
+        loop {
+            tokio::select! {
+                settled = &mut *client_request => return (served, settled),
+                session = next_machine_request(base, notices) => {
+                    let (line, mut data) = session;
+                    if line == DEVICE_PROBE_REQUEST_LINE {
+                        reply_http(&mut data, StatusCode::UNAUTHORIZED, b"").await;
+                    } else {
+                        assert_eq!(
+                            line, forwarded_request_line,
+                            "unexpected request line on the machine side"
+                        );
+                        reply_http(&mut data, forwarded_status, forwarded_body).await;
+                    }
+                    served += 1;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_proxy_rejects_foreign_account() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("other-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        // Spawned so the fixture below can stop the moment the request settles.
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/other-machine/api/v1/health");
+            async move { client.get(url).bearer_auth(token).send().await }
+        });
+
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        assert_eq!(
+            served, 1,
+            "only the device probe may reach another account's machine"
+        );
+        let response = settled
+            .expect("request task must not panic")
+            .expect("host proxy request must return a response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "MACHINE_NOT_FOUND");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_proxy_rejects_anonymous_on_account_relay() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        // 1. Missing Authorization header completely -> 401 UNAUTHORIZED, with no machine
+        //    session at all: the gate rejects before it opens one.
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/health");
+            async move { client.get(url).send().await }
+        });
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        assert_eq!(
+            served, 0,
+            "a request without a bearer must be rejected before any machine session"
+        );
+        let response = settled
+            .expect("request task must not panic")
+            .expect("anonymous host proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "UNAUTHORIZED");
+
+        // 2. Invalid/unknown bearer token (neither device token nor account session) -> 401
+        //    UNAUTHORIZED. The bearer may only ever reach the machine as the device probe.
+        let mut request_bad = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/health");
+            async move { client.get(url).bearer_auth("bad-token").send().await }
+        });
+        let (served_bad, settled_bad) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request_bad,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        assert_eq!(
+            served_bad, 1,
+            "an unknown bearer may only reach the device probe, never a forwarded request"
+        );
+        let response_bad = settled_bad
+            .expect("request task must not panic")
+            .expect("host proxy request must return a response");
+        assert_eq!(response_bad.status(), StatusCode::UNAUTHORIZED);
+        let body_bad: serde_json::Value = response_bad.json().await.unwrap();
+        assert_eq!(body_bad["code"], "UNAUTHORIZED");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_proxy_allows_owner() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/health");
+            async move { client.get(url).bearer_auth(token).send().await }
+        });
+
+        // The owner path serves two sessions - the bearer probe and then the authorized forward -
+        // and the served count is deliberately not asserted here so a gate mutation keeps the
+        // reject tests as the only RED evidence.
+        let (_served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        let response = settled
+            .expect("request task must not panic")
+            .expect("host proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["status"], "healthy");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_proxy_allows_authorized_device_token() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let device_token = "valid-paired-device-token";
+        // Pre-register fresh cached device token in relay state (as happens after pair/exchange or authorize_device_token)
+        state.register_device_token("owned-machine", device_token);
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Account state has user-1, but no account session token matches the device token
+        let account =
+            test_account_state(tmp.path(), "user-1", "user-session-token", "owned-machine", "other-machine");
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        // A cached device token needs no probe: the forwarded request is the only session.
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/health");
+            async move { client.get(url).bearer_auth(device_token).send().await }
+        });
+
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy","paired":true}"#,
+        )
+        .await;
+        assert_eq!(
+            served, 1,
+            "a cached device token must authorize without a device probe"
+        );
+        let response = settled
+            .expect("request task must not panic")
+            .expect("host proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["status"], "healthy");
+        assert_eq!(body["paired"], true);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_attach_session_is_402() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "user-stopped-session-token";
+        let user_id = "user-stopped-attach";
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "stopped-attach@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-owned".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-owned".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "owned-machine".into(),
+                        display_name: "Owned Machine".into(),
+                        public_key: "pubkey-1".into(),
+                        attach_public_key: "attachkey-1".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                store.machines.insert(
+                    "rec-owned-2".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-owned-2".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "owned-machine-2".into(),
+                        display_name: "Owned Machine 2".into(),
+                        public_key: "pubkey-2".into(),
+                        attach_public_key: "attachkey-2".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000),
+                        ),
+                        stopped_at: Some(now.saturating_sub(100)),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Assert computed status before attach call is legitimately Stopped
+        let eval_before =
+            crate::account::billing::routes::entitlement_for_user(&account, user_id, now)
+                .expect("entitlement evaluation");
+        assert_eq!(
+            eval_before.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped,
+            "computed status before attach session must be Stopped"
+        );
+        assert!(
+            !eval_before.remote_allowed,
+            "remote access must not be allowed when stopped"
+        );
+
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        let attach_body = serde_json::json!({
+            "machineId": "owned-machine"
+        });
+
+        let response = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(token)
+            .json(&attach_body)
+            .send()
+            .await
+            .expect("attach session request must respond");
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "REMOTE_SUSPENDED");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_control_tunnel_refused() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let user_id = "user-stopped-control";
+        let token = "user-stopped-ctrl-token";
+        let identity = identity(101, "owned-stopped-ctrl");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "stopped-ctrl@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-stopped-ctrl".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-stopped-ctrl".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: identity.machine_id.clone(),
+                        display_name: identity.display_name.clone(),
+                        public_key: identity.public_key.clone(),
+                        attach_public_key: identity.public_key.clone(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                store.machines.insert(
+                    "rec-stopped-ctrl-2".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-stopped-ctrl-2".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "stopped-ctrl-machine-2".into(),
+                        display_name: "Stopped Ctrl Machine 2".into(),
+                        public_key: "pubkey-ctrl-2".into(),
+                        attach_public_key: "attachkey-ctrl-2".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000),
+                        ),
+                        stopped_at: Some(now.saturating_sub(100)),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Assert computed status before control connection is legitimately Stopped
+        let eval_before =
+            crate::account::billing::routes::entitlement_for_user(&account, user_id, now)
+                .expect("entitlement evaluation");
+        assert_eq!(
+            eval_before.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped,
+            "computed status before control socket connect must be Stopped"
+        );
+        assert!(
+            !eval_before.remote_allowed,
+            "remote access must not be allowed when stopped"
+        );
+
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+
+        let (mut socket, response) =
+            authenticate_with_token(&base, &identity, false, false, None).await;
+
+        assert!(
+            !response.success,
+            "control authentication must fail for a stopped account owner"
+        );
+        assert_eq!(response.error.as_deref(), Some("REMOTE_SUSPENDED"));
+
+        let close_frame = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("server must close control socket within 5s")
+            .expect("socket stream item must exist")
+            .expect("socket read must not error");
+
+        match close_frame {
+            TMessage::Close(Some(frame)) => {
+                assert_eq!(frame.reason.as_str(), "REMOTE_SUSPENDED");
+                assert_eq!(u16::from(frame.code), 1008);
+            }
+            other => panic!("expected close frame with REMOTE_SUSPENDED reason, got {other:?}"),
+        }
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn static_token_machine_unaffected() {
+        let state = test_state(vec!["test-machine-token".into()]);
+        let (base, server) = spawn_test_relay_with_account_state(state.clone(), None).await;
+        let identity = identity(102, "static-token-machine");
+
+        let (_socket, response) = authenticate_with_token(
+            &base,
+            &identity,
+            false,
+            false,
+            Some("test-machine-token"),
+        )
+        .await;
+
+        assert!(
+            response.success,
+            "static token machine must authenticate successfully without account billing gate"
+        );
+        assert!(response.error.is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selfhost_never_checks() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let user_id = "user-selfhost";
+        let token = "user-selfhost-token";
+        let identity = identity(103, "selfhost-ctrl-machine");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::SelfHost),
+        );
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "selfhost@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-selfhost".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-selfhost".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: identity.machine_id.clone(),
+                        display_name: identity.display_name.clone(),
+                        public_key: identity.public_key.clone(),
+                        attach_public_key: identity.public_key.clone(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                // Mark stopped state in store; SelfHost must ignore it
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(now - 700_000),
+                        stopped_at: Some(now - 100),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+
+        let (_socket, response) =
+            authenticate_with_token(&base, &identity, false, false, None).await;
+
+        assert!(
+            response.success,
+            "selfhost relay must never refuse control socket on billing state"
+        );
+        assert!(response.error.is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn billing_evaluation_failure_refuses_control_tunnel() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let user_id = "user-outage";
+        let identity = identity(104, "outage-machine");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "outage@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.machines.insert(
+                    "rec-outage".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-outage".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: identity.machine_id.clone(),
+                        display_name: identity.display_name.clone(),
+                        public_key: identity.public_key.clone(),
+                        attach_public_key: identity.public_key.clone(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
+
+        // Simulate billing store outage by corrupting the database file
+        let db_path = tmp
+            .path()
+            .join("account")
+            .join(crate::account::store::store_sqlite::STORE_SQLITE_FILENAME);
+        assert!(
+            db_path.exists(),
+            "store database file must exist at {db_path:?} before corruption"
+        );
+        let wal_path = tmp
+            .path()
+            .join("account")
+            .join(format!("{}-wal", crate::account::store::store_sqlite::STORE_SQLITE_FILENAME));
+        if wal_path.exists() {
+            let _ = std::fs::remove_file(&wal_path);
+        }
+        let shm_path = tmp
+            .path()
+            .join("account")
+            .join(format!("{}-shm", crate::account::store::store_sqlite::STORE_SQLITE_FILENAME));
+        if shm_path.exists() {
+            let _ = std::fs::remove_file(&shm_path);
+        }
+        std::fs::write(&db_path, b"corrupted sqlite header garbage data").unwrap();
+
+        let (_socket, response) =
+            authenticate_with_token(&base, &identity, false, false, None).await;
+
+        assert!(
+            !response.success,
+            "control authentication must fail when billing entitlement evaluation fails"
+        );
+        let err = response.error.expect("error message must be present");
+        assert!(
+            err.contains("ACCOUNT_ENTITLEMENT_UNAVAILABLE"),
+            "error must indicate entitlement evaluation failure, got: {err}"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_device_token_proxy_refused() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let device_token = "valid-stopped-device-token";
+        state.register_device_token("owned-machine", device_token);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let user_id = "user-stopped-dev";
+        let session_token = "user-session-token";
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let account = Arc::new(
+            crate::account::service::AccountState::new(
+                tmp.path().join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        );
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: "stopped-dev@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(session_token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-owned".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-owned".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "owned-machine".into(),
+                        display_name: "Owned Machine".into(),
+                        public_key: "pubkey-1".into(),
+                        attach_public_key: "attachkey-1".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                // Second machine creates an active over_limit violation on Free (2 > 1)
+                store.machines.insert(
+                    "rec-owned-2".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-owned-2".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "owned-machine-2".into(),
+                        display_name: "Owned Machine 2".into(),
+                        public_key: "pubkey-2".into(),
+                        attach_public_key: "attachkey-2".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000),
+                        ),
+                        stopped_at: Some(now.saturating_sub(100)),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Assert computed status before proxy call is legitimately Stopped
+        let eval_before =
+            crate::account::billing::routes::entitlement_for_user(&account, user_id, now)
+                .expect("entitlement evaluation");
+        assert_eq!(
+            eval_before.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped,
+            "computed status before proxy request must be Stopped"
+        );
+        assert!(
+            !eval_before.remote_allowed,
+            "remote access must not be allowed when stopped"
+        );
+
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/health");
+            async move { client.get(url).bearer_auth(device_token).send().await }
+        });
+
+        // The request must be rejected by the relay gate before reaching the machine
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        assert_eq!(
+            served, 0,
+            "a valid device token for a stopped account must be rejected before opening any machine session"
+        );
+        let response = settled
+            .expect("request task must not panic")
+            .expect("proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "REMOTE_SUSPENDED");
+        let details = body.get("details").expect("details must be present");
+        assert_eq!(details["status"], "stopped");
+        assert_eq!(details["plan"], "free");
+        assert_eq!(details["stoppedAt"], now.saturating_sub(100));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn static_token_device_token_proxy_unaffected() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("static-machine".into());
+        let device_token = "valid-static-device-token";
+        state.register_device_token("static-machine", device_token);
+
+        // Standalone relay without account state
+        let (base, server) = spawn_test_relay_with_account_state(state.clone(), None).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/static-machine/api/v1/health");
+            async move { client.get(url).bearer_auth(device_token).send().await }
+        });
+
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy","static":true}"#,
+        )
+        .await;
+        assert_eq!(
+            served, 1,
+            "a cached device token for a static machine must authorize without account checks"
+        );
+        let response = settled
+            .expect("request task must not panic")
+            .expect("proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["status"], "healthy");
+        assert_eq!(body["static"], true);
+
+        server.abort();
+    }
+
+    /// A commercial account state whose store backs the suspension tests.
+    fn test_suspension_account(
+        temp_dir: &std::path::Path,
+    ) -> Arc<crate::account::service::AccountState> {
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            temp_dir.join("mail"),
+        ));
+        Arc::new(
+            crate::account::service::AccountState::new(
+                temp_dir.join("account"),
+                "https://relay.test",
+                mailer,
+            )
+            .with_deployment_mode(crate::account::origin::DeploymentMode::Commercial),
+        )
+    }
+
+    /// Enrolls `machine_count` machines for `user_id` — the first carrying `public_key` and
+    /// `machine_id` — and seeds the owner's grace start when one is given.
+    ///
+    /// Two machines on the Free plan are over the limit of one, so an owner seeded with a
+    /// grace start is a real violation rather than a hypothetical one.
+    fn seed_suspension_owner(
+        account: &Arc<crate::account::service::AccountState>,
+        user_id: &str,
+        session_token: &str,
+        machine_id: &str,
+        machine_public_key: &str,
+        grace_started_at: Option<u64>,
+        machine_count: usize,
+    ) {
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    crate::account::store::UserRecord {
+                        user_id: user_id.into(),
+                        email: format!("{user_id}@example.com"),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    crate::account::store::token_hash(session_token),
+                    crate::account::store::SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                for index in 0..machine_count {
+                    let id = if index == 0 {
+                        machine_id.to_string()
+                    } else {
+                        format!("{machine_id}-{index}")
+                    };
+                    let public_key = if index == 0 {
+                        machine_public_key.to_string()
+                    } else {
+                        format!("pubkey-{id}")
+                    };
+                    store.machines.insert(
+                        format!("rec-{id}"),
+                        crate::account::store::MachineRecord {
+                            machine_record_id: format!("rec-{id}"),
+                            owner_user_id: user_id.into(),
+                            machine_id: id.clone(),
+                            display_name: id.clone(),
+                            public_key,
+                            attach_public_key: format!("attachkey-{id}"),
+                            relay_origin: "https://relay.test".into(),
+                            platform: "linux".into(),
+                            enrollment_epoch: 1,
+                            enrolled_at: now,
+                            last_seen_at: now,
+                        },
+                    );
+                }
+                if let Some(grace_started_at) = grace_started_at {
+                    store.billing_states.insert(
+                        user_id.into(),
+                        crate::account::store::BillingStateRecord {
+                            owner_key: user_id.into(),
+                            grace_started_at: Some(grace_started_at),
+                            stopped_at: None,
+                            last_notice: None,
+                        },
+                    );
+                }
+                Ok(())
+            })
+            .expect("seed the suspension fixture");
+    }
+
+    /// Authenticates a control tunnel, allocates a session and pairs both halves, proving the
+    /// splice is live before the test makes the assertion it actually cares about.
+    ///
+    /// The daemon half connects first, so it owns the splice and the browser half is the peer.
+    async fn open_live_session(
+        base: &str,
+        identity: &crate::remote::auth::MachineIdentity,
+    ) -> (TestSocket, TestSocket, TestSocket, IncomingSessionNotice) {
+        let (mut control, response) =
+            authenticate_with_token(base, identity, false, false, None).await;
+        assert!(
+            response.success,
+            "the control tunnel must authenticate: {:?}",
+            response.error
+        );
+        let notice = allocate(&mut control).await;
+        let (mut data, _) = tokio_tungstenite::connect_async(format!(
+            "{base}/tunnel/data/{}",
+            notice.session_id
+        ))
+        .await
+        .unwrap();
+        let (mut client, _) = tokio_tungstenite::connect_async(format!(
+            "{base}/tunnel/client/{}",
+            notice.session_id
+        ))
+        .await
+        .unwrap();
+        client.send(TMessage::Text("live".into())).await.unwrap();
+        let frame = timeout(Duration::from_secs(5), data.next())
+            .await
+            .expect("the paired halves must forward a frame")
+            .expect("the daemon half must stay open")
+            .expect("the frame read must not error");
+        assert_eq!(frame.to_text().unwrap(), "live");
+        (control, client, data, notice)
+    }
+
+    #[tokio::test]
+    async fn suspension_closes_live_sessions_with_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let user_id = "user-suspension";
+        let machine_id = "suspension-machine";
+        let identity = identity(201, machine_id);
+        let now = crate::account::store::now_secs();
+        let account = test_suspension_account(tmp.path());
+        // Grace starts now, so the tunnel below is admitted at the real clock and only the
+        // injected clock is past the deadline: the same store, a later decision.
+        seed_suspension_owner(
+            &account,
+            user_id,
+            "user-suspension-token",
+            machine_id,
+            &identity.public_key,
+            Some(now),
+            2,
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
+
+        let (mut control, mut client, _data, _notice) = open_live_session(&base, &identity).await;
+
+        let virtual_now = now + crate::account::billing::entitlement::GRACE_SECS;
+        let sweep = state
+            .sweep_suspended_owners(virtual_now)
+            .await
+            .expect("the sweep must evaluate the store");
+        assert_eq!(
+            sweep.stopped_owners, 1,
+            "the injected clock is past the grace deadline"
+        );
+        assert_eq!(sweep.closed_sessions, 1);
+        assert_eq!(sweep.closed_controls, 1);
+
+        // Prearmed and bounded: the browser half must be told exactly why, and the daemon's
+        // control tunnel must end for the same reason instead of lingering.
+        let browser_close = timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("the browser half must close")
+            .expect("the browser half must yield a frame")
+            .expect("the browser half must not error");
+        match browser_close {
+            TMessage::Close(Some(frame)) => {
+                assert_eq!(frame.reason.as_str(), "REMOTE_SUSPENDED");
+                assert_eq!(u16::from(frame.code), 1008);
+            }
+            other => panic!("expected REMOTE_SUSPENDED on the browser half, got {other:?}"),
+        }
+        let control_close = timeout(Duration::from_secs(5), control.next())
+            .await
+            .expect("the control tunnel must close")
+            .expect("the control tunnel must yield a frame")
+            .expect("the control tunnel must not error");
+        match control_close {
+            TMessage::Close(Some(frame)) => assert_eq!(frame.reason.as_str(), "REMOTE_SUSPENDED"),
+            other => panic!("expected REMOTE_SUSPENDED on the control tunnel, got {other:?}"),
+        }
+
+        // A stop is a state flag: the machine record and the account survive it.
+        assert!(
+            crate::account::service::owner_stopped_at(&account, user_id).is_some(),
+            "the stop must be persisted through the billing store"
+        );
+        assert!(
+            crate::account::service::try_enrolled_machine_by_id(&account, machine_id)
+                .expect("store read")
+                .is_some(),
+            "the machine record must survive the stop"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suspension_skips_healthy_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let account = test_suspension_account(tmp.path());
+        let now = crate::account::store::now_secs();
+        let stopped_id = "stopped-owner-machine";
+        let stopped_identity = identity(202, stopped_id);
+        seed_suspension_owner(
+            &account,
+            "user-stopped-owner",
+            "stopped-owner-token",
+            stopped_id,
+            &stopped_identity.public_key,
+            Some(now),
+            2,
+        );
+        let healthy_id = "healthy-owner-machine";
+        let healthy_identity = identity(203, healthy_id);
+        seed_suspension_owner(
+            &account,
+            "user-healthy-owner",
+            "healthy-owner-token",
+            healthy_id,
+            &healthy_identity.public_key,
+            None,
+            1,
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
+
+        let (mut stopped_control, mut stopped_client, _stopped_data, _) =
+            open_live_session(&base, &stopped_identity).await;
+        let (mut healthy_control, mut healthy_client, mut healthy_data, _) =
+            open_live_session(&base, &healthy_identity).await;
+
+        let virtual_now = now + crate::account::billing::entitlement::GRACE_SECS;
+        let sweep = state
+            .sweep_suspended_owners(virtual_now)
+            .await
+            .expect("the sweep must evaluate the store");
+        assert_eq!(
+            sweep.stopped_owners, 1,
+            "only the owner past the deadline is stopped"
+        );
+        assert_eq!(
+            sweep.closed_sessions, 1,
+            "the healthy owner's session must survive the pass"
+        );
+        assert_eq!(sweep.closed_controls, 1);
+
+        let stopped_close = timeout(Duration::from_secs(5), stopped_client.next())
+            .await
+            .expect("the stopped owner's browser half must close")
+            .expect("the stopped owner's browser half must yield a frame")
+            .expect("the stopped owner's browser half must not error");
+        match stopped_close {
+            TMessage::Close(Some(frame)) => assert_eq!(frame.reason.as_str(), "REMOTE_SUSPENDED"),
+            other => panic!("expected REMOTE_SUSPENDED on the stopped owner, got {other:?}"),
+        }
+        let stopped_control_close = timeout(Duration::from_secs(5), stopped_control.next())
+            .await
+            .expect("the stopped owner's control tunnel must close")
+            .expect("the stopped owner's control tunnel must yield a frame")
+            .expect("the stopped owner's control tunnel must not error");
+        assert!(matches!(
+            stopped_control_close,
+            TMessage::Close(Some(_))
+        ));
+
+        // The healthy owner keeps working: a frame still crosses the live splice and the
+        // control tunnel still allocates a session.
+        healthy_client
+            .send(TMessage::Text("still-live".into()))
+            .await
+            .unwrap();
+        let frame = timeout(Duration::from_secs(5), healthy_data.next())
+            .await
+            .expect("the healthy session must still forward frames")
+            .expect("the healthy daemon half must stay open")
+            .expect("the healthy frame read must not error");
+        assert_eq!(frame.to_text().unwrap(), "still-live");
+        let notice = allocate(&mut healthy_control).await;
+        assert!(!notice.session_id.is_empty());
+
+        assert!(
+            crate::account::service::owner_stopped_at(&account, "user-healthy-owner").is_none(),
+            "a healthy owner must not be marked stopped"
+        );
+        assert!(
+            crate::account::service::owner_stopped_at(&account, "user-stopped-owner").is_some(),
+            "the stopped owner must be marked stopped"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resolved_owner_reconnects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let user_id = "user-resolved";
+        let machine_id = "resolved-machine";
+        let identity = identity(204, machine_id);
+        let now = crate::account::store::now_secs();
+        let account = test_suspension_account(tmp.path());
+        // The violation starts now, so the tunnel and session below are admitted while the
+        // owner is still inside the grace window.
+        seed_suspension_owner(
+            &account,
+            user_id,
+            "user-resolved-token",
+            machine_id,
+            &identity.public_key,
+            Some(now),
+            2,
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
+
+        let (mut control, mut client, _data, _notice) = open_live_session(&base, &identity).await;
+
+        // Record that the deadline has passed — the same store change the passage of time
+        // makes in production — while the tunnel and the session stay live.
+        account
+            .mutate(|store| {
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 30),
+                        ),
+                        stopped_at: None,
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .expect("record the end of the grace period");
+
+        // The admission gate already refuses a new tunnel for the stopped owner...
+        let (_refused, response) = authenticate_with_token(&base, &identity, false, false, None).await;
+        assert!(
+            !response.success,
+            "a stopped owner must not open a control tunnel"
+        );
+        assert_eq!(response.error.as_deref(), Some("REMOTE_SUSPENDED"));
+
+        // ...and the sweeper ends the tunnel and the session that predate the stop.
+        let sweep = state
+            .sweep_suspended_owners(now)
+            .await
+            .expect("the sweep must evaluate the store");
+        assert_eq!(
+            sweep.stopped_owners, 1,
+            "the real clock is past the grace deadline"
+        );
+        assert_eq!(sweep.closed_sessions, 1);
+        assert_eq!(sweep.closed_controls, 1);
+        let browser_close = timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("the browser half must close")
+            .expect("the browser half must yield a frame")
+            .expect("the browser half must not error");
+        match browser_close {
+            TMessage::Close(Some(frame)) => assert_eq!(frame.reason.as_str(), "REMOTE_SUSPENDED"),
+            other => panic!("expected REMOTE_SUSPENDED on the browser half, got {other:?}"),
+        }
+        assert!(matches!(
+            timeout(Duration::from_secs(5), control.next())
+                .await
+                .expect("the control tunnel must close")
+                .expect("the control tunnel must yield a frame")
+                .expect("the control tunnel must not error"),
+            TMessage::Close(Some(_))
+        ));
+        assert!(
+            crate::account::service::owner_stopped_at(&account, user_id).is_some(),
+            "the sweep persists the stop through the billing store"
+        );
+
+        // Resolution: the owner upgrades to Pro, so both machines fit the plan limit.
+        account
+            .mutate(|store| {
+                store.subscriptions.insert(
+                    "sub-resolved".into(),
+                    crate::account::store::SubscriptionRecord {
+                        subscription_id: "sub-resolved".into(),
+                        owner_user_id: user_id.into(),
+                        org_id: None,
+                        plan_key: "pro_monthly".into(),
+                        seats: 0,
+                        host_packs: 0,
+                        kind: crate::account::billing::routes::KIND_BASE.into(),
+                        status: "active".into(),
+                        ends_at: None,
+                        ls_customer_id: Some("cust-resolved".into()),
+                        ls_updated_at: now,
+                        manage_url: None,
+                    },
+                );
+                Ok(())
+            })
+            .expect("record the upgrade");
+
+        // The owner reconnects: admission and a fresh live session both work again.
+        let (_control, _client, _data, notice) = open_live_session(&base, &identity).await;
+        assert!(!notice.session_id.is_empty());
+        let sweep = state
+            .sweep_suspended_owners(now)
+            .await
+            .expect("the sweep must evaluate the store");
+        assert_eq!(sweep.stopped_owners, 0, "a resolved owner is not stopped");
+        assert_eq!(sweep.closed_sessions, 0);
+        assert!(
+            crate::account::service::owner_stopped_at(&account, user_id).is_none(),
+            "resolution clears the persisted stop"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suspension_sweeper_ends_a_session_on_its_own_tick() {
+        // Virtual time: the sweeper's own interval fires without a wall-clock sleep.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let machine_id = "sweeper-tick-machine";
+        let identity = identity(205, machine_id);
+        let now = crate::account::store::now_secs();
+        let account = test_suspension_account(tmp.path());
+        seed_suspension_owner(
+            &account,
+            "user-sweeper-tick",
+            "sweeper-tick-token",
+            machine_id,
+            &identity.public_key,
+            Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 30)),
+            2,
+        );
+        state.set_account_state(account);
+
+        let (generation, _notices, _grants) = state.register_control_channel(machine_id.to_string());
+        let session_id = "sweeper-tick-session";
+        assert!(
+            state.issue_session(machine_id, session_id, Some(generation), false),
+            "the control channel must accept a session"
+        );
+        let mut suspension = state.session_suspension_receiver(session_id);
+
+        tokio::time::pause();
+        let sweeper = spawn_suspension_sweeper_with_interval(state.clone(), SUSPENSION_SWEEP_INTERVAL);
+        // Let the spawned task register its sleep with the timer wheel before time moves.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(SUSPENSION_SWEEP_INTERVAL).await;
+        tokio::time::resume();
+
+        let reason = timeout(Duration::from_secs(5), next_suspension_reason(&mut suspension))
+            .await
+            .expect("the sweeper must end the session on its own interval");
+        assert_eq!(reason, "REMOTE_SUSPENDED");
+        sweeper.abort();
+    }
+
+    #[tokio::test]
+    async fn authenticated_control_socket_client_initiated_close_handshake() {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
+        let state = test_state(vec![]);
+        let (base, relay) = spawn_test_relay_with_state(state.clone()).await;
+        let machine_id = "close-handshake-machine";
+        let machine_ident = identity(206, machine_id);
+
+        let (mut control, auth) = authenticate(&base, &machine_ident, false, false).await;
+        assert!(auth.success, "control channel must authenticate successfully");
+
+        let close_frame = CloseFrame {
+            code: CloseCode::Normal,
+            reason: "probe clean close".into(),
+        };
+        control
+            .send(TMessage::Close(Some(close_frame)))
+            .await
+            .expect("send client close frame");
+
+        let mut observed_close = None;
+        let read_close = async {
+            while let Some(msg) = control.next().await {
+                match msg {
+                    Ok(TMessage::Close(frame)) => {
+                        observed_close = frame;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("unexpected error waiting for close handshake: {error}"),
+                }
+            }
+        };
+        timeout(Duration::from_secs(5), read_close)
+            .await
+            .expect("server must complete the WebSocket close handshake within timeout");
+
+        let frame = observed_close.expect("server must return an echoed close frame");
+        assert_eq!(frame.code, CloseCode::Normal);
+        assert_eq!(frame.reason.as_str(), "probe clean close");
+
+        relay.abort();
     }
 }

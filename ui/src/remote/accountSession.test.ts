@@ -21,6 +21,16 @@ import {
   resolveAccountOrigin,
   DEFAULT_ACCOUNT_ORIGIN,
   ACCOUNT_ORIGIN_PROBE_STORAGE_KEY,
+  PLAN_LIMIT_REACHED,
+  REMOTE_SUSPENDED,
+  REMOTE_SUSPENDED_CLOSE_REASON,
+  ACCOUNT_ENTITLEMENT_STORAGE_KEY,
+  planLimitStateFromError,
+  planLimitStateFromCloseEvent,
+  planLimitStateWithEntitlement,
+  storeAccountEntitlementSnapshot,
+  getStoredAccountEntitlementSnapshot,
+  clearStoredAccountEntitlementSnapshot,
   type AccountMachineView,
 } from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
@@ -941,5 +951,252 @@ describe("accountSession client module", () => {
       clearStoredAccountSessionToken();
     });
 
+  });
+
+  describe("plan limit and suspension contract", () => {
+    const GRACE_ENDS_AT = 1700000000;
+    const STOPPED_AT = 1700086400;
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-mach-1",
+      machineId: "mach-uuid-1",
+      displayName: "Test Laptop",
+      publicKey: "ed25519-pub-1",
+      attachPublicKey: "x25519-pub-1",
+      relayOrigin: origin,
+      platform: "macos",
+      online: true,
+      enrollmentEpoch: "2",
+      lastSeenAt: 1700000000,
+    };
+
+    it("preserves structured PLAN_LIMIT_REACHED details on the grant error", async () => {
+      globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/grants")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                code: PLAN_LIMIT_REACHED,
+                message: "Machine limit reached",
+                details: { plan: "free", limit: 1, used: 2 },
+              }),
+              { status: 402 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      });
+
+      let captured: unknown;
+      try {
+        await requestGrant(origin, sessionToken, machine, "attach-pub-key");
+      } catch (err) {
+        captured = err;
+      }
+
+      expect(captured).toBeInstanceOf(AccountSessionError);
+      expect((captured as AccountSessionError).code).toBe(PLAN_LIMIT_REACHED);
+      expect((captured as AccountSessionError).details).toEqual({
+        plan: "free",
+        limit: 1,
+        used: 2,
+      });
+      expect(planLimitStateFromError(captured)).toEqual({
+        code: PLAN_LIMIT_REACHED,
+        plan: "free",
+        limit: 1,
+        used: 2,
+      });
+    });
+
+    it("preserves REMOTE_SUSPENDED details on a refused attach session", async () => {
+      globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/api/v1/attach/session")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                code: REMOTE_SUSPENDED,
+                message: "Remote access is suspended",
+                details: {
+                  plan: "pro_monthly",
+                  status: "stopped",
+                  graceEndsAt: 1700000000,
+                  stoppedAt: 1700086400,
+                },
+              }),
+              { status: 402 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      });
+
+      let captured: unknown;
+      try {
+        await allocateSession(origin, sessionToken, "mach-uuid-1");
+      } catch (err) {
+        captured = err;
+      }
+
+      expect(captured).toBeInstanceOf(AccountSessionError);
+      expect((captured as AccountSessionError).status).toBe(402);
+      expect(planLimitStateFromError(captured)).toEqual({
+        code: REMOTE_SUSPENDED,
+        plan: "pro_monthly",
+        status: "stopped",
+        graceEndsAt: 1700000000,
+        stoppedAt: 1700086400,
+      });
+    });
+
+    it("classifies only the exact contract codes and the exact close reason", () => {
+      expect(
+        planLimitStateFromError(
+          new AccountSessionError("CONCURRENT_ATTACH_SESSION_LIMIT", "limit", 429),
+        ),
+      ).toBeNull();
+      expect(
+        planLimitStateFromError(new AccountSessionError("REMOTE_SUSPENDED_BY_ADMIN", "x", 402)),
+      ).toBeNull();
+      expect(planLimitStateFromError(new Error(`PLAN_LIMIT_REACHED: ${PLAN_LIMIT_REACHED}`))).toBeNull();
+      expect(planLimitStateFromError(null)).toBeNull();
+
+      expect(
+        planLimitStateFromCloseEvent({
+          code: 1012,
+          reason: REMOTE_SUSPENDED_CLOSE_REASON,
+          wasClean: true,
+        }),
+      ).toEqual({ code: REMOTE_SUSPENDED });
+      expect(planLimitStateFromCloseEvent({ code: 1012, reason: "remote_suspended" })).toBeNull();
+      expect(planLimitStateFromCloseEvent({ code: 1012, reason: "REMOTE_SUSPENDED " })).toBeNull();
+      expect(planLimitStateFromCloseEvent({ code: 1006, reason: "" })).toBeNull();
+      expect(planLimitStateFromCloseEvent(undefined)).toBeNull();
+    });
+
+    it("reuses the stored entitlement for a close-reason-only suspension", () => {
+      storeAccountSessionToken(sessionToken, origin);
+      storeAccountEntitlementSnapshot(origin, {
+        plan: "pro_annual",
+        status: "stopped",
+        graceEndsAt: GRACE_ENDS_AT,
+        stoppedAt: STOPPED_AT,
+      });
+      expect(getStoredAccountEntitlementSnapshot(origin)).toEqual({
+        plan: "pro_annual",
+        status: "stopped",
+        graceEndsAt: GRACE_ENDS_AT,
+        stoppedAt: STOPPED_AT,
+      });
+      expect(getStoredAccountEntitlementSnapshot("https://other.example.com")).toBeNull();
+
+      const fromClose = planLimitStateFromCloseEvent({ reason: REMOTE_SUSPENDED_CLOSE_REASON });
+      expect(planLimitStateWithEntitlement(fromClose!, getStoredAccountEntitlementSnapshot(origin))).toEqual({
+        code: REMOTE_SUSPENDED,
+        plan: "pro_annual",
+        status: "stopped",
+        graceEndsAt: GRACE_ENDS_AT,
+        stoppedAt: STOPPED_AT,
+      });
+
+      expect(
+        planLimitStateWithEntitlement(
+          { code: REMOTE_SUSPENDED, stoppedAt: 1 },
+          { stoppedAt: 2, graceEndsAt: 3 },
+        ),
+      ).toEqual({ code: REMOTE_SUSPENDED, stoppedAt: 1, graceEndsAt: 3 });
+      expect(planLimitStateWithEntitlement({ code: PLAN_LIMIT_REACHED, limit: 1 }, null)).toEqual({
+        code: PLAN_LIMIT_REACHED,
+        limit: 1,
+      });
+
+      clearStoredAccountEntitlementSnapshot(origin);
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+      clearStoredAccountSessionToken();
+    });
+
+    it("binds the stored snapshot to the account session", () => {
+      const key = `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${origin}`;
+      storeAccountSessionToken("session-token-a", origin);
+      storeAccountEntitlementSnapshot(origin, { plan: "pro_monthly", graceEndsAt: GRACE_ENDS_AT });
+      expect(getStoredAccountEntitlementSnapshot(origin)).toEqual({
+        plan: "pro_monthly",
+        graceEndsAt: GRACE_ENDS_AT,
+      });
+
+      storeAccountSessionToken("session-token-b", origin);
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+      expect(window.localStorage.getItem(key)).toBeNull();
+
+      storeAccountSessionToken("session-token-b", origin);
+      storeAccountEntitlementSnapshot(origin, { plan: "team_annual" });
+      expect(getStoredAccountEntitlementSnapshot(origin)).toEqual({ plan: "team_annual" });
+
+      storeAccountSessionToken("session-token-c", origin);
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+
+      window.localStorage.setItem(key, JSON.stringify({ plan: "free" }));
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+      expect(window.localStorage.getItem(key)).toBeNull();
+
+      clearStoredAccountSessionToken();
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+    });
+
+    it("drops malformed counts and unrenderable timestamps from structured details", () => {
+      const malformed = new AccountSessionError(REMOTE_SUSPENDED, "suspended", 402, {
+        plan: "pro_monthly",
+        status: "stopped",
+        limit: 1.5,
+        used: -3,
+        graceEndsAt: 18446744073709551615,
+        stoppedAt: 8640000000001,
+      });
+      expect(planLimitStateFromError(malformed)).toEqual({
+        code: REMOTE_SUSPENDED,
+        plan: "pro_monthly",
+        status: "stopped",
+      });
+      expect(() => new Date(18446744073709551615 * 1000).toISOString()).toThrow(RangeError);
+
+      const accepted = new AccountSessionError(REMOTE_SUSPENDED, "suspended", 402, {
+        limit: 0,
+        used: Number.MAX_SAFE_INTEGER,
+        graceEndsAt: 8640000000000,
+        stoppedAt: 0,
+      });
+      expect(planLimitStateFromError(accepted)).toEqual({
+        code: REMOTE_SUSPENDED,
+        limit: 0,
+        used: Number.MAX_SAFE_INTEGER,
+        graceEndsAt: 8640000000000,
+        stoppedAt: 0,
+      });
+      expect(() => new Date(8640000000000 * 1000).toISOString()).not.toThrow();
+    });
+
+    it("sanitises stored entitlement payloads on write and on read", () => {
+      const key = `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${origin}`;
+      storeAccountSessionToken(sessionToken, origin);
+
+      storeAccountEntitlementSnapshot(origin, { plan: "free", graceEndsAt: Number.MAX_VALUE });
+      expect(getStoredAccountEntitlementSnapshot(origin)).toEqual({ plan: "free" });
+
+      storeAccountEntitlementSnapshot(origin, { plan: "free", graceEndsAt: GRACE_ENDS_AT });
+      const record = JSON.parse(window.localStorage.getItem(key) as string);
+      expect(record.graceEndsAt).toBe(GRACE_ENDS_AT);
+      record.graceEndsAt = 8640000000001;
+      record.limit = -1;
+      window.localStorage.setItem(key, JSON.stringify(record));
+      expect(getStoredAccountEntitlementSnapshot(origin)).toEqual({ plan: "free" });
+
+      window.localStorage.setItem(key, "{not json");
+      expect(getStoredAccountEntitlementSnapshot(origin)).toBeNull();
+
+      clearStoredAccountEntitlementSnapshot(origin);
+      expect(window.localStorage.getItem(key)).toBeNull();
+      clearStoredAccountSessionToken();
+    });
   });
 });

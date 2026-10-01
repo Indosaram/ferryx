@@ -92,3 +92,10 @@ splice a recording proxy between the two ends: the recorded bytes never contain 
 an unbound device key is rejected, a substituted machine key cannot complete the handshake, and a
 plaintext client cannot attach. Connecting that handshake to the relay and desktop paths is the part
 still in progress, so do not describe a live account attach as encrypted until that wiring lands.
+
+## Commercial billing and operations
+
+Commercial deployments serving paid managed relays connect to Lemon Squeezy for subscription
+checkout, quantity adjustments, and webhook synchronization. For complete deployment setup,
+systemd drop-in configuration, SQLite storage maintenance, and 7-day grace period enforcement,
+see the [Billing Operations Runbook](billing-operations.md).

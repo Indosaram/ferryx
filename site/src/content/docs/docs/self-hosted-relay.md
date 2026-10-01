@@ -103,6 +103,7 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 
 | Variable / Option | CLI Argument | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `FERRYX_DEPLOYMENT_MODE` | none | unset (required) | Deployment mode: must be set explicitly to `selfhost` for private relays or `commercial` for managed relays. |
 | `FERRYX_RELAY_PORT` | `--port <u16>` | `8787` | TCP port for the HTTP and WebSocket listener. |
 | `FERRYX_ACCOUNT_ORIGIN` | none | `https://relay.checka.cc` | Canonical public HTTPS URL for account auth and magic links. |
 | `FERRYX_ACCOUNT_RELAY_ORIGIN` | none | Value of `FERRYX_ACCOUNT_ORIGIN` | Public WebSocket relay URL advertised in machine records. |
@@ -111,6 +112,38 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 | `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` | `--account-public-key <key>` | unset | Base64-encoded public key of the embedded account authority to enable signed grant submission; unset leaves that route closed. |
 | `FERRYX_RELAY_DATA_DIR` | none | `~/.ferryx/relay` | Durable machine key registry; override for a dedicated service user. |
 | `FERRYX_UI_DIST_DIR` | none | packaged/build-dependent | Directory containing the built remote web app (`ui/dist`); required when the server binary has no bundled UI assets. |
+
+### Deployment Mode Requirement (`FERRYX_DEPLOYMENT_MODE=selfhost`)
+
+`ferryx-relay` requires an explicit deployment mode so that server operators and users have clear guarantees regarding billing, license checks, and network boundaries:
+
+- **Self-Hosted Mode (`FERRYX_DEPLOYMENT_MODE=selfhost`)**:
+  - **Required for all private and internal relay deployments.**
+  - Completely disables commercial billing routes (`/api/account/v1/billing/*`), Lemon Squeezy webhooks, machine quotas, and license suspension checks.
+  - All connected daemons and clients operate with full capabilities perpetually free of charge.
+  - If omitted on startup, `ferryx-relay` will exit immediately with an error instructing the operator to declare `FERRYX_DEPLOYMENT_MODE=selfhost` or `FERRYX_DEPLOYMENT_MODE=commercial`.
+
+The deployment mode is read from the environment only — there is no CLI flag for it, and an
+unrecognized argument fails startup with `unrecognized argument: <arg>` and exit status 2. Set
+the variable for the service or shell that launches the relay:
+
+```bash
+# Linux / macOS
+export FERRYX_DEPLOYMENT_MODE="selfhost"
+ferryx-relay --port 8787
+```
+
+```powershell
+# Windows PowerShell
+$env:FERRYX_DEPLOYMENT_MODE = "selfhost"
+ferryx-relay --port 8787
+```
+
+```bat
+REM Windows Command Prompt
+set FERRYX_DEPLOYMENT_MODE=selfhost
+ferryx-relay --port 8787
+```
 
 ### Machine Authentication Modes
 
@@ -168,6 +201,7 @@ Type=simple
 User=ferryx
 Group=ferryx
 WorkingDirectory=/var/lib/ferryx
+Environment=FERRYX_DEPLOYMENT_MODE=selfhost
 Environment=FERRYX_RELAY_PORT=8787
 Environment=FERRYX_ACCOUNT_ORIGIN=https://relay.example.com
 Environment=FERRYX_ACCOUNT_RELAY_ORIGIN=https://relay.example.com

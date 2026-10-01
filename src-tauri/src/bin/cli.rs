@@ -2,7 +2,7 @@ use ferryx_lib::cli::{
     parse_account_cli, parse_browser_cli, parse_direct_trust_cli, parse_handover_from,
     parse_launch_mode, parse_open_cli, parse_pair_cli, parse_remote_cli, print_browser_cli_error,
     run_account_cli, run_browser_cli, run_daemon_headless, run_direct_trust_cli, run_open_cli,
-    run_pair_cli, run_remote_cli, LaunchMode,
+    run_pair_cli, run_remote_cli, AccountCliError, LaunchMode,
 };
 
 fn main() {
@@ -25,11 +25,14 @@ fn main() {
         }
     }
     if args.get(1).is_some_and(|arg| arg == "account") {
-        match parse_account_cli(&args).and_then(run_account_cli) {
+        let outcome = parse_account_cli(&args)
+            .map_err(|message| AccountCliError::usage(message))
+            .and_then(run_account_cli);
+        match outcome {
             Ok(()) => return,
             Err(error) => {
                 eprintln!("{error}");
-                std::process::exit(1);
+                std::process::exit(error.exit_code);
             }
         }
     }

@@ -1,7 +1,10 @@
 use std::io::Write;
 use std::sync::Arc;
 
+pub mod billing;
 pub mod direct_trust;
+
+pub use billing::AccountCliError;
 pub use direct_trust::{
     parse_direct_trust_cli, run_direct_trust_cli, DirectTrustCliCommand, DIRECT_TRUST_USAGE,
 };
@@ -2243,9 +2246,10 @@ where
 pub enum AccountCliCommand {
     Enroll { code: String, origin: Option<String> },
     Login { email: Option<String>, origin: Option<String> },
+    Plan { json: bool, origin: Option<String> },
 }
 
-const ACCOUNT_USAGE: &str = "expected `ferryx account <enroll|login>`\n  enroll: `ferryx account enroll --code <code> [--origin <url>]`\n  login:  `ferryx account login [--email <email>] [--origin <url>]`";
+const ACCOUNT_USAGE: &str = "expected `ferryx account <enroll|login|plan>`\n  enroll: `ferryx account enroll --code <code> [--origin <url>]`\n  login:  `ferryx account login [--email <email>] [--origin <url>]`\n  plan:   `ferryx account plan [--json] [--origin <url>]` (reuses an existing account session: FERRYX_ACCOUNT_SESSION_TOKEN + FERRYX_ACCOUNT_SESSION_ORIGIN)";
 
 pub fn parse_account_cli<I, T>(args: I) -> Result<AccountCliCommand, String>
 where
@@ -2306,26 +2310,54 @@ where
             }
             Ok(AccountCliCommand::Login { email, origin })
         }
+        Some("plan") => {
+            let mut json = false;
+            let mut origin = None;
+            let mut index = 3;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    "--origin" if origin.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --origin")?;
+                        origin = Some(value.clone());
+                        index += 2;
+                    }
+                    other => return Err(format!("unknown account option `{other}`")),
+                }
+            }
+            Ok(AccountCliCommand::Plan { json, origin })
+        }
         _ => Err(ACCOUNT_USAGE.into()),
     }
 }
 
-pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
+fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {
+    match origin {
+        Some(value) => crate::account::origin::normalize_account_origin(&value)
+            .map_err(|error| AccountCliError::usage(error.to_string())),
+        None => crate::account::origin::account_origin()
+            .map_err(|error| AccountCliError::usage(error.to_string())),
+    }
+}
+
+fn account_cli_runtime() -> Result<tokio::runtime::Runtime, AccountCliError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| AccountCliError::usage(error.to_string()))
+}
+
+pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError> {
     match command {
         AccountCliCommand::Enroll { code, origin } => {
-            let origin = match origin {
-                Some(value) => crate::account::origin::normalize_account_origin(&value)
-                    .map_err(|error| error.to_string())?,
-                None => crate::account::origin::account_origin()
-                    .map_err(|error| error.to_string())?,
-            };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
+            let origin = account_cli_origin(origin)?;
+            let runtime = account_cli_runtime()?;
             let record = runtime
                 .block_on(crate::account::enroll_client::enroll_machine(&origin, &code))
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| billing::from_enroll_error(&origin, &error))?;
             println!("{}", record.account_id);
             println!("{}", record.machine_record_id);
             println!("{}", record.relay_origin);
@@ -2340,26 +2372,17 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
             let email = match email {
                 Some(ref em) if !em.trim().is_empty() => em.trim(),
                 _ => {
-                    return Err(
-                        "error: --email <address> is required for headless machine login.\nUsage: ferryx account login --email user@example.com"
-                            .to_string(),
-                    );
+                    return Err(AccountCliError::usage(
+                        "error: --email <address> is required for headless machine login.\nUsage: ferryx account login --email user@example.com",
+                    ));
                 }
             };
-            let origin = match origin {
-                Some(value) => crate::account::origin::normalize_account_origin(&value)
-                    .map_err(|error| error.to_string())?,
-                None => crate::account::origin::account_origin()
-                    .map_err(|error| error.to_string())?,
-            };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
+            let origin = account_cli_origin(origin)?;
+            let runtime = account_cli_runtime()?;
             runtime.block_on(async {
                 let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|error| billing::from_enroll_error(&origin, &error))?;
                 eprintln!("\n=== Ferryx Machine Login ===");
                 eprintln!("A magic authorization link has been sent to {email}.");
                 eprintln!("Please open the link in your email to approve this machine.\n");
@@ -2372,7 +2395,10 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                 let enrollment_code = loop {
                     tokio::time::sleep(poll_interval).await;
                     if start.elapsed() > timeout {
-                        return Err("Authentication timed out waiting for approval.".to_string());
+                        return Err(AccountCliError::local(
+                            "ACCOUNT_LOGIN_TIMEOUT",
+                            "authentication timed out waiting for approval",
+                        ));
                     }
                     eprint!(".");
                     match crate::account::enroll_client::poll_device_auth(&origin, &auth_resp.device_code).await {
@@ -2381,14 +2407,14 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                             break code;
                         }
                         Ok(None) => continue,
-                        Err(err) => return Err(format!("\nPolling error: {err}")),
+                        Err(err) => return Err(billing::from_enroll_error(&origin, &err)),
                     }
                 };
 
                 eprintln!("Enrolling machine with account...");
                 let record = crate::account::enroll_client::enroll_machine(&origin, &enrollment_code)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| billing::from_enroll_error(&origin, &error))?;
                 println!("{}", record.account_id);
                 println!("{}", record.machine_record_id);
                 println!("{}", record.relay_origin);
@@ -2399,6 +2425,18 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                 );
                 Ok(())
             })
+        }
+        AccountCliCommand::Plan { json, origin } => {
+            let origin = account_cli_origin(origin)?;
+            let session_token = billing::resolve_session_token(&origin)?;
+            let runtime = account_cli_runtime()?;
+            let entitlement = runtime.block_on(billing::fetch_entitlement(&origin, &session_token))?;
+            if json {
+                println!("{}", billing::entitlement_json(&entitlement)?);
+            } else {
+                print!("{}", billing::render_plan_text(&entitlement));
+            }
+            Ok(())
         }
     }
 }
@@ -5897,6 +5935,41 @@ mod tests {
             }
         );
         assert!(parse_account_cli(["ferryx", "account", "login", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn account_plan_cli_parses_json_and_optional_origin() {
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "plan"]).expect("parse"),
+            AccountCliCommand::Plan {
+                json: false,
+                origin: None,
+            }
+        );
+        assert_eq!(
+            parse_account_cli([
+                "ferryx",
+                "account",
+                "plan",
+                "--json",
+                "--origin",
+                "https://account.example",
+            ])
+            .expect("parse"),
+            AccountCliCommand::Plan {
+                json: true,
+                origin: Some("https://account.example".into()),
+            }
+        );
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "plan", "--json", "--json"]).expect("parse"),
+            AccountCliCommand::Plan {
+                json: true,
+                origin: None,
+            }
+        );
+        assert!(parse_account_cli(["ferryx", "account", "plan", "--origin"]).is_err());
+        assert!(parse_account_cli(["ferryx", "account", "plan", "--bogus"]).is_err());
     }
 
     #[test]

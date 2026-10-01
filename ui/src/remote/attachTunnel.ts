@@ -990,11 +990,17 @@ export async function openAccountTunnel(
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent | { code?: number; reason?: string }) => {
       if (timeoutId) clearTimeout(timeoutId);
       isClosed = true;
       if (!handshakeComplete) {
-        reject(new Error("PREMATURE_CLOSE: socket closed before handshake completed"));
+        const code = event?.code;
+        const reason = event?.reason;
+        if (code === 1008 || code === 1012 || (reason && /PLAN_LIMIT|REMOTE_SUSPENDED/i.test(reason))) {
+          reject(new Error(`ATTACH_TUNNEL_REFUSED: code=${code ?? 0} reason=${reason ?? ""}`));
+        } else {
+          reject(new Error("PREMATURE_CLOSE: socket closed before handshake completed"));
+        }
       } else {
         if (pendingReadResolve) {
           const pResolve = pendingReadResolve;

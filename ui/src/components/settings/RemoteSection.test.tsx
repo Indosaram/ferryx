@@ -1092,4 +1092,60 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("reports account session changes to its parent for the resolved origin", async () => {
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/api/account/v1/machines")) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      }),
+    );
+    const onAccountSessionChange = vi.fn();
+
+    try {
+      const { rerender } = render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
+          accountSessionToken={null}
+          onAccountSessionChange={onAccountSessionChange}
+        />,
+      );
+
+      expect(onAccountSessionChange).toHaveBeenCalledWith(null, DEFAULT_RELAY_ORIGIN);
+
+      rerender(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
+          accountSessionToken="session-token-1"
+          onAccountSessionChange={onAccountSessionChange}
+        />,
+      );
+
+      expect(onAccountSessionChange).toHaveBeenCalledWith("session-token-1", DEFAULT_RELAY_ORIGIN);
+
+      rerender(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountOrigin={DEFAULT_RELAY_ORIGIN}
+          accountSessionToken={null}
+          onAccountSessionChange={onAccountSessionChange}
+        />,
+      );
+
+      const calls = onAccountSessionChange.mock.calls;
+      expect(calls[calls.length - 1]).toEqual([null, DEFAULT_RELAY_ORIGIN]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -7,7 +7,6 @@ import {
   openAccountTunnel,
   type TunnelTransport,
   type TunnelWebSocket,
-  type TunnelCloseEvent,
 } from "./attachTunnel";
 import { getMigratedItem, getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
@@ -33,6 +32,40 @@ export class AccountSessionError extends Error {
     this.details = details;
   }
 }
+
+/**
+ * Structured plan-limit contract shared with the account service. Callers branch
+ * on these codes only; error message text is never pattern-matched.
+ */
+export const PLAN_LIMIT_REACHED = "PLAN_LIMIT_REACHED";
+export const REMOTE_SUSPENDED = "REMOTE_SUSPENDED";
+/** Exact WebSocket close reason the relay sends when it stops a suspended account. */
+export const REMOTE_SUSPENDED_CLOSE_REASON = "REMOTE_SUSPENDED";
+
+export type PlanLimitCode = typeof PLAN_LIMIT_REACHED | typeof REMOTE_SUSPENDED;
+
+/** Displayable limit state; every field besides `code` is optional and only ever
+ *  filled from server-provided structure (or the stored entitlement fallback). */
+export interface PlanLimitState {
+  readonly code: PlanLimitCode;
+  readonly plan?: string;
+  readonly status?: string;
+  readonly limit?: number;
+  readonly used?: number;
+  readonly graceEndsAt?: number;
+  readonly stoppedAt?: number;
+}
+
+/** Last entitlement values seen for an account, reused when a WS close carries
+ *  only the REMOTE_SUSPENDED reason and no details. */
+export interface AccountEntitlementSnapshot {
+  readonly plan?: string;
+  readonly status?: string;
+  readonly graceEndsAt?: number;
+  readonly stoppedAt?: number;
+}
+
+export const ACCOUNT_ENTITLEMENT_STORAGE_KEY = "ferryx.account.entitlement";
 
 export interface LoginRequestResponse {
   loginHandle: string;
@@ -118,20 +151,233 @@ function cleanOrigin(origin: string): string {
   return trimmed.replace(/\/+$/, "");
 }
 
+function errorDetails(data: unknown): unknown {
+  return data && typeof data === "object" && "details" in data
+    ? (data as { details?: unknown }).details
+    : undefined;
+}
+
+function planText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** Largest millisecond value `new Date(ms).toISOString()` can render (ECMA-262 Date range). */
+const MAX_DATE_MS = 8.64e15;
+
+function planCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function planTimestamp(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return undefined;
+  const milliseconds = value * 1000;
+  return Number.isFinite(milliseconds) && milliseconds <= MAX_DATE_MS ? value : undefined;
+}
+
+function sessionFingerprint(token: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < token.length; index += 1) {
+    hash ^= token.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/** Identity separator for the entitlement snapshot: never a second copy of the token. */
+function accountSessionFingerprint(): string | null {
+  const token = getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
+  return token ? sessionFingerprint(token) : null;
+}
+
+function planLimitStateFromParts(code: PlanLimitCode, details: unknown): PlanLimitState {
+  const record =
+    details && typeof details === "object" ? (details as Record<string, unknown>) : {};
+  const plan = planText(record.plan);
+  const status = planText(record.status);
+  const limit = planCount(record.limit);
+  const used = planCount(record.used);
+  const graceEndsAt = planTimestamp(record.graceEndsAt);
+  const stoppedAt = planTimestamp(record.stoppedAt);
+  return {
+    code,
+    ...(plan !== undefined ? { plan } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+    ...(used !== undefined ? { used } : {}),
+    ...(graceEndsAt !== undefined ? { graceEndsAt } : {}),
+    ...(stoppedAt !== undefined ? { stoppedAt } : {}),
+  };
+}
+
+function isPlanLimitCode(code: unknown): code is PlanLimitCode {
+  return code === PLAN_LIMIT_REACHED || code === REMOTE_SUSPENDED;
+}
+
+/**
+ * Maps a structured account error to the displayable plan-limit state.
+ * Only the two contract codes match; unrelated codes (for example
+ * CONCURRENT_ATTACH_SESSION_LIMIT) stay ordinary errors.
+ */
+export function planLimitStateFromError(err: unknown): PlanLimitState | null {
+  if (!err || typeof err !== "object") return null;
+  const code = (err as { code?: unknown }).code;
+  if (!isPlanLimitCode(code)) return null;
+  return planLimitStateFromParts(code, (err as { details?: unknown }).details);
+}
+
+/**
+ * Maps a WebSocket close event to the suspended state. The relay closes a
+ * suspended account's sessions with the exact reason REMOTE_SUSPENDED and no
+ * details, so the state stays detail-free instead of inventing timestamps.
+ */
+export function planLimitStateFromCloseEvent(event: unknown): PlanLimitState | null {
+  if (!event || typeof event !== "object") return null;
+  if ((event as { reason?: unknown }).reason !== REMOTE_SUSPENDED_CLOSE_REASON) return null;
+  return { code: REMOTE_SUSPENDED };
+}
+
+/**
+ * Fills a limit state from the last stored entitlement so a close-reason-only
+ * suspension can still show the real plan and grace deadline. Values already
+ * present on the state always win and missing values stay missing.
+ */
+export function planLimitStateWithEntitlement(
+  state: PlanLimitState,
+  snapshot: AccountEntitlementSnapshot | null | undefined,
+): PlanLimitState {
+  if (!snapshot) return state;
+  return {
+    code: state.code,
+    plan: state.plan ?? snapshot.plan,
+    status: state.status ?? snapshot.status,
+    limit: state.limit,
+    used: state.used,
+    graceEndsAt: state.graceEndsAt ?? snapshot.graceEndsAt,
+    stoppedAt: state.stoppedAt ?? snapshot.stoppedAt,
+  };
+}
+
+function accountEntitlementStorageKey(origin: string): string {
+  return `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${cleanOrigin(origin)}`;
+}
+
+export function storeAccountEntitlementSnapshot(
+  origin: string,
+  snapshot: AccountEntitlementSnapshot,
+  storage: Pick<Storage, "setItem"> | null = typeof window !== "undefined" && window.localStorage
+    ? window.localStorage
+    : null,
+): void {
+  if (!storage) return;
+  const session = accountSessionFingerprint();
+  if (!session) return;
+  const plan = planText(snapshot.plan);
+  const status = planText(snapshot.status);
+  const graceEndsAt = planTimestamp(snapshot.graceEndsAt);
+  const stoppedAt = planTimestamp(snapshot.stoppedAt);
+  const stored = {
+    session,
+    ...(plan !== undefined ? { plan } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(graceEndsAt !== undefined ? { graceEndsAt } : {}),
+    ...(stoppedAt !== undefined ? { stoppedAt } : {}),
+  };
+  try {
+    storage.setItem(accountEntitlementStorageKey(origin), JSON.stringify(stored));
+  } catch {
+    // Blocked or full storage must never break the connection flow.
+  }
+}
+
+export function getStoredAccountEntitlementSnapshot(
+  origin: string,
+  storage: Pick<Storage, "getItem" | "removeItem"> | null = typeof window !== "undefined" && window.localStorage
+    ? window.localStorage
+    : null,
+): AccountEntitlementSnapshot | null {
+  if (!storage) return null;
+  const key = accountEntitlementStorageKey(origin);
+  try {
+    const raw = storage.getItem(key);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      storage.removeItem(key);
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    const session = planText(record.session);
+    const current = accountSessionFingerprint();
+    if (!session || !current || session !== current) {
+      storage.removeItem(key);
+      return null;
+    }
+    const plan = planText(record.plan);
+    const status = planText(record.status);
+    const graceEndsAt = planTimestamp(record.graceEndsAt);
+    const stoppedAt = planTimestamp(record.stoppedAt);
+    const snapshot: AccountEntitlementSnapshot = {
+      ...(plan !== undefined ? { plan } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(graceEndsAt !== undefined ? { graceEndsAt } : {}),
+      ...(stoppedAt !== undefined ? { stoppedAt } : {}),
+    };
+    return Object.keys(snapshot).length > 0 ? snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearStoredAccountEntitlementSnapshot(
+  origin: string,
+  storage: Pick<Storage, "removeItem"> | null = typeof window !== "undefined" && window.localStorage
+    ? window.localStorage
+    : null,
+): void {
+  try {
+    storage?.removeItem(accountEntitlementStorageKey(origin));
+  } catch {
+    // Removal failures are not actionable; the stale snapshot only affects display.
+  }
+}
+
 export function getStoredAccountSessionToken(origin: string = getConfiguredAccountOrigin()): string | null {
   const issuer = typeof window !== "undefined" ? window.localStorage.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) : null;
   if (issuer !== cleanOrigin(origin)) return null;
   return getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
 }
 
+export const ACCOUNT_SESSION_CHANGED_EVENT = "ferryx:account-session";
+
+function dispatchAccountSessionChanged(origin: string): void {
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    try {
+      window.dispatchEvent(
+        new CustomEvent(ACCOUNT_SESSION_CHANGED_EVENT, {
+          detail: { origin },
+        }),
+      );
+    } catch {}
+  }
+}
+
 export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin()): void {
+  const issuer = cleanOrigin(origin);
+  if (getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID) !== token) {
+    clearStoredAccountEntitlementSnapshot(issuer);
+  }
   setRemoteAuthToken(token, ACCOUNT_TOKEN_HOST_ID);
-  if (typeof window !== "undefined") window.localStorage.setItem(ACCOUNT_TOKEN_ORIGIN_KEY, cleanOrigin(origin));
+  if (typeof window !== "undefined") window.localStorage.setItem(ACCOUNT_TOKEN_ORIGIN_KEY, issuer);
+  dispatchAccountSessionChanged(issuer);
 }
 
 export function clearStoredAccountSessionToken(): void {
+  const storage = typeof window !== "undefined" ? window.localStorage : null;
+  const issuer = storage?.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) ?? null;
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
-  if (typeof window !== "undefined") window.localStorage.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+  storage?.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+  if (issuer) clearStoredAccountEntitlementSnapshot(issuer);
+  dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOrigin());
 }
 
 export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
@@ -418,6 +664,7 @@ export async function listMachines(
   if (!res.ok) {
     let code = "LIST_MACHINES_FAILED";
     let message = `Failed to list account machines (${res.status})`;
+    let details: unknown;
     try {
       const data = await res.json();
       if (typeof data?.code === "string" && data.code.trim().length > 0) {
@@ -426,6 +673,7 @@ export async function listMachines(
       if (typeof data?.message === "string" && data.message.trim().length > 0) {
         message = data.message.trim();
       }
+      details = errorDetails(data);
     } catch {}
     if (code === "UNAUTHORIZED" && res.status !== 401) {
       code = "LIST_MACHINES_FAILED";
@@ -433,7 +681,7 @@ export async function listMachines(
     if (res.status === 401 && code === "UNAUTHORIZED") {
       message = "Account session expired or unauthorized.";
     }
-    throw new AccountSessionError(code, message, res.status);
+    throw new AccountSessionError(code, message, res.status, details);
   }
 
   const data = await res.json();
@@ -487,12 +735,14 @@ export async function requestGrant(
       code = "UNAUTHORIZED";
       message = "Account session expired or unauthorized.";
     }
+    let details: unknown;
     try {
       const data = await res.json();
       if (data?.code) code = data.code;
       if (data?.message) message = data.message;
+      details = errorDetails(data);
     } catch {}
-    throw new AccountSessionError(code, message, res.status);
+    throw new AccountSessionError(code, message, res.status, details);
   }
 
   const data = await res.json();
@@ -527,6 +777,7 @@ export async function allocateSession(
       code = "UNAUTHORIZED";
       message = "Unauthorized to allocate attach session.";
     }
+    let details: unknown;
     try {
       const data = await res.json();
       if (data?.code === "MACHINE_OFFLINE") {
@@ -536,8 +787,9 @@ export async function allocateSession(
         code = data.code;
         if (data.message) message = data.message;
       }
+      details = errorDetails(data);
     } catch {}
-    throw new AccountSessionError(code, message, res.status);
+    throw new AccountSessionError(code, message, res.status, details);
   }
 
   const data = await res.json();
@@ -587,14 +839,16 @@ export async function redeemInTunnel(
   if (res.status < 200 || res.status >= 300) {
     let code = "PAIR_EXCHANGE_FAILED";
     let message = `Redemption inside tunnel failed (${res.status})`;
+    let details: unknown;
     try {
       const data = JSON.parse(text);
       if (data?.code) code = data.code;
       if (data?.message) message = data.message;
+      details = errorDetails(data);
     } catch {
       if (text) message = text;
     }
-    throw new AccountSessionError(code, message, res.status);
+    throw new AccountSessionError(code, message, res.status, details);
   }
 
   const data = JSON.parse(text) as PairExchangeResponse;
@@ -707,8 +961,11 @@ export async function openAccountWebSocket(
       }
     };
 
-    let userOnClose: ((event: TunnelCloseEvent) => void) | null = null;
-    const origSetOnClose = Object.getOwnPropertyDescriptor(ws, "onclose")?.set;
+    let userOnClose: ((event: any) => void) | null = null;
+    const wsProto = Object.getPrototypeOf(ws);
+    const origSetOnClose =
+      Object.getOwnPropertyDescriptor(ws, "onclose")?.set ||
+      (wsProto ? Object.getOwnPropertyDescriptor(wsProto, "onclose")?.set : undefined);
 
     if (origSetOnClose) {
       Object.defineProperty(ws, "onclose", {
@@ -717,9 +974,9 @@ export async function openAccountWebSocket(
         get() {
           return userOnClose;
         },
-        set(handler: ((event: TunnelCloseEvent) => void) | null) {
+        set(handler: ((event: any) => void) | null) {
           userOnClose = handler;
-          origSetOnClose.call(ws, (event: TunnelCloseEvent) => {
+          origSetOnClose.call(ws, (event: any) => {
             cleanup();
             if (userOnClose) userOnClose(event);
           });
@@ -729,11 +986,23 @@ export async function openAccountWebSocket(
         cleanup();
       });
     } else {
-      const origOnClose = ws.onclose;
-      ws.onclose = (event: TunnelCloseEvent) => {
-        cleanup();
-        if (origOnClose) origOnClose(event);
-      };
+      let currentHandler = ws.onclose;
+      Object.defineProperty(ws, "onclose", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return currentHandler;
+        },
+        set(handler: ((event: any) => void) | null) {
+          currentHandler = (event: any) => {
+            cleanup();
+            if (handler) handler(event);
+          };
+        },
+      });
+      if (currentHandler) {
+        ws.onclose = currentHandler;
+      }
     }
 
     return ws;

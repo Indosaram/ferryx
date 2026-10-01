@@ -200,3 +200,6 @@ async fn router_mounts_offer_with_bearer_and_body_limit() {
     assert_eq!(small.expect("bounded").unwrap().status().as_u16(), 401);
     assert_eq!(large.expect("bounded").unwrap().status().as_u16(), 413);
 }
+
+#[path = "direct_lease_tests.rs"]
+mod direct_lease_tests;

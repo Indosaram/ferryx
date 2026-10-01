@@ -13,19 +13,20 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::mailer::Mailer;
+use super::origin::DeploymentMode;
 use super::store::{
     lock_account_dir, normalize_email, now_secs, random_token, signing_key_path, token_hash,
     write_private_json, AccountSigningKeyRecord, AccountStore, EnrollmentCodeRecord, GrantRecord,
     LoginCodeRecord, MachineRecord, SessionRecord, UserRecord, DEFAULT_LOGIN_REQUESTS_PER_HOUR,
     DEFAULT_MAX_BODY_BYTES, ENROLLMENT_CODE_TTL, LOGIN_CODE_TTL, SESSION_TTL,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ed25519_dalek::{Signer, SigningKey};
 use crate::remote::account_grants::{submission_signing_input, GrantSubmission};
 use crate::remote::account_protocol::{
     AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantOffer,
     AccountGrantOfferEnvelope, AccountGrantRequest, AccountGrantResponse, AccountGrantScope,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signer, SigningKey};
 
 pub const GRANT_TTL: Duration = Duration::from_secs(600);
 
@@ -48,6 +49,7 @@ pub struct AccountState {
     pub data_dir: PathBuf,
     pub origin: String,
     pub relay_origin: String,
+    pub deployment_mode: DeploymentMode,
     pub mailer: Arc<dyn Mailer>,
     pub login_requests_per_hour: u32,
     pub max_body_bytes: usize,
@@ -123,6 +125,7 @@ impl AccountState {
             data_dir: data_dir.into(),
             origin: origin.into(),
             relay_origin: crate::remote::state::DEFAULT_RELAY_URL.to_string(),
+            deployment_mode: DeploymentMode::SelfHost,
             mailer,
             login_requests_per_hour: DEFAULT_LOGIN_REQUESTS_PER_HOUR,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -132,6 +135,11 @@ impl AccountState {
             signing_key: Mutex::new(None),
             liveness_probe: Mutex::new(None),
         }
+    }
+
+    pub fn with_deployment_mode(mut self, deployment_mode: DeploymentMode) -> Self {
+        self.deployment_mode = deployment_mode;
+        self
     }
 
     pub fn with_liveness_probe(self, probe: MachineLivenessProbe) -> Self {
@@ -229,7 +237,7 @@ impl AccountState {
         challenge.nonce == nonce && challenge.expires_at > now
     }
 
-    fn load(&self) -> Result<AccountStore, String> {
+    pub(crate) fn load(&self) -> Result<AccountStore, String> {
         AccountStore::load(&self.data_dir)
     }
 
@@ -237,13 +245,7 @@ impl AccountState {
         &self,
         change: impl FnOnce(&mut AccountStore) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
-        let _guard = lock_account_dir(&self.data_dir).map_err(ApiError::internal)?;
-        let mut store = self.load().map_err(ApiError::internal)?;
-        let now = now_secs();
-        store.purge_expired(now);
-        let value = change(&mut store)?;
-        store.save(&self.data_dir).map_err(ApiError::internal)?;
-        Ok(value)
+        AccountStore::mutate_transaction(&self.data_dir, change)
     }
 
     fn read<T>(
@@ -255,11 +257,18 @@ impl AccountState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    pub details: Option<serde_json::Value>,
+}
+
+impl From<String> for ApiError {
+    fn from(error: String) -> Self {
+        Self::internal(error)
+    }
 }
 
 impl ApiError {
@@ -268,7 +277,15 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            details: None,
         }
+    }
+
+    /// Attaches the structured `details` object clients branch on (AGENTS.md: no regex matching
+    /// on error strings). Omitted from the wire body when absent.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -285,6 +302,8 @@ impl ApiError {
 struct ErrorBody {
     code: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 impl IntoResponse for ApiError {
@@ -294,6 +313,7 @@ impl IntoResponse for ApiError {
             Json(ErrorBody {
                 code: self.code,
                 message: self.message,
+                details: self.details,
             }),
         )
             .into_response()
@@ -412,7 +432,10 @@ impl MachineViewResponse {
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     value
         .strip_prefix("Bearer ")
         .map(|token| token.trim().to_string())
@@ -462,23 +485,35 @@ pub(crate) fn machine_for_owner(
 /// it enrolled, without the operator having to hand out a static enrollment token for it.
 /// Ownership is proven by the exact `machine_id` + `public_key` pair recorded at enrollment.
 pub fn enrolled_machine_by_id(state: &AccountState, machine_id: &str) -> Option<MachineRecord> {
-    state
-        .read(|store| {
-            Ok(store
-                .machines
-                .values()
-                .find(|m| m.machine_id == machine_id)
-                .cloned())
-        })
-        .ok()
-        .flatten()
+    try_enrolled_machine_by_id(state, machine_id).ok().flatten()
+}
+
+/// Looks up an enrolled machine by machine id, propagating any underlying store read error.
+///
+/// Used by relay control admission when billing evaluation is enabled so that a store read
+/// failure fails closed rather than bypassing entitlement checks.
+pub fn try_enrolled_machine_by_id(
+    state: &AccountState,
+    machine_id: &str,
+) -> Result<Option<MachineRecord>, ApiError> {
+    state.read(|store| {
+        Ok(store
+            .machines
+            .values()
+            .find(|m| m.machine_id == machine_id)
+            .cloned())
+    })
 }
 
 pub fn touch_enrolled_machine(state: &AccountState, machine_id: &str) -> bool {
     let now = now_secs();
     state
         .mutate(|store| {
-            if let Some(m) = store.machines.values_mut().find(|m| m.machine_id == machine_id) {
+            if let Some(m) = store
+                .machines
+                .values_mut()
+                .find(|m| m.machine_id == machine_id)
+            {
                 m.last_seen_at = now;
                 Ok(true)
             } else {
@@ -556,13 +591,18 @@ pub async fn device_request(
     let verification_uri = format!("{origin}/device");
     let email_token = random_token();
     let email_token_hash = token_hash(&email_token);
-    let email_approve_url = format!(
-        "{origin}/api/account/v1/device/approve?code={user_code}&token={email_token}"
-    );
+    let email_approve_url =
+        format!("{origin}/api/account/v1/device/approve?code={user_code}&token={email_token}");
     state
         .mailer
         .send_magic_link(&email, &email_approve_url)
-        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "MAIL_FAILED", e.to_string()))?;
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MAIL_FAILED",
+                e.to_string(),
+            )
+        })?;
 
     let expires_at = now_secs() + 900;
     state.mutate(|store| {
@@ -599,11 +639,19 @@ pub async fn device_poll(
     let code_hash = token_hash(&request.device_code);
     state.mutate(|store| {
         let record = store.device_auths.get(&code_hash).ok_or_else(|| {
-            ApiError::new(StatusCode::BAD_REQUEST, "DEVICE_CODE_INVALID", "invalid code")
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "DEVICE_CODE_INVALID",
+                "invalid code",
+            )
         })?;
         if record.expires_at <= now {
             store.device_auths.remove(&code_hash);
-            return Err(ApiError::new(StatusCode::BAD_REQUEST, "DEVICE_CODE_EXPIRED", "expired"));
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "DEVICE_CODE_EXPIRED",
+                "expired",
+            ));
         }
         if let Some(ref enrollment_code) = record.enrollment_code {
             let code = enrollment_code.clone();
@@ -731,7 +779,9 @@ pub async fn login_request(
 
     let expires_at = now_secs() + LOGIN_CODE_TTL.as_secs();
     state.mutate(|store| {
-        store.login_codes.retain(|_, code| code.expires_at > now_secs());
+        store
+            .login_codes
+            .retain(|_, code| code.expires_at > now_secs());
         store.login_codes.insert(
             token_hash(&code),
             LoginCodeRecord {
@@ -930,15 +980,16 @@ pub async fn list_machines(
 ) -> Result<Json<Vec<MachineViewResponse>>, ApiError> {
     let user = require_user(&state, &headers)?;
     let now = now_secs();
-    state.read(|store| {
-        Ok(store
-            .machines
-            .values()
-            .filter(|machine| machine.owner_user_id == user.user_id)
-            .map(|machine| state.machine_view(machine, now))
-            .collect())
-    })
-    .map(Json)
+    state
+        .read(|store| {
+            Ok(store
+                .machines
+                .values()
+                .filter(|machine| machine.owner_user_id == user.user_id)
+                .map(|machine| state.machine_view(machine, now))
+                .collect())
+        })
+        .map(Json)
 }
 
 impl From<&MachineRecord> for MachineViewResponse {
@@ -974,6 +1025,76 @@ fn scope_name(scope: AccountGrantScope) -> String {
     .to_string()
 }
 
+fn plan_key_str(plan: crate::account::billing::entitlement::PlanKey) -> &'static str {
+    match plan {
+        crate::account::billing::entitlement::PlanKey::Free => "free",
+        crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+        crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+        crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+        crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+    }
+}
+
+fn entitlement_status_str(
+    status: crate::account::billing::entitlement::EntitlementStatus,
+) -> &'static str {
+    match status {
+        crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+        crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+        crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+        crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+    }
+}
+
+fn machines_used_for_user(store: &AccountStore, user_id: &str) -> u32 {
+    let org_member = store
+        .org_members
+        .values()
+        .filter(|m| m.user_id == user_id && store.orgs.contains_key(&m.org_id))
+        .min_by(|left, right| left.org_id.cmp(&right.org_id));
+    if let Some(member) = org_member {
+        let org_users: std::collections::HashSet<&str> = store
+            .org_members
+            .values()
+            .filter(|m| m.org_id == member.org_id)
+            .map(|m| m.user_id.as_str())
+            .collect();
+        store
+            .machines
+            .values()
+            .filter(|m| org_users.contains(m.owner_user_id.as_str()))
+            .count() as u32
+    } else {
+        store
+            .machines
+            .values()
+            .filter(|m| m.owner_user_id == user_id)
+            .count() as u32
+    }
+}
+
+fn owner_key_for_user(store: &AccountStore, user_id: &str) -> String {
+    let org_member = store
+        .org_members
+        .values()
+        .filter(|m| m.user_id == user_id && store.orgs.contains_key(&m.org_id))
+        .min_by(|left, right| left.org_id.cmp(&right.org_id));
+    match org_member {
+        Some(m) => format!("org:{}", m.org_id),
+        None => user_id.to_string(),
+    }
+}
+
+pub(crate) fn owner_stopped_at(state: &AccountState, user_id: &str) -> Option<u64> {
+    state
+        .read(|store| {
+            let key = owner_key_for_user(store, user_id);
+            Ok(store.billing_states.get(&key).and_then(|b| b.stopped_at))
+        })
+        .ok()
+        .flatten()
+}
+
 pub async fn enroll_challenge(
     State(state): State<Arc<AccountState>>,
     body: Bytes,
@@ -1002,6 +1123,7 @@ pub async fn enroll(
         ));
     }
     let now = now_secs();
+    let billing_now = crate::account::billing::routes::billing_now();
     if !state.take_challenge(&request.machine_id, &request.nonce, now) {
         return Err(ApiError::unauthorized(
             "ENROLL_CHALLENGE_INVALID",
@@ -1030,86 +1152,146 @@ pub async fn enroll(
         ));
     }
 
-    let (user_id, machine_record_id, epoch) = state.mutate(|store| {
-        let record = store
-            .enrollment_codes
-            .get(&code_hash)
-            .cloned()
-            .ok_or_else(|| {
-                ApiError::unauthorized("ENROLL_CODE_INVALID", "unknown enrollment code")
-            })?;
-        if record.expires_at <= now {
-            store.enrollment_codes.remove(&code_hash);
-            return Err(ApiError::unauthorized(
-                "ENROLL_CODE_EXPIRED",
-                "enrollment code has expired",
-            ));
-        }
-        if record.account_origin != state.origin {
-            return Err(ApiError::unauthorized(
-                "ENROLL_ORIGIN_MISMATCH",
-                "enrollment code was issued for a different account origin",
-            ));
-        }
-        store.enrollment_codes.remove(&code_hash);
-        let user_id = record.user_id;
-
-        let existing = store
-            .machines
-            .values()
-            .find(|machine| machine.machine_id == request.machine_id)
-            .cloned();
-        let platform = platform_name(&request.platform);
-        let (machine_record_id, epoch) = match existing {
-            Some(machine) if machine.owner_user_id != user_id => {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "ACCOUNT_MACHINE_CLAIMED",
-                    "this machine id is already enrolled to a different account",
+    let state_clone = state.clone();
+    let request_clone = request.clone();
+    let (user_id, machine_record_id, epoch) = crate::ipc::run_blocking(move || {
+        Ok((|| -> Result<(String, String, u64), ApiError> {
+            let decision = state_clone.mutate(|store| {
+                let record = store
+                .enrollment_codes
+                .get(&code_hash)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::unauthorized("ENROLL_CODE_INVALID", "unknown enrollment code")
+                })?;
+            if record.expires_at <= now {
+                store.enrollment_codes.remove(&code_hash);
+                return Err(ApiError::unauthorized(
+                    "ENROLL_CODE_EXPIRED",
+                    "enrollment code has expired",
                 ));
             }
-            Some(machine) => {
-                let epoch = machine.enrollment_epoch + 1;
-                let updated = MachineRecord {
-                    machine_record_id: machine.machine_record_id.clone(),
-                    owner_user_id: machine.owner_user_id.clone(),
-                    machine_id: machine.machine_id.clone(),
-                    display_name: request.display_name.clone(),
-                    public_key: request.public_key.clone(),
-                    attach_public_key: request.attach_public_key.clone(),
-                    relay_origin: state.relay_origin.clone(),
-                    platform,
-                    enrollment_epoch: epoch,
-                    enrolled_at: machine.enrolled_at,
-                    last_seen_at: now,
-                };
-                store
-                    .machines
-                    .insert(updated.machine_record_id.clone(), updated.clone());
-                (updated.machine_record_id, epoch)
+            if record.account_origin != state_clone.origin {
+                return Err(ApiError::unauthorized(
+                    "ENROLL_ORIGIN_MISMATCH",
+                    "enrollment code was issued for a different account origin",
+                ));
             }
-            None => {
-                let record = MachineRecord {
-                    machine_record_id: uuid::Uuid::new_v4().to_string(),
-                    owner_user_id: user_id.clone(),
-                    machine_id: request.machine_id.clone(),
-                    display_name: request.display_name.clone(),
-                    public_key: request.public_key.clone(),
-                    attach_public_key: request.attach_public_key.clone(),
-                    relay_origin: state.relay_origin.clone(),
-                    platform,
-                    enrollment_epoch: 1,
-                    enrolled_at: now,
-                    last_seen_at: now,
-                };
-                store
-                    .machines
-                    .insert(record.machine_record_id.clone(), record.clone());
-                (record.machine_record_id, 1)
+            let user_id = record.user_id.clone();
+
+            let existing = store
+                .machines
+                .values()
+                .find(|machine| machine.machine_id == request_clone.machine_id)
+                .cloned();
+
+            if let Some(ref machine) = existing {
+                if machine.owner_user_id != user_id {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "ACCOUNT_MACHINE_CLAIMED",
+                        "this machine id is already enrolled to a different account",
+                    ));
+                }
             }
-        };
-        Ok((user_id, machine_record_id, epoch))
-    })?;
+
+            if state_clone.deployment_mode.is_billing_enabled() {
+                let entitlement = crate::account::billing::routes::entitlement_for_user_in_store(
+                    store,
+                    &user_id,
+                    billing_now,
+                );
+                if entitlement.status == crate::account::billing::entitlement::EntitlementStatus::Stopped {
+                    let owner_key = owner_key_for_user(store, &user_id);
+                    let stopped_at = store
+                        .billing_states
+                        .get(&owner_key)
+                        .and_then(|b| b.stopped_at)
+                        .or(Some(billing_now));
+                    let refusal = ApiError::new(
+                        StatusCode::PAYMENT_REQUIRED,
+                        "REMOTE_SUSPENDED",
+                        "remote access is suspended for this account",
+                    )
+                    .with_details(serde_json::json!({
+                        "plan": plan_key_str(entitlement.effective_plan),
+                        "status": entitlement_status_str(entitlement.status),
+                        "graceEndsAt": entitlement.grace_ends_at,
+                        "stoppedAt": stopped_at,
+                    }));
+                    // Return Ok(Err(refusal)) so the updated billing state is committed to SQLite,
+                    // while the machine is not enrolled and the enrollment code is preserved.
+                    return Ok(Err(refusal));
+                }
+
+                if existing.is_none() && !entitlement.may_enroll_new {
+                    let used = machines_used_for_user(store, &user_id);
+                    let refusal = ApiError::new(
+                        StatusCode::PAYMENT_REQUIRED,
+                        "PLAN_LIMIT_REACHED",
+                        "plan machine limit reached",
+                    )
+                    .with_details(serde_json::json!({
+                        "plan": plan_key_str(entitlement.effective_plan),
+                        "limit": entitlement.machine_limit,
+                        "used": used,
+                    }));
+                    // Return Ok(Err(refusal)) so the updated billing state is committed to SQLite,
+                    // while the machine is not enrolled and the enrollment code is preserved.
+                    return Ok(Err(refusal));
+                }
+            }
+
+            store.enrollment_codes.remove(&code_hash);
+            let platform = platform_name(&request_clone.platform);
+            let (machine_record_id, epoch) = match existing {
+                Some(machine) => {
+                    let epoch = machine.enrollment_epoch + 1;
+                    let updated = MachineRecord {
+                        machine_record_id: machine.machine_record_id.clone(),
+                        owner_user_id: machine.owner_user_id.clone(),
+                        machine_id: machine.machine_id.clone(),
+                        display_name: request_clone.display_name.clone(),
+                        public_key: request_clone.public_key.clone(),
+                        attach_public_key: request_clone.attach_public_key.clone(),
+                        relay_origin: state_clone.relay_origin.clone(),
+                        platform,
+                        enrollment_epoch: epoch,
+                        enrolled_at: machine.enrolled_at,
+                        last_seen_at: now,
+                    };
+                    store
+                        .machines
+                        .insert(updated.machine_record_id.clone(), updated.clone());
+                    (updated.machine_record_id, epoch)
+                }
+                None => {
+                    let record = MachineRecord {
+                        machine_record_id: uuid::Uuid::new_v4().to_string(),
+                        owner_user_id: user_id.clone(),
+                        machine_id: request_clone.machine_id.clone(),
+                        display_name: request_clone.display_name.clone(),
+                        public_key: request_clone.public_key.clone(),
+                        attach_public_key: request_clone.attach_public_key.clone(),
+                        relay_origin: state_clone.relay_origin.clone(),
+                        platform,
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    };
+                    store
+                        .machines
+                        .insert(record.machine_record_id.clone(), record.clone());
+                    (record.machine_record_id, 1)
+                }
+            };
+            Ok(Ok((user_id, machine_record_id, epoch)))
+        })?;
+        decision
+        })())
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
 
     Ok(Json(AccountEnrollResponse {
         account_id: user_id,
@@ -1126,109 +1308,192 @@ pub async fn issue_grant(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<AccountGrantResponse>, ApiError> {
-    let user = require_user(&state, &headers)?;
     let request: AccountGrantRequest = parse_json(body).await?;
     let now = now_secs();
+    let billing_now = crate::account::billing::routes::billing_now();
 
-    let (grant, pairing_token, machine, offer) = state.mutate(|store| {
-        let machine = store
-            .machines
-            .get(&machine_record_id)
-            .cloned()
-            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "MACHINE_NOT_FOUND", "no such machine"))?;
-        if machine.owner_user_id != user.user_id {
-            return Err(ApiError::new(
-                StatusCode::NOT_FOUND,
-                "MACHINE_NOT_FOUND",
-                "no such machine on this account",
-            ));
-        }
-        if machine.enrollment_epoch.to_string() != request.enrollment_epoch {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "ACCOUNT_ENROLLMENT_EPOCH_MISMATCH",
-                "machine re-enrolled since this view was fetched",
-            ));
-        }
-        let pairing_token = random_token();
-        let grant = GrantRecord {
-            grant_id: uuid::Uuid::new_v4().to_string(),
-            machine_record_id: machine.machine_record_id.clone(),
-            owner_user_id: machine.owner_user_id.clone(),
-            pairing_token_hash: token_hash(&pairing_token),
-            grant_scope: scope_name(request.grant_scope),
-            device_attach_public_key: request.attach_public_key.clone(),
-            installation_id: request.installation_id.clone(),
-            issued_at: now,
-            expires_at: now + GRANT_TTL.as_secs(),
-        };
-        store.grants.insert(grant.grant_id.clone(), grant.clone());
-        let offer = AccountGrantOffer {
-            grant_id: grant.grant_id.clone(),
-            machine_id: machine.machine_id.clone(),
-            enrollment_epoch: machine.enrollment_epoch.to_string(),
-            pairing_token: pairing_token.clone(),
-            device_label: request.device_label.clone(),
-            installation_id: request.installation_id.clone(),
-            grant_scope: request.grant_scope,
-            expires_at: grant.expires_at,
-            device_attach_public_key: request.attach_public_key.clone(),
-        };
-        Ok((grant, pairing_token, machine, offer))
-    })?;
+    let state_clone = state.clone();
+    let machine_record_id_clone = machine_record_id.clone();
+    let request_clone = request.clone();
+    let headers_clone = headers.clone();
 
-    let sealed_offer = serde_json::to_vec(&offer)
-        .map_err(|error| ApiError::internal(error.to_string()))
-        .and_then(|plaintext| {
-            crate::remote::sealed_offer::seal_offer(
-                &machine.attach_public_key,
-                &machine.machine_id,
-                &offer.enrollment_epoch,
-                &plaintext,
-            )
-            .map_err(|error| ApiError::internal(error.to_string()))
+    let (grant, pairing_token, machine, offer, sealed_offer, submission) =
+        crate::ipc::run_blocking(move || {
+            Ok((|| -> Result<_, ApiError> {
+                let user = require_user(&state_clone, &headers_clone)?;
+
+                let decision = state_clone.mutate(|store| {
+                let machine = store
+                    .machines
+                    .get(&machine_record_id_clone)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            StatusCode::NOT_FOUND,
+                            "MACHINE_NOT_FOUND",
+                            "no such machine",
+                        )
+                    })?;
+                if machine.owner_user_id != user.user_id {
+                    return Err(ApiError::new(
+                        StatusCode::NOT_FOUND,
+                        "MACHINE_NOT_FOUND",
+                        "no such machine on this account",
+                    ));
+                }
+                if machine.enrollment_epoch.to_string() != request_clone.enrollment_epoch {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "ACCOUNT_ENROLLMENT_EPOCH_MISMATCH",
+                        "machine re-enrolled since this view was fetched",
+                    ));
+                }
+
+                if state_clone.deployment_mode.is_billing_enabled() {
+                    let entitlement = crate::account::billing::routes::entitlement_for_user_in_store(
+                        store,
+                        &user.user_id,
+                        billing_now,
+                    );
+                    if !entitlement.remote_allowed {
+                        let owner_key = owner_key_for_user(store, &user.user_id);
+                        let stopped_at = store
+                            .billing_states
+                            .get(&owner_key)
+                            .and_then(|b| b.stopped_at)
+                            .or(Some(billing_now));
+                        let refusal = ApiError::new(
+                            StatusCode::PAYMENT_REQUIRED,
+                            "REMOTE_SUSPENDED",
+                            "remote access is suspended for this account",
+                        )
+                        .with_details(serde_json::json!({
+                            "plan": plan_key_str(entitlement.effective_plan),
+                            "status": entitlement_status_str(entitlement.status),
+                            "graceEndsAt": entitlement.grace_ends_at,
+                            "stoppedAt": stopped_at,
+                        }));
+                        // Return Ok(Err(refusal)) so the updated billing state is committed to SQLite,
+                        // while the grant is not issued.
+                        return Ok(Err(refusal));
+                    }
+                }
+
+                let pairing_token = random_token();
+                let grant = GrantRecord {
+                    grant_id: uuid::Uuid::new_v4().to_string(),
+                    machine_record_id: machine.machine_record_id.clone(),
+                    owner_user_id: machine.owner_user_id.clone(),
+                    pairing_token_hash: token_hash(&pairing_token),
+                    grant_scope: scope_name(request_clone.grant_scope),
+                    device_attach_public_key: request_clone.attach_public_key.clone(),
+                    installation_id: request_clone.installation_id.clone(),
+                    issued_at: now,
+                    expires_at: now + GRANT_TTL.as_secs(),
+                };
+                store.grants.insert(grant.grant_id.clone(), grant.clone());
+                let offer = AccountGrantOffer {
+                    grant_id: grant.grant_id.clone(),
+                    machine_id: machine.machine_id.clone(),
+                    enrollment_epoch: machine.enrollment_epoch.to_string(),
+                    pairing_token: pairing_token.clone(),
+                    device_label: request_clone.device_label.clone(),
+                    installation_id: request_clone.installation_id.clone(),
+                    grant_scope: request_clone.grant_scope,
+                    expires_at: grant.expires_at,
+                    device_attach_public_key: request_clone.attach_public_key.clone(),
+                };
+                Ok(Ok((grant, pairing_token, machine, offer)))
+            })?;
+
+            let (grant, pairing_token, machine, offer) = decision?;
+
+            let sealed_offer = serde_json::to_vec(&offer)
+                .map_err(|error| ApiError::internal(error.to_string()))
+                .and_then(|plaintext| {
+                    crate::remote::sealed_offer::seal_offer(
+                        &machine.attach_public_key,
+                        &machine.machine_id,
+                        &offer.enrollment_epoch,
+                        &plaintext,
+                    )
+                    .map_err(|error| ApiError::internal(error.to_string()))
+                })
+                .map(|sealed| AccountGrantOfferEnvelope {
+                    machine_id: machine.machine_id.clone(),
+                    enrollment_epoch: offer.enrollment_epoch.clone(),
+                    sealed: STANDARD.encode(sealed),
+                })?;
+
+            let signing_key = state_clone
+                .signing_key()
+                .map_err(|error| ApiError::internal(format!("signing key unavailable: {error}")))?;
+            let mut submission = GrantSubmission {
+                machine_id: machine.machine_id.clone(),
+                enrollment_epoch: offer.enrollment_epoch.clone(),
+                envelope: sealed_offer.clone(),
+                signature: String::new(),
+            };
+            let signing_input = submission_signing_input(&submission);
+            let signature = signing_key.sign(&signing_input);
+            submission.signature = STANDARD.encode(signature.to_bytes());
+
+            Ok((grant, pairing_token, machine, offer, sealed_offer, submission))
+            })())
         })
-        .map(|sealed| AccountGrantOfferEnvelope {
-            machine_id: machine.machine_id.clone(),
-            enrollment_epoch: offer.enrollment_epoch.clone(),
-            sealed: STANDARD.encode(sealed),
-        })?;
-
-    let signing_key = state
-        .signing_key()
-        .map_err(|error| ApiError::internal(format!("signing key unavailable: {error}")))?;
-    let mut submission = GrantSubmission {
-        machine_id: machine.machine_id.clone(),
-        enrollment_epoch: offer.enrollment_epoch.clone(),
-        envelope: sealed_offer.clone(),
-        signature: String::new(),
-    };
-    let signing_input = submission_signing_input(&submission);
-    let signature = signing_key.sign(&signing_input);
-    submission.signature = STANDARD.encode(signature.to_bytes());
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
 
     let relay_url = format!(
         "{}/api/v1/attach/grant",
         machine.relay_origin.trim_end_matches('/')
     );
-    let delivery_response = state
+    let rollback_grant = || {
+        let rollback_state = state.clone();
+        let rollback_grant_id = grant.grant_id.clone();
+        let log_grant_id = rollback_grant_id.clone();
+        async move {
+            let rollback_res = crate::ipc::run_blocking(move || {
+                Ok(rollback_state.mutate(|store| {
+                    store.grants.remove(&rollback_grant_id);
+                    Ok(())
+                }))
+            })
+            .await;
+            match rollback_res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(api_err)) => {
+                    eprintln!("failed to rollback grant {log_grant_id}: {api_err:?}");
+                    Err(api_err)
+                }
+                Err(ipc_err) => {
+                    eprintln!("failed to dispatch rollback grant {log_grant_id}: {ipc_err}");
+                    Err(ApiError::internal(ipc_err.to_string()))
+                }
+            }
+        }
+    };
+
+    let delivery_response = match state
         .http_client
         .post(&relay_url)
         .timeout(Duration::from_secs(5))
         .json(&submission)
         .send()
         .await
-        .map_err(|error| {
-            let _ = state.mutate(|store| {
-                store.grants.remove(&grant.grant_id);
-                Ok(())
-            });
-            ApiError::new(
+    {
+        Ok(resp) => resp,
+        Err(error) => {
+            if let Err(rb_err) = rollback_grant().await {
+                eprintln!("rollback failed on delivery send error: {rb_err:?}");
+            }
+            return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GRANT_DELIVERY_FAILED",
                 format!("failed to deliver grant to relay at {relay_url}: {error}"),
-            )
-        })?;
+            ));
+        }
+    };
 
     if !delivery_response.status().is_success() {
         let status = delivery_response.status();
@@ -1236,10 +1501,9 @@ pub async fn issue_grant(
             .text()
             .await
             .unwrap_or_else(|_| "<unreadable response body>".to_string());
-        let _ = state.mutate(|store| {
-            store.grants.remove(&grant.grant_id);
-            Ok(())
-        });
+        if let Err(rb_err) = rollback_grant().await {
+            eprintln!("rollback failed on delivery status error: {rb_err:?}");
+        }
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "GRANT_DELIVERY_FAILED",
@@ -1251,10 +1515,9 @@ pub async fn issue_grant(
     let value: serde_json::Value = match serde_json::from_str(&body_text) {
         Ok(v) => v,
         Err(_) => {
-            let _ = state.mutate(|store| {
-                store.grants.remove(&grant.grant_id);
-                Ok(())
-            });
+            if let Err(rb_err) = rollback_grant().await {
+                eprintln!("rollback failed on delivery response parse error: {rb_err:?}");
+            }
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GRANT_DELIVERY_FAILED",
@@ -1264,10 +1527,9 @@ pub async fn issue_grant(
     };
 
     if value.get("accepted").and_then(|v| v.as_bool()) == Some(false) {
-        let _ = state.mutate(|store| {
-            store.grants.remove(&grant.grant_id);
-            Ok(())
-        });
+        if let Err(rb_err) = rollback_grant().await {
+            eprintln!("rollback failed on delivery rejected: {rb_err:?}");
+        }
         return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "GRANT_DELIVERY_FAILED",
@@ -1283,10 +1545,9 @@ pub async fn issue_grant(
     match status {
         Some("ready") => {}
         Some(other) => {
-            let _ = state.mutate(|store| {
-                store.grants.remove(&grant.grant_id);
-                Ok(())
-            });
+            if let Err(rb_err) = rollback_grant().await {
+                eprintln!("rollback failed on machine delivery error: {rb_err:?}");
+            }
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GRANT_DELIVERY_FAILED",
@@ -1294,10 +1555,9 @@ pub async fn issue_grant(
             ));
         }
         None => {
-            let _ = state.mutate(|store| {
-                store.grants.remove(&grant.grant_id);
-                Ok(())
-            });
+            if let Err(rb_err) = rollback_grant().await {
+                eprintln!("rollback failed on missing delivered status: {rb_err:?}");
+            }
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GRANT_DELIVERY_FAILED",
@@ -1320,7 +1580,7 @@ pub async fn issue_grant(
 
 pub fn router(state: Arc<AccountState>) -> Router {
     let limit = state.max_body_bytes;
-    Router::new()
+    let mut router = Router::new()
         .route("/api/account/v1/public-key", get(get_public_key))
         .route("/api/account/v1/login/request", post(login_request))
         .route("/api/account/v1/login/poll", post(login_poll))
@@ -1343,15 +1603,37 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route(
             "/api/account/v1/machines/{machine_record_id}/grants",
             post(issue_grant),
-        )
-        .layer(DefaultBodyLimit::max(limit))
-        .with_state(state)
+        );
+
+    // Self-hosted deployments never expose billing, lease or team routes: nothing is registered,
+    // so every billing path answers the router default 404.
+    if state.deployment_mode.is_billing_enabled() {
+        router = router.merge(crate::account::billing::routes::billing_routes(
+            crate::account::billing::lemonsqueezy::LemonSqueezyConfig::from_env(),
+        ));
+    }
+
+    router.layer(DefaultBodyLimit::max(limit)).with_state(state)
 }
 
-pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AccountState>) -> Result<(), String> {
-    axum::serve(listener, router(state))
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: Arc<AccountState>,
+) -> Result<(), String> {
+    // The grace, suspension and recovery notices are clock-driven and must fire while the
+    // entitlement state stays unchanged, so commercial deployments run one background notice
+    // sweeper. Self-host never enables billing and must not start it.
+    let sweeper = state
+        .deployment_mode
+        .is_billing_enabled()
+        .then(|| crate::account::billing::notices::spawn_billing_notice_sweeper(Arc::clone(&state)));
+    let served = axum::serve(listener, router(state))
         .await
-        .map_err(|error| format!("account server failed: {error}"))
+        .map_err(|error| format!("account server failed: {error}"));
+    if let Some(sweeper) = sweeper {
+        sweeper.abort();
+    }
+    served
 }
 
 #[cfg(test)]
@@ -1363,7 +1645,11 @@ mod tests {
             .expect("mail dir")
             .filter_map(|entry| entry.ok())
             .collect();
-        assert_eq!(entries.len(), 1, "device request sends exactly one magic link");
+        assert_eq!(
+            entries.len(),
+            1,
+            "device request sends exactly one magic link"
+        );
         std::fs::read_to_string(entries[0].path()).expect("magic link content")
     }
 
@@ -1385,13 +1671,19 @@ mod tests {
     async fn device_flow_lifecycle_request_poll_approve() {
         let tmp = tempfile::tempdir().unwrap();
         let mail_dir = tmp.path().join("mail");
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir.clone()));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            mail_dir.clone(),
+        ));
         let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
 
         let req_body = serde_json::to_vec(&serde_json::json!({
             "email": "headless@test.local"
-        })).unwrap();
-        let resp = device_request(State(state.clone()), Bytes::from(req_body)).await.unwrap().0;
+        }))
+        .unwrap();
+        let resp = device_request(State(state.clone()), Bytes::from(req_body))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(resp.interval, 2);
         assert!(!resp.user_code.is_empty());
         assert_eq!(resp.verification_uri, "https://relay.test/device");
@@ -1411,8 +1703,12 @@ mod tests {
 
         let poll_body = serde_json::to_vec(&serde_json::json!({
             "deviceCode": resp.device_code
-        })).unwrap();
-        let pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        }))
+        .unwrap();
+        let pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(pending.status, "authorization_pending");
         assert!(pending.enrollment_code.is_none());
 
@@ -1422,7 +1718,8 @@ mod tests {
                 code: resp.user_code.clone(),
                 token: "wrong_token".into(),
             }),
-        ).await;
+        )
+        .await;
         let error = match rejected {
             Err(error) => error,
             Ok(_) => panic!("approval without the emailed token must fail"),
@@ -1430,7 +1727,10 @@ mod tests {
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
         assert_eq!(error.code, "EMAIL_TOKEN_INVALID");
 
-        let still_pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        let still_pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(still_pending.status, "authorization_pending");
         assert!(still_pending.enrollment_code.is_none());
 
@@ -1440,10 +1740,14 @@ mod tests {
                 code: resp.user_code.clone(),
                 token: valid_token,
             }),
-        ).await;
+        )
+        .await;
         assert!(approve_res.is_ok());
 
-        let approved = device_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap().0;
+        let approved = device_poll(State(state.clone()), Bytes::from(poll_body))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(approved.status, "approved");
         assert!(approved.enrollment_code.is_some());
     }
@@ -1452,13 +1756,18 @@ mod tests {
     async fn login_poll_returns_pending_until_the_browser_consumes_the_code() {
         let tmp = tempfile::tempdir().unwrap();
         let mail_dir = tmp.path().join("mail");
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir.clone()));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            mail_dir.clone(),
+        ));
         let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
 
         let req_body = serde_json::to_vec(&serde_json::json!({
             "email": "user@test.local"
-        })).unwrap();
-        let (status, resp) = login_request(State(state.clone()), Bytes::from(req_body)).await.unwrap();
+        }))
+        .unwrap();
+        let (status, resp) = login_request(State(state.clone()), Bytes::from(req_body))
+            .await
+            .unwrap();
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(!resp.login_handle.is_empty());
 
@@ -1480,33 +1789,52 @@ mod tests {
         // 1. Poll before browser consumption -> pending, no token
         let poll_body = serde_json::to_vec(&serde_json::json!({
             "loginHandle": resp.login_handle
-        })).unwrap();
-        let pending = login_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        }))
+        .unwrap();
+        let pending = login_poll(State(state.clone()), Bytes::from(poll_body.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(pending.status, "pending");
         assert!(pending.token.is_none());
 
         // 2. Browser consumes the code -> returns a token
         let consume_body = serde_json::to_vec(&serde_json::json!({
             "code": code
-        })).unwrap();
-        let browser_session = login_consume(State(state.clone()), Bytes::from(consume_body.clone())).await.unwrap().0;
+        }))
+        .unwrap();
+        let browser_session =
+            login_consume(State(state.clone()), Bytes::from(consume_body.clone()))
+                .await
+                .unwrap()
+                .0;
         assert!(!browser_session.token.is_empty());
         assert_eq!(browser_session.email, "user@test.local");
 
         // 3. Poll after browser consumption -> approved, mints session for app
-        let approved = login_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        let approved = login_poll(State(state.clone()), Bytes::from(poll_body.clone()))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(approved.status, "approved");
         assert!(approved.token.is_some());
         assert_eq!(approved.email.as_deref(), Some("user@test.local"));
-        assert_eq!(approved.account_id.as_deref(), Some(browser_session.account_id.as_str()));
+        assert_eq!(
+            approved.account_id.as_deref(),
+            Some(browser_session.account_id.as_str())
+        );
 
         // 4. Poll third time -> fails with 401 LOGIN_HANDLE_INVALID (record was removed)
-        let third_poll_err = login_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap_err();
+        let third_poll_err = login_poll(State(state.clone()), Bytes::from(poll_body))
+            .await
+            .unwrap_err();
         assert_eq!(third_poll_err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(third_poll_err.code, "LOGIN_HANDLE_INVALID");
 
         // 5. Second consume with same code -> fails with 401 LOGIN_CODE_USED
-        let second_consume_err = login_consume(State(state.clone()), Bytes::from(consume_body)).await.unwrap_err();
+        let second_consume_err = login_consume(State(state.clone()), Bytes::from(consume_body))
+            .await
+            .unwrap_err();
         assert_eq!(second_consume_err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(second_consume_err.code, "LOGIN_CODE_USED");
     }
@@ -1514,7 +1842,9 @@ mod tests {
     #[tokio::test]
     async fn device_request_rejects_invalid_email() {
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
         let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
 
         for email in ["", "not-an-email"] {
@@ -1534,12 +1864,19 @@ mod tests {
         let mail_dir = tmp.path().join("mail");
         let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
 
-        let state1 = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer.clone()));
+        let state1 = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer.clone(),
+        ));
         let pk1 = state1.account_public_key();
         assert!(!pk1.is_empty(), "public key must not be empty");
 
         let key_file = tmp.path().join("account-signing-key.json");
-        assert!(key_file.exists(), "signing key file must be created on disk");
+        assert!(
+            key_file.exists(),
+            "signing key file must be created on disk"
+        );
 
         #[cfg(unix)]
         {
@@ -1552,9 +1889,16 @@ mod tests {
             );
         }
 
-        let state2 = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let state2 = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
         let pk2 = state2.account_public_key();
-        assert_eq!(pk1, pk2, "reloading the same directory must yield the same public key");
+        assert_eq!(
+            pk1, pk2,
+            "reloading the same directory must yield the same public key"
+        );
     }
 
     #[tokio::test]
@@ -1562,7 +1906,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mail_dir = tmp.path().join("mail");
         let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
         let expected_key = state.account_public_key();
 
         let resp = get_public_key(State(state))
@@ -1590,7 +1938,11 @@ mod tests {
 
         let mail_dir = tmp.path().join("mail");
         let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
 
         let err = get_public_key(State(state))
             .await
@@ -1603,8 +1955,14 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_reports_ok_and_unknown_path_is_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -1650,7 +2008,9 @@ mod tests {
         let machine = MachineRecord {
             machine_record_id: uuid::Uuid::new_v4().to_string(),
             owner_user_id: user_id.clone(),
-            machine_id: "test-machine-1".to_string(),
+            // machines_machine_id_unique is a store-level unique index, so a fixed literal
+            // collides as soon as one test mints a second machine into the same store.
+            machine_id: format!("test-machine-{user_id}"),
             display_name: "Test Machine".to_string(),
             public_key: STANDARD.encode([1u8; 32]),
             attach_public_key,
@@ -1667,7 +2027,9 @@ mod tests {
                     user_id.clone(),
                     UserRecord {
                         user_id: user_id.clone(),
-                        email: "tester@example.com".to_string(),
+                        // users_email_unique is a store-level unique index; the email must differ
+                        // per fixture user even though the conflict target is only user_id.
+                        email: format!("tester-{user_id}@example.com"),
                         created_at: now,
                     },
                 );
@@ -1720,8 +2082,14 @@ mod tests {
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
 
         let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin);
 
@@ -1832,8 +2200,14 @@ mod tests {
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
 
         let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin_403);
         let device_attach_key = STANDARD.encode([3u8; 32]);
@@ -2073,30 +2447,49 @@ mod tests {
     #[tokio::test]
     async fn machine_online_status_freshness_and_liveness_probe() {
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
-        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
         let now = now_secs();
 
         // 1. Fresh machine (last_seen_at = now) -> online: true
-        let (session_token, fresh_machine) = setup_test_user_and_machine(&state, "https://relay.test");
+        let (session_token, fresh_machine) =
+            setup_test_user_and_machine(&state, "https://relay.test");
         let view = state.machine_view(&fresh_machine, now);
-        assert!(view.online, "a machine seen within the freshness window must report online: true");
+        assert!(
+            view.online,
+            "a machine seen within the freshness window must report online: true"
+        );
 
         // From<&MachineRecord> fallback also reports true for fresh machine
         let from_view = MachineViewResponse::from(&fresh_machine);
-        assert!(from_view.online, "From conversion must also report online: true for fresh machine");
+        assert!(
+            from_view.online,
+            "From conversion must also report online: true for fresh machine"
+        );
 
         // 2. Stale machine (last_seen_at = now - 600s, beyond 300s window) -> online: false
         let mut stale_machine = fresh_machine.clone();
         stale_machine.last_seen_at = now.saturating_sub(MACHINE_ONLINE_FRESHNESS_WINDOW_SECS + 300);
         let stale_view = state.machine_view(&stale_machine, now);
-        assert!(!stale_view.online, "a stale machine must report online: false");
+        assert!(
+            !stale_view.online,
+            "a stale machine must report online: false"
+        );
 
         // 3. Machine never seen (last_seen_at = 0) -> online: false
         let mut unseen_machine = fresh_machine.clone();
         unseen_machine.last_seen_at = 0;
         let unseen_view = state.machine_view(&unseen_machine, now);
-        assert!(!unseen_view.online, "a machine with last_seen_at == 0 must report online: false");
+        assert!(
+            !unseen_view.online,
+            "a machine with last_seen_at == 0 must report online: false"
+        );
 
         // 4. Stale machine with live control channel probe -> online: true
         let live_machine_id = stale_machine.machine_id.clone();
@@ -2149,5 +2542,1018 @@ mod tests {
             !stale_response[0].online,
             "list_machines endpoint must report stale machine online: false"
         );
+    }
+
+    #[tokio::test]
+    async fn mutate_rolls_back_on_error_and_commits_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path(),
+            "https://account.test",
+            mailer,
+        ));
+
+        // 1. Initial successful mutation
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    "user_initial".into(),
+                    UserRecord {
+                        user_id: "user_initial".into(),
+                        email: "initial@example.com".into(),
+                        created_at: 1000,
+                    },
+                );
+                Ok(())
+            })
+            .expect("initial mutation must commit");
+
+        let initial_store = state.load().expect("load store");
+        assert_eq!(initial_store.users.len(), 1);
+        assert!(initial_store.users.contains_key("user_initial"));
+
+        // 2. Failing mutation rolls back: closure modifies store in-memory then returns Err
+        let mutate_err = state.mutate(|store| -> Result<(), ApiError> {
+            store.users.insert(
+                "user_transient".into(),
+                UserRecord {
+                    user_id: "user_transient".into(),
+                    email: "transient@example.com".into(),
+                    created_at: 2000,
+                },
+            );
+            Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "INTENTIONAL_ERROR",
+                "simulated failure before commit",
+            ))
+        });
+        assert!(
+            mutate_err.is_err(),
+            "mutating closure returning Err must yield error"
+        );
+        let err = mutate_err.unwrap_err();
+        assert_eq!(err.code, "INTENTIONAL_ERROR");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+
+        // Verify rollback: user_transient was never committed to sqlite
+        let store_after_abort = state.load().expect("load store after abort");
+        assert_eq!(store_after_abort.users.len(), 1);
+        assert!(!store_after_abort.users.contains_key("user_transient"));
+        assert!(store_after_abort.users.contains_key("user_initial"));
+
+        // 3. Second successful mutation commits cleanly
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    "user_second".into(),
+                    UserRecord {
+                        user_id: "user_second".into(),
+                        email: "second@example.com".into(),
+                        created_at: 3000,
+                    },
+                );
+                Ok(())
+            })
+            .expect("second mutation must commit");
+
+        let store_after_second = state.load().expect("load store after second");
+        assert_eq!(store_after_second.users.len(), 2);
+        assert!(store_after_second.users.contains_key("user_initial"));
+        assert!(store_after_second.users.contains_key("user_second"));
+    }
+
+    fn test_identity(machine_id: &str) -> crate::remote::auth::MachineIdentity {
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        crate::remote::auth::MachineIdentity {
+            machine_id: machine_id.into(),
+            display_name: format!("{machine_id}-box"),
+            public_key: STANDARD.encode(key.verifying_key().as_bytes()),
+            private_key: STANDARD.encode(key.to_bytes()),
+        }
+    }
+
+    fn test_enroll_request(
+        state: &AccountState,
+        identity: &crate::remote::auth::MachineIdentity,
+        code: &str,
+    ) -> AccountEnrollRequest {
+        let challenge = state.open_challenge(&identity.machine_id);
+        let now = now_secs();
+        let code_hash = crate::remote::auth::enrollment_code_hash(code);
+        let signature = crate::remote::auth::sign_account_enrollment(
+            identity,
+            &state.origin,
+            &code_hash,
+            &challenge.nonce,
+            now,
+        )
+        .expect("sign enrollment");
+        AccountEnrollRequest {
+            api_version: 1,
+            enrollment_code: code.to_string(),
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            attach_public_key: identity.public_key.clone(),
+            platform: crate::remote::machine_protocol::Platform::Linux,
+            app_version: "2026.930.1".into(),
+            nonce: challenge.nonce,
+            timestamp: now,
+            signature,
+        }
+    }
+
+    #[tokio::test]
+    async fn free_second_machine_enroll_is_402() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let user_id = "test-user-free";
+        let code1 = "free-code-1";
+        let code2 = "free-code-2";
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "free@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code1),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code2),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let id1 = test_identity("free-machine-1");
+        let req1 = test_enroll_request(&state, &id1, code1);
+        let resp1 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req1).unwrap()),
+        )
+        .await
+        .expect("first free machine enrollment must succeed");
+        assert_eq!(resp1.0.account_id, user_id);
+
+        let id2 = test_identity("free-machine-2");
+        let req2 = test_enroll_request(&state, &id2, code2);
+        let err2 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req2).unwrap()),
+        )
+        .await
+        .expect_err("second free machine enrollment must fail with 402");
+        assert_eq!(err2.status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err2.code, "PLAN_LIMIT_REACHED");
+        let details = err2.details.expect("PLAN_LIMIT_REACHED carries details");
+        assert_eq!(details["plan"], "free");
+        assert_eq!(details["limit"], 1);
+        assert_eq!(details["used"], 1);
+    }
+
+    #[tokio::test]
+    async fn reenroll_is_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let user_id = "test-user-reenroll";
+        let code1 = "reenroll-code-1";
+        let code2 = "reenroll-code-2";
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "reenroll@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code1),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code2),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let id1 = test_identity("reenroll-machine");
+        let req1 = test_enroll_request(&state, &id1, code1);
+        let resp1 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req1).unwrap()),
+        )
+        .await
+        .expect("initial enrollment must succeed");
+        assert_eq!(resp1.0.enrollment_epoch, "1");
+        let machine_rec_id = resp1.0.machine_record_id.clone();
+
+        // Re-enrolling the same machine id: exempt from machine limit
+        let req2 = test_enroll_request(&state, &id1, code2);
+        let resp2 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req2).unwrap()),
+        )
+        .await
+        .expect("re-enrollment must succeed and not be blocked by capacity");
+        assert_eq!(resp2.0.enrollment_epoch, "2");
+        assert_eq!(
+            resp2.0.machine_record_id, machine_rec_id,
+            "machine_record_id must be preserved across re-enrollment"
+        );
+
+        let store_after = state.load().expect("load store after reenroll");
+        assert_eq!(
+            store_after.machines.len(),
+            1,
+            "stored machines count must remain exactly 1 after reenrollment"
+        );
+        let stored_machine = store_after
+            .machines
+            .values()
+            .find(|m| m.machine_id == id1.machine_id)
+            .expect("machine must exist in store");
+        assert_eq!(stored_machine.machine_record_id, machine_rec_id);
+        assert_eq!(stored_machine.enrollment_epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_reenroll_is_refused_and_preserves_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let billing_now = crate::account::billing::routes::billing_now();
+        let user_id = "test-user-stopped-reenroll";
+        let code1 = "stopped-reenroll-code-1";
+        let code2 = "stopped-reenroll-code-2";
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "stopped-reenroll@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code1),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code2),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let id1 = test_identity("stopped-reenroll-machine");
+        let req1 = test_enroll_request(&state, &id1, code1);
+        let resp1 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req1).unwrap()),
+        )
+        .await
+        .expect("initial enrollment must succeed");
+        assert_eq!(resp1.0.enrollment_epoch, "1");
+        let machine_rec_id = resp1.0.machine_record_id.clone();
+
+        // Populate a second machine owned by the user so machines_used (2) > limit (1) creates an
+        // active over_limit violation; with grace_started_at > GRACE_SECS in the past, evaluate_owner
+        // legitimately computes EntitlementStatus::Stopped.
+        state
+            .mutate(|store| {
+                store.machines.insert(
+                    "rec-second-reenroll".into(),
+                    MachineRecord {
+                        machine_record_id: "rec-second-reenroll".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: "second-machine-reenroll".into(),
+                        display_name: "Second Machine".into(),
+                        public_key: "pubkey-second-reenroll".into(),
+                        attach_public_key: "attachkey-second-reenroll".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            billing_now
+                                .saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000),
+                        ),
+                        stopped_at: Some(billing_now.saturating_sub(100)),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Assert computed status before reenroll is legitimately Stopped
+        let eval_before =
+            crate::account::billing::routes::entitlement_for_user(&state, user_id, billing_now)
+                .expect("entitlement evaluation");
+        assert_eq!(
+            eval_before.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped,
+            "computed status before reenroll must be Stopped"
+        );
+        assert!(
+            !eval_before.remote_allowed,
+            "remote access must not be allowed when stopped"
+        );
+
+        // Re-enrolling while stopped must be refused with 402 REMOTE_SUSPENDED
+        let req2 = test_enroll_request(&state, &id1, code2);
+        let err2 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req2).unwrap()),
+        )
+        .await
+        .expect_err("re-enrollment while stopped must fail with 402 REMOTE_SUSPENDED");
+        assert_eq!(err2.status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err2.code, "REMOTE_SUSPENDED");
+
+        let store_after = state.load().expect("load store after stopped reenroll");
+        let stored_machine = store_after
+            .machines
+            .values()
+            .find(|m| m.machine_id == id1.machine_id)
+            .expect("machine must exist in store");
+        assert_eq!(
+            stored_machine.enrollment_epoch, 1,
+            "enrollment epoch must NOT advance on stopped refusal"
+        );
+        assert_eq!(
+            stored_machine.machine_record_id, machine_rec_id,
+            "machine_record_id must be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_grant_is_402() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let billing_now = crate::account::billing::routes::billing_now();
+        let user_id = "test-user-stopped";
+        let session_token = "valid-session-token-stopped";
+        let id1 = test_identity("stopped-machine");
+        let id2 = test_identity("stopped-machine-2");
+        let device_id = test_identity("stopped-device");
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "stopped@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.sessions.insert(
+                    token_hash(session_token),
+                    SessionRecord {
+                        user_id: user_id.into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.machines.insert(
+                    "rec-stopped".into(),
+                    MachineRecord {
+                        machine_record_id: "rec-stopped".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: id1.machine_id.clone(),
+                        display_name: id1.display_name.clone(),
+                        public_key: id1.public_key.clone(),
+                        attach_public_key: id1.public_key.clone(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                // Second machine owned by user creates an active over_limit violation (2 > 1 limit on Free)
+                store.machines.insert(
+                    "rec-stopped-2".into(),
+                    MachineRecord {
+                        machine_record_id: "rec-stopped-2".into(),
+                        owner_user_id: user_id.into(),
+                        machine_id: id2.machine_id.clone(),
+                        display_name: id2.display_name.clone(),
+                        public_key: id2.public_key.clone(),
+                        attach_public_key: id2.public_key.clone(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                store.billing_states.insert(
+                    user_id.into(),
+                    crate::account::store::BillingStateRecord {
+                        owner_key: user_id.into(),
+                        grace_started_at: Some(
+                            billing_now
+                                .saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000),
+                        ),
+                        stopped_at: Some(billing_now.saturating_sub(100)),
+                        last_notice: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Assert computed status before grant call is legitimately Stopped
+        let eval_before =
+            crate::account::billing::routes::entitlement_for_user(&state, user_id, billing_now)
+                .expect("entitlement evaluation");
+        assert_eq!(
+            eval_before.status,
+            crate::account::billing::entitlement::EntitlementStatus::Stopped,
+            "computed status before grant issuance must be Stopped"
+        );
+        assert!(
+            !eval_before.remote_allowed,
+            "remote access must not be allowed when stopped"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token}").parse().unwrap(),
+        );
+
+        let grant_req = AccountGrantRequest {
+            machine_record_id: "rec-stopped".into(),
+            enrollment_epoch: "1".into(),
+            device_label: "test-device".into(),
+            installation_id: "inst-1".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_id.public_key.clone(),
+        };
+
+        let err = issue_grant(
+            State(state.clone()),
+            axum::extract::Path("rec-stopped".into()),
+            headers,
+            Bytes::from(serde_json::to_vec(&grant_req).unwrap()),
+        )
+        .await
+        .expect_err("issue_grant on stopped owner must fail with 402");
+
+        assert_eq!(err.status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.code, "REMOTE_SUSPENDED");
+        let details = err.details.expect("REMOTE_SUSPENDED carries details");
+        assert_eq!(details["status"], "stopped");
+        assert_eq!(details["plan"], "free");
+        let expected_stopped_at = state
+            .load()
+            .expect("load store")
+            .billing_states
+            .get(user_id)
+            .and_then(|b| b.stopped_at)
+            .expect("persisted billing state must have stopped_at");
+        assert_eq!(
+            details["stoppedAt"],
+            expected_stopped_at
+        );
+    }
+
+    #[tokio::test]
+    async fn selfhost_never_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::SelfHost),
+        );
+
+        let now = now_secs();
+        let user_id = "test-user-selfhost";
+        let code1 = "selfhost-code-1";
+        let code2 = "selfhost-code-2";
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "selfhost@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code1),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code2),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let id1 = test_identity("selfhost-machine-1");
+        let req1 = test_enroll_request(&state, &id1, code1);
+        let resp1 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req1).unwrap()),
+        )
+        .await
+        .expect("first machine enrollment must succeed in SelfHost mode");
+        assert_eq!(resp1.0.account_id, user_id);
+
+        let id2 = test_identity("selfhost-machine-2");
+        let req2 = test_enroll_request(&state, &id2, code2);
+        let resp2 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req2).unwrap()),
+        )
+        .await
+        .expect("second machine enrollment must succeed in SelfHost mode without limit");
+        assert_eq!(resp2.0.account_id, user_id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_free_enroll_atomic_transaction_race() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let user_id = "test-user-race";
+        let code1 = "race-code-1";
+        let code2 = "race-code-2";
+
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    user_id.into(),
+                    UserRecord {
+                        user_id: user_id.into(),
+                        email: "race@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code1),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(code2),
+                    EnrollmentCodeRecord {
+                        user_id: user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let id1 = test_identity("race-machine-1");
+        let req1 = test_enroll_request(&state, &id1, code1);
+        let id2 = test_identity("race-machine-2");
+        let req2 = test_enroll_request(&state, &id2, code2);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let state1 = state.clone();
+        let barrier1 = barrier.clone();
+        let mut task1 = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), barrier1.wait())
+                .await
+                .expect("barrier1 wait must not time out");
+            enroll(
+                State(state1),
+                Bytes::from(serde_json::to_vec(&req1).unwrap()),
+            )
+            .await
+        });
+
+        let state2 = state.clone();
+        let barrier2 = barrier.clone();
+        let mut task2 = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), barrier2.wait())
+                .await
+                .expect("barrier2 wait must not time out");
+            enroll(
+                State(state2),
+                Bytes::from(serde_json::to_vec(&req2).unwrap()),
+            )
+            .await
+        });
+
+        let joined = tokio::time::timeout(
+            Duration::from_secs(10),
+            async { tokio::join!(&mut task1, &mut task2) },
+        )
+        .await;
+
+        let (res1, res2) = match joined {
+            Ok((r1, r2)) => (
+                r1.expect("task1 panicked"),
+                r2.expect("task2 panicked"),
+            ),
+            Err(_) => {
+                task1.abort();
+                task2.abort();
+                panic!("concurrent enrollment tasks timed out after 10s");
+            }
+        };
+
+        let ok_count = (res1.is_ok() as usize) + (res2.is_ok() as usize);
+        let limit_err_count = (matches!(&res1, Err(e) if e.status == StatusCode::PAYMENT_REQUIRED && e.code == "PLAN_LIMIT_REACHED") as usize)
+            + (matches!(&res2, Err(e) if e.status == StatusCode::PAYMENT_REQUIRED && e.code == "PLAN_LIMIT_REACHED") as usize);
+
+        assert_eq!(
+            ok_count, 1,
+            "exactly one concurrent enrollment on Free tier must succeed"
+        );
+        assert_eq!(
+            limit_err_count, 1,
+            "the concurrent sibling must be rejected with 402 PLAN_LIMIT_REACHED"
+        );
+
+        let err = if res1.is_err() {
+            res1.unwrap_err()
+        } else {
+            res2.unwrap_err()
+        };
+        assert_eq!(err.status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.code, "PLAN_LIMIT_REACHED");
+        let details = err.details.expect("PLAN_LIMIT_REACHED carries details");
+        assert_eq!(details["plan"], "free");
+        assert_eq!(details["limit"], 1);
+        assert_eq!(details["used"], 1);
+
+        let store_after = state.load().expect("load store after race");
+        assert_eq!(
+            store_after.machines.len(),
+            1,
+            "final stored machines must be exactly 1"
+        );
+        assert_eq!(
+            store_after.enrollment_codes.len(),
+            1,
+            "unconsumed rejected enrollment code must remain in store"
+        );
+        assert_eq!(
+            store_after.grants.len(),
+            0,
+            "grants state must remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn team_member_pool_aggregate_capacity_enforced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_deployment_mode(DeploymentMode::Commercial),
+        );
+
+        let now = now_secs();
+        let owner_user_id = "team-owner-user";
+        let member_user_id = "team-member-user";
+        let org_id = "org-team-pool";
+        let member_code_21 = "member-enroll-code-21";
+
+        state
+            .mutate(|store| {
+                // Insert both users (required by foreign key)
+                store.users.insert(
+                    owner_user_id.into(),
+                    UserRecord {
+                        user_id: owner_user_id.into(),
+                        email: "owner@team.example".into(),
+                        created_at: now,
+                    },
+                );
+                store.users.insert(
+                    member_user_id.into(),
+                    UserRecord {
+                        user_id: member_user_id.into(),
+                        email: "member@team.example".into(),
+                        created_at: now,
+                    },
+                );
+                // Insert Organization
+                store.orgs.insert(
+                    org_id.into(),
+                    crate::account::store::OrgRecord {
+                        org_id: org_id.into(),
+                        owner_user_id: owner_user_id.into(),
+                        name: "Team Engineering".into(),
+                        created_at: now,
+                    },
+                );
+                // Insert Org Memberships
+                store.org_members.insert(
+                    format!("{org_id}:{owner_user_id}"),
+                    crate::account::store::OrgMemberRecord {
+                        org_id: org_id.into(),
+                        user_id: owner_user_id.into(),
+                        role: "owner".into(),
+                        joined_at: now,
+                    },
+                );
+                store.org_members.insert(
+                    format!("{org_id}:{member_user_id}"),
+                    crate::account::store::OrgMemberRecord {
+                        org_id: org_id.into(),
+                        user_id: member_user_id.into(),
+                        role: "member".into(),
+                        joined_at: now,
+                    },
+                );
+                // Team subscription: 2 seats (minimum seats = 2), 0 host packs => machineLimit = 20
+                store.subscriptions.insert(
+                    "sub-team-1".into(),
+                    crate::account::store::SubscriptionRecord {
+                        subscription_id: "sub-team-1".into(),
+                        owner_user_id: owner_user_id.into(),
+                        org_id: Some(org_id.into()),
+                        plan_key: "team_monthly".into(),
+                        seats: 2,
+                        host_packs: 0,
+                        kind: "base".into(),
+                        status: "active".into(),
+                        ends_at: None,
+                        ls_customer_id: Some("cust-1".into()),
+                        ls_updated_at: now,
+                        manage_url: None,
+                    },
+                );
+
+                // Populate 20 machines in the pool: 10 owned by owner, 10 owned by member
+                for i in 0..10 {
+                    store.machines.insert(
+                        format!("rec-owner-{i}"),
+                        MachineRecord {
+                            machine_record_id: format!("rec-owner-{i}"),
+                            owner_user_id: owner_user_id.into(),
+                            machine_id: format!("owner-machine-{i}"),
+                            display_name: format!("Owner Machine {i}"),
+                            public_key: format!("pubkey-owner-{i}"),
+                            attach_public_key: format!("attachkey-owner-{i}"),
+                            relay_origin: "https://relay.test".into(),
+                            platform: "linux".into(),
+                            enrollment_epoch: 1,
+                            enrolled_at: now,
+                            last_seen_at: now,
+                        },
+                    );
+                }
+                for i in 0..10 {
+                    store.machines.insert(
+                        format!("rec-member-{i}"),
+                        MachineRecord {
+                            machine_record_id: format!("rec-member-{i}"),
+                            owner_user_id: member_user_id.into(),
+                            machine_id: format!("member-machine-{i}"),
+                            display_name: format!("Member Machine {i}"),
+                            public_key: format!("pubkey-member-{i}"),
+                            attach_public_key: format!("attachkey-member-{i}"),
+                            relay_origin: "https://relay.test".into(),
+                            platform: "linux".into(),
+                            enrollment_epoch: 1,
+                            enrolled_at: now,
+                            last_seen_at: now,
+                        },
+                    );
+                }
+
+                // Member gets an enrollment code to enroll the 21st machine
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash(member_code_21),
+                    EnrollmentCodeRecord {
+                        user_id: member_user_id.into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                    },
+                );
+
+                Ok(())
+            })
+            .unwrap();
+
+        // Member attempts to enroll machine 21
+        let member_id_21 = test_identity("member-machine-21");
+        let req21 = test_enroll_request(&state, &member_id_21, member_code_21);
+
+        let err21 = enroll(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&req21).unwrap()),
+        )
+        .await
+        .expect_err("enrolling 21st machine in 20-machine team pool must fail with 402");
+
+        assert_eq!(err21.status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err21.code, "PLAN_LIMIT_REACHED");
+        let details = err21.details.expect("PLAN_LIMIT_REACHED carries details");
+        assert_eq!(details["plan"], "team_monthly");
+        assert_eq!(details["limit"], 20);
+        assert_eq!(details["used"], 20);
+
+        let store_after = state.load().expect("load store after refusal");
+        assert_eq!(
+            store_after.machines.len(),
+            20,
+            "machine count must remain exactly 20 (rejected machine was not added)"
+        );
+        assert_eq!(
+            store_after.enrollment_codes.len(),
+            1,
+            "member enrollment code must remain unconsumed"
+        );
+    }
+
+    #[test]
+    fn try_enrolled_machine_by_id_propagates_read_error_on_corrupt_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = Arc::new(AccountState::new(
+            tmp.path().join("account"),
+            "https://relay.test",
+            mailer,
+        ));
+        let now = now_secs();
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    "u-1".into(),
+                    UserRecord {
+                        user_id: "u-1".into(),
+                        email: "u-1-corrupt@example.test".into(),
+                        created_at: now,
+                    },
+                );
+                store.machines.insert(
+                    "rec-1".into(),
+                    MachineRecord {
+                        machine_record_id: "rec-1".into(),
+                        owner_user_id: "u-1".into(),
+                        machine_id: "m-1".into(),
+                        display_name: "Machine 1".into(),
+                        public_key: "pk-1".into(),
+                        attach_public_key: "apk-1".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // Before corruption: machine found
+        let found = try_enrolled_machine_by_id(&state, "m-1").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().machine_id, "m-1");
+
+        // Before corruption: nonexistent machine returns Ok(None)
+        let not_found = try_enrolled_machine_by_id(&state, "nonexistent").unwrap();
+        assert!(not_found.is_none());
+
+        // Corrupt SQLite store
+        let db_path = tmp
+            .path()
+            .join("account")
+            .join(crate::account::store::store_sqlite::STORE_SQLITE_FILENAME);
+        let wal_path = tmp
+            .path()
+            .join("account")
+            .join(format!("{}-wal", crate::account::store::store_sqlite::STORE_SQLITE_FILENAME));
+        if wal_path.exists() {
+            let _ = std::fs::remove_file(&wal_path);
+        }
+        let shm_path = tmp
+            .path()
+            .join("account")
+            .join(format!("{}-shm", crate::account::store::store_sqlite::STORE_SQLITE_FILENAME));
+        if shm_path.exists() {
+            let _ = std::fs::remove_file(&shm_path);
+        }
+        std::fs::write(&db_path, b"corrupted sqlite header garbage data").unwrap();
+
+        // After corruption: try_enrolled_machine_by_id returns Err
+        let err = try_enrolled_machine_by_id(&state, "m-1")
+            .expect_err("must return Err when store is corrupted");
+        assert_eq!(err.code, "INTERNAL_ERROR");
+
+        // enrolled_machine_by_id returns None (swallows error for non-critical callers)
+        assert!(enrolled_machine_by_id(&state, "m-1").is_none());
     }
 }

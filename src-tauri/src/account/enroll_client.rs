@@ -27,10 +27,14 @@ pub struct AccountEnrollmentRecord {
     pub enrolled_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnrollError {
     pub code: String,
     pub message: String,
+    /// Account-service HTTP status; `0` for failures detected locally.
+    pub status: u16,
+    /// Structured `details` from the `{code, message, details}` envelope, when the server sends it.
+    pub details: Option<serde_json::Value>,
 }
 
 impl EnrollError {
@@ -38,6 +42,8 @@ impl EnrollError {
         Self {
             code: code.to_string(),
             message: message.into(),
+            status: 0,
+            details: None,
         }
     }
 
@@ -51,7 +57,16 @@ impl EnrollError {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| body.to_string());
-        Self { code, message }
+        let details = value
+            .get("details")
+            .filter(|details| !details.is_null())
+            .cloned();
+        Self {
+            code,
+            message,
+            status,
+            details,
+        }
     }
 }
 
@@ -416,5 +431,39 @@ mod tests {
         assert_eq!(round_tripped, record);
         let identity_path = dir.path().join("identity.json");
         assert!(!identity_path.exists(), "enrollment never creates the machine identity");
+    }
+
+    #[test]
+    fn remote_enrollment_errors_keep_the_http_status_and_details() {
+        let limited = EnrollError::remote(
+            402,
+            r#"{"code":"PLAN_LIMIT_REACHED","message":"the free plan allows one computer","details":{"plan":"free","limit":1,"used":2}}"#,
+        );
+        assert_eq!(limited.code, "PLAN_LIMIT_REACHED");
+        assert_eq!(limited.status, 402);
+        assert_eq!(limited.message, "the free plan allows one computer");
+        assert_eq!(
+            limited.details,
+            Some(serde_json::json!({"plan": "free", "limit": 1, "used": 2}))
+        );
+
+        let suspended = EnrollError::remote(
+            402,
+            r#"{"code":"REMOTE_SUSPENDED","message":"remote access is stopped","details":{"plan":"pro_monthly","status":"stopped","graceEndsAt":1793491200,"stoppedAt":1793491260}}"#,
+        );
+        assert_eq!(suspended.status, 402);
+        assert_eq!(
+            suspended
+                .details
+                .as_ref()
+                .and_then(|details| details.get("graceEndsAt"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1_793_491_200)
+        );
+
+        let offline = EnrollError::local("ACCOUNT_UNREACHABLE", "connection refused");
+        assert_eq!(offline.code, "ACCOUNT_UNREACHABLE");
+        assert_eq!(offline.status, 0, "locally detected failures carry no HTTP status");
+        assert_eq!(offline.details, None);
     }
 }

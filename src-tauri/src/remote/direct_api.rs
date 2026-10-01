@@ -65,16 +65,29 @@ pub struct DirectHostManager {
     permits: Arc<Semaphore>,
     tasks: parking_lot::Mutex<JoinSet<()>>,
     udp_binds: AtomicUsize,
+    cancellation_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl DirectHostManager {
     pub fn new(config: DirectHostConfig) -> Self {
+        let (cancellation_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             permits: Arc::new(Semaphore::new(config.max_sessions)),
             config,
             tasks: parking_lot::Mutex::new(JoinSet::new()),
             udp_binds: AtomicUsize::new(0),
+            cancellation_tx,
         }
+    }
+
+    /// Cancel all active account-gated bridges immediately (e.g. on lease expiry or 402).
+    pub fn cancel_account_bridges(&self) {
+        let _ = self.cancellation_tx.send(());
+    }
+
+    /// Subscribe to cancellation signal for account-gated bridges.
+    pub fn subscribe_cancellation(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.cancellation_tx.subscribe()
     }
 
     /// UDP sockets ever bound; proves rejected offers never touch UDP.
@@ -89,9 +102,54 @@ impl DirectHostManager {
     }
 }
 
-fn global_manager() -> &'static DirectHostManager {
-    static MANAGER: OnceLock<DirectHostManager> = OnceLock::new();
-    MANAGER.get_or_init(|| DirectHostManager::new(DirectHostConfig::default()))
+/// The process-wide host manager. Shared as an `Arc` so the lease cancellation watch can hold it
+/// for the lifetime of the process.
+pub(crate) fn global_manager() -> Arc<DirectHostManager> {
+    static MANAGER: OnceLock<Arc<DirectHostManager>> = OnceLock::new();
+    Arc::clone(
+        MANAGER.get_or_init(|| Arc::new(DirectHostManager::new(DirectHostConfig::default()))),
+    )
+}
+
+/// Account-lease wiring for the direct path, started once by the remote-server startup.
+///
+/// The renewal loop acquires the first lease immediately and refreshes it every
+/// [`crate::remote::direct_lease::DEFAULT_RENEWAL_INTERVAL`]; the cancellation watch turns a
+/// revocation or a real expiry into a stop for every live account-gated bridge, and those bridges
+/// release their permits as they end. Non-account hosts pass
+/// [`crate::remote::direct_lease::HostLeaseWiring::none`] and start nothing here, so LAN,
+/// static-token and selfhost direct trust paths are untouched.
+pub(crate) fn start_account_lease_gate(
+    state: &Arc<RemoteGatewayState>,
+    manager: Arc<DirectHostManager>,
+    wiring: crate::remote::direct_lease::HostLeaseWiring,
+) {
+    if !state.begin_host_lease_wiring() {
+        return;
+    }
+    state.set_host_lease_required(wiring.required);
+
+    let Some(context) = wiring.context else {
+        if wiring.required {
+            tracing::warn!(
+                "account-enrolled host has no verifiable lease pin ({}); direct offers stay \
+                 refused until the account public key is configured",
+                crate::remote::direct_lease::ACCOUNT_PUBLIC_KEY_ENV
+            );
+        }
+        return;
+    };
+
+    crate::remote::direct_lease::spawn_lease_cancellation_watch(
+        Arc::clone(&state.host_lease),
+        Arc::clone(&context.now_fn),
+        Arc::new(move || manager.cancel_account_bridges()),
+    );
+
+    let lease_state = Arc::clone(&state.host_lease);
+    tokio::spawn(async move {
+        crate::remote::direct_lease::run_host_lease_renewal(lease_state, context).await
+    });
 }
 
 pub(super) async fn direct_offer_handler(
@@ -99,7 +157,8 @@ pub(super) async fn direct_offer_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle_offer(state, &headers, &body, global_manager()).await
+    let manager = global_manager();
+    handle_offer(state, &headers, &body, &manager).await
 }
 
 /// Loopback gateway listener the bridge dials; never a remote-supplied address.
@@ -166,6 +225,17 @@ async fn negotiate(
         Some(dir) => dir.clone(),
         None => crate::remote::auth::canonical_identity_dir().map_err(|_| unavailable())?,
     };
+    // Whether this host is account-enrolled is decided once at startup off the reactor; the
+    // reactor must not stat the identity dir on every offer.
+    let host_lease_required = state.host_lease_required();
+
+    if host_lease_required {
+        let now_secs = (manager.config.now_ms)() / 1000;
+        if state.host_lease.get_valid_lease(now_secs).is_none() {
+            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED"));
+        }
+    }
+
     let key = trusted_key(DirectTrustStore::at(&store_dir), source)
         .await
         .ok_or_else(|| forbidden("DIRECT_UNTRUSTED"))?;
@@ -204,6 +274,18 @@ async fn negotiate(
         &signing_key,
     );
 
+    // If this host is account-enrolled, ensure a valid lease is held before and after STUN.
+    // Also attach the cancellation receiver so lease expiry drops this bridge immediately.
+    let cancellation = if host_lease_required {
+        let now_secs = (manager.config.now_ms)() / 1000;
+        if state.host_lease.get_valid_lease(now_secs).is_none() {
+            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED"));
+        }
+        Some(manager.subscribe_cancellation())
+    } else {
+        None
+    };
+
     // The task is spawned, never awaited: the answer must reach the client first.
     let job = host_task::HostJob {
         socket,
@@ -212,6 +294,7 @@ async fn negotiate(
         offer: envelope.offer,
         gateway,
         deadline: manager.config.connect_deadline,
+        cancellation,
     };
     let mut tasks = manager.tasks.lock();
     while tasks.try_join_next().is_some() {}

@@ -14,8 +14,12 @@
 //! The relay origin advertised in machine records can be configured via
 //! `FERRYX_ACCOUNT_RELAY_ORIGIN`, falling back to the resolved account origin.
 
+use base64::Engine as _;
 use ferryx_lib::remote::relay_server::{
-    relay_router_with_account, spawn_session_reaper, RelayState,
+    relay_router_with_account, spawn_session_reaper, spawn_suspension_sweeper, RelayState,
+};
+use ferryx_lib::account::origin::{
+    deployment_mode, missing_lemon_squeezy_env_vars, DeploymentMode,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,9 +28,13 @@ struct RelayConfig {
     port: u16,
     machine_tokens: Vec<String>,
     account_public_key: Option<String>,
+    deployment_mode: DeploymentMode,
 }
 
 fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
+    let deployment_mode = deployment_mode()
+        .map_err(|err| format!("configuration error: {}", err.message))?;
+
     let mut port: u16 = std::env::var("FERRYX_RELAY_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -82,6 +90,7 @@ fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
         port,
         machine_tokens,
         account_public_key,
+        deployment_mode,
     })
 }
 
@@ -120,6 +129,26 @@ async fn main() {
         );
     }
 
+    match config.deployment_mode {
+        DeploymentMode::SelfHost => {
+            tracing::info!(
+                "ferryx-relay running in selfhost mode: billing disabled, all entitlement checks skipped"
+            );
+        }
+        DeploymentMode::Commercial => {
+            let missing = missing_lemon_squeezy_env_vars();
+            if !missing.is_empty() {
+                eprintln!(
+                    "ferryx-relay: WARNING: commercial mode is running without complete Lemon Squeezy configuration; \
+                     missing variables: {}. Billing routes and paid surfaces will fail closed with 503 BILLING_UNCONFIGURED",
+                    missing.join(", ")
+                );
+            } else {
+                tracing::info!("ferryx-relay running in commercial mode with Lemon Squeezy configured");
+            }
+        }
+    }
+
     let state = RelayState::new(config.machine_tokens);
     spawn_session_reaper(state.clone());
 
@@ -147,10 +176,32 @@ async fn main() {
     let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
     let account_state = Arc::new(
         ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer)
-            .with_relay_origin(relay_origin),
+            .with_relay_origin(relay_origin)
+            .with_deployment_mode(config.deployment_mode),
     );
 
-    let router = relay_router_with_account(state, config.account_public_key, Some(account_state));
+    let account_public_key = config.account_public_key.or_else(|| {
+        account_state.signing_key().ok().map(|k| {
+            base64::engine::general_purpose::STANDARD.encode(k.verifying_key().as_bytes())
+        })
+    });
+    let router = relay_router_with_account(
+        state.clone(),
+        account_public_key,
+        Some(account_state.clone()),
+    );
+
+    if matches!(config.deployment_mode, DeploymentMode::Commercial) {
+        // Only a commercial relay enforces suspension. The task is detached on purpose: it
+        // must outlive this scope for the whole process, like the session reaper above.
+        let _suspension_sweeper = spawn_suspension_sweeper(state);
+
+        // The grace, suspension and recovery notices are clock-driven and must fire while the
+        // entitlement state stays unchanged, so the commercial relay runs one notice sweeper
+        // next to the suspension sweeper. Self-host never enables billing and starts neither.
+        let _notice_sweeper =
+            ferryx_lib::account::billing::notices::spawn_billing_notice_sweeper(account_state);
+    }
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {

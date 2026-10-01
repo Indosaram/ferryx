@@ -90,11 +90,12 @@ blake2 = "0.10"
 rand = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 sha2 = "0.10"
+hmac = "=0.12.1"
 snow = "0.9"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 futures-util = "0.3"
 cookie = "0.18"
-time = "0.3"
+time = { version = "0.3", features = ["parsing"] }
 wgpu = { version = "30", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 winit = { version = "0.30", optional = true }

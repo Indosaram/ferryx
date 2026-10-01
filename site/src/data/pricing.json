@@ -1,0 +1,65 @@
+{
+  "currency": "USD",
+  "currency_symbol": "$",
+  "plans": {
+    "free": {
+      "name": "Free",
+      "monthly": "$0",
+      "annual": "$0",
+      "monthly_num": 0,
+      "annual_num": 0,
+      "machine_limit": 1,
+      "extra_host_pack": null,
+      "description": "Essential remote terminal for personal use on 1 connected computer. Local terminal multiplexing and self-hosted relays remain completely free and open."
+    },
+    "pro": {
+      "name": "Pro",
+      "monthly": "$5",
+      "annual": "$50",
+      "monthly_num": 5,
+      "annual_num": 50,
+      "machine_limit": 10,
+      "extra_host_pack": {
+        "hosts": 5,
+        "monthly": "$2",
+        "annual": "$20",
+        "monthly_num": 2,
+        "annual_num": 20
+      },
+      "description": "For individual developers and power users managing multiple cloud instances, workstations, and local machines."
+    },
+    "team": {
+      "name": "Team",
+      "monthly": "$7",
+      "annual": "$70",
+      "monthly_num": 7,
+      "annual_num": 70,
+      "min_seats": 2,
+      "hosts_per_seat": 10,
+      "machine_limit": "10 per seat (pooled across team)",
+      "extra_host_pack": {
+        "hosts": 5,
+        "monthly": null,
+        "annual": "$20",
+        "annual_num": 20,
+        "note": "Annual only ($20/year per 5-host pack)"
+      },
+      "description": "For organizations and teams collaborating across fleets of development servers and build runners with unified pooled capacity."
+    }
+  },
+  "raw_variants": {
+    "pro_monthly": "$5",
+    "pro_annual": "$50",
+    "pro_hostpack_monthly": "$2",
+    "pro_hostpack_annual": "$20",
+    "team_monthly": "$7",
+    "team_annual": "$70",
+    "team_hostpack_annual": "$20"
+  },
+  "policies": {
+    "local_and_selfhosted": "Local terminal multiplexing, direct LAN connections, and self-hosted relays (FERRYX_DEPLOYMENT_MODE=selfhost) are perpetually free with no license keys or machine limits required.",
+    "enrollment_cap": "New machine enrollment is blocked immediately when registered machines reach plan capacity (PLAN_LIMIT_REACHED).",
+    "grace_period_days": 7,
+    "grace_period_policy": "7-day grace period for existing accounts entering overdue or over-capacity state before all account-based remote connections (relay and direct streams) are fully stopped at the grace deadline. Local and LAN terminal access is never interrupted."
+  }
+}

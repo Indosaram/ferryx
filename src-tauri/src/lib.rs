@@ -1,3 +1,6 @@
+// The Send/Sync auto-trait check of the remote server startup future exceeds the default depth of 128.
+#![recursion_limit = "256"]
+
 pub mod account;
 pub mod agent_detect;
 pub mod agent_transcript;

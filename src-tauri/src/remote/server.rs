@@ -1922,7 +1922,7 @@ async fn machine_terminal_upgrade(
 #[cfg(all(test, unix))]
 #[path = "../../tests/support/machine_input_cancellation.rs"]
 pub(crate) mod machine_input_cancellation_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "../../tests/support/machine_input_fixture.rs"]
 pub(crate) mod machine_input_fixture;
 #[cfg(test)]
@@ -2094,6 +2094,7 @@ async fn handle_machine_terminal_socket(
         }
     };
     let (input_tx, mut input_rx) = mpsc::channel(if cfg!(test) { 1 } else { 64 });
+    let (close_tx, mut close_rx) = mpsc::channel::<Option<axum::extract::ws::CloseFrame>>(1);
     let read = async {
         let mut pending_message: Option<Message> = None;
         loop {
@@ -2106,7 +2107,8 @@ async fn handle_machine_terminal_socket(
                     }
                 }
             };
-            if matches!(message, Message::Close(_)) {
+            if let Message::Close(frame) = message {
+                let _ = close_tx.send(frame).await;
                 return;
             }
             // One bounded in-flight frame; all pending input is dropped when
@@ -2129,7 +2131,11 @@ async fn handle_machine_terminal_socket(
                 }
                 next_frame = receiver.next() => {
                     match next_frame {
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                        Some(Ok(Message::Close(frame))) => {
+                            let _ = close_tx.send(frame).await;
+                            return;
+                        }
+                        None | Some(Err(_)) => return,
                         Some(Ok(next)) => {
                             next_message = Some(next);
                         }
@@ -2257,7 +2263,21 @@ async fn handle_machine_terminal_socket(
             }
         }
     };
-    tokio::select! { biased; _ = read => {}, _ = send => {}, _ = receive => {} }
+    {
+        tokio::select! { biased; _ = read => {}, _ = send => {}, _ = receive => {} }
+    }
+
+    if close_rx.try_recv().is_ok() {
+        match tokio::time::timeout(Duration::from_secs(5), sender.flush()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(session_id = %target.session_id, %error, "machine terminal close ack flush sink error");
+            }
+            Err(_) => {
+                tracing::warn!(session_id = %target.session_id, "machine terminal close ack flush timed out");
+            }
+        }
+    }
 }
 
 async fn handle_terminal_socket(
@@ -4543,6 +4563,64 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
+    /// Prepare a replacement without changing the active listener or relay publication.
+    pub(crate) async fn prepare_relay(
+        state: Arc<RemoteGatewayState>,
+        relay_url: Option<&str>,
+        address: SocketAddr,
+    ) -> Result<crate::remote::relay_client::RelayClient, String> {
+        let url = relay_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        crate::remote::relay_client::validate_relay_url(
+            url,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
+        .map_err(|error| format!("Invalid relay configuration: {error}"))?;
+        let identity = load_gateway_identity(Arc::clone(&state))
+            .await
+            .map_err(|_| "Machine identity unavailable".to_string())?;
+        let client = match std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url,
+                token,
+                address.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url,
+                identity.clone(),
+                address.to_string(),
+            ),
+        };
+        Ok(client
+            .with_machine_id(&identity.machine_id)
+            .with_auth_manager((*state.auth_manager).clone()))
+    }
+
+    /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
+    pub(crate) fn replace_relay(
+        &mut self,
+        state: Arc<RemoteGatewayState>,
+        client: crate::remote::relay_client::RelayClient,
+    ) {
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
+        let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch,
+        });
+        *state.relay_client.write() = Some(client.clone());
+        self.published_pairing = Some((state, epoch));
+        self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+    }
+
     pub fn is_external_bound(&self) -> bool {
         !self._extra_shutdown_txs.is_empty()
     }
@@ -4777,6 +4855,31 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             return Err(err);
         }
     }
+
+    // Plan todo 10: an account-enrolled host must hold a signed entitlement lease before a
+    // direct offer is admitted. Enrollment is a private-file read, so it is resolved once here
+    // on a blocking worker instead of on the reactor inside `negotiate`, and the renewal loop
+    // plus the lease-to-bridge cancellation watch start exactly once. Hosts with no enrollment
+    // record start nothing and keep their LAN, static-token and selfhost trust paths.
+    let lease_dir = state.identity_dir.clone();
+    let lease_wiring = match crate::ipc::run_blocking(move || {
+        Ok(crate::remote::direct_lease::HostLeaseWiring::resolve(
+            lease_dir.as_deref(),
+        ))
+    })
+    .await
+    {
+        Ok(wiring) => wiring,
+        Err(error) => {
+            tracing::warn!("account lease wiring unavailable at startup: {error}");
+            crate::remote::direct_lease::HostLeaseWiring::none()
+        }
+    };
+    crate::remote::direct_api::start_account_lease_gate(
+        &state,
+        crate::remote::direct_api::global_manager(),
+        lease_wiring,
+    );
 
     let mut published_pairing: Option<(Arc<RemoteGatewayState>, u64)> = None;
     let relay_task = relay_url
@@ -7143,6 +7246,196 @@ mod tests {
         fixture.cleanup().await;
     }
 
+    #[tokio::test]
+    async fn test_machine_terminal_client_close_acknowledges_and_preserves_pty() {
+        use futures_util::{FutureExt, SinkExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let fixture = machine_input_fixture::Fixture::new().await;
+        let session = fixture.create().await;
+        let id = session["target"]["sessionId"].as_str().unwrap().to_owned();
+        let mut socket = fixture.attach(&session).await;
+
+        let test_body = async {
+            // Drive initial command into the PTY with bounded timeout.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                socket.send(Message::Binary(b"echo MACHINE_WS_ALIVE\n".to_vec().into())),
+            )
+            .await
+            .expect("send command timed out")
+            .expect("send command failed");
+
+            // Client initiates close with clean normal code 1000.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                socket.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                    reason: "client clean close".into(),
+                })),
+            )
+            .await
+            .expect("client close timed out")
+            .expect("client close send failed");
+
+            // Server must acknowledge with a Close frame before terminating the socket.
+            let mut observed_ack = false;
+            let mut ack_code = None;
+            let mut drain_error = None;
+            let drain = async {
+                while let Some(msg) = socket.next().await {
+                    match msg {
+                        Ok(Message::Close(frame)) => {
+                            observed_ack = true;
+                            ack_code = frame.map(|f| u16::from(f.code));
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            drain_error = Some(err);
+                            break;
+                        }
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), drain)
+                .await
+                .expect("close acknowledgement must arrive within bounded timeout");
+
+            assert!(
+                observed_ack,
+                "gateway must send close acknowledgement frame; socket drain error: {:?}",
+                drain_error
+            );
+            assert_eq!(ack_code, Some(1000), "ack close code must match client frame");
+
+            // PTY session must remain running and registered on the daemon service.
+            let pty = fixture.owner.terminal_service().get_session(&id);
+            assert!(pty.is_some(), "PTY session must survive client socket close");
+            let pty = pty.unwrap();
+            assert!(!pty.is_reaped(), "PTY process must not be reaped by socket close");
+        };
+
+        let result = std::panic::AssertUnwindSafe(test_body).catch_unwind().await;
+        let cleanup_result = std::panic::AssertUnwindSafe(fixture.cleanup()).catch_unwind().await;
+        if let Err(payload) = result {
+            if let Err(cleanup_err) = cleanup_result {
+                eprintln!("test panicked and cleanup also panicked: {:?}", cleanup_err);
+            }
+            std::panic::resume_unwind(payload);
+        }
+        if let Err(cleanup_err) = cleanup_result {
+            std::panic::resume_unwind(cleanup_err);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_machine_terminal_client_close_under_saturation_acknowledges() {
+        use futures_util::SinkExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let fixture = machine_input_fixture::Fixture::new().await;
+        let session = fixture.create().await;
+        let id = session["target"]["sessionId"].as_str().unwrap().to_owned();
+        let mut socket = fixture.attach(&session).await;
+
+        let path = fixture.root.path().join("close_throttle.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let script = r#"use IO::Socket::UNIX; my $s=IO::Socket::UNIX->new(Peer=>$ARGV[0]) or die $!; $s->autoflush(1); print $s pack('L<',$$); read($s,my $go,1)==1 or die; while (1) { my $n=sysread(STDIN,my $b,4096); $n or die; print $s $b; last if index($b,'!')>=0; }"#;
+        let command = format!(
+            "stty raw -echo; exec /usr/bin/perl -e '{}' '{}'\r",
+            script.replace('\'', "'\\''"),
+            path.display()
+        );
+        socket
+            .send(Message::Binary(command.into_bytes().into()))
+            .await
+            .unwrap();
+
+        let (mut control, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let _pid = control.read_u32_le().await.unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+
+        let pty = fixture
+            .owner
+            .terminal_service()
+            .get_session(&id)
+            .unwrap();
+        let fd = pty.raw_master_fd().unwrap();
+        let fill = [b'x'; 65536];
+        loop {
+            let n = unsafe { libc::write(fd, fill.as_ptr().cast(), fill.len()) };
+            if n < 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                break;
+            }
+        }
+
+        let mut observation = machine_input_probe::Observation::register(&id);
+
+        // Saturate input buffer
+        socket.send(Message::Binary(b"S1\n".to_vec().into())).await.unwrap();
+        socket.send(Message::Binary(b"S2\n".to_vec().into())).await.unwrap();
+        socket.send(Message::Binary(b"S3\n".to_vec().into())).await.unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            observation.0.wait_for(|p| p.queue_full),
+        )
+        .await
+        .expect("queue must become full")
+        .unwrap();
+
+        // Client initiates close while reader lookahead is active
+        socket
+            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: "saturated clean close".into(),
+            }))
+            .await
+            .unwrap();
+
+        // Release slow consumer
+        control.write_all(&[1]).await.unwrap();
+        let _ = pty.write_input_cancellable(b"!\n").await;
+
+        let mut observed_ack = false;
+        let mut ack_code = None;
+        let drain = async {
+            while let Some(msg) = socket.next().await {
+                match msg {
+                    Ok(Message::Close(frame)) => {
+                        observed_ack = true;
+                        ack_code = frame.map(|f| u16::from(f.code));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("close acknowledgement must arrive within bounded timeout");
+
+        assert!(observed_ack, "gateway must send close acknowledgement frame under saturation");
+        assert_eq!(ack_code, Some(1000), "ack close code must match client frame");
+
+        // PTY must survive
+        assert!(!pty.is_reaped(), "PTY process must not be reaped by saturated socket close");
+
+        fixture.cleanup().await;
+    }
+
     #[test]
     fn test_a_stored_host_record_deserializes_into_ssh_host() {
         // The real store writes the host with camelCase enum values (`source: "config"`,
@@ -7982,5 +8275,320 @@ mod tests {
         let _ = stop_tx.send(());
         let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn prepare_relay_failure_preserves_existing_supervisor_and_state() {
+        let temp_dir = std::env::temp_dir().join(format!("test_prepare_err_preserves_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // The auth store's parent directory doubles as the identity directory, so the
+        // fixture never touches the canonical per-user identity.
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(temp_dir.join("remote-config.json")),
+            Some(temp_dir.join("remote-auth.json")),
+        ));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+        }
+
+        // Setup an existing supervisor task and published pairing with dynamically derived initial epoch
+        let initial_epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let auth_mgr = (*state.auth_manager).clone();
+        let (pin_tx, _pin_rx) = tokio::sync::mpsc::channel(1);
+        let coordinator = crate::remote::relay_client::PairingCoordinator::new_with_auth(
+            "machine-initial",
+            pin_tx,
+            auth_mgr,
+        );
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: coordinator.clone(),
+            epoch: initial_epoch,
+        });
+
+        let (abort_notify_tx, mut abort_notify_rx) = tokio::sync::oneshot::channel::<()>();
+        struct DropAbortNotifier(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropAbortNotifier {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        // Built before the spawn so the guard's destructor fires even when the task is
+        // aborted before its first poll.
+        let abort_notifier = DropAbortNotifier(Some(abort_notify_tx));
+        let initial_task = tokio::spawn(async move {
+            let _drop_guard = abort_notifier;
+            std::future::pending::<()>().await;
+        });
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = RemoteServerHandle {
+            shutdown_tx,
+            relay_task: Some(initial_task),
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: Some((Arc::clone(&state), initial_epoch)),
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        let dummy_addr: SocketAddr = "127.0.0.1:8899".parse().unwrap();
+        // Malformed URL must fail validation in prepare_relay
+        let result = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some("not-a-valid-url"),
+            dummy_addr,
+        ).await;
+
+        assert!(result.is_err(), "Invalid relay url should fail prepare_relay");
+        // State must remain unmutated on error: existing coordinator and epoch preserved
+        let current_epoch = state
+            .relay_pairing
+            .read()
+            .as_ref()
+            .expect("pairing must still exist")
+            .epoch;
+        assert_eq!(current_epoch, initial_epoch);
+        // Initial relay task must still be running (abort notifier not fired)
+        assert!(abort_notify_rx.try_recv().is_err(), "initial task must not have been dropped");
+        assert!(handle.relay_task.as_ref().is_some_and(|t| !t.is_finished()));
+
+        // Clean up: stopping the handle must abort the supervisor task, whose drop guard then
+        // signals - a discarded timeout would leave that cleanup unproven.
+        handle.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(1), abort_notify_rx)
+            .await
+            .expect("supervisor task must be aborted within 1s of handle.stop()")
+            .expect("drop guard must signal when the supervisor task is aborted");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn prepare_and_replace_relay_preserves_listener_continuity() {
+        let temp_dir = std::env::temp_dir().join(format!("test_prepare_replace_existing_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Same identity isolation as the failure test: auth store inside the temp dir.
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(temp_dir.join("remote-config.json")),
+            Some(temp_dir.join("remote-auth.json")),
+        ));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+        }
+
+        // Start a real local fake relay listener on loopback
+        let fake_relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_relay_addr = fake_relay_listener.local_addr().unwrap();
+        let fake_relay_url = format!("ws://{fake_relay_addr}");
+
+        // Spawn mock relay accepting control WS and completing challenge handshake
+        let (handshake_completed_tx, handshake_completed_rx) = tokio::sync::oneshot::channel::<()>();
+        let fake_relay_server = tokio::spawn(async move {
+            let (tcp, _) = fake_relay_listener.accept().await.expect("relay listener accept");
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.expect("relay ws accept");
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let challenge = crate::remote::protocol::ControlChallenge {
+                audience: None,
+                nonce: "mock-test-challenge".into(),
+                timestamp: now_secs,
+            };
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .expect("send challenge");
+
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                .await
+                .expect("timed out waiting for control auth")
+                .expect("control auth frame exists")
+                .expect("control auth frame ok");
+            let auth: crate::remote::protocol::ControlAuth =
+                serde_json::from_str(frame.to_text().expect("auth text"))
+                .expect("deserialize auth");
+            assert!(!auth.machine_id.is_empty(), "machine_id must be populated");
+            assert!(crate::remote::auth::verify_control_challenge(
+                &auth.public_key,
+                &auth.machine_id,
+                "relay",
+                &challenge.nonce,
+                auth.timestamp,
+                &auth.signature
+            ));
+
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&crate::remote::protocol::ControlAuthResponse {
+                        success: true,
+                        error: None,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .expect("send auth response");
+
+            handshake_completed_tx.send(()).expect("send handshake done");
+            // Hold the control channel open until the test aborts this task. Classify the
+            // terminal event explicitly: the aborted client drops its socket without a close
+            // handshake (tungstenite reports that as a protocol reset), while any other error
+            // is a fixture failure and must not be swallowed.
+            loop {
+                match socket.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                    Some(Ok(_)) => continue,
+                    Some(Err(
+                        tokio_tungstenite::tungstenite::Error::Protocol(
+                            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                        ),
+                    )) => break,
+                    Some(Err(error)) => panic!("fake relay control socket failed: {error}"),
+                }
+            }
+        });
+
+        // Bind real HTTP loopback gateway to prove listener continuity before & after replace
+        let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway_listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(gateway_listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("gateway listener must serve until graceful shutdown");
+        });
+
+        // Verify gateway health check endpoint works initially
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let initial_health = http_client
+            .get(format!("http://{gateway_addr}/api/v1/health"))
+            .send()
+            .await
+            .expect("initial health request must succeed");
+        assert_eq!(initial_health.status(), StatusCode::OK);
+
+        // 1. Establish an initial existing supervisor and coordinator
+        let initial_epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let auth_mgr = (*state.auth_manager).clone();
+        let (initial_pin_tx, _initial_pin_rx) = tokio::sync::mpsc::channel(1);
+        let initial_coordinator = crate::remote::relay_client::PairingCoordinator::new_with_auth(
+            "machine-old",
+            initial_pin_tx,
+            auth_mgr,
+        );
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: initial_coordinator.clone(),
+            epoch: initial_epoch,
+        });
+
+        // A long-running task simulating the existing supervisor with a Drop cancellation trigger
+        let (old_task_aborted_tx, old_task_aborted_rx) = tokio::sync::oneshot::channel::<()>();
+        struct OldSupervisorGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for OldSupervisorGuard {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        // Built before the spawn so the guard's destructor still signals when the task is
+        // aborted before its first poll.
+        let supervisor_guard = OldSupervisorGuard(Some(old_task_aborted_tx));
+        let initial_task = tokio::spawn(async move {
+            let _guard = supervisor_guard;
+            std::future::pending::<()>().await;
+        });
+
+        let mut handle = RemoteServerHandle {
+            shutdown_tx,
+            relay_task: Some(initial_task),
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: Some((Arc::clone(&state), initial_epoch)),
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        // 2. Prepare new relay client targeting the local fake relay
+        let new_client = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some(&fake_relay_url),
+            gateway_addr,
+        )
+        .await
+        .expect("prepare_relay should succeed for local fake relay");
+
+        // Prior to replace, state pairing remains the initial one
+        assert_eq!(state.relay_pairing.read().as_ref().unwrap().epoch, initial_epoch);
+
+        // 3. Replace relay: this must abort old task and replace coordinator & epoch
+        handle.replace_relay(Arc::clone(&state), new_client);
+
+        // Prove old supervisor was aborted deterministically without sleeps
+        tokio::time::timeout(std::time::Duration::from_secs(2), old_task_aborted_rx)
+            .await
+            .expect("timeout waiting for old task to be aborted")
+            .expect("old task abort signal received");
+
+        // The epoch must strictly increase
+        let replaced_epoch = state
+            .relay_pairing
+            .read()
+            .as_ref()
+            .expect("new pairing present")
+            .epoch;
+        assert!(
+            replaced_epoch > initial_epoch,
+            "epoch must increment from {initial_epoch} to > {initial_epoch}, got {replaced_epoch}"
+        );
+
+        // The pairing published into handle must match the new epoch
+        assert_eq!(handle.published_pairing.as_ref().unwrap().1, replaced_epoch);
+
+        // Listener continuity: real HTTP health check request still succeeds immediately after replacement
+        let post_swap_health = http_client
+            .get(format!("http://{gateway_addr}/api/v1/health"))
+            .send()
+            .await
+            .expect("post-swap health request must succeed");
+        assert_eq!(post_swap_health.status(), StatusCode::OK);
+
+        // Wait for the new client to connect to fake relay and perform handshake
+        tokio::time::timeout(std::time::Duration::from_secs(5), handshake_completed_rx)
+            .await
+            .expect("timeout waiting for new relay client to connect to local fake relay")
+            .expect("handshake completed signal");
+
+        // 4. Stopping handle must clear pairing only when matching epoch, and stop listener
+        handle.stop();
+        assert!(state.relay_pairing.read().is_none(), "pairing must be cleared on stop");
+
+        // Server task must actually finish on the handle's shutdown signal: discarding the
+        // timeout result would leave listener continuity cleanup unproven.
+        tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+            .await
+            .expect("gateway server task must finish within 2s of handle.stop()")
+            .expect("gateway server task must not panic");
+
+        fake_relay_server.abort();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

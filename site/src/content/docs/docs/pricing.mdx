@@ -1,0 +1,98 @@
+---
+title: Pricing & Plans
+description: Transparent pricing for Ferryx managed relay and remote terminal access. Local use and self-hosted relays remain perpetually free.
+---
+
+import pricingData from '../../../data/pricing.json';
+
+export const formatPrice = (val, suffix = '') => {
+  if (!val || val === '') return '결제 화면에서 확인';
+  return `${val}${suffix}`;
+};
+
+Ferryx connects your terminals, agents, and Git worktrees across local and remote machines.
+
+Our commercial hosted relay network allows connecting remote machines, accessing terminals from web browsers, and coordinating agent workflows without manual port forwarding or VPN configuration.
+
+:::tip[Local and Self-Hosted are Perpetually Free]
+**Local terminal multiplexing and self-hosted relays are completely free and open.** Running Ferryx locally on your machine or hosting your own relay instance (`FERRYX_DEPLOYMENT_MODE=selfhost`) requires no account, no subscription, and enforces no machine limits.
+:::
+
+---
+
+## Plan Comparison
+
+| Feature | Free | Pro | Team |
+| :--- | :--- | :--- | :--- |
+| **Monthly Price** | **{formatPrice(pricingData.plans.free.monthly, ' / mo')}** | **{formatPrice(pricingData.plans.pro.monthly, ' / mo')}** | **{formatPrice(pricingData.plans.team.monthly, ' / seat / mo')}** |
+| **Annual Price** | **{formatPrice(pricingData.plans.free.annual, ' / yr')}** | **{formatPrice(pricingData.plans.pro.annual, ' / yr')}** | **{formatPrice(pricingData.plans.team.annual, ' / seat / yr')}** |
+| **Connected Machines** | {pricingData.plans.free.machine_limit} machine | Up to {pricingData.plans.pro.machine_limit} machines | {pricingData.plans.team.machine_limit} |
+| **Extra Machine Expansion** | — | {formatPrice(pricingData.plans.pro.extra_host_pack.monthly, ' / mo')} or {formatPrice(pricingData.plans.pro.extra_host_pack.annual, ' / yr')} per {pricingData.plans.pro.extra_host_pack.hosts} hosts | {formatPrice(pricingData.plans.team.extra_host_pack.annual, ' / yr')} per {pricingData.plans.team.extra_host_pack.hosts} hosts (Annual) |
+| **Seat Requirements** | 1 user | 1 user | Minimum {pricingData.plans.team.min_seats} seats |
+| **Managed Relay Network** | Included | Included | Included (Pooled) |
+| **Direct P2P & QUIC Tunnels** | Included | Included | Included |
+| **Mobile & Web Terminal Access** | Included | Included | Included |
+| **Self-Hosted Relay Option** | **Perpetually Free** | **Perpetually Free** | **Perpetually Free** |
+
+---
+
+## Detailed Tiers
+
+### 1. Free Plan
+- **Price:** {formatPrice(pricingData.plans.free.monthly)}
+- **Connected Machines:** {pricingData.plans.free.machine_limit} active registered machine at a time via official managed relay.
+- **Audience:** Individual developers getting started with remote terminal access on a single workstation or server.
+- **Local Multiplexing:** Unlimited local workspaces, worktrees, tabs, and agents on your primary machine.
+
+### 2. Pro Plan
+- **Price:** {formatPrice(pricingData.plans.pro.monthly, ' / month')} or {formatPrice(pricingData.plans.pro.annual, ' / year')} (Save $10 with annual billing).
+- **Connected Machines:** Up to {pricingData.plans.pro.machine_limit} active registered machines.
+- **Capacity Add-ons:** Need more than 10 machines? Add extra host packs (+{pricingData.plans.pro.extra_host_pack.hosts} machines) for {formatPrice(pricingData.plans.pro.extra_host_pack.monthly, ' / month')} or {formatPrice(pricingData.plans.pro.extra_host_pack.annual, ' / year')}.
+- **Audience:** Power users with multiple development servers, cloud GPUs, laptops, and home desktop rigs.
+
+### 3. Team Plan
+- **Price:** {formatPrice(pricingData.plans.team.monthly, ' / seat / month')} or {formatPrice(pricingData.plans.team.annual, ' / seat / year')}.
+- **Minimum Seats:** {pricingData.plans.team.min_seats} seats.
+- **Pooled Machine Capacity:** Each seat contributes {pricingData.plans.team.hosts_per_seat} machines to an organization-wide pool (e.g., a 5-seat team shares 50 connected machines across all members).
+- **Team Host Expansion:** Additional host packs (+{pricingData.plans.team.extra_host_pack.hosts} machines) can be added for {formatPrice(pricingData.plans.team.extra_host_pack.annual, ' / year')} per pack.
+- **Management:** Organization owner and admin roles, centralized member invitations, and shared license enforcement.
+
+---
+
+## Policies & Safeguards
+
+### Capacity Limits & Immediate Enrollment Guard
+- **No Over-Limit Enrollment:** If your enrolled machine count is at or above your plan's machine limit, enrolling a new machine is blocked immediately (`PLAN_LIMIT_REACHED`).
+- To add a new machine, you must either expand your plan capacity (or add host packs) or unregister an existing idle machine first.
+
+### 7-Day Grace Period and Complete Remote Cutoff
+If an existing account enters an overdue or over-capacity state (for example, if seat count decreases or an automated renewal payment fails):
+- A **7-day grace period** starts from the first moment the non-compliant state is detected.
+- During these 7 days, warning banners and notifications appear in the client so you have time to update billing or unregister machines.
+- **After 7 Days (Remote Cutoff):** If the account is still not in good standing after 7 days, all account-based remote connections (including relay connections and direct streams) are fully stopped at the grace deadline.
+- Remote connectivity remains suspended until the subscription is renewed or machine count is brought within plan limits.
+
+### Local & LAN Terminal Access is Never Suspended
+- Local terminal multiplexing, direct local PTY processes, native Ghostty rendering, Git worktrees, and direct LAN/SSH connections **never lock up or suspend**.
+- Only account-brokered remote tunnels and managed relay access are suspended during a billing lapse.
+
+### Self-Hosted Relay Deployment
+Organizations running their own infrastructure can deploy `ferryx-relay` in self-hosted mode:
+```bash
+export FERRYX_DEPLOYMENT_MODE="selfhost"
+ferryx-relay --port 8787
+```
+In self-hosted mode, commercial billing, Lemon Squeezy integration, and machine limits are completely disabled. See the [Self-Hosted Relay Operations Guide](/docs/self-hosted-relay/) for step-by-step instructions.
+
+---
+
+## Frequently Asked Questions
+
+#### How are "connected machines" counted?
+A machine is counted when it enrolls with your account and obtains an active machine identity record. You can view, rename, or unregister idle or decommissioned machines at any time from your account settings.
+
+#### When do seat and host pack quantity changes take effect?
+When you add or remove seats or extra host packs through your account settings, the quantity update is submitted to Lemon Squeezy with prorations disabled (`disable_prorations: true`, `invoice_immediately: false`). The financial charge for the updated quantity is deferred to your **next billing renewal date** according to our renewal billing policy. However, your account's machine limit and seat capacity update immediately once the provider acknowledges the quantity modification or when the corresponding webhook is processed.
+
+#### What happens if `pricing.json` values are updated?
+All prices on this page are loaded dynamically from our pricing configuration. If any specific item is missing or empty, it defaults safely to indicating that pricing is confirmed directly in checkout.

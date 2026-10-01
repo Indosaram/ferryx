@@ -1,11 +1,15 @@
 use crate::{
     daemon::server::DaemonServer,
     remote::{server::create_remote_router, state::RemoteGatewayState},
-    terminal::PtySession,
 };
-use futures_util::{SinkExt, StreamExt};
+#[cfg(unix)]
+use crate::terminal::PtySession;
+use futures_util::StreamExt;
+#[cfg(unix)]
+use futures_util::SinkExt;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::{
     connect_async,
@@ -116,7 +120,10 @@ impl Fixture {
         socket
     }
     pub async fn cleanup(mut self) {
-        self.state.auth_manager.revoke_device(&self.device);
+        self.state
+            .auth_manager
+            .revoke_device(&self.device)
+            .expect("device must be revoked");
         let backend = self.owner.terminal_service();
         for id in backend.list_sessions() {
             // A child may exit naturally when its control socket drops on a
@@ -124,18 +131,79 @@ impl Fixture {
             let pty = backend.get_session(&id);
             let pid = pty.as_ref().and_then(|pty| pty.pid());
             if pty.is_some() {
-                backend.close_session(&id).await.unwrap();
+                #[cfg(windows)]
+                {
+                    if let Some((history, mut rx)) = backend.output_hub().subscribe(&id) {
+                        let mut has_dsr = history.windows(4).any(|w| w == b"\x1b[6n");
+                        if !has_dsr {
+                            while let Ok(chunk) = rx.try_recv() {
+                                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                                    has_dsr = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if has_dsr {
+                            eprintln!("A10 cleanup phase 1: answering DSR CPR for id={id}");
+                            backend
+                                .write_input(&id, b"\x1b[1;1R")
+                                .expect("write CPR response must succeed");
+                        }
+                    }
+                    eprintln!("A10 cleanup phase 2: sending graceful exit for id={id}");
+                    backend
+                        .write_input(&id, b"exit\r\n")
+                        .expect("write exit command must succeed");
+                }
+                #[cfg(not(windows))]
+                {
+                    backend
+                        .close_session(&id)
+                        .await
+                        .expect("Unix backend close_session must succeed");
+                }
             }
-            self.state
-                .machine_services
-                .as_ref()
-                .unwrap()
-                .sessions
-                .wait_machine_lifecycle(&id)
-                .await
-                .unwrap();
+
+            // Await daemon machine lifecycle completion bounded by 5s.
+            eprintln!("A10 cleanup phase 3: awaiting wait_machine_lifecycle for id={id}");
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                self.state
+                    .machine_services
+                    .as_ref()
+                    .unwrap()
+                    .sessions
+                    .wait_machine_lifecycle(&id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    eprintln!("A10 cleanup phase 3: lifecycle done confirmed for id={id}");
+                }
+                Ok(Err(err)) => {
+                    eprintln!("A10 cleanup phase 3: lifecycle returned error for id={id} pid={pid:?}: {err}");
+                    #[cfg(windows)]
+                    if backend.get_session(&id).is_some() {
+                        if let Err(close_err) = backend.close_session(&id).await {
+                            eprintln!("A10 cleanup close_session error for id={id}: {close_err}");
+                        }
+                    }
+                    panic!("wait_machine_lifecycle failed for session '{id}': {err}");
+                }
+                Err(_) => {
+                    eprintln!("A10 cleanup phase 3: lifecycle timed out for id={id} pid={pid:?}; escalating close_session");
+                    #[cfg(windows)]
+                    if backend.get_session(&id).is_some() {
+                        if let Err(close_err) = backend.close_session(&id).await {
+                            eprintln!("A10 cleanup close_session error for id={id}: {close_err}");
+                        }
+                    }
+                    panic!("wait_machine_lifecycle timed out for session '{id}'");
+                }
+            }
+
             if let Some(pty) = pty {
-                assert!(pty.is_reaped());
+                assert!(pty.is_reaped(), "PTY must be reaped after lifecycle drain");
             }
             eprintln!("A10 cleanup lifecycle drained pid={pid:?} id={id}");
         }
@@ -149,12 +217,14 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
 pub struct Held {
     pub pty: Arc<PtySession>,
     pub control: tokio::net::UnixStream,
     pub accepted: u64,
     pub pid: u32,
 }
+#[cfg(unix)]
 impl Held {
     pub async fn start(fixture: &Fixture, session: &Value, socket: &mut Socket) -> Self {
         let path = fixture.root.path().join(uuid::Uuid::new_v4().to_string());
