@@ -10,8 +10,10 @@ import type { TerminalActivity } from "../lib/activity";
 import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
+  emitNativeTerminalPresentation,
   presentNativeTerminalLifecycle,
   reattachNativeTerminalLifecycle,
+  type NativeTerminalPresentationReceipt,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
@@ -29,7 +31,8 @@ import {
 } from "../lib/tauri";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
-import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageLocally, pasteClipboardImageToRemote } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageLocally, pasteClipboardImageToRemote, uploadDroppedFilesToRemote, cancelRemoteDropUpload, quoteRemotePath } from "../lib/remoteProject";
+import { safeRandomUUID } from "../lib/uuid";
 import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import {
@@ -558,6 +561,11 @@ export function NativeTerminalPane({
   const { visible: surfaceVisible, interactive } = useNativeTerminalVisibilityState();
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const overflowReportedRef = useRef(false);
+  const lastOverflowReportAtRef = useRef(0);
+  const lastGateLogAtRef = useRef(0);
+  const consecutiveDropsRef = useRef(0);
+  const lastReportedDropCountRef = useRef(0);
   const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
   const ensureStreamListenerRef = useRef<() => Promise<unknown>>(async () => undefined);
@@ -598,6 +606,17 @@ export function NativeTerminalPane({
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
   const paneIdentity = session?.id ?? sessionId;
+  useEffect(() => {
+    switchDebug("terminal.surface.input.gate.state", {
+      paneIdentity,
+      backendSessionId: session?.backendSessionId ?? targetSessionId,
+      visible,
+      interactive,
+      surfaceVisible,
+      suspended,
+      isExited,
+    });
+  }, [paneIdentity, session?.backendSessionId, targetSessionId, visible, interactive, surfaceVisible, suspended, isExited]);
   const [presentation, setPresentation] = useState<{
     readonly paneIdentity: string | undefined;
     readonly backendSessionId: string;
@@ -639,6 +658,24 @@ export function NativeTerminalPane({
       : null;
     return () => { attachmentOwnerRef.current = null; };
   }, [bindingKey, surfaceSessionId, surfaceVisible, suspended, targetSessionId]);
+  // Receipt-time identity gate: a set-bounds promise resolves in a microtask that
+  // can land after a commit re-bound this pane but before the passive surface
+  // effect cleaned up its closure. Comparing the dispatch-captured identity
+  // against this ref - written during commit, cleared on unmount - is what makes
+  // a stale receipt unable to emit a positive presentation for a pane/binding it
+  // no longer owns. Authoritative exit (surfaceSessionId -> null) lands here too,
+  // so a late positive receipt after exit can never mark the pane ready.
+  const presentationIdentityRef = useRef<{
+    readonly paneIdentity: string;
+    readonly backendSessionId: string;
+    readonly bindingKey: string | null;
+  } | null>(null);
+  useLayoutEffect(() => {
+    presentationIdentityRef.current = surfaceSessionId && paneIdentity !== undefined
+      ? { paneIdentity, backendSessionId: surfaceSessionId, bindingKey }
+      : null;
+    return () => { presentationIdentityRef.current = null; };
+  }, [bindingKey, paneIdentity, surfaceSessionId]);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -1201,7 +1238,14 @@ export function NativeTerminalPane({
     const payloadBytes = estimateInputBytes(input);
 
     const executeInput = async (isRetry = false): Promise<void> => {
-      if (!isCurrentOwner()) return;
+      if (!isCurrentOwner()) {
+        recordTerminalInputDrop("dropped");
+        switchDebug("terminal.surface.input.dropped.owner_mismatch", {
+          backendSessionId: currentSessionId,
+          ownerSessionId: surfaceOwnerRef.current?.sessionId ?? null,
+        });
+        return;
+      }
       if (quarantinedBindingRef.current?.sessionId === currentSessionId) {
         recordTerminalInputDrop("quarantined");
         return;
@@ -1214,23 +1258,30 @@ export function NativeTerminalPane({
           currentSessionId,
           generation,
           payloadBytes,
-          async () => {
+          async (requestId) => {
             return invoke<void>("cmd_native_terminal_send_input", {
               sessionId: currentSessionId,
               input,
               ...(generation != null ? { generation } : {}),
+              requestId,
             });
           },
         );
         if (!isCurrentOwner()) return;
+        if (consecutiveDropsRef.current > 0) {
+          switchDebug("terminal.surface.input.dropped.summary", {
+            backendSessionId: currentSessionId,
+            totalDroppedInStall: consecutiveDropsRef.current,
+            recovered: true,
+          });
+          consecutiveDropsRef.current = 0;
+          lastReportedDropCountRef.current = 0;
+        }
+        overflowReportedRef.current = false;
         switchDebug("terminal.surface.input.sent", {
           backendSessionId: currentSessionId,
           hasKeyEvent: "keyEvent" in input && Boolean(input.keyEvent),
           textLength: "text" in input ? (input.text?.length ?? 0) : 0,
-          textCodePoints:
-            "text" in input && input.text !== undefined
-              ? Array.from(input.text).map((c) => c.codePointAt(0)?.toString(16)).join(",")
-              : undefined,
         });
         setError(null);
       } catch (error: unknown) {
@@ -1241,10 +1292,40 @@ export function NativeTerminalPane({
         }
         if (error instanceof NativeTerminalQueueOverflowError) {
           recordTerminalInputDrop("overflow");
-          switchDebug("terminal.surface.input.dropped.overflow", {
+          consecutiveDropsRef.current += 1;
+          const currentDrops = consecutiveDropsRef.current;
+          const now = Date.now();
+          const runningAgeMs = terminalInputQueue.getRunningAgeMs(currentSessionId);
+          const inFlightRequestId = terminalInputQueue.getInFlightRequestId(currentSessionId);
+          const details = {
             backendSessionId: currentSessionId,
-            error: String(error),
-          });
+            generation,
+            inFlightRequestId,
+            queuedEntries: terminalInputQueue.getQueuedCount(currentSessionId),
+            queuedBytes: terminalInputQueue.getQueuedBytes(currentSessionId),
+            runningAgeMs,
+            consecutiveDrops: currentDrops,
+            remoteConnectionState,
+          };
+          const dropsSinceLast = currentDrops - lastReportedDropCountRef.current;
+          const timeSinceLast = now - lastOverflowReportAtRef.current;
+          const isMilestone = currentDrops === 1 || currentDrops === 5 || currentDrops === 10 || currentDrops === 25 || currentDrops === 50 || currentDrops % 100 === 0;
+
+          if (!overflowReportedRef.current || (isMilestone && dropsSinceLast > 0) || timeSinceLast >= 1000) {
+            overflowReportedRef.current = true;
+            lastOverflowReportAtRef.current = now;
+            lastReportedDropCountRef.current = currentDrops;
+            console.warn("Native terminal input queue overflow", details);
+            switchDebug(
+              currentDrops === 1
+                ? "terminal.surface.input.dropped.overflow"
+                : "terminal.surface.input.dropped.rate",
+              {
+                ...details,
+                dropsSinceLastReport: dropsSinceLast,
+              },
+            );
+          }
           // A dropped keystroke that says nothing is the worst outcome here: the user believes
           // they typed it. Surface the drop so they know to retype rather than trusting the buffer.
           setError("Input dropped: the terminal is not keeping up. Retype the last characters.");
@@ -1534,15 +1615,18 @@ export function NativeTerminalPane({
     };
 
     void terminalInputQueue
-      .enqueue(targetSessionId, generation, 64, () =>
+      .enqueue(targetSessionId, generation, 64, (requestId) =>
         invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>(
           "cmd_native_terminal_mouse",
           {
             sessionId: targetSessionId,
+            requestId,
             ...(generation != null ? { generation } : {}),
             event: mousePayload,
           },
         ),
+        undefined,
+        `mouse.${action}`,
       )
       .then((receipt: { readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt } | undefined) => {
         if (receipt && typeof receipt.mouseTrackingEnabled === "boolean" && targetSessionId) setSessionMouseTracking(targetSessionId, receipt.mouseTrackingEnabled);
@@ -1618,6 +1702,26 @@ export function NativeTerminalPane({
   useEffect(() => {
     let plainDown: { clientX: number; clientY: number } | null = null;
     const onDown = (event: PointerEvent) => {
+      const container = containerRef.current;
+      const rect = container?.getBoundingClientRect();
+      if (container && rect && rect.width > 0 && rect.height > 0 &&
+          event.clientX >= rect.left && event.clientX < rect.right &&
+          event.clientY >= rect.top && event.clientY < rect.bottom) {
+        const target = event.target instanceof Element ? event.target : null;
+        switchDebug("terminal.surface.input.gate.pointer", {
+          backendSessionId: targetSessionId,
+          visible,
+          surfaceVisible: container.dataset.nativeTerminalVisible,
+          reachesPane: target !== null && container.contains(target),
+          targetTag: target?.tagName ?? null,
+          targetTestId: target?.getAttribute("data-testid") ?? null,
+          targetClass: target?.getAttribute("class")?.slice(0, 160) ?? null,
+          activeTag: document.activeElement?.tagName ?? null,
+          pointerId: event.pointerId,
+          queuedEntries: targetSessionId ? terminalInputQueue.getQueuedCount(targetSessionId) : 0,
+          inFlightRequestId: targetSessionId ? terminalInputQueue.getInFlightRequestId(targetSessionId) : null,
+        });
+      }
       if (
         isTerminalLinkActionClick(event) &&
         (!event.target || containerRef.current?.contains(event.target as Node))
@@ -1716,7 +1820,7 @@ export function NativeTerminalPane({
       pendingMotionRef.current = null;
       document.body.style.cursor = "";
     };
-  }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse, targetSessionId]);
+  }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse, targetSessionId, visible]);
 
   useEffect(() => {
     const handleKeyChange = (event: globalThis.KeyboardEvent) => {
@@ -1790,6 +1894,24 @@ export function NativeTerminalPane({
         activeElement: activeElement.slice(0, 120),
         targetSessionId,
       });
+
+      const isIntendedOwner =
+        ownsInput || Boolean(active) || lastFocusedNativeTerminalSessionId === targetSessionId;
+      if (isIntendedOwner && !canClaimInput) {
+        const now = Date.now();
+        if (now - lastGateLogAtRef.current >= 1000) {
+          lastGateLogAtRef.current = now;
+          switchDebug("terminal.surface.input.gate.unclaimed", {
+            backendSessionId: targetSessionId,
+            ownsInput,
+            canClaimInput,
+            activeTag: activeEl?.tagName ?? null,
+            activeTestId: activeEl?.getAttribute("data-testid") ?? null,
+            targetTag: targetEl?.tagName ?? null,
+            hasModifiers: event.ctrlKey || event.altKey || event.metaKey,
+          });
+        }
+      }
 
       // Shared IME/AltGr gate. IME-owned keydowns are left to the IME (no send, no preventDefault,
       // no focus steal); AltGr text claims focus only for the owning pane so the browser input
@@ -2110,7 +2232,73 @@ export function NativeTerminalPane({
         lastFocusedNativeTerminalSessionId = targetSessionId;
         inputRef.current?.focus();
         sendFocus(true);
-        sendPaste(paths.map(quoteShellPath).join(" ") + " ");
+
+        if (remoteWorkspaceId) {
+          const uploadId = safeRandomUUID();
+          const fileCount = paths.length;
+          const label = fileCount === 1 ? "file" : `${fileCount} files`;
+          const toastId = `remote-drop-${uploadId}`;
+
+          toast.loading(`Uploading ${label} to remote host...`, {
+            id: toastId,
+            action: {
+              label: "Cancel",
+              onClick: () => {
+                void cancelRemoteDropUpload(uploadId);
+                toast.dismiss(toastId);
+              },
+            },
+          });
+
+          let lastReportedPercent = -1;
+          void uploadDroppedFilesToRemote(remoteWorkspaceId, paths, uploadId, (progress) => {
+            if (progress.aggregateTotalBytes > 0) {
+              const percent = Math.floor(
+                (progress.aggregateSentBytes / progress.aggregateTotalBytes) * 100,
+              );
+              if (percent !== lastReportedPercent) {
+                lastReportedPercent = percent;
+                const sentMb = (progress.aggregateSentBytes / (1024 * 1024)).toFixed(1);
+                const totalMb = (progress.aggregateTotalBytes / (1024 * 1024)).toFixed(1);
+                toast.loading(`Uploading ${label} to remote host (${sentMb}/${totalMb} MB, ${percent}%)...`, {
+                  id: toastId,
+                  action: {
+                    label: "Cancel",
+                    onClick: () => {
+                      void cancelRemoteDropUpload(uploadId);
+                      toast.dismiss(toastId);
+                    },
+                  },
+                });
+              }
+            }
+          })
+            .then((result) => {
+              toast.dismiss(toastId);
+              if (!result) {
+                return;
+              }
+              if (surfaceOwnerRef.current?.sessionId !== targetSessionId) {
+                toast.info(
+                  `Uploaded ${label} to the remote host, but the terminal moved on before the path could be pasted.`,
+                );
+                return;
+              }
+              const remotePaths = result.files.map((f) => quoteRemotePath(f.remotePath, result.platform));
+              sendPaste(remotePaths.join(" ") + " ");
+            })
+            .catch((error: unknown) => {
+              toast.dismiss(toastId);
+              if (isStructuredIpcError(error) && error.code === "UPLOAD_CANCELLED") {
+                return;
+              }
+              toast.error(
+                `Remote drop upload failed: ${extractIpcErrorMessage(error, "unknown error")}`,
+              );
+            });
+        } else {
+          sendPaste(paths.map(quoteShellPath).join(" ") + " ");
+        }
       }
     };
 
@@ -2179,7 +2367,7 @@ export function NativeTerminalPane({
       disposed = true;
       for (const dispose of unlistenFns) dispose();
     };
-  }, [sendFocus, sendPaste, targetSessionId, visible]);
+  }, [remoteWorkspaceId, sendFocus, sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -2202,6 +2390,10 @@ export function NativeTerminalPane({
     let pendingGeometry: GeometryState | null = null;
     let isAttached = false;
     let presentationFrame: number | null = null;
+    // Set when the component-level generation effect re-arms bounds while an
+    // older set-bounds request is still in flight; consumed by that request's
+    // settle path so the newer attempt's parked geometry dispatches even when
+    // the cached geometry would otherwise suppress it.
 
     // Presentation ownership is independent from live PTY readiness: a retained
     // presentation (exited session on macOS) keeps the compositor surface on
@@ -2220,6 +2412,16 @@ export function NativeTerminalPane({
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
+      const presentationReceipt: NativeTerminalPresentationReceipt | null =
+        paneIdentity !== undefined
+          ? {
+              frontendSessionId: paneIdentity,
+              paneIdentity,
+              backendSessionId: targetSessionId,
+              bindingKey,
+              attemptGeneration: 0,
+            }
+          : null;
       if (presentationFrame !== null) {
         cancelAnimationFrame(presentationFrame);
         presentationFrame = null;
@@ -2254,11 +2456,41 @@ export function NativeTerminalPane({
             retryBoundsRef.current = null;
             updateImeAnchor(receipt);
             if (receipt?.presented) {
-              setPresentation((current) =>
-                current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity && current.bindingKey === bindingKey
-                  ? current
-                  : { paneIdentity, backendSessionId: targetSessionId, bindingKey },
-              );
+              const currentIdentity = presentationIdentityRef.current;
+              const identityMatches =
+                presentationReceipt !== null &&
+                currentIdentity !== null &&
+                currentIdentity.paneIdentity === presentationReceipt.paneIdentity &&
+                currentIdentity.backendSessionId === presentationReceipt.backendSessionId &&
+                currentIdentity.bindingKey === presentationReceipt.bindingKey;
+              if (identityMatches) {
+                setPresentation((current) =>
+                  current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity && current.bindingKey === bindingKey
+                    ? current
+                    : { paneIdentity, backendSessionId: targetSessionId, bindingKey },
+                );
+                // Positive receipt + current identity: emit the dispatch-frozen
+                // payload (attemptGeneration from request time, not response
+                // time). Missing/deferred receipts never reach this branch;
+                // the acceptance gate is the exact `presented === true`.
+                if (receipt.presented === true) {
+                  emitNativeTerminalPresentation(presentationReceipt);
+                }
+              } else {
+                // Stale receipt: the pane re-bound, exited, retained its surface
+                // or unmounted between dispatch and this positive receipt. It
+                // must not arm presentation or mark anyone ready.
+                switchDebug("terminal.surface.presentation.stale", {
+                  localSessionId: sessionId,
+                  backendSessionId: targetSessionId,
+                  paneIdentity,
+                  bindingKey,
+                  attemptGeneration: presentationReceipt?.attemptGeneration ?? null,
+                  currentPaneIdentity: currentIdentity?.paneIdentity ?? null,
+                  currentBackendSessionId: currentIdentity?.backendSessionId ?? null,
+                  currentBindingKey: currentIdentity?.bindingKey ?? null,
+                });
+              }
             }
             presentNativeTerminalLifecycle(targetSessionId);
             refreshScrollbar();
@@ -2928,6 +3160,15 @@ export function NativeTerminalPane({
             }
 
             if (!shouldForwardKey(forwardable)) {
+              if (!ignoredBrowserKeys.has(event.key)) {
+                switchDebug("terminal.surface.input.gate.sink_dropped", {
+                  backendSessionId: targetSessionId,
+                  defaultPrevented: event.defaultPrevented,
+                  isComposing: event.nativeEvent.isComposing || isComposingRef.current,
+                  keyLength: event.key.length,
+                  hasModifiers: event.ctrlKey || event.altKey || event.metaKey,
+                });
+              }
               return;
             }
 

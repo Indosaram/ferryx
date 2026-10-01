@@ -8,6 +8,9 @@ import fixture from "../state/__fixtures__/dagRunSample.json";
 
 vi.mock("./tauri", () => ({
   listenDagRunUpdated: vi.fn(),
+  // The hook subscribes the status channel fire-and-forget; the default no-op
+  // unlisten keeps that path exercised, and registration assertions override it.
+  listenDagWatchStatus: vi.fn(() => Promise.resolve(() => undefined)),
   watchDagProject: vi.fn(),
   watchDagPairedProject: vi.fn(),
   watchDagSshProject: vi.fn(),
@@ -205,4 +208,143 @@ it("does not let an untagged event bypass an established remote generation", asy
   await act(async () => {});
   act(() => emit({ projectPath: key, snapshot }));
   expect(dagStore.getState().runsByProject[key]).toBeUndefined();
+});
+
+it("re-arms remote watcher when ssh project registration succeeds for target workspace and ignores other workspaces", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(bridge.watchDagSshProject).mockResolvedValue({ projectPath: key, generation: 1, runs: [] });
+    renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
+    await act(async () => {});
+    expect(bridge.watchDagSshProject).toHaveBeenCalledTimes(1);
+
+    // Event for an unrelated workspace must NOT trigger retry / rearm
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("ferryx:ssh-project-registered", {
+          detail: { workspaceId: "ssh:unrelated-workspace" },
+        }),
+      );
+    });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(bridge.watchDagSshProject).toHaveBeenCalledTimes(1);
+
+    // Event for the matching target.workspaceId ("workspace") MUST trigger retry / rearm
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("ferryx:ssh-project-registered", {
+          detail: { workspaceId: target.workspaceId },
+        }),
+      );
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(bridge.watchDagSshProject).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+const pairedTarget = { kind: "pairedDaemon", workspaceId: "workspace", remotePath: "/remote:repo" } as const;
+const pairedCanonicalKey = "paired:workspace:/remote:repo";
+
+it("subscribes the watch-status channel once the run listener is ready and releases it on unmount", async () => {
+  const ready = deferred<() => void>();
+  const statusUnlisten = vi.fn();
+  vi.mocked(bridge.listenDagRunUpdated).mockReturnValue(ready.promise);
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async () => statusUnlisten);
+  vi.mocked(bridge.watchDagPairedProject).mockResolvedValue({ projectPath: pairedCanonicalKey, runs: [] });
+  const view = renderHook(() => useDagWatchLifecycle({
+    localRoots: [], remoteTargets: [pairedTarget], watchKey: pairedCanonicalKey,
+  }));
+  await act(async () => {});
+  expect(bridge.listenDagWatchStatus).not.toHaveBeenCalled();
+  await act(async () => { ready.resolve(vi.fn()); await ready.promise; });
+  expect(bridge.listenDagWatchStatus).toHaveBeenCalledTimes(1);
+  view.unmount();
+  await act(async () => {});
+  expect(statusUnlisten).toHaveBeenCalledTimes(1);
+});
+
+it("records a pushed watch failure for the paired canonical key and rejects stale or untagged generations", async () => {
+  const response = deferred<bridge.DagWatchProjectResult>();
+  let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn(); });
+  vi.mocked(bridge.watchDagPairedProject).mockReturnValue(response.promise);
+  renderHook(() => useDagWatchLifecycle({
+    localRoots: [], remoteTargets: [pairedTarget], watchKey: pairedCanonicalKey,
+  }));
+  await act(async () => {});
+  // Before the watch response lands there is no generation to compare against, so the push is
+  // applied as-is; the authoritative watch result below supersedes it.
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "authentication", message: "key rejected", generation: 7 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("authentication");
+  await act(async () => {
+    response.resolve({ projectPath: pairedCanonicalKey, generation: 7, runs: [], failure: null });
+    await response.promise;
+  });
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]).toBeUndefined();
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "authentication", message: "key rejected", generation: 7 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("authentication");
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "unavailable", message: "stale generation", generation: 6 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("authentication");
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "unavailable", message: "untagged" }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("authentication");
+});
+
+it("clears a recorded paired failure when a rewatch succeeds and rejects the retired generation's status", async () => {
+  let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
+  const firstStatusUnlisten = vi.fn();
+  let statusRegistrations = 0;
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => {
+    emitStatus = handler;
+    statusRegistrations += 1;
+    return statusRegistrations === 1 ? firstStatusUnlisten : vi.fn();
+  });
+  vi.mocked(bridge.watchDagPairedProject)
+    .mockResolvedValueOnce({ projectPath: pairedCanonicalKey, generation: 7, runs: [] })
+    .mockResolvedValue({ projectPath: pairedCanonicalKey, generation: 8, runs: [], failure: null });
+  const view = renderHook(({ revision }) => useDagWatchLifecycle({
+    localRoots: [], remoteTargets: [pairedTarget], watchKey: `${pairedCanonicalKey}:${revision}`,
+  }), { initialProps: { revision: 1 } });
+  await act(async () => {});
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "unavailable", message: "stream down", generation: 7 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("unavailable");
+  view.rerender({ revision: 2 });
+  await act(async () => {});
+  expect(bridge.watchDagPairedProject).toHaveBeenCalledTimes(2);
+  expect(bridge.listenDagWatchStatus).toHaveBeenCalledTimes(2);
+  expect(firstStatusUnlisten).toHaveBeenCalledTimes(1);
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]).toBeUndefined();
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "capability_missing", message: "helper offline", generation: 8 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("capability_missing");
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "authentication", message: "retired generation", generation: 7 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("capability_missing");
+});
+
+it("clears a recorded paired failure on an accepted snapshot and keeps it for a stale generation", async () => {
+  const snapshot = parseDagRunSnapshot(fixture);
+  if (!snapshot) throw new Error("invalid fixture");
+  let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
+  let emitRun: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("run listener absent"); };
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emitRun = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn(); });
+  vi.mocked(bridge.watchDagPairedProject).mockResolvedValue({ projectPath: pairedCanonicalKey, generation: 7, runs: [] });
+  renderHook(() => useDagWatchLifecycle({
+    localRoots: [], remoteTargets: [pairedTarget], watchKey: pairedCanonicalKey,
+  }));
+  await act(async () => {});
+  act(() => emitStatus({ projectPath: pairedCanonicalKey, hostId: "host-1", code: "unavailable", message: "stream down", generation: 7 }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("unavailable");
+  act(() => emitRun({ projectPath: pairedCanonicalKey, generation: 6, snapshot: { ...snapshot, status: "completed" } }));
+  expect(dagStore.getState().runsByProject[pairedCanonicalKey]).toBeUndefined();
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]?.code).toBe("unavailable");
+  act(() => emitRun({ projectPath: pairedCanonicalKey, generation: 7, snapshot: { ...snapshot, status: "completed" } }));
+  expect(dagStore.getState().watchFailures[pairedCanonicalKey]).toBeUndefined();
+  expect(dagStore.getState().runsByProject[pairedCanonicalKey]?.[snapshot.runId]?.status).toBe("completed");
 });

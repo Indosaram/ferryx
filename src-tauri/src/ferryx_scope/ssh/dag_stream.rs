@@ -18,16 +18,26 @@ use std::{
     time::Duration,
 };
 
+use super::dag_journal::parse_run_checkpoint;
+
 /// Maximum concurrently open subscriptions across the whole helper runtime.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
 /// Maximum coalesced pending checkpoint files before the subscription resyncs.
 pub const MAX_PENDING_FILES: usize = 64;
 /// Maximum `dropped` reports carried by one frame; the rest stay pending.
 pub const MAX_DROPPED_PER_FRAME: usize = 16;
-/// Payload budget for one delivered frame; the remainder stays pending.
+/// Payload budget for one delivered frame batch (512 KiB).
+/// Note: caller wrappers (such as `dag.subscribe` in helper which stamps `projectId`)
+/// fit well within the 1 MiB wire limit.
 pub const MAX_BATCH_BYTES: usize = 512 * 1024;
-/// Per-checkpoint limit. Larger files are reported explicitly, never truncated.
-pub const MAX_SNAPSHOT_BYTES: u64 = 256 * 1024;
+/// Raw checkpoint file size limit at input boundary (e.g. bridge max 1 MiB).
+/// Checkpoints exceeding this are refused immediately before reading into memory.
+pub const MAX_INPUT_FILE_BYTES: u64 = 1024 * 1024;
+/// Maximum allowed serialized size of a single projected snapshot (512 KiB).
+/// Projected snapshots exceeding this budget are explicitly reported in dropped.
+pub const MAX_PROJECTED_SNAPSHOT_BYTES: usize = 512 * 1024;
+/// Per-checkpoint limit retained for backward compatibility / tests.
+pub const MAX_SNAPSHOT_BYTES: u64 = MAX_INPUT_FILE_BYTES;
 /// Upper bound on a consumer's blocking wait.
 pub const MAX_WAIT_MS: u64 = 10_000;
 /// A subscription with no consumer call within this window releases itself.
@@ -85,6 +95,45 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+fn project_checkpoint(bytes: &[u8]) -> Result<(Value, usize), String> {
+    let raw_str = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let snapshot = parse_run_checkpoint(raw_str).map_err(|e| e.to_string())?;
+    let value = serde_json::to_value(&snapshot).map_err(|e| e.to_string())?;
+    let serialized_len = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
+    Ok((value, serialized_len))
+}
+
+fn build_frame(
+    id: &str,
+    sequence: u64,
+    runs: &[Value],
+    dropped: &[Value],
+    resync: bool,
+    more: bool,
+) -> Value {
+    json!({
+        "subscriptionId": id,
+        "sequence": sequence,
+        "runs": runs,
+        "dropped": dropped,
+        "resync": resync,
+        "more": more,
+        "closed": false,
+    })
+}
+
+fn frame_size_valid(
+    id: &str,
+    sequence: u64,
+    runs: &[Value],
+    dropped: &[Value],
+    resync: bool,
+    more: bool,
+) -> bool {
+    let frame = build_frame(id, sequence, runs, dropped, resync, more);
+    serde_json::to_vec(&frame).map(|b| b.len() <= MAX_BATCH_BYTES).unwrap_or(false)
+}
+
 // Content hashing (not mtime) is what makes a same-timestamp rewrite visible.
 // Oversized files are never read into memory; their identity is derived from
 // length and mtime so they are reported once instead of on every scan.
@@ -94,7 +143,7 @@ fn probe(path: &Path) -> Option<Probe> {
         return None;
     }
     let len = meta.len();
-    if len > MAX_SNAPSHOT_BYTES {
+    if len > MAX_INPUT_FILE_BYTES {
         let mtime = meta
             .modified()
             .ok()
@@ -354,7 +403,6 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
 
     let mut runs: Vec<Value> = Vec::new();
     let mut dropped: Vec<Value> = Vec::new();
-    let mut batch_bytes = 0usize;
 
     loop {
         let name = {
@@ -388,34 +436,93 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
             }
         }
 
+        let next_seq = subscription
+            .state
+            .lock()
+            .map_err(|e| e.to_string())?
+            .sequence
+            + 1;
+
         let Some(content) = probed.content else {
-            // Never silently truncate an oversized snapshot: report it and keep
-            // the stream (and the terminal) healthy.
             if dropped.len() >= MAX_DROPPED_PER_FRAME {
                 let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                 state.pending.insert(name);
                 break;
             }
-            dropped.push(json!({
+            let drop_entry = json!({
                 "file": name,
                 "error": "SNAPSHOT_TOO_LARGE",
                 "bytes": probed.len,
-            }));
+            });
+            let mut candidate_dropped = dropped.clone();
+            candidate_dropped.push(drop_entry.clone());
+            if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
+                if !runs.is_empty() || !dropped.is_empty() {
+                    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                    state.pending.insert(name);
+                    break;
+                }
+            }
+            dropped.push(drop_entry);
             let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
             state.known.insert(name, probed.hash);
             continue;
         };
 
-        if !runs.is_empty() && batch_bytes + content.len() > MAX_BATCH_BYTES {
-            let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
-            state.pending.insert(name);
-            break;
-        }
+        match project_checkpoint(&content) {
+            Ok((projected_val, projected_bytes)) => {
+                if projected_bytes > MAX_PROJECTED_SNAPSHOT_BYTES {
+                    if dropped.len() >= MAX_DROPPED_PER_FRAME {
+                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                        state.pending.insert(name);
+                        break;
+                    }
+                    let drop_entry = json!({
+                        "file": name.clone(),
+                        "error": "SNAPSHOT_TOO_LARGE",
+                        "bytes": projected_bytes as u64,
+                    });
+                    let mut candidate_dropped = dropped.clone();
+                    candidate_dropped.push(drop_entry.clone());
+                    if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
+                        if !runs.is_empty() || !dropped.is_empty() {
+                            let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                            state.pending.insert(name);
+                            break;
+                        }
+                    }
+                    dropped.push(drop_entry);
+                    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                    state.known.insert(name, probed.hash);
+                    continue;
+                }
 
-        match serde_json::from_slice::<Value>(&content) {
-            Ok(value) => {
-                batch_bytes += content.len();
-                runs.push(value);
+                let mut candidate_runs = runs.clone();
+                candidate_runs.push(projected_val.clone());
+                if !frame_size_valid(id, next_seq, &candidate_runs, &dropped, resync, true) {
+                    if !runs.is_empty() || !dropped.is_empty() {
+                        // Batched: defer to subsequent frame so current frame stays within 512KiB
+                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                        state.pending.insert(name);
+                        break;
+                    }
+                    // Single run alone exceeds frame budget (with envelope wrapper) -> report drop
+                    if dropped.len() >= MAX_DROPPED_PER_FRAME {
+                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                        state.pending.insert(name);
+                        break;
+                    }
+                    dropped.push(json!({
+                        "file": name.clone(),
+                        "error": "SNAPSHOT_TOO_LARGE",
+                        "bytes": projected_bytes as u64,
+                    }));
+                    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                    state.known.insert(name, probed.hash);
+                    continue;
+                }
+
+                runs.push(projected_val);
             }
             Err(error) => {
                 if dropped.len() >= MAX_DROPPED_PER_FRAME {
@@ -423,12 +530,22 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                     state.pending.insert(name);
                     break;
                 }
-                dropped.push(json!({
+                let drop_entry = json!({
                     "file": name.clone(),
                     "error": "INVALID_CHECKPOINT_JSON",
                     "bytes": probed.len,
-                    "detail": error.to_string(),
-                }));
+                    "detail": error,
+                });
+                let mut candidate_dropped = dropped.clone();
+                candidate_dropped.push(drop_entry.clone());
+                if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
+                    if !runs.is_empty() || !dropped.is_empty() {
+                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                        state.pending.insert(name);
+                        break;
+                    }
+                }
+                dropped.push(drop_entry);
             }
         }
         let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
@@ -438,15 +555,8 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
     let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
     state.sequence += 1;
     state.last_activity = std::time::Instant::now();
-    Ok(json!({
-        "subscriptionId": id,
-        "sequence": state.sequence,
-        "runs": runs,
-        "dropped": dropped,
-        "resync": resync,
-        "more": !state.pending.is_empty() || state.resync,
-        "closed": false,
-    }))
+    let more = !state.pending.is_empty() || state.resync;
+    Ok(build_frame(id, state.sequence, &runs, &dropped, resync, more))
 }
 
 fn watch(subscription: Arc<Subscription>) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { dagStore } from "../state/dagStore";
+import { SSH_PROJECT_REGISTERED_EVENT, type SshProjectRegisteredDetail } from "./sshRegistrationHeal";
 import { listenDagRunUpdated, listenDagWatchStatus, unwatchDagProject, watchDagPairedProject, watchDagProject, watchDagSshProject } from "./tauri";
 import type { DagRunUpdatedEvent } from "./tauri";
 
@@ -41,6 +42,21 @@ export function useDagWatchLifecycle(input: Input): void {
       try { await unwatchDagProject(key); }
       catch (error) { console.error("DAG unsubscribe failed", key, error); }
     };
+    const onSshProjectRegistered = (event: Event) => {
+      if (disposed) return;
+      const customEvent = event as CustomEvent<SshProjectRegisteredDetail>;
+      const registeredWsId = customEvent.detail?.workspaceId;
+      if (!registeredWsId) return;
+      const matchesTarget = current.remoteTargets.some(
+        (target) => target.kind === "ssh" && target.workspaceId === registeredWsId,
+      );
+      if (matchesTarget) {
+        retry();
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener(SSH_PROJECT_REGISTERED_EVENT, onSshProjectRegistered);
+    }
     const setup = queue.current.then(async () => {
       if (disposed) return;
       try {
@@ -66,6 +82,11 @@ export function useDagWatchLifecycle(input: Input): void {
           if (!runs) { runs = new Set(); observed.set(event.projectPath, runs); }
           runs.add(event.snapshot.runId);
           dagStore.applySnapshot(event.projectPath, event.snapshot);
+          // A snapshot accepted for the established generation proves the stream recovered;
+          // the stale failure must not resurface once the run is gone.
+          if (remote && generations.get(event.projectPath) === event.generation) {
+            dagStore.setWatchFailure(event.projectPath, null);
+          }
         });
         if (disposed) { unlisten(); unlisten = undefined; return; }
         void (async () => {
@@ -137,6 +158,9 @@ export function useDagWatchLifecycle(input: Input): void {
     return () => {
       disposed = true;
       clearTimeout(retryTimer);
+      if (typeof window !== "undefined") {
+        window.removeEventListener(SSH_PROJECT_REGISTERED_EVENT, onSshProjectRegistered);
+      }
       unlisten?.();
       unlisten = undefined;
       unlistenStatus?.();

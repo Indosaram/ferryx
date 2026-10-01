@@ -294,6 +294,7 @@ export function TerminalPane({
     >
       <DagPaneBadge
         projectPath={session.worktreePath ?? session.cwd}
+        workspaceId={session.workspaceId}
         paneId={session.id}
         providerSessionId={session.providerSession?.id ?? null}
         sessions={sessions}

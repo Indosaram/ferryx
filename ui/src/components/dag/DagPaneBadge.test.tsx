@@ -640,4 +640,185 @@ describe("DagPaneBadge", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByTestId("dag-pane-modal")).not.toBeInTheDocument();
   });
+
+  describe("remote watch failure lookup and workspace isolation", () => {
+    it("displays remote failure for owning pane and NOT a different remote workspace with same cwd", () => {
+      // Both workspaces operate on the same remote path (e.g. /remote/project)
+      const remoteCwd = "/remote/project";
+      const failureKeyA = "ssh:ssh:host-a-hash:/remote/project";
+
+      dagStore.setWatchFailure(failureKeyA, {
+        projectPath: failureKeyA,
+        hostId: "host-a",
+        code: "authentication",
+        message: "SSH authentication failed for workspace-a",
+      });
+
+      // Render Pane A (owning workspace ssh:host-a-hash) and Pane B (different workspace ssh:host-b-hash, same cwd)
+      render(
+        <>
+          <section data-testid="pane-a-container">
+            <DagPaneBadge
+              projectPath={remoteCwd}
+              workspaceId="ssh:host-a-hash"
+              paneId="pane-a"
+              providerSessionId="provider-a"
+            />
+          </section>
+          <section data-testid="pane-b-container">
+            <DagPaneBadge
+              projectPath={remoteCwd}
+              workspaceId="ssh:host-b-hash"
+              paneId="pane-b"
+              providerSessionId="provider-b"
+            />
+          </section>
+        </>,
+      );
+
+      // Pane A should display the watch failure badge with data-code
+      const paneA = screen.getByTestId("pane-a-container");
+      expect(paneA.querySelector("[data-testid=dag-watch-failure]")).toBeInTheDocument();
+      expect(paneA.querySelector("[data-testid=dag-watch-failure]")).toHaveAttribute(
+        "data-code",
+        "authentication",
+      );
+
+      // Pane B must NOT display the failure from workspace-a
+      const paneB = screen.getByTestId("pane-b-container");
+      expect(paneB.querySelector("[data-testid=dag-watch-failure]")).toBeNull();
+      expect(paneB.querySelector("[data-testid=dag-pane-badge]")).toBeNull();
+    });
+
+    it("displays paired daemon watch failure when matching paired:<workspaceId>:<repoRoot>", () => {
+      const remoteCwd = "/srv/repo";
+      const pairedKey = "paired:daemon:host-paired-hash:/srv/repo";
+
+      dagStore.setWatchFailure(pairedKey, {
+        projectPath: pairedKey,
+        hostId: "host-paired",
+        code: "unavailable",
+        message: "Paired daemon unreachable",
+      });
+
+      render(
+        <DagPaneBadge
+          projectPath={remoteCwd}
+          workspaceId="daemon:host-paired-hash"
+          paneId="pane-paired"
+          providerSessionId="provider-paired"
+        />,
+      );
+
+      const failureEl = screen.getByTestId("dag-watch-failure");
+      expect(failureEl).toBeInTheDocument();
+      expect(failureEl).toHaveAttribute("data-code", "unavailable");
+    });
+
+    it("displays failure on worktree pane where worktreePath differs from watched repo root", () => {
+      const worktreePath = "/remote/checkout/orca-worktrees/feature-a";
+      const sshFailureKey = "ssh:ssh:worktree-host-hash:/remote/checkout/main";
+
+      dagStore.setWatchFailure(sshFailureKey, {
+        projectPath: sshFailureKey,
+        hostId: "worktree-host",
+        code: "helper_missing",
+        message: "DAG helper is missing on remote host",
+      });
+
+      // TerminalSession in a worktree pane has worktreePath != watchedRoot
+      const session = {
+        ...createSession("worktree-pane", "provider-worktree"),
+        workspaceId: "ssh:worktree-host-hash",
+        worktreePath,
+        cwd: `${worktreePath}/src`,
+      };
+
+      render(
+        <DagPaneBadge
+          projectPath={session.worktreePath ?? session.cwd}
+          workspaceId={session.workspaceId}
+          paneId={session.id}
+          providerSessionId={session.providerSession?.id ?? null}
+        />,
+      );
+
+      const failureEl = screen.getByTestId("dag-watch-failure");
+      expect(failureEl).toBeInTheDocument();
+      expect(failureEl).toHaveAttribute("data-code", "helper_missing");
+    });
+
+    it("does not match remote failure against a local workspace", () => {
+      const watchedRoot = "/local/repo";
+      const sshFailureKey = "ssh:ssh:remote-host:/local/repo";
+
+      dagStore.setWatchFailure(sshFailureKey, {
+        projectPath: sshFailureKey,
+        hostId: "remote-host",
+        code: "unavailable",
+        message: "Remote unavailable",
+      });
+
+      render(
+        <DagPaneBadge
+          projectPath={watchedRoot}
+          workspaceId="local-workspace-id"
+          paneId="pane-local"
+          providerSessionId="provider-local"
+        />,
+      );
+
+      expect(screen.queryByTestId("dag-watch-failure")).toBeNull();
+      expect(screen.queryByTestId("dag-pane-badge")).toBeNull();
+    });
+
+    it("does not leak raw local path failure to a remote workspace sharing same path", () => {
+      const sharedPath = "/repo/app";
+      // A raw local failure is registered for /repo/app
+      dagStore.setWatchFailure(sharedPath, {
+        projectPath: sharedPath,
+        hostId: "local",
+        code: "helper_missing",
+        message: "Local helper missing",
+      });
+
+      render(
+        <DagPaneBadge
+          projectPath={sharedPath}
+          workspaceId="ssh:remote-host-hash"
+          paneId="pane-remote"
+          providerSessionId="provider-remote"
+        />,
+      );
+
+      expect(screen.queryByTestId("dag-watch-failure")).toBeNull();
+      expect(screen.queryByTestId("dag-pane-badge")).toBeNull();
+    });
+
+    it("skips null or cleared entries when scanning prefix failures", () => {
+      const prefix = "ssh:ssh:multi-root-hash:";
+      // First key has null failure (cleared or transiently empty in record)
+      (dagStore.getState() as { watchFailures: Record<string, unknown> }).watchFailures[`${prefix}/other/path`] = null;
+      // Second key has a real active failure
+      dagStore.setWatchFailure(`${prefix}/active/path`, {
+        projectPath: `${prefix}/active/path`,
+        hostId: "multi-root-host",
+        code: "authentication",
+        message: "Auth failed on active root",
+      });
+
+      render(
+        <DagPaneBadge
+          projectPath="/my/worktree/path"
+          workspaceId="ssh:multi-root-hash"
+          paneId="pane-multi"
+          providerSessionId="provider-multi"
+        />,
+      );
+
+      const failureEl = screen.getByTestId("dag-watch-failure");
+      expect(failureEl).toBeInTheDocument();
+      expect(failureEl).toHaveAttribute("data-code", "authentication");
+    });
+  });
 });

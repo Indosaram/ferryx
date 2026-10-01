@@ -74,6 +74,7 @@ pub struct Proxy {
     /// Credential authority captured by the last explicit reattach; used only to
     /// recover from a lost direct route, never to create a session.
     recovery: Option<PairedHostService>,
+    agent_sink: Option<Arc<dyn crate::terminal::remote::AgentStateSink>>,
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
@@ -100,7 +101,11 @@ impl Proxy {
             replay_pending: false,
             exited: false,
             recovery: None,
+            agent_sink: None,
         })
+    }
+    pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+        self.agent_sink = Some(sink);
     }
     pub fn id(&self) -> &str {
         &self.id
@@ -304,6 +309,28 @@ impl Proxy {
                 } else if matches!(value["type"].as_str(), Some("status" | "error")) {
                     self.controller = None;
                     self.transport = None;
+                } else if matches!(value["type"].as_str(), Some("agent_state")) {
+                    // Required fields that do not decode are a wire-contract violation,
+                    // not a message to drop: a silent skip would lose authoritative
+                    // state while the stream still looks healthy.
+                    let msg = serde_json::from_value::<crate::remote::machine_agent_state::MachineAgentStateMessage>(value.clone())
+                        .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
+                    // Exact compare kept as a backstop: the shared target check above
+                    // only runs when the frame carries `target`, so this frame must
+                    // still prove it belongs to this descriptor before its state lands.
+                    if msg.target != self.descriptor.target {
+                        return Err(error("PAIRED_HOST_WRONG_MACHINE"));
+                    }
+                    if let Some(sink) = &self.agent_sink {
+                        sink.accept(crate::daemon::agent_state::AgentState {
+                            session_id: self.id.clone(),
+                            state: msg.state,
+                            agent: msg.agent,
+                            provider_session: msg.provider_session,
+                            detail: msg.detail,
+                            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                        });
+                    }
                 }
                 Ok(Some(value))
             }

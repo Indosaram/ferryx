@@ -1937,6 +1937,64 @@ fn machine_control_message(value: serde_json::Value) -> Message {
 mod machine_output_writer;
 use machine_output_writer::{machine_control, machine_frame, machine_send};
 
+async fn send_machine_agent_state<S>(
+    sender: &mut S,
+    state: &crate::daemon::agent_state::AgentState,
+    target: &crate::remote::machine_protocol::RemoteTerminalTarget,
+    termination: &mut tokio::sync::watch::Receiver<Option<crate::terminal::output_hub::machine_output::MachineOutputError>>,
+) -> Result<(), ()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let msg = crate::remote::machine_agent_state::MachineAgentStateMessage::new(
+        target.clone(),
+        state.state.clone(),
+        state.agent.clone(),
+        state.provider_session.clone(),
+        state.detail.clone(),
+    );
+    let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
+
+    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
+    // so no racing agent state update or initial conversation identity is lost.
+    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
+
+    // Guard against oversized metadata without dropping the PTY terminal connection:
+    // If the full message (e.g. carrying an unusually long detail question or path)
+    // exceeds the 1024-byte control slot, fallback to sending the essential provider identity
+    // and activity state with explicit metadata_truncated flag, omitting detail and long transcriptPath.
+    let text_message = match machine_control(Message::Text(json_str.clone().into())) {
+        Ok(control) => control,
+        Err(()) => {
+            let bounded_provider = state.provider_session.as_ref().map(|ps| {
+                crate::daemon::protocol::AgentProviderSession {
+                    key: ps.key.clone(),
+                    id: ps.id.clone(),
+                    transcript_path: None, // Exclude oversized transcript paths; root badge requires key+id
+                }
+            });
+            let compact_msg = crate::remote::machine_agent_state::MachineAgentStateMessage::truncated(
+                target.clone(),
+                state.state.clone(),
+                state.agent.clone(),
+                bounded_provider,
+            );
+            let compact_json = serde_json::to_string(&compact_msg).map_err(|_| ())?;
+            match machine_control(Message::Text(compact_json.into())) {
+                Ok(control) => {
+                    tracing::warn!(
+                        session_id = %target.session_id,
+                        "AgentState metadata exceeded 1024B control slot; sent explicit truncated identity (metadataTruncated: true)"
+                    );
+                    control
+                }
+                Err(()) => return Ok(()), // Non-fatal to PTY stream: skip frame rather than dropping terminal
+            }
+        }
+    };
+    machine_send(sender, text_message, termination).await
+}
+
 async fn handle_machine_terminal_socket(
     socket: WebSocket,
     session: crate::remote::machine_protocol::Session,
@@ -1961,7 +2019,44 @@ async fn handle_machine_terminal_socket(
     } = attachment;
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
     let gap = snapshot
+                agent_update = agent_subscription.receiver.recv() => {
+                    match agent_update {
+                        Ok(update) if update.state.session_id == target.session_id => {
+                            if services.sessions.validate_machine_target(target).await.is_err() {
+                                return;
+                            }
+                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
+                                if current.session_id == target.session_id
+                                    && services.sessions.validate_machine_target(target).await.is_ok()
+                                {
+                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                    continue;
+                }
         .gap
         .as_ref()
         .map(|g| crate::remote::machine_protocol::ReplayGap {
@@ -3242,7 +3337,7 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2"];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
@@ -3729,14 +3824,46 @@ async fn paste_upload_boundary(
         .decode(&req.data)
         .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_BASE64"))?;
 
-    let saved = crate::clipboard_image::save_paste_chunk(
-        &req.upload_id,
-        &req.file_name,
-        req.chunk_index,
-        req.total_chunks,
-        &chunk_bytes,
-    )
-    .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?;
+    let saved = match (req.offset, req.total_bytes) {
+        (Some(offset), Some(total_bytes)) => {
+            let upload_id = req.upload_id.clone();
+            let file_name = req.file_name.clone();
+            crate::ipc::run_blocking(move || {
+                crate::clipboard_image::save_paste_chunk_v2(
+                    &upload_id,
+                    &file_name,
+                    req.chunk_index,
+                    req.total_chunks,
+                    offset,
+                    total_bytes,
+                    &chunk_bytes,
+                )
+            })
+            .await
+            .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?
+        }
+        (None, None) => {
+            let upload_id = req.upload_id.clone();
+            let file_name = req.file_name.clone();
+            crate::ipc::run_blocking(move || {
+                crate::clipboard_image::save_paste_chunk(
+                    &upload_id,
+                    &file_name,
+                    req.chunk_index,
+                    req.total_chunks,
+                    &chunk_bytes,
+                )
+            })
+            .await
+            .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?
+        }
+        _ => {
+            return Err(machine_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST: offset and totalBytes must both be present or both absent",
+            ));
+        }
+    };
 
     let res = super::machine_protocol::PasteUploadChunkResult {
         remote_path: saved.map(|p| p.to_string_lossy().into_owned()),

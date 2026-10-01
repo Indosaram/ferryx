@@ -1311,6 +1311,55 @@ fn helper_process_version_flag_prints_version() {
 }
 
 #[test]
+fn helper_process_capabilities_flag_reports_machine_json() {
+    let mut out = Vec::new();
+    let res = super::super::process::run_with_io(vec!["--capabilities".to_string()], &mut out);
+    assert!(res.is_ok());
+    let report: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        report,
+        json!({
+            "protocol": 1,
+            "helperVersion": super::super::process::HELPER_VERSION,
+            "capabilities": super::super::process::HELPER_CAPABILITIES,
+            "runtimeConditional": [super::super::process::CONDITIONAL_AGENT_STATE],
+        })
+    );
+}
+
+#[test]
+fn helper_handshake_capabilities_follow_shared_constant_list() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-cap-guard");
+    let resp = runtime
+        .handle(Request {
+            protocol: 1,
+            token: "tok-cap-guard".to_string(),
+            op: "handshake".to_string(),
+            params: json!({}),
+        })
+        .unwrap();
+
+    let bound = runtime.agent_state_server().is_some();
+    let expected: Vec<String> = super::super::process::HELPER_CAPABILITIES
+        .iter()
+        .filter(|capability| {
+            bound || **capability != super::super::process::CONDITIONAL_AGENT_STATE
+        })
+        .map(|capability| (*capability).to_string())
+        .collect();
+    assert_eq!(resp["capabilities"], json!(expected));
+    assert_eq!(
+        resp["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(super::super::process::CONDITIONAL_AGENT_STATE)),
+        bound
+    );
+}
+
+#[test]
 fn helper_dag_inventory_and_poll_operations() {
     let runtime_dir = tempfile::tempdir().unwrap();
     let project_dir = tempfile::tempdir().unwrap();

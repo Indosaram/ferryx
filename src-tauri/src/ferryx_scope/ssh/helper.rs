@@ -15,6 +15,9 @@ use crate::scoped_contracts::{Epoch, TargetRef};
 #[path = "../../dag/paths.rs"]
 mod dag_paths;
 
+#[path = "../../dag/journal.rs"]
+pub mod dag_journal;
+
 #[path = "dag_stream.rs"]
 pub mod dag_stream;
 
@@ -222,14 +225,17 @@ impl Runtime {
     ) -> Result<Value, String> {
         match op {
             "handshake" => {
-                let mut capabilities = vec![
-                    "sshHelperV1".to_string(),
-                    "dagStreamingV1".to_string(),
-                    "dagSubscribeV1".to_string(),
-                ];
-                if self.agent_state.is_some() {
-                    capabilities.push("agentStateV1".to_string());
-                }
+                // Shared with the `--capabilities` CLI: the compile surface is the
+                // constant, and the runtime-conditional token is advertised only
+                // when the agent-state listener actually bound.
+                let capabilities: Vec<String> = super::process::HELPER_CAPABILITIES
+                    .iter()
+                    .filter(|capability| {
+                        self.agent_state.is_some()
+                            || **capability != super::process::CONDITIONAL_AGENT_STATE
+                    })
+                    .map(|capability| (*capability).to_string())
+                    .collect();
                 Ok(json!({
                     "protocol": 1,
                     "capabilities": capabilities,

@@ -27,6 +27,7 @@ pub mod preferences;
 pub mod project;
 pub mod project_remote;
 pub mod remote;
+pub mod remote_drop;
 pub mod remote_file;
 pub mod session;
 pub mod ssh;

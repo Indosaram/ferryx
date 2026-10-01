@@ -356,10 +356,20 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub(crate) fn subscribe_agent_states(&self, session_id: &str) -> crate::daemon::agent_state::AgentStateSubscription {
+        self.agent_states.subscribe(session_id)
+    }
+
+    #[cfg(test)]
+    pub fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
+        self.agent_states.publish_canonical(state);
+    }
+
     pub fn ensure_agent_sink(&self) {
         // Bind, then unsize: `Arc::clone` cannot coerce through `&Arc<_>` at the call site.
         let sink: Arc<dyn crate::terminal::remote::AgentStateSink> = self.agent_states.clone();
-        self.terminal_service.remote().set_agent_sink(sink);
+        self.terminal_service.remote().set_agent_sink(sink.clone());
+        self.terminal_service.set_paired_agent_sink(sink);
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
@@ -1325,8 +1335,9 @@ impl DaemonSessionService {
             }
             environment
         };
-        let helper = crate::ssh::helper_setup::default_location(&host, &environment)
-            .map_err(|e| e.to_string())?;
+        let helper = crate::ipc::ssh::ensure_qualified_ssh_helper(&host, &environment)
+            .await
+            .map_err(|e| SpawnError::Other(e.to_string()))?;
         let relative = Self::remote_spawn_relative_path(&project.repo_root, &root);
         let config = crate::terminal::remote::RemoteSessionConfig {
             host,

@@ -50,6 +50,24 @@ fn write_checkpoint(dir: &Path, name: &str, body: &Value) {
     std::fs::write(dir.join(name), serde_json::to_vec(body).expect("encode")).expect("write");
 }
 
+fn canonical_checkpoint(run_id: &str, status: &str) -> Value {
+    json!({
+        "runId": run_id,
+        "runKey": format!("key-{run_id}"),
+        "name": format!("name-{run_id}"),
+        "status": status,
+        "nodes": [
+            {
+                "id": "node-1",
+                "label": "Node 1",
+                "prompt": "Prompt 1",
+                "state": status,
+                "route": { "kind": "category", "category": "deep-low" }
+            }
+        ]
+    })
+}
+
 fn run_ids(frame: &Value) -> Vec<String> {
     frame["runs"]
         .as_array()
@@ -98,7 +116,7 @@ fn dag_subscribe_streams_inventory_then_asynchronous_update() {
     write_checkpoint(
         &dir,
         "run-a.json",
-        &json!({ "runId": "run-a", "status": "running" }),
+        &canonical_checkpoint("run-a", "running"),
     );
 
     let first = call(
@@ -118,7 +136,7 @@ fn dag_subscribe_streams_inventory_then_asynchronous_update() {
     write_checkpoint(
         &dir,
         "run-b.json",
-        &json!({ "runId": "run-b", "status": "running" }),
+        &canonical_checkpoint("run-b", "running"),
     );
     let update = pending
         .recv_timeout(BOUND)
@@ -149,7 +167,7 @@ fn dag_subscribe_emits_same_mtime_content_change_without_known_runs() {
     write_checkpoint(
         &dir,
         "run.json",
-        &json!({ "runId": "same-run", "status": "running" }),
+        &canonical_checkpoint("same-run", "running"),
     );
     let original = std::fs::metadata(&path).unwrap().modified().unwrap();
 
@@ -167,7 +185,7 @@ fn dag_subscribe_emits_same_mtime_content_change_without_known_runs() {
     write_checkpoint(
         &dir,
         "run.json",
-        &json!({ "runId": "same-run", "status": "completed" }),
+        &canonical_checkpoint("same-run", "completed"),
     );
     std::fs::File::options()
         .write(true)
@@ -202,7 +220,7 @@ fn dag_subscribe_suppresses_unchanged_checkpoint_rewrite() {
     let (runtime, _runtime_dir, project_dir) = runtime_with_project("tok-dedup");
     let runtime = Arc::new(runtime);
     let dir = runs_dir(project_dir.path());
-    let snapshot = json!({ "runId": "dedup-run", "status": "running" });
+    let snapshot = canonical_checkpoint("dedup-run", "running");
     write_checkpoint(&dir, "run.json", &snapshot);
 
     let first = call(
@@ -233,7 +251,7 @@ fn dag_subscribe_suppresses_unchanged_checkpoint_rewrite() {
     write_checkpoint(
         &dir,
         "run.json",
-        &json!({ "runId": "dedup-run", "status": "failed" }),
+        &canonical_checkpoint("dedup-run", "failed"),
     );
     let update = pending
         .recv_timeout(BOUND)
@@ -323,7 +341,7 @@ fn dag_subscribe_does_not_redeliver_concurrently_requeued_unchanged_file() {
     write_checkpoint(
         &dir,
         "run.json",
-        &json!({ "runId": "overlap-run", "status": "running" }),
+        &canonical_checkpoint("overlap-run", "running"),
     );
 
     let first = call(
@@ -424,11 +442,14 @@ fn dag_subscribe_reports_oversized_snapshot_instead_of_truncating() {
     write_checkpoint(
         &dir,
         "small.json",
-        &json!({ "runId": "small-run", "status": "running" }),
+        &canonical_checkpoint("small-run", "running"),
     );
     let huge = json!({
         "runId": "huge-run",
+        "runKey": "key-huge",
+        "name": "huge",
         "status": "running",
+        "nodes": [],
         "filler": "x".repeat(super::MAX_SNAPSHOT_BYTES as usize + 1),
     });
     write_checkpoint(&dir, "huge.json", &huge);
@@ -474,8 +495,17 @@ fn dag_inventory_drains_pending_files_before_advancing_resync_cursor() {
             &format!("run-{index:03}.json"),
             &json!({
                 "runId": format!("run-{index:03}"),
+                "runKey": format!("key-{index:03}"),
+                "name": format!("name-{index:03}"),
                 "status": "running",
-                "name": "x".repeat(100_000),
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "prompt": "x".repeat(50_000),
+                        "state": "running",
+                        "route": { "kind": "category", "category": "quick" }
+                    }
+                ]
             }),
         );
     }
@@ -513,4 +543,341 @@ fn dag_inventory_drains_pending_files_before_advancing_resync_cursor() {
         expected,
         "paged inventory lost pending checkpoints"
     );
+}
+
+#[test]
+fn dag_stream_projects_large_raw_checkpoint_with_padding_definition() {
+    let (runtime, _runtime_dir, project_dir) = runtime_with_project("tok-large-projected");
+    let dir = runs_dir(project_dir.path());
+
+    // Construct a checkpoint with >300KiB of raw padding definition (e.g. 618KiB total),
+    // which previously exceeded the 256KiB raw limit.
+    // The projection via parse_run_checkpoint strips `definition` / extra unmodeled fields,
+    // preserving id, prompt, run_stats, amends, while producing a compact frame <300KiB.
+    let large_raw_definition = "A".repeat(400 * 1024);
+    let checkpoint = json!({
+        "runId": "large-run-618k",
+        "runKey": "key-large",
+        "name": "large-test-run",
+        "status": "running",
+        "definition": large_raw_definition,
+        "nodes": [
+            {
+                "id": "node-1",
+                "label": "First Node",
+                "prompt": "Analyze repository and produce plan",
+                "state": "completed",
+                "route": { "kind": "category", "category": "deep-low" },
+                "runStats": { "turns": 3, "totalTokens": 15000 }
+            },
+            {
+                "id": "node-2",
+                "label": "Second Node",
+                "prompt": "Execute verification and regression tests",
+                "state": "running",
+                "route": { "kind": "category", "category": "quick" },
+                "dependsOn": ["node-1"]
+            }
+        ],
+        "edges": [{ "from": "node-1", "to": "node-2" }],
+        "waves": [
+            { "index": 0, "nodeIds": ["node-1"] },
+            { "index": 1, "nodeIds": ["node-2"] }
+        ]
+    });
+
+    write_checkpoint(&dir, "large_run.json", &checkpoint);
+
+    let raw_bytes = std::fs::metadata(dir.join("large_run.json")).unwrap().len();
+    assert!(
+        raw_bytes > 256 * 1024,
+        "raw checkpoint must be >256KiB, was {raw_bytes}"
+    );
+    assert!(
+        raw_bytes < super::MAX_INPUT_FILE_BYTES,
+        "raw checkpoint must be within input limit"
+    );
+
+    let frame = call(
+        &runtime,
+        "tok-large-projected",
+        "dag.subscribe",
+        json!({ "projectId": "project" }),
+    )
+    .expect("subscribe");
+
+    assert_eq!(
+        run_ids(&frame),
+        vec!["large-run-618k".to_string()],
+        "projected snapshot must be delivered in runs"
+    );
+    assert!(
+        frame["dropped"].as_array().unwrap().is_empty(),
+        "checkpoint should not be dropped: {:?}",
+        frame["dropped"]
+    );
+
+    let run = &frame["runs"][0];
+    assert_eq!(run["runId"], "large-run-618k");
+    // Definition must be stripped by projection
+    assert!(
+        run.get("definition").is_none(),
+        "raw definition field must be omitted in projected frame"
+    );
+    // Node fields must be preserved
+    let nodes = run["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["prompt"], "Analyze repository and produce plan");
+    assert_eq!(nodes[0]["runStats"]["totalTokens"], 15000);
+    assert_eq!(nodes[1]["prompt"], "Execute verification and regression tests");
+
+    // Frame serialized size must be compact (<300KiB) and well within 512KiB frame budget
+    let frame_bytes = serde_json::to_vec(&frame).unwrap().len();
+    assert!(
+        frame_bytes < 300 * 1024,
+        "projected frame should be compact (<300KiB), was {frame_bytes} bytes"
+    );
+
+    call(
+        &runtime,
+        "tok-large-projected",
+        "dag.unsubscribe",
+        json!({ "subscriptionId": frame["subscriptionId"].as_str().unwrap() }),
+    )
+    .expect("unsubscribe");
+}
+
+#[test]
+fn dag_stream_rejects_oversized_projected_frame() {
+    let (runtime, _runtime_dir, project_dir) = runtime_with_project("tok-oversize-projected");
+    let dir = runs_dir(project_dir.path());
+
+    // Construct a checkpoint where the PROJECTED fields themselves exceed 512KiB
+    let huge_prompt = "P".repeat(550 * 1024);
+    let checkpoint = json!({
+        "runId": "huge-projected-run",
+        "runKey": "key-huge",
+        "name": "huge-projected",
+        "status": "running",
+        "nodes": [
+            {
+                "id": "node-huge",
+                "prompt": huge_prompt,
+                "state": "running",
+                "route": { "kind": "category", "category": "deep-low" }
+            }
+        ]
+    });
+
+    write_checkpoint(&dir, "huge_projected.json", &checkpoint);
+
+    let frame = call(
+        &runtime,
+        "tok-oversize-projected",
+        "dag.subscribe",
+        json!({ "projectId": "project" }),
+    )
+    .expect("subscribe");
+
+    assert!(
+        run_ids(&frame).is_empty(),
+        "oversized projected run must not be included in runs"
+    );
+    let dropped = frame["dropped"].as_array().expect("dropped array");
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0]["file"], "huge_projected.json");
+    assert_eq!(dropped[0]["error"], "SNAPSHOT_TOO_LARGE");
+    assert!(dropped[0]["bytes"].as_u64().unwrap() > super::MAX_PROJECTED_SNAPSHOT_BYTES as u64);
+
+    call(
+        &runtime,
+        "tok-oversize-projected",
+        "dag.unsubscribe",
+        json!({ "subscriptionId": frame["subscriptionId"].as_str().unwrap() }),
+    )
+    .expect("unsubscribe");
+}
+
+fn exact_sized_checkpoint(run_id: &str, target_projected_bytes: usize) -> Value {
+    let mut checkpoint = json!({
+        "runId": run_id,
+        "runKey": format!("key-{run_id}"),
+        "name": format!("name-{run_id}"),
+        "status": "running",
+        "nodes": [
+            {
+                "id": "node-1",
+                "label": "Node 1",
+                "prompt": "",
+                "state": "running",
+                "route": { "kind": "category", "category": "deep-low" }
+            }
+        ]
+    });
+
+    let raw_str = serde_json::to_string(&checkpoint).unwrap();
+    let snapshot = super::super::dag_journal::parse_run_checkpoint(&raw_str).unwrap();
+    let base_val = serde_json::to_value(&snapshot).unwrap();
+    let base_bytes = serde_json::to_vec(&base_val).unwrap().len();
+
+    assert!(
+        target_projected_bytes >= base_bytes,
+        "target bytes {target_projected_bytes} must be >= base {base_bytes}"
+    );
+
+    let padding_len = target_projected_bytes - base_bytes;
+    checkpoint["nodes"][0]["prompt"] = Value::String("X".repeat(padding_len));
+
+    // Verify exact projected byte length matches target
+    let raw_str = serde_json::to_string(&checkpoint).unwrap();
+    let snapshot = super::super::dag_journal::parse_run_checkpoint(&raw_str).unwrap();
+    let projected_val = serde_json::to_value(&snapshot).unwrap();
+    let actual_projected_bytes = serde_json::to_vec(&projected_val).unwrap().len();
+    assert_eq!(actual_projected_bytes, target_projected_bytes);
+
+    checkpoint
+}
+
+#[test]
+fn dag_stream_strictly_bounds_complete_frame_with_near_cap_run_and_drops() {
+    let (runtime, _runtime_dir, project_dir) = runtime_with_project("tok-near-cap");
+    let dir = runs_dir(project_dir.path());
+
+    // 1) Test single projected snapshot where snapshot len is MAX_BATCH_BYTES - 50.
+    // The snapshot itself is 524,238 bytes <= MAX_PROJECTED_SNAPSHOT_BYTES (524,288 bytes).
+    // However, the JSON envelope wrapper (subscriptionId, sequence, runs, dropped, etc.)
+    // is > 100 bytes, which pushes the entire candidate frame > MAX_BATCH_BYTES (512 KiB).
+    // Because it is a single item that alone cannot fit in any valid frame, it must be
+    // reported as dropped with SNAPSHOT_TOO_LARGE and NO runs delivered.
+    let target_bytes = super::MAX_BATCH_BYTES - 50;
+    let single_overflow_checkpoint = exact_sized_checkpoint("single-near-cap", target_bytes);
+    write_checkpoint(&dir, "00-single-near-cap.json", &single_overflow_checkpoint);
+
+    let frame = call(
+        &runtime,
+        "tok-near-cap",
+        "dag.subscribe",
+        json!({ "projectId": "project" }),
+    )
+    .expect("subscribe");
+
+    assert!(
+        run_ids(&frame).is_empty(),
+        "run exceeding envelope budget alone must not be delivered in runs"
+    );
+    let dropped = frame["dropped"].as_array().expect("dropped array");
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0]["file"], "00-single-near-cap.json");
+    assert_eq!(dropped[0]["error"], "SNAPSHOT_TOO_LARGE");
+    assert_eq!(dropped[0]["bytes"], target_bytes as u64);
+
+    let frame_bytes = serde_json::to_vec(&frame).unwrap().len();
+    assert!(
+        frame_bytes <= super::MAX_BATCH_BYTES,
+        "delivered frame must not exceed 512KiB budget, was {frame_bytes} bytes"
+    );
+
+    call(
+        &runtime,
+        "tok-near-cap",
+        "dag.unsubscribe",
+        json!({ "subscriptionId": frame["subscriptionId"].as_str().unwrap() }),
+    )
+    .expect("unsubscribe");
+}
+
+#[test]
+fn dag_stream_defers_dropped_record_when_addition_overflows_frame() {
+    let (runtime, _runtime_dir, project_dir) = runtime_with_project("tok-defer-drop");
+    let dir = runs_dir(project_dir.path());
+
+    // Size run so that candidate frame with run alone is valid, but adding a dropped record
+    // (~80-120 bytes) causes the total frame to exceed MAX_BATCH_BYTES (512 KiB).
+    // First subscribe with a dummy run to discover the exact wrapper overhead.
+    let dummy = exact_sized_checkpoint("probe-run", 1000);
+    write_checkpoint(&dir, "probe.json", &dummy);
+    let probe_frame = call(
+        &runtime,
+        "tok-defer-drop",
+        "dag.subscribe",
+        json!({ "projectId": "project" }),
+    )
+    .unwrap();
+    let sub_id = probe_frame["subscriptionId"].as_str().unwrap();
+    let probe_frame_bytes = serde_json::to_vec(&probe_frame).unwrap().len();
+    let wrapper_overhead = probe_frame_bytes - 1000;
+
+    call(
+        &runtime,
+        "tok-defer-drop",
+        "dag.unsubscribe",
+        json!({ "subscriptionId": sub_id }),
+    )
+    .unwrap();
+    std::fs::remove_file(dir.join("probe.json")).unwrap();
+
+    // Create run that leaves only 30 bytes remaining before MAX_BATCH_BYTES.
+    // That fits in the frame alone, but adding any dropped entry (>50 bytes) will overflow.
+    let exact_run_bytes = super::MAX_BATCH_BYTES - wrapper_overhead - 30;
+    let run_checkpoint = exact_sized_checkpoint("run-fit", exact_run_bytes);
+    write_checkpoint(&dir, "00-run-fit.json", &run_checkpoint);
+
+    // Create second file that is invalid / oversized, producing a dropped record
+    let huge = json!({
+        "runId": "huge-file",
+        "runKey": "key-huge",
+        "name": "huge",
+        "status": "running",
+        "nodes": [],
+        "filler": "x".repeat(super::MAX_INPUT_FILE_BYTES as usize + 1),
+    });
+    write_checkpoint(&dir, "01-huge.json", &huge);
+
+    let frame = call(
+        &runtime,
+        "tok-defer-drop",
+        "dag.subscribe",
+        json!({ "projectId": "project" }),
+    )
+    .expect("subscribe");
+
+    let sub_id = frame["subscriptionId"].as_str().unwrap().to_string();
+    assert_eq!(run_ids(&frame), vec!["run-fit".to_string()]);
+    assert!(
+        frame["dropped"].as_array().unwrap().is_empty(),
+        "dropped record must be deferred to next frame because adding it exceeds 512KiB"
+    );
+    assert_eq!(
+        frame["more"], true,
+        "more must be true to indicate deferred items"
+    );
+
+    let frame_bytes = serde_json::to_vec(&frame).unwrap().len();
+    assert!(
+        frame_bytes <= super::MAX_BATCH_BYTES,
+        "frame must be within 512KiB, was {frame_bytes} bytes"
+    );
+
+    // Second frame delivers the deferred dropped record
+    let next_frame = call(
+        &runtime,
+        "tok-defer-drop",
+        "dag.next",
+        json!({ "subscriptionId": sub_id, "waitMs": 0 }),
+    )
+    .expect("next frame");
+
+    assert!(run_ids(&next_frame).is_empty());
+    let next_dropped = next_frame["dropped"].as_array().expect("dropped in next");
+    assert_eq!(next_dropped.len(), 1);
+    assert_eq!(next_dropped[0]["file"], "01-huge.json");
+    assert_eq!(next_dropped[0]["error"], "SNAPSHOT_TOO_LARGE");
+
+    call(
+        &runtime,
+        "tok-defer-drop",
+        "dag.unsubscribe",
+        json!({ "subscriptionId": sub_id }),
+    )
+    .expect("unsubscribe");
 }

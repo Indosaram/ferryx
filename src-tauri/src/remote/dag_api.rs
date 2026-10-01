@@ -197,8 +197,9 @@ pub(super) async fn serve(
     };
     let workspaces = services.workspaces.clone();
     let lookup = workspace_id.clone();
+    let workspaces_for_catalog = workspaces.clone();
     let resolved = crate::ipc::run_blocking(move || {
-        Ok(workspaces.catalog().map(|catalog| {
+        Ok(workspaces_for_catalog.catalog().map(|catalog| {
             catalog
                 .workspaces
                 .get(&lookup)
@@ -220,11 +221,33 @@ pub(super) async fn serve(
 
     let _live = LiveStream::enter();
     let project_path = root.to_string_lossy().into_owned();
+
+    // Subscribe to worktree changes BEFORE the initial scan so no racing commit is lost.
+    let mut worktree_change_rx = workspaces.subscribe_worktree_changes();
+
     let scan_root = root.clone();
-    let Ok(runs) = crate::ipc::run_blocking(move || {
-        Ok(crate::daemon::dag_service::scan_project_inventory(
-            &scan_root,
-        ))
+    let workspace_id_for_scan = workspace_id.clone();
+    let workspaces_for_scan = workspaces.clone();
+    let Ok((runs, worktree_roots)) = crate::ipc::run_blocking(move || {
+        let mut all_runs = crate::daemon::dag_service::scan_project_inventory(&scan_root);
+        let mut extra_roots = Vec::new();
+        // Authority check: query canonical workspace service worktree manager
+        let manager = workspaces_for_scan
+            .worktree_manager(&workspace_id_for_scan, false)
+            .map_err(|e| crate::ipc::IpcError::internal(format!("Worktree authority unavailable: {e}")))?;
+        let worktrees = manager
+            .list_worktrees()
+            .map_err(|e| crate::ipc::IpcError::internal(format!("Worktree listing failed: {e}")))?;
+        for wt in worktrees {
+            let wt_path = std::path::PathBuf::from(&wt.path);
+            if wt_path != scan_root && wt_path.is_dir() {
+                let wt_runs = crate::daemon::dag_service::scan_project_inventory(&wt_path);
+                all_runs.extend(wt_runs);
+                extra_roots.push(wt_path);
+            }
+        }
+        all_runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok::<_, crate::ipc::IpcError>((all_runs, extra_roots))
     })
     .await
     else {
@@ -248,13 +271,121 @@ pub(super) async fn serve(
     }
 
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
-    let _watcher = WatcherGuard(crate::dag::watcher::spawn_dag_watcher(root, events_tx));
+    let mut watchers: std::collections::HashMap<std::path::PathBuf, WatcherGuard> =
+        std::collections::HashMap::new();
+
+    watchers.insert(
+        root.clone(),
+        WatcherGuard(crate::dag::watcher::spawn_dag_watcher(
+            root.clone(),
+            events_tx.clone(),
+        )),
+    );
+
+    for wt_root in worktree_roots {
+        watchers.entry(wt_root.clone()).or_insert_with(|| {
+            WatcherGuard(crate::dag::watcher::spawn_dag_watcher(
+                wt_root,
+                events_tx.clone(),
+            ))
+        });
+    }
+
     loop {
         tokio::select! {
             incoming = socket.next() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
             },
+            change_event = worktree_change_rx.recv() => {
+                let should_reconcile = match change_event {
+                    Ok(change) if change.workspace_id == workspace_id => true,
+                    Ok(_) => false,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+
+                if should_reconcile {
+                    let ws_id = workspace_id.clone();
+                    let ws_svc = workspaces.clone();
+                    let resolution = crate::ipc::run_blocking(move || {
+                        let manager = ws_svc
+                            .worktree_manager(&ws_id, false)
+                            .map_err(|e| crate::ipc::IpcError::internal(format!("Worktree authority unavailable: {e}")))?;
+                        let worktrees = manager
+                            .list_worktrees()
+                            .map_err(|e| crate::ipc::IpcError::internal(format!("Worktree listing failed: {e}")))?;
+                        let mut roots = std::collections::HashSet::new();
+                        for wt in worktrees {
+                            let path = std::path::PathBuf::from(&wt.path);
+                            if path.is_dir() {
+                                roots.insert(path);
+                            }
+                        }
+                        Ok::<_, crate::ipc::IpcError>(roots)
+                    }).await;
+
+                    let current_roots = match resolution {
+                        Ok(roots) => roots,
+                        Err(_) => {
+                            fail(&mut socket, "MACHINE_SERVICE_UNAVAILABLE").await;
+                            break;
+                        }
+                    };
+
+                    // Retain only currently valid roots (always keeping the base repository root)
+                    watchers.retain(|path, _| path == &root || current_roots.contains(path));
+
+                    // Arm and scan any newly added worktrees
+                    let mut send_failed = false;
+                    for new_root in current_roots {
+                        if !watchers.contains_key(&new_root) {
+                            // Arm watcher before scanning so changes occurring during scan are captured
+                            watchers.insert(
+                                new_root.clone(),
+                                WatcherGuard(crate::dag::watcher::spawn_dag_watcher(
+                                    new_root.clone(),
+                                    events_tx.clone(),
+                                )),
+                            );
+
+                            let scan_path = new_root.clone();
+                            let scan_result = crate::ipc::run_blocking(move || {
+                                Ok(crate::daemon::dag_service::scan_project_inventory(&scan_path))
+                            }).await;
+
+                            match scan_result {
+                                Ok(runs) => {
+                                    for batch in inventory_batches(runs) {
+                                        if !send(
+                                            &mut socket,
+                                            &DagFrame::DagInventory {
+                                                workspace_id: workspace_id.clone(),
+                                                project_path: project_path.clone(),
+                                                runs: batch,
+                                            },
+                                        ).await {
+                                            send_failed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    fail(&mut socket, "MACHINE_SERVICE_UNAVAILABLE").await;
+                                    send_failed = true;
+                                    break;
+                                }
+                            }
+                            if send_failed {
+                                break;
+                            }
+                        }
+                    }
+                    if send_failed {
+                        break;
+                    }
+                }
+            }
             event = events_rx.recv() => match event {
                 Some((_, snapshot)) => {
                     if !send(

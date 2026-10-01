@@ -625,6 +625,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "machineWorkspaceV1",
                 "managedWorktreesV1",
                 "pairedPasteUploadV1",
+                "pairedPasteUploadV2",
                 "terminalCreateV1",
                 "terminalStreamV1",
                 "dagStreamingV1"

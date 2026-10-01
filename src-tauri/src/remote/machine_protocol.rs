@@ -415,6 +415,10 @@ pub struct PasteUploadChunkRequest {
     pub chunk_index: u32,
     pub total_chunks: u32,
     pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

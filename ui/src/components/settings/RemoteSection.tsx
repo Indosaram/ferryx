@@ -47,6 +47,8 @@ import {
   AccountSessionError,
   allocateSession,
   clearStoredAccountSessionToken,
+  getStoredAccountTokenOrigin,
+  logoutAccountSession,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
   storeAccountOrigin,
@@ -248,6 +250,10 @@ export function RemoteSection({
   };
 
   const handleSignOut = () => {
+    if (accountToken) {
+      const issuerOrigin = getStoredAccountTokenOrigin() || accountOrigin;
+      void logoutAccountSession(issuerOrigin, accountToken);
+    }
     clearStoredAccountSessionToken();
     setAccountToken(null);
     setAccountMachines([]);

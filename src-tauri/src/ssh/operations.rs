@@ -132,6 +132,76 @@ pub fn shell_plan(
     }
 }
 
+pub fn upload_deadline_for_bytes(byte_count: usize) -> Duration {
+    let base = 60u64;
+    let additional = (byte_count as u64) / (200 * 1024);
+    Duration::from_secs((base + additional).min(600))
+}
+
+pub fn posix_drop_upload_script(upload_id: &str, file_name: &str, marker: &str) -> String {
+    let quoted_name = direct::quote_posix(file_name);
+    format!(
+        "set -e; \
+         d=\"${{TMPDIR:-/tmp}}\"; d=\"${{d%/}}/ferryx-paste\"; mkdir -p \"$d\"; chmod 700 \"$d\"; \
+         find \"$d\" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {{}} + 2>/dev/null || true; \
+         sub=\"$d/{upload_id}\"; mkdir -p \"$sub\"; chmod 700 \"$sub\"; \
+         umask 077; target=\"$sub/\"{quoted_name}; \
+         cat > \"$target\"; \
+         printf '{marker}\\000%s\\000' \"$target\""
+    )
+}
+
+pub fn windows_drop_upload_script(upload_id: &str, file_name: &str, marker: &str) -> String {
+    let sub_id = powershell_data(upload_id);
+    let name_data = powershell_data(file_name);
+    format!(
+        "$d=Join-Path ([IO.Path]::GetTempPath()) 'ferryx-paste'; \
+         [void][IO.Directory]::CreateDirectory($d); \
+         $acl=New-Object Security.AccessControl.DirectorySecurity; \
+         $acl.SetAccessRuleProtection($true,$false); \
+         $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; \
+         $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); \
+         $acl.AddAccessRule($rule); Set-Acl -LiteralPath $d -AclObject $acl; \
+         Get-ChildItem -LiteralPath $d | Where-Object {{ $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-1) }} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; \
+         $sub=Join-Path $d {sub_id}; \
+         [void][IO.Directory]::CreateDirectory($sub); \
+         $p=Join-Path $sub {name_data}; \
+         $f=[IO.File]::Open($p,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None); \
+         try {{ $f.Write($bytes,0,$bytes.Length) }} finally {{ $f.Dispose() }}; \
+         [Console]::Write(('{marker}',$p,'' -join [char]0))"
+    )
+}
+
+pub async fn upload_dropped(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    upload_id: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<String, IpcError> {
+    crate::clipboard_image::validate_drop_file_name(file_name)?;
+    let marker = format!("FERRYX_DROP_V1_{}", uuid::Uuid::new_v4().simple());
+    let deadline = upload_deadline_for_bytes(bytes.len());
+
+    let script = match environment.platform {
+        RemotePlatform::Posix => posix_drop_upload_script(upload_id, file_name, &marker),
+        RemotePlatform::Windows => windows_drop_upload_script(upload_id, file_name, &marker),
+    };
+
+    let plan = |command| direct::ssh_plan(host, command, false);
+    let output = data_output_with(environment, &script, bytes, deadline, plan)
+        .await
+        .map_err(|mut err| {
+            if let Some(details) = err.details.as_mut() {
+                details["stage"] = "upload_dropped".into();
+            }
+            err
+        })?;
+    let fields = parse_fields(&output, &marker, 1)?;
+    environment.platform.validate_path(fields[0])?;
+    Ok(fields[0].into())
+}
+
 pub async fn upload(
     host: &SshHost,
     environment: &RemoteEnvironment,
@@ -172,7 +242,8 @@ pub(crate) async fn upload_with(
              [Console]::Write(('{marker}',$p,'' -join [char]0))"
         ),
     };
-    let output = data_output_with(environment, &script, bytes, Duration::from_secs(60), plan)
+    let deadline = upload_deadline_for_bytes(bytes.len());
+    let output = data_output_with(environment, &script, bytes, deadline, plan)
         .await
         .map_err(|mut err| {
             if let Some(details) = err.details.as_mut() {
@@ -240,6 +311,39 @@ pub async fn prepare_integration(
         err
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod drop_upload_tests {
+    use super::*;
+
+    #[test]
+    fn upload_deadline_scales_with_byte_count() {
+        assert_eq!(upload_deadline_for_bytes(0), Duration::from_secs(60));
+        assert_eq!(upload_deadline_for_bytes(1024 * 1024), Duration::from_secs(65));
+        assert_eq!(upload_deadline_for_bytes(30 * 1024 * 1024), Duration::from_secs(213));
+        assert_eq!(upload_deadline_for_bytes(500 * 1024 * 1024), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn posix_drop_upload_script_contains_subfolder_and_quoted_name() {
+        let script = posix_drop_upload_script("u-123", "report 2026.pdf", "FERRYX_DROP_V1_abc");
+        assert!(script.contains("sub=\"$d/u-123\""));
+        assert!(script.contains("target=\"$sub/\"'report 2026.pdf'"));
+        assert!(script.contains("find \"$d\" -mindepth 1"));
+        assert!(script.contains("printf 'FERRYX_DROP_V1_abc\\000%s\\000' \"$target\""));
+    }
+
+    #[test]
+    fn windows_drop_upload_script_writes_under_temp_and_reports_the_marked_path() {
+        let script = windows_drop_upload_script("u-123", "report 2026.pdf", "FERRYX_DROP_V1_abc");
+        assert!(script.contains("'ferryx-paste'"));
+        assert!(script.contains("[Convert]::FromBase64String('dS0xMjM=')"));
+        assert!(script.contains("[Convert]::FromBase64String('cmVwb3J0IDIwMjYucGRm')"));
+        assert!(!script.contains("u-123"), "the upload id must never reach PowerShell unescaped");
+        assert!(!script.contains("report 2026.pdf"), "the file name must never reach PowerShell unescaped");
+        assert!(script.contains("[Console]::Write(('FERRYX_DROP_V1_abc',$p,'' -join [char]0))"));
+    }
 }
 
 #[cfg(all(test, unix))]

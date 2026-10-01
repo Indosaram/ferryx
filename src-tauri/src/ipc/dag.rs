@@ -207,6 +207,161 @@ pub async fn dag_watch_project<R: tauri::Runtime>(
     })
 }
 
+/// Paired DAG-watch failures share the SSH watcher's vocabulary and its bounded retry
+/// budgets. The structured code always survives in the message; the bucket decides whether
+/// the shared budget treats the failure as terminal authorization or retryable transport.
+pub(crate) fn classify_paired_watch_failure(code: &str, message: &str) -> SshWatchFailureKind {
+    let message = message.trim();
+    let structured = if message.is_empty() || message == code {
+        code.to_string()
+    } else {
+        format!("{message} ({code})")
+    };
+    match code {
+        "PAIRED_HOST_UNAUTHORIZED"
+        | "PAIRED_HOST_NOT_PAIRED"
+        | "UNAUTHORIZED"
+        | "MACHINE_ACCESS_REQUIRED"
+        | "PAIRED_HOST_WRONG_MACHINE" => SshWatchFailureKind::Authentication(structured),
+        "PAIRED_HOST_UNAVAILABLE"
+        | "PAIRED_HOST_STALE_GENERATION"
+        | "PAIRED_PROXY_UNAVAILABLE"
+        | "PAIRED_PROXY_MISSING"
+        | "PAIRED_HOST_INVALID_RESPONSE"
+        | "HOST_UNAVAILABLE"
+        | "TIMEOUT"
+        | "MACHINE_SERVICE_UNAVAILABLE" => SshWatchFailureKind::Transport(structured),
+        _ => SshWatchFailureKind::Other(structured),
+    }
+}
+
+/// The wire code an `IpcErrorCode` serializes to, so classification and operator-facing
+/// messages keep the structured code instead of a Rust debug name.
+fn ipc_error_code_text(code: &IpcErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{code:?}"))
+}
+
+/// A paired subscribe failure carries its classification either as a paired-specific
+/// `IpcErrorCode` or, for codes forwarded from the host, as the code text in the message.
+pub(crate) fn classify_paired_watch_error(err: &IpcError) -> SshWatchFailureKind {
+    let code = ipc_error_code_text(&err.code);
+    match err.code {
+        IpcErrorCode::PairedProxyUnavailable
+        | IpcErrorCode::PairedHostStaleGeneration
+        | IpcErrorCode::PairedHostInvalidResponse
+        | IpcErrorCode::PairedHostRedirectRejected
+        | IpcErrorCode::HostUnavailable
+        | IpcErrorCode::Timeout
+        | IpcErrorCode::IoError
+        | IpcErrorCode::MachineServiceUnavailable => {
+            SshWatchFailureKind::Transport(format!("{} ({code})", err.message))
+        }
+        IpcErrorCode::Unauthorized
+        | IpcErrorCode::PermissionDenied
+        | IpcErrorCode::MachineAccessRequired => {
+            SshWatchFailureKind::Authentication(format!("{} ({code})", err.message))
+        }
+        _ => {
+            let forwarded = err.message.trim();
+            if forwarded.starts_with("PAIRED_")
+                || forwarded.starts_with("HOST_UNAVAILABLE")
+                || forwarded.starts_with("TIMEOUT")
+                || forwarded.starts_with("MACHINE_SERVICE_UNAVAILABLE")
+            {
+                classify_paired_watch_failure(forwarded, forwarded)
+            } else {
+                classify_ssh_ipc_error(err)
+            }
+        }
+    }
+}
+
+/// Bounded-retry state for one DAG watcher, layered on the existing SSH policy so every
+/// watcher shares one budget shape.
+///
+/// It counts CONSECUTIVE failures across every attempt of the loop - host resolution and
+/// subscribe alike - and reports at the exact bound. Only a successful subscription or an
+/// accepted frame may clear it: a successful host-list lookup proves nothing about the
+/// stream, so clearing there would let consecutive subscribe failures retry forever.
+struct WatchRetryBudget {
+    terminal: u32,
+    transport: u32,
+    reported: bool,
+}
+
+impl WatchRetryBudget {
+    fn new() -> Self {
+        Self {
+            terminal: 0,
+            transport: 0,
+            reported: false,
+        }
+    }
+
+    /// Records one failure and yields the payload to report when the bound is first
+    /// reached. Later attempts keep retrying and report nothing until a success clears it.
+    fn record(
+        &mut self,
+        cancelled: bool,
+        failure: &SshWatchFailureKind,
+        host_id: &str,
+        project_path: &str,
+        generation: u64,
+    ) -> Option<DagWatchFailurePayload> {
+        match decide_ssh_watch_step(
+            cancelled,
+            failure,
+            self.terminal,
+            self.transport,
+            host_id,
+            project_path,
+            Some(generation),
+        ) {
+            SshWatchDecision::Cancel => None,
+            SshWatchDecision::Terminal(payload) => {
+                if self.reported {
+                    None
+                } else {
+                    self.reported = true;
+                    Some(payload)
+                }
+            }
+            SshWatchDecision::Retry {
+                consecutive_terminal_failures,
+                consecutive_transport_failures,
+            } => {
+                self.terminal = consecutive_terminal_failures;
+                self.transport = consecutive_transport_failures;
+                None
+            }
+        }
+    }
+
+    /// Clears the budget. Only proof that the stream works may call this.
+    fn clear(&mut self) {
+        self.terminal = 0;
+        self.transport = 0;
+        self.reported = false;
+    }
+}
+
+/// Backoff cap for the paired DAG watcher.
+const PAIRED_WATCH_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cancellable retry sleep, delegated to the shared SSH capability-retry helper so both
+/// watchers use one backoff implementation. Returns false when the watcher was cancelled,
+/// so no frame and no status can be emitted after an unwatch under this generation.
+async fn paired_watch_retry_sleep(
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+    retry_delay: &mut tokio::time::Duration,
+) -> bool {
+    wait_ssh_capability_retry(cancel_rx, retry_delay, PAIRED_WATCH_MAX_RETRY_DELAY).await
+        == SshCapabilityRetryAction::Retry
+}
+
 #[tauri::command]
 pub async fn dag_watch_paired_project<R: tauri::Runtime>(
     workspace_id: String,
@@ -276,6 +431,7 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
 
         tauri::async_runtime::spawn(async move {
             let mut retry_delay = tokio::time::Duration::from_millis(1000);
+            let mut budget = WatchRetryBudget::new();
             'outer: loop {
                 if *cancel_rx.borrow() {
                     break 'outer;
@@ -290,29 +446,58 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                     _ = cancel_rx.changed() => break 'outer,
                     hosts = client.paired_host_list() => hosts,
                 };
-                let binding = match current.ok().and_then(|hosts| {
-                    hosts
-                        .into_iter()
-                        .find(|candidate| candidate.host_id == binding_host_id)
-                        .filter(|candidate| {
-                            candidate.auth_status
+
+                // A host-list RPC failure and a listed-but-unauthorized host are both
+                // surfaced: retrying them silently left the pane with no badge and no way
+                // to learn that the grant or the RPC path itself was broken.
+                let resolved: Result<
+                    crate::daemon::protocol::PairedDagBinding,
+                    SshWatchFailureKind,
+                > = match current {
+                    Ok(hosts) => match hosts.into_iter().find(|candidate| {
+                        candidate.host_id == binding_host_id
+                            && candidate.auth_status
                                 == crate::paired_host::inventory::AuthStatus::Paired
-                        })
-                }) {
-                    Some(host) => crate::daemon::protocol::PairedDagBinding {
-                        host_id: binding_host_id.clone(),
-                        generation: host.generation,
-                        remote_workspace_id: binding_workspace.clone(),
+                    }) {
+                        Some(host) => Ok(crate::daemon::protocol::PairedDagBinding {
+                            host_id: binding_host_id.clone(),
+                            generation: host.generation,
+                            remote_workspace_id: binding_workspace.clone(),
+                        }),
+                        None => Err(classify_paired_watch_failure(
+                            "PAIRED_HOST_NOT_PAIRED",
+                            &format!(
+                                "Paired host '{binding_host_id}' is listed but not machine-authorized"
+                            ),
+                        )),
                     },
-                    None => {
-                        tracing::debug!(workspace_id = %ws_id, "Paired host no longer authorized for DAG streaming");
-                        tokio::select! {
-                            biased;
-                            _ = cancel_rx.changed() => break 'outer,
-                            _ = tokio::time::sleep(retry_delay) => {}
+                    Err(error) => Err(classify_paired_watch_failure(&error.code, &error.message)),
+                };
+
+                let binding = match resolved {
+                    // A successful lookup is NOT proof of a working stream: it must not
+                    // clear the budget, or consecutive subscribe failures never accumulate.
+                    Ok(binding) => binding,
+                    Err(failure) => {
+                        tracing::warn!(
+                            workspace_id = %ws_id,
+                            message = %failure.message(),
+                            "Paired DAG watch resolution failed, counting it against the shared budget"
+                        );
+                        if let Some(payload) = budget.record(
+                            *cancel_rx.borrow(),
+                            &failure,
+                            &binding_host_id,
+                            &watched_key,
+                            generation,
+                        ) {
+                            let _ = app_clone.emit("dag-watch-status", &payload);
                         }
-                        retry_delay =
-                            std::cmp::min(retry_delay * 2, tokio::time::Duration::from_secs(10));
+                        // A bounded transient failure must not kill the watch: keep retrying
+                        // while the reported failure stays visible to the pane.
+                        if !paired_watch_retry_sleep(&mut cancel_rx, &mut retry_delay).await {
+                            break 'outer;
+                        }
                         continue;
                     }
                 };
@@ -328,6 +513,8 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                 match attempt {
                     Ok(mut rx) => {
                         retry_delay = tokio::time::Duration::from_millis(1000);
+                        // Only an accepted subscription proves the stream works.
+                        budget.clear();
                         loop {
                             // Biased on cancellation so a queued frame can never be
                             // emitted after unwatch under this watcher generation.
@@ -341,6 +528,9 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                                 maybe_msg = rx.recv() => {
                                     match maybe_msg {
                                         Some(msg) => {
+                                            // An accepted frame proves the stream works: only
+                                            // this and a successful subscribe clear the budget.
+                                            budget.clear();
                                             match msg {
                                                 crate::daemon::protocol::DaemonStreamMessage::DagInventory {
                                                     runs,
@@ -381,19 +571,23 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(%error, workspace_id = %ws_id, "Failed to subscribe to paired DAG stream, will retry");
+                        tracing::warn!(%error, workspace_id = %ws_id, "Failed to subscribe to paired DAG stream, counting it against the shared budget");
+                        let failure = classify_paired_watch_error(&error);
+                        if let Some(payload) = budget.record(
+                            *cancel_rx.borrow(),
+                            &failure,
+                            &binding_host_id,
+                            &watched_key,
+                            generation,
+                        ) {
+                            let _ = app_clone.emit("dag-watch-status", &payload);
+                        }
                     }
                 }
 
-                tokio::select! {
-                    changed = cancel_rx.changed() => {
-                        if changed.is_err() || *cancel_rx.borrow() {
-                            break 'outer;
-                        }
-                    }
-                    _ = tokio::time::sleep(retry_delay) => {}
+                if !paired_watch_retry_sleep(&mut cancel_rx, &mut retry_delay).await {
+                    break 'outer;
                 }
-                retry_delay = std::cmp::min(retry_delay * 2, tokio::time::Duration::from_secs(10));
             }
 
             unregister_watcher(&watched_key, generation);
@@ -676,6 +870,14 @@ pub(crate) async fn wait_ssh_capability_retry(
     SshCapabilityRetryAction::Retry
 }
 
+async fn prepare_qualified_dag_helper<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    host: &crate::ssh::SshHost,
+    environment: &crate::ssh::runtime::RemoteEnvironment,
+) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
+    crate::ipc::ssh::ensure_qualified_ssh_helper(host, environment).await
+}
+
 #[tauri::command]
 pub async fn dag_watch_ssh_project<R: tauri::Runtime>(
     workspace_id: String,
@@ -838,11 +1040,17 @@ pub async fn dag_watch_ssh_project<R: tauri::Runtime>(
                     }
                 };
 
-                let location = match crate::ssh::helper_setup::default_location(&host, &environment)
-                {
+                let prepared_location = prepare_qualified_dag_helper(
+                    &app_clone,
+                    &host,
+                    &environment,
+                )
+                .await;
+
+                let location = match prepared_location {
                     Ok(loc) => loc,
                     Err(e) => {
-                        tracing::warn!(error = %e, host_id = %host.id, "Failed to resolve helper location for DAG watch, will retry");
+                        tracing::warn!(error = %e, host_id = %host.id, "Failed to prepare qualified helper for DAG watch, will retry");
                         let failure = classify_ssh_ipc_error(&e);
                         match decide_ssh_watch_step(
                             *cancel_rx.borrow(),
@@ -1855,6 +2063,120 @@ mod tests {
         };
         assert!(matches!(
             classify_bridge_error(&bridge_auth),
+            SshWatchFailureKind::Authentication(_)
+        ));
+    }
+
+    #[test]
+    fn test_paired_watch_classifies_and_bounds_terminal_and_transport_failures() {
+        let host_id = "paired-host-1";
+        let project_path = "paired:ws-9:/remote/repo";
+
+        let host_failure =
+            classify_paired_watch_failure("PAIRED_HOST_UNAVAILABLE", "Paired host list unavailable");
+        assert!(matches!(host_failure, SshWatchFailureKind::Transport(_)));
+        assert!(host_failure.message().contains("PAIRED_HOST_UNAVAILABLE"));
+
+        let grant_failure =
+            classify_paired_watch_failure("PAIRED_HOST_UNAUTHORIZED", "grant revoked");
+        assert!(matches!(grant_failure, SshWatchFailureKind::Authentication(_)));
+        assert!(grant_failure.message().contains("PAIRED_HOST_UNAUTHORIZED"));
+
+        // Authorization-class failures report at the exact bound, not before it.
+        let mut budget = WatchRetryBudget::new();
+        for expected in 1..DEFAULT_TERMINAL_FAILURE_BUDGET {
+            assert!(budget
+                .record(false, &grant_failure, host_id, project_path, 11)
+                .is_none());
+            assert_eq!(budget.terminal, expected);
+        }
+        let payload = budget
+            .record(false, &grant_failure, host_id, project_path, 11)
+            .expect("the authorization bound must report exactly once");
+        assert_eq!(payload.code, DagWatchFailureCode::Authentication);
+        assert_eq!(payload.project_path, project_path);
+        assert_eq!(payload.host_id, host_id);
+        assert_eq!(payload.generation, Some(11));
+
+        // Cancellation reports nothing, whatever the counters hold.
+        assert!(budget
+            .record(true, &grant_failure, host_id, project_path, 11)
+            .is_none());
+    }
+
+    #[test]
+    fn test_paired_watch_budget_survives_successful_host_lookups() {
+        let host_id = "paired-host-2";
+        let project_path = "paired:ws-5:/repo";
+        let lookup_failure =
+            classify_paired_watch_failure("PAIRED_HOST_UNAVAILABLE", "host list unavailable");
+        let subscribe_failure = classify_paired_watch_error(&IpcError::new(
+            IpcErrorCode::PairedProxyUnavailable,
+            "paired proxy missing",
+        ));
+
+        let mut budget = WatchRetryBudget::new();
+        // Attempt 1: the host-list lookup itself fails and counts once.
+        assert!(budget
+            .record(false, &lookup_failure, host_id, project_path, 3)
+            .is_none());
+        assert_eq!(budget.transport, 1);
+
+        // Attempt 2: the lookup succeeds, so the subscription is attempted and fails. A
+        // successful lookup proves nothing about the stream and must not reset the count.
+        assert!(budget
+            .record(false, &subscribe_failure, host_id, project_path, 3)
+            .is_none());
+        assert_eq!(budget.transport, 2);
+
+        // Repeated subscribe failures accumulate to the exact transport bound.
+        for expected in 3..DEFAULT_TRANSPORT_FAILURE_BUDGET {
+            assert!(budget
+                .record(false, &subscribe_failure, host_id, project_path, 3)
+                .is_none());
+            assert_eq!(budget.transport, expected);
+        }
+        let payload = budget
+            .record(false, &subscribe_failure, host_id, project_path, 3)
+            .expect("the transport bound must report exactly once");
+        assert_eq!(payload.code, DagWatchFailureCode::Unavailable);
+        assert_eq!(payload.project_path, project_path);
+        assert_eq!(payload.host_id, host_id);
+        assert_eq!(payload.generation, Some(3));
+
+        // The watcher keeps retrying after the report: it reports once, never per attempt.
+        assert!(budget
+            .record(false, &subscribe_failure, host_id, project_path, 3)
+            .is_none());
+
+        // Only an accepted subscription or frame clears the budget.
+        budget.clear();
+        assert_eq!(budget.transport, 0);
+        assert!(!budget.reported);
+        assert!(budget
+            .record(false, &subscribe_failure, host_id, project_path, 3)
+            .is_none());
+        assert_eq!(budget.transport, 1);
+    }
+
+    #[test]
+    fn test_paired_failed_subscribe_classification_preserves_codes() {
+        // A paired attach refused by the host keeps its classification.
+        let proxy = IpcError::new(IpcErrorCode::PairedProxyUnavailable, "paired proxy missing");
+        let failure = classify_paired_watch_error(&proxy);
+        assert!(matches!(failure, SshWatchFailureKind::Transport(_)));
+        assert!(failure.message().contains("PAIRED_PROXY_UNAVAILABLE"));
+
+        // A code forwarded from the host survives verbatim in the structured failure.
+        let forwarded = IpcError::new(IpcErrorCode::InternalError, "PAIRED_PROXY_MISSING");
+        let forwarded_failure = classify_paired_watch_error(&forwarded);
+        assert!(matches!(forwarded_failure, SshWatchFailureKind::Transport(_)));
+        assert_eq!(forwarded_failure.message(), "PAIRED_PROXY_MISSING");
+
+        // An unauthorized attach is authorization-class, not transport-class.
+        let unauthorized = IpcError::new(IpcErrorCode::Unauthorized, "token rejected");
+        assert!(matches!(
+            classify_paired_watch_error(&unauthorized),
             SshWatchFailureKind::Authentication(_)
         ));
     }

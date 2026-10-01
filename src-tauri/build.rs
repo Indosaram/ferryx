@@ -19,7 +19,64 @@ const WINDOWS_APP_MANIFEST: &str = r#"<assembly xmlns="urn:schemas-microsoft-com
 </assembly>
 "#;
 
+fn validate_bundled_helpers_gate(repo_root: &std::path::Path) -> Result<(), String> {
+    let manifest_path = repo_root.join("src-tauri/resources/helpers/manifest.json");
+    if !manifest_path.is_file() {
+        // Unlike the JS validator, which stays development-permissive, this gate is only
+        // reached for release or FERRYX_ENFORCE_HELPER_GATE builds: those must ship staged
+        // helper assets, so an absent manifest is a hard error, not a reason to skip.
+        return Err(format!(
+            "missing bundled helper manifest at {}; stage remote helpers before release packaging",
+            manifest_path.display()
+        ));
+    }
+
+    let script_path = repo_root.join("scripts/build-remote-helpers.mjs");
+    if !script_path.is_file() {
+        return Err(format!("missing validation script at {}", script_path.display()));
+    }
+
+    let (binary, args) = if std::process::Command::new("bun").arg("--version").output().is_ok() {
+        ("bun", vec![script_path.to_string_lossy().to_string(), "--check-bundled".to_string(), repo_root.to_string_lossy().to_string()])
+    } else {
+        ("node", vec![script_path.to_string_lossy().to_string(), "--check-bundled".to_string(), repo_root.to_string_lossy().to_string()])
+    };
+
+    let output = std::process::Command::new(binary)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to invoke {binary} helper freshness gate: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let msg = if !stderr.trim().is_empty() { stderr } else { stdout };
+        return Err(format!("{msg}"));
+    }
+
+    Ok(())
+}
+
 fn main() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let repo_root = manifest_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| manifest_dir.clone());
+
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    let is_release = profile == "release"
+        || std::env::var("FERRYX_ENFORCE_HELPER_GATE").as_deref() == Ok("1");
+
+    if is_release {
+        if let Err(err) = validate_bundled_helpers_gate(&repo_root) {
+            eprintln!("\n[helper asset freshness error] {err}\n");
+            std::process::exit(1);
+        }
+    }
+
     // Windows test binaries do not receive tauri-build's embedded application
     // manifest, so the loader binds comctl32 v5 from System32 and fails to
     // launch with STATUS_ENTRYPOINT_NOT_FOUND (TaskDialogIndirect). Embed the

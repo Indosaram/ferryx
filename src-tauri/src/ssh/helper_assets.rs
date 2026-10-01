@@ -287,6 +287,44 @@ pub fn resolve_helper_asset(
     })
 }
 
+pub fn resolve_current_helper_asset(
+    base_dir: &Path,
+    target: HelperTarget,
+) -> Result<ResolvedHelperAsset, IpcError> {
+    let manifest_path = base_dir.join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::IoError,
+            format!("Failed to read helper manifest: {e}"),
+        )
+    })?;
+
+    let manifest: HelperAssetManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::ParseError,
+            format!("Failed to parse helper manifest: {e}"),
+        )
+    })?;
+
+    if manifest.helper_version != crate::ssh::helper_runtime::process::HELPER_VERSION {
+        return Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Helper manifest version mismatch: expected {}, got {}",
+                crate::ssh::helper_runtime::process::HELPER_VERSION,
+                manifest.helper_version
+            ),
+        )
+        .with_details(serde_json::json!({
+            "stage": "helper_asset_version_mismatch",
+            "expected": crate::ssh::helper_runtime::process::HELPER_VERSION,
+            "actual": manifest.helper_version,
+        })));
+    }
+
+    resolve_helper_asset(base_dir, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +645,133 @@ mod tests {
 
         let err = resolve_helper_asset(base, target).unwrap_err();
         assert_eq!(err.code, IpcErrorCode::InvalidPath);
+    }
+
+    fn sha256_hex(payload: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Writes `<base>/manifest.json` plus `<base>/<triple>/<filename>` carrying
+    /// `payload`. The digest and byte length written to the manifest are passed
+    /// in explicitly so a fixture can model a corrupt or stale bundle.
+    fn write_asset_fixture(
+        base: &Path,
+        target: HelperTarget,
+        helper_version: &str,
+        payload: &[u8],
+        manifest_sha256: String,
+        manifest_byte_length: u64,
+    ) -> PathBuf {
+        let target_dir = base.join(target.triple());
+        fs::create_dir_all(&target_dir).unwrap();
+        let binary_path = target_dir.join(target.filename());
+        fs::write(&binary_path, payload).unwrap();
+
+        let manifest = HelperAssetManifest {
+            schema_version: 1,
+            helper_version: helper_version.into(),
+            protocol_version: 1,
+            artifacts: vec![HelperAssetEntry {
+                target,
+                filename: target.filename().into(),
+                sha256: manifest_sha256,
+                byte_length: manifest_byte_length,
+            }],
+        };
+        fs::write(
+            base.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        binary_path
+    }
+
+    #[test]
+    fn resolve_current_helper_asset_accepts_verified_current_asset() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let target = HelperTarget::LinuxX86_64;
+        let payload = b"verified current helper payload";
+
+        let binary_path = write_asset_fixture(
+            base,
+            target,
+            crate::ssh::helper_runtime::process::HELPER_VERSION,
+            payload,
+            sha256_hex(payload),
+            payload.len() as u64,
+        );
+
+        let resolved = resolve_current_helper_asset(base, target)
+            .expect("a current-version asset with a matching digest must resolve");
+        assert_eq!(resolved.target, target);
+        assert_eq!(resolved.binary_path, binary_path);
+        assert_eq!(resolved.sha256, sha256_hex(payload));
+        assert_eq!(resolved.byte_length, payload.len() as u64);
+    }
+
+    #[test]
+    fn resolve_current_helper_asset_rejects_stale_helper_version() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let target = HelperTarget::LinuxX86_64;
+        let payload = b"stale but internally consistent helper payload";
+        let expected_version = crate::ssh::helper_runtime::process::HELPER_VERSION;
+
+        write_asset_fixture(
+            base,
+            target,
+            "2026.917.1",
+            payload,
+            sha256_hex(payload),
+            payload.len() as u64,
+        );
+
+        let err = resolve_current_helper_asset(base, target)
+            .expect_err("a stale bundle must never satisfy the current version contract");
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
+        let details = err.details.expect("details");
+        assert_eq!(details["stage"].as_str(), Some("helper_asset_version_mismatch"));
+        assert_eq!(details["expected"].as_str(), Some(expected_version));
+        assert_eq!(details["actual"].as_str(), Some("2026.917.1"));
+    }
+
+    #[test]
+    fn resolve_current_helper_asset_rejects_corrupt_binary_without_bypass() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let target = HelperTarget::LinuxX86_64;
+        let payload = b"corrupted helper payload";
+        let corrupt_digest = sha256_hex(b"entirely different bytes");
+
+        // Current version, correct declared length, wrong digest: resolution must
+        // fail closed instead of handing back an unverified executable.
+        let binary_path = write_asset_fixture(
+            base,
+            target,
+            crate::ssh::helper_runtime::process::HELPER_VERSION,
+            payload,
+            corrupt_digest.clone(),
+            payload.len() as u64,
+        );
+
+        let err = resolve_current_helper_asset(base, target)
+            .expect_err("a corrupt asset must not resolve");
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+        let details = err.details.expect("details");
+        assert_eq!(details["stage"].as_str(), Some("helper_asset_checksum_mismatch"));
+        assert_eq!(details["expected"].as_str(), Some(corrupt_digest.as_str()));
+
+        // A missing binary is equally fatal: no raw-executable fallback exists.
+        fs::remove_file(&binary_path).unwrap();
+        let missing = resolve_current_helper_asset(base, target)
+            .expect_err("a missing asset must not resolve");
+        assert_eq!(missing.code, IpcErrorCode::CliExecutableNotFound);
+        assert_eq!(
+            missing.details.expect("details")["stage"].as_str(),
+            Some("helper_asset_binary_missing")
+        );
     }
 }

@@ -16,6 +16,7 @@ pub mod direct_api;
 pub mod direct_lease;
 pub mod discovery;
 pub(crate) mod filesystem;
+pub mod machine_agent_state;
 pub mod machine_events;
 pub mod machine_operation_journal;
 pub mod machine_protocol;
@@ -71,6 +72,19 @@ mod workspace_api_tests;
 #[cfg(all(test, unix))]
 #[path = "dag_paired_tests.rs"]
 mod dag_paired_tests;
+
+// The agent-state fixture binds relays over TCP loopback and drives the paired
+// transport the desktop uses, so it must run on every target, not only Unix:
+// `cfg(all(test, unix))` here silently executed zero tests on Windows.
+#[cfg(test)]
+#[path = "machine_agent_state_tests.rs"]
+mod machine_agent_state_tests;
+
+// Portable counterpart to `dag_paired_tests` (which needs a Unix listener): the
+// paired DAG stream is exercised through `MachineClient::attach_dag`.
+#[cfg(test)]
+#[path = "machine_dag_paired_tests.rs"]
+mod machine_dag_paired_tests;
 
 #[cfg(test)]
 mod browser_protocol_tests;

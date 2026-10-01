@@ -370,7 +370,12 @@ impl Drop for OwnedTestHelper {
 async fn install_test_helper(host: &SshHost, home: &Path) -> OwnedTestHelper {
     let mut environment = crate::ssh::runtime::detect(host).await.unwrap();
     environment.home = home.to_string_lossy().into_owned();
-    let location = crate::ssh::helper_setup::default_location(host, &environment).unwrap();
+    let location = crate::ssh::helper_setup::qualified_location(
+        host,
+        &environment,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .unwrap();
     let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../remote-helper/target/debug/ferryx-remote-helper");
     assert!(
@@ -730,4 +735,435 @@ async fn exercise_child(root: &Path) {
             .code,
         crate::ipc::IpcErrorCode::WorkspaceNotFound
     );
+}
+
+/// First remote spawn on a host without the version-qualified helper must
+/// resolve a digest-verified bundled asset, install it at the qualified
+/// location, and start it before creating the session.
+///
+/// The asset fixture has to sit next to the executable (the packaged-app
+/// layout), so the child runs from a private copy of this test binary inside
+/// its own temporary directory rather than from the shared build directory.
+const PROVISION_CHILD: &str = "FERRYX_SSH_PROVISION_CHILD";
+
+/// Maps this machine to the bundled helper target that the loopback SSH host
+/// reports. Parent and child run on the same host, so both derive one triple.
+fn local_helper_target_triple() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    crate::ssh::helper_assets::resolve_target_from_probe(os, std::env::consts::ARCH)
+        .expect("the local test host must map to a bundled helper target")
+        .triple()
+        .to_string()
+}
+
+fn helper_target_for_triple(triple: &str) -> crate::ssh::helper_assets::HelperTarget {
+    serde_json::from_value(serde_json::Value::String(triple.to_string()))
+        .unwrap_or_else(|_| panic!("unsupported helper target triple: {triple}"))
+}
+
+/// The staged bundle path the packaged-app layout resolves to: `<exe_dir>/helpers`.
+fn staged_asset_path(exe_dir: &Path, target_triple: &str) -> PathBuf {
+    let target = helper_target_for_triple(target_triple);
+    exe_dir
+        .join("helpers")
+        .join(target.triple())
+        .join(target.filename())
+}
+
+/// Copies the just-built standalone helper into `exe_dir/helpers` as a real
+/// bundled asset: `<exe_dir>/helpers/<triple>/<filename>` plus a manifest
+/// carrying its true digest and byte length. `exe_dir` must be a private
+/// directory owned by this test - the shared `target/debug/deps` directory is
+/// never written to, because foreign artifacts may live there.
+fn stage_verified_helper_asset(exe_dir: &Path, target_triple: &str) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../remote-helper/target/debug/ferryx-remote-helper");
+    assert!(
+        source.is_file(),
+        "Explicit test prerequisite: build remote-helper before SSH daemon tests"
+    );
+    let target = helper_target_for_triple(target_triple);
+
+    let binary_path = staged_asset_path(exe_dir, target_triple);
+    std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
+    std::fs::copy(&source, &binary_path).unwrap();
+    std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The manifest is only honest if the staged file really is a current helper.
+    let expected_version = crate::ssh::helper_runtime::process::HELPER_VERSION;
+    let version = std::process::Command::new(&binary_path)
+        .arg("--version")
+        .output()
+        .expect("run the staged helper");
+    let reported = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    assert!(
+        version.status.success() && reported == expected_version,
+        "staged helper must report {expected_version}, got {reported:?} ({})",
+        String::from_utf8_lossy(&version.stderr).trim()
+    );
+
+    let manifest = crate::ssh::helper_assets::HelperAssetManifest {
+        schema_version: 1,
+        helper_version: expected_version.to_string(),
+        protocol_version: 1,
+        artifacts: vec![crate::ssh::helper_assets::HelperAssetEntry {
+            target,
+            filename: target.filename().to_string(),
+            sha256: crate::ssh::helper_assets::compute_file_sha256(&binary_path).unwrap(),
+            byte_length: std::fs::metadata(&binary_path).unwrap().len(),
+        }],
+    };
+    std::fs::write(
+        exe_dir.join("helpers").join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    binary_path
+}
+
+/// Best-effort reap of the detached helper daemon that automatic provisioning
+/// started inside this test's own temporary home.
+///
+/// A PID read from an endpoint file can outlive its process, so the signal is
+/// only sent when the live command line still matches all three identity facts
+/// of this test's helper: the qualified executable, `--root`, and `--host-id`.
+/// A mismatch (including a reused PID) leaves the process alone. This is a
+/// cleanliness measure, not a guarantee.
+struct OwnedProvisionedHelper {
+    root: PathBuf,
+    executable: PathBuf,
+    host_id: String,
+}
+
+/// Every accepted spelling of a path: as given, and canonicalized when the
+/// filesystem resolves it differently (macOS reports `/private/tmp` for `/tmp`).
+fn path_spellings(path: &Path) -> Vec<String> {
+    let given = path.to_string_lossy().into_owned();
+    let mut spellings = vec![given.clone()];
+    if let Ok(canonical) = path.canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if canonical != given {
+            spellings.push(canonical);
+        }
+    }
+    spellings
+}
+
+impl Drop for OwnedProvisionedHelper {
+    fn drop(&mut self) {
+        let Ok(raw) = std::fs::read_to_string(self.root.join("endpoint.json")) else {
+            return;
+        };
+        let Some(pid) = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
+        else {
+            return;
+        };
+        let pid = pid.to_string();
+        // `-ww` prints the whole argv instead of truncating it to a screen width.
+        let Ok(listed) = std::process::Command::new("ps")
+            .args(["-ww", "-p", &pid, "-o", "command="])
+            .output()
+        else {
+            return;
+        };
+        let command = String::from_utf8_lossy(&listed.stdout);
+        let is_ours = path_spellings(&self.executable)
+            .iter()
+            .any(|exe| command.contains(exe.as_str()))
+            && path_spellings(&self.root)
+                .iter()
+                .any(|root| command.contains(&format!("--root {root}")))
+            && command.contains(&format!("--host-id {}", self.host_id));
+        if !is_ours {
+            return;
+        }
+        let stop = format!("kill -9 {pid}");
+        let _ = std::process::Command::new("sh")
+            .args(["-c", &stop])
+            .status();
+    }
+}
+
+#[tokio::test]
+async fn remote_ssh_first_spawn_provisions_qualified_helper_automatically() {
+    // Short root: the qualified runtime root is `<home>/.ferryx/r/<version>/<host digest>`
+    // and the helper binds `<root>/helper.sock`, which must stay under the Unix
+    // socket limit (103 bytes on macOS, 107 on Linux).
+    let dir = tempfile::Builder::new()
+        .prefix("fx")
+        .rand_bytes(2)
+        .tempdir_in("/tmp")
+        .unwrap();
+    for name in ["host_key", "user_key"] {
+        let output = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(dir.path().join(name))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let config = dir.path().join("sshd_config");
+    std::fs::write(&config, format!("HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\n",
+        dir.path().join("host_key").display(), dir.path().join("user_key.pub").display())).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let host_key = std::fs::read_to_string(dir.path().join("host_key.pub")).unwrap();
+    let known_hosts = dir.path().join("known_hosts");
+    std::fs::write(&known_hosts, format!("[127.0.0.1]:{port} {host_key}")).unwrap();
+    let wrapper = dir.path().join("ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o UserKnownHostsFile={} \"$@\"\n",
+            crate::ssh::direct::quote_posix(known_hosts.to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(dir.path().join("port"), port.to_string()).unwrap();
+    let log_path = dir.path().join("sshd.log");
+    let log_for_server = log_path.clone();
+    // sshd inetd mode uses an already-bound socket: no ephemeral-port race or polling.
+    let sshd = sshd_binary();
+    assert!(
+        sshd.is_file(),
+        "Explicit test prerequisite: install an OpenSSH server ({} missing)",
+        sshd.display()
+    );
+    let server = tokio::spawn(async move {
+        let mut children = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                connection = listener.accept() => {
+                    let (stream, _) = connection.unwrap();
+                    let stream = stream.into_std().unwrap();
+                    stream.set_nonblocking(false).unwrap();
+                    let input = Stdio::from(OwnedFd::from(stream.try_clone().unwrap()));
+                    let output = Stdio::from(OwnedFd::from(stream));
+                    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_for_server).unwrap();
+                    let mut child = tokio::process::Command::new(&sshd)
+                        .args(["-i", "-e", "-f"]).arg(&config)
+                        .stdin(input).stdout(output).stderr(log).kill_on_drop(true).spawn().unwrap();
+                    children.spawn(async move { child.wait().await.unwrap() });
+                }
+                Some(result) = children.join_next(), if !children.is_empty() => { result.unwrap(); }
+            }
+        }
+    });
+    let path = std::env::var_os("PATH").unwrap();
+    let mut paths = vec![dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&path));
+    // The asset fixture must be adjacent to the executable, so this test binary
+    // runs from a private copy inside its own temporary directory: the shared
+    // `target/debug/deps/helpers` subtree (which may hold foreign artifacts) is
+    // never written to and never removed.
+    let assets = tempfile::Builder::new()
+        .prefix("fx-provision-assets")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let child_binary = assets.path().join("ferryx-lib-provision-tests");
+    std::fs::copy(std::env::current_exe().unwrap(), &child_binary).unwrap();
+    std::fs::set_permissions(&child_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let staged = stage_verified_helper_asset(assets.path(), &local_helper_target_triple());
+    assert!(
+        staged.starts_with(assets.path()),
+        "the asset fixture must stay inside its own private directory"
+    );
+
+    // The private copy loads the ghostty dylib through the inherited
+    // `DYLD_FALLBACK_LIBRARY_PATH` that cargo set for this test process.
+    let output = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::process::Command::new(&child_binary)
+            .args([
+                "--exact",
+                "daemon::server::remote_ssh_tests::remote_ssh_first_spawn_provisions_qualified_helper_child",
+                "--nocapture",
+            ])
+            .env(PROVISION_CHILD, dir.path())
+            // The daemon supervises its SSH transport through this test binary's ignored
+            // `ssh_bridge_transport_supervisor_entry`; the real app dispatches
+            // `--ferryx-ssh-supervisor` from its own main instead. Child-owned env only.
+            .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("bounded child test")
+    .unwrap();
+    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    assert!(
+        output.status.success(),
+        "child stdout:\n{}\nchild stderr:\n{}\nsshd:\n{log}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
+    let Some(root) = std::env::var_os(PROVISION_CHILD) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let port = std::fs::read_to_string(root.join("port"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let user = std::process::Command::new("id").arg("-un").output().unwrap();
+    assert!(user.status.success());
+    let host = SshHost {
+        // Short id on purpose: `host_slug` appends "-" plus 32 hex characters, and the
+        // fixture root must stay short enough for the helper's socket path.
+        id: "fx".into(),
+        label: "Loopback provisioning".into(),
+        hostname: "127.0.0.1".into(),
+        username: Some(String::from_utf8(user.stdout).unwrap().trim().into()),
+        port: Some(port),
+        identity_file: Some(root.join("user_key").to_str().unwrap().into()),
+        jump_host: None,
+        source: SshHostSource::Manual,
+        auth_method: SshAuthMethod::Key,
+        disabled: None,
+    };
+    let host_store = root.join("ssh_hosts.json");
+    write_hosts(&host_store, vec![host.clone()]);
+
+    let repository = root.join("remote repository");
+    std::fs::create_dir(&repository).unwrap();
+    let response = register_remote_project(
+        host_store.clone(),
+        RegisterRemoteProjectRequest {
+            workspace_id: "auto-provision".into(),
+            host_id: host.id.clone(),
+            repo_path: repository.to_string_lossy().into_owned(),
+        },
+    )
+    .await
+    .expect("register the loopback project over real SSH");
+
+    let daemon = DaemonServer::new_with_paths(
+        Some(root.join("gateway.json")),
+        Some(root.join("auth.json")),
+    );
+    let mut environment = crate::ssh::runtime::detect(&host).await.unwrap();
+    environment.home = root.to_string_lossy().into_owned();
+    let qualified = crate::ssh::helper_setup::qualified_location(
+        &host,
+        &environment,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .unwrap();
+    let legacy = crate::ssh::helper_setup::default_location(&host, &environment).unwrap();
+
+    // The helper canonicalizes the root before binding, so measure the socket path the
+    // same way; failing here beats a cryptic SUN_LEN bind error from the remote.
+    let socket_path = Path::new(&qualified.root).join("helper.sock");
+    let socket_path = match Path::new(&environment.home).canonicalize() {
+        Ok(canonical) => canonical.join(socket_path.strip_prefix(&environment.home).unwrap()),
+        Err(_) => socket_path,
+    };
+    assert!(
+        socket_path.to_string_lossy().len() < 104,
+        "helper socket path exceeds the Unix socket limit: {}",
+        socket_path.display()
+    );
+
+    // Armed before anything can provision: a failed assertion or panic after the
+    // helper starts still reaps the daemon it launched.
+    let _helper = OwnedProvisionedHelper {
+        root: PathBuf::from(&qualified.root),
+        executable: PathBuf::from(&qualified.executable),
+        host_id: host.id.clone(),
+    };
+
+    // The first spawn must provision from scratch: nothing is installed yet.
+    assert!(
+        !Path::new(&qualified.executable).exists(),
+        "the qualified helper must be absent before the first spawn"
+    );
+    assert_ne!(
+        crate::ssh::helper_setup::probe_ready_at(&host, &environment, &qualified).await,
+        crate::ssh::helper_setup::HelperProbeState::Installed
+    );
+
+    let exe_dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(
+        !exe_dir.ends_with("deps"),
+        "the fixture must run from its private copy, never the shared build directory"
+    );
+    let target_triple = crate::ipc::ssh::resolve_remote_target_triple(&host, &environment)
+        .await
+        .expect("resolve the remote helper target");
+    assert_eq!(
+        target_triple,
+        local_helper_target_triple(),
+        "the loopback SSH host must report this machine's helper target"
+    );
+    let expected_asset = staged_asset_path(&exe_dir, &target_triple);
+    assert!(
+        expected_asset.is_file(),
+        "the verified asset fixture must be staged beside the private test binary copy"
+    );
+    // Production resolution must pick the private fixture: it is the first
+    // candidate for the packaged layout, ahead of any bundle installed on this
+    // machine and ahead of the repository copy.
+    assert_eq!(
+        crate::ipc::ssh::resolve_bundled_helper_binary(&target_triple)
+            .expect("the staged asset must resolve"),
+        expected_asset,
+        "asset resolution must pick the verified bundle staged for this test"
+    );
+    let expected_sha256 = crate::ssh::helper_assets::compute_file_sha256(&expected_asset).unwrap();
+
+    let startup = TerminalStartup::RemoteSsh {
+        host_store_path: host_store.clone(),
+    };
+    let session_id = daemon
+        .handle_spawn(
+            "auto-provision-first-spawn",
+            &response.workspace_id,
+            None,
+            Some(response.repo_root.clone()),
+            80,
+            24,
+            None,
+            Some(startup),
+        )
+        .await
+        .expect("first remote spawn must provision the qualified helper automatically");
+
+    assert_eq!(
+        crate::ssh::helper_setup::probe_ready_at(&host, &environment, &qualified).await,
+        crate::ssh::helper_setup::HelperProbeState::Installed
+    );
+    assert_eq!(
+        crate::ssh::helper_assets::compute_file_sha256(Path::new(&qualified.executable)).unwrap(),
+        expected_sha256,
+        "the provisioned helper must be the verified bundled asset"
+    );
+    assert!(
+        !Path::new(&legacy.executable).exists(),
+        "provisioning must never fall back to a raw default-location executable"
+    );
+
+    wait_remote_connected(&daemon, &session_id).await;
+    daemon.handle_close(&session_id).await.unwrap();
 }

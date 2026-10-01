@@ -18,6 +18,10 @@ const CHECKPOINT: &str =
     include_str!("../dag/testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json");
 const RUN_ID: &str = "dag_081e597f-0aa8-4a20-a826-4e3d045aacef";
 
+/// One absolute bound per wait. Timing out frame-by-frame would let an unrelated but busy
+/// stream extend a wait whose deadline has already passed.
+const EVENT_WAIT: Duration = Duration::from_secs(30);
+
 struct Fixture {
     tasks: tokio::task::JoinSet<()>,
     desktop: Arc<DaemonServer>,
@@ -189,15 +193,20 @@ fn write_checkpoint(root: &Path) -> anyhow::Result<()> {
 async fn next_inventory(
     rx: &mut tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
 ) -> Option<(String, Vec<crate::dag::journal::DagRunSnapshot>)> {
-    loop {
-        match tokio::time::timeout(Duration::from_secs(20), rx.recv()).await {
-            Ok(Some(DaemonStreamMessage::DagInventory {
-                project_path, runs, ..
-            })) => return Some((project_path.into_owned(), runs)),
-            Ok(Some(_)) => continue,
-            Ok(None) | Err(_) => return None,
+    let wait = async {
+        loop {
+            match rx.recv().await {
+                Some(DaemonStreamMessage::DagInventory {
+                    project_path, runs, ..
+                }) => return Some((project_path.into_owned(), runs)),
+                Some(_) => continue,
+                None => return None,
+            }
         }
-    }
+    };
+    let bounded: Result<Option<(String, Vec<crate::dag::journal::DagRunSnapshot>)>, tokio::time::error::Elapsed> =
+        tokio::time::timeout(EVENT_WAIT, wait).await;
+    bounded.unwrap_or(None)
 }
 
 /// Drains inventory frames until `expected` distinct runs have arrived, returning
@@ -208,16 +217,19 @@ async fn drain_inventory(
 ) -> (usize, std::collections::BTreeSet<String>) {
     let mut frames = 0usize;
     let mut seen = std::collections::BTreeSet::new();
-    while seen.len() < expected {
-        match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
-            Ok(Some(DaemonStreamMessage::DagInventory { runs, .. })) => {
-                frames += 1;
-                seen.extend(runs.into_iter().map(|run| run.run_id));
+    let wait = async {
+        while seen.len() < expected {
+            match rx.recv().await {
+                Some(DaemonStreamMessage::DagInventory { runs, .. }) => {
+                    frames += 1;
+                    seen.extend(runs.into_iter().map(|run| run.run_id));
+                }
+                Some(_) => continue,
+                None => break,
             }
-            Ok(Some(_)) => continue,
-            Ok(None) | Err(_) => break,
         }
-    }
+    };
+    let _ = tokio::time::timeout(EVENT_WAIT, wait).await;
     (frames, seen)
 }
 
@@ -226,16 +238,120 @@ async fn next_update(
     rx: &mut tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
     run_id: &str,
 ) -> bool {
-    loop {
-        match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
-            Ok(Some(DaemonStreamMessage::DagRunUpdated { snapshot, .. })) => {
-                if snapshot.run_id == run_id {
-                    return true;
+    let wait = async {
+        loop {
+            match rx.recv().await {
+                Some(DaemonStreamMessage::DagRunUpdated { snapshot, .. }) => {
+                    if snapshot.run_id == run_id {
+                        return true;
+                    }
                 }
+                Some(_) => continue,
+                None => return false,
             }
-            Ok(Some(_)) => continue,
-            Ok(None) | Err(_) => return false,
         }
+    };
+    let bounded: Result<bool, tokio::time::error::Elapsed> =
+        tokio::time::timeout(EVENT_WAIT, wait).await;
+    bounded.unwrap_or(false)
+}
+
+/// Waits for `run_id` in either form the host may publish it: an inventory frame (the
+/// reconcile scan saw it) or a live update (the watcher armed for that root fired first).
+/// Which one wins is a race, so accepting a single frame type is timing-dependent.
+async fn next_run_state(
+    rx: &mut tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
+    run_id: &str,
+) -> bool {
+    let wait = async {
+        loop {
+            match rx.recv().await {
+                Some(DaemonStreamMessage::DagInventory { runs, .. }) => {
+                    if runs.iter().any(|run| run.run_id == run_id) {
+                        return true;
+                    }
+                }
+                Some(DaemonStreamMessage::DagRunUpdated { snapshot, .. }) => {
+                    if snapshot.run_id == run_id {
+                        return true;
+                    }
+                }
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    };
+    let bounded: Result<bool, tokio::time::error::Elapsed> =
+        tokio::time::timeout(EVENT_WAIT, wait).await;
+    bounded.unwrap_or(false)
+}
+
+/// Drains frames until `barrier_run_id` arrives, failing if `forbidden_run_id` is
+/// published first. The barrier's journal is written after the forbidden one, so an event
+/// from a retired root would have to cross this same stream ahead of the barrier's.
+async fn await_barrier_without(
+    rx: &mut tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
+    barrier_run_id: &str,
+    forbidden_run_id: &str,
+) -> Result<(), String> {
+    let wait = async {
+        loop {
+            match rx.recv().await {
+                Some(DaemonStreamMessage::DagInventory { runs, .. }) => {
+                    if runs.iter().any(|run| run.run_id == forbidden_run_id) {
+                        return Err(format!(
+                            "retired worktree watcher still published {forbidden_run_id} in an inventory"
+                        ));
+                    }
+                    if runs.iter().any(|run| run.run_id == barrier_run_id) {
+                        return Ok(());
+                    }
+                }
+                Some(DaemonStreamMessage::DagRunUpdated { snapshot, .. }) => {
+                    if snapshot.run_id == forbidden_run_id {
+                        return Err(format!(
+                            "retired worktree watcher still published {forbidden_run_id}"
+                        ));
+                    }
+                    if snapshot.run_id == barrier_run_id {
+                        return Ok(());
+                    }
+                }
+                Some(_) => continue,
+                None => return Err("dag stream ended before the barrier event".into()),
+            }
+        }
+    };
+    let bounded: Result<Result<(), String>, tokio::time::error::Elapsed> =
+        tokio::time::timeout(EVENT_WAIT, wait).await;
+    bounded.unwrap_or_else(|_| Err("barrier event never arrived".into()))
+}
+
+/// Creates a managed worktree through the production owner-mutation route so the
+/// committed revision (and with it the worktree-change broadcast the DAG stream
+/// reconciles on) is published exactly as the app publishes it.
+async fn create_owned_worktree(
+    state: &Arc<crate::remote::state::RemoteGatewayState>,
+    workspace_id: &str,
+    slug: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let response = crate::remote::workspace_api::worktrees::owner_mutation(
+        Arc::clone(state),
+        workspace_id.to_string(),
+        crate::worktree::WorktreeIdentity {
+            ws_id: workspace_id.to_string(),
+            slug: slug.to_string(),
+        },
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("owner_mutation create {slug}: {error}"))?;
+    match response {
+        crate::daemon::protocol::DaemonResponse::CreateWorktreeOk { worktree } => Ok(worktree.path),
+        other => Err(anyhow::anyhow!(
+            "expected CreateWorktreeOk for {slug}, got: {other:?}"
+        )),
     }
 }
 
@@ -431,6 +547,163 @@ async fn paired_dag_streams_from_authenticated_remote_host() {
             "paired-dag remote_only_checkpoint=true remote_root={} live_push=true reconnect_rehydrated=true byte_batched_frames>1 unsubscribe_released=true unknown_workspace_rejected=true stale_generation_rejected=true",
             host_root.display()
         );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    fixture.close().await.unwrap();
+    root.close().unwrap();
+    outcome.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paired_dag_scans_and_watches_workspace_worktree_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let host_root = root.path().join("remote-workspace-with-worktree");
+    std::fs::create_dir_all(&host_root).unwrap();
+    let host_root = std::fs::canonicalize(&host_root).unwrap();
+
+    // Initialize real git repo so worktree operations succeed
+    crate::worktree::run_git(&host_root, &["init"]).expect("git init");
+    crate::worktree::run_git(&host_root, &["config", "user.name", "Test User"]).expect("git config name");
+    crate::worktree::run_git(&host_root, &["config", "user.email", "test@example.com"]).expect("git config email");
+    std::fs::write(host_root.join("README.md"), "initial commit").unwrap();
+    crate::worktree::run_git(&host_root, &["add", "README.md"]).expect("git add");
+    crate::worktree::run_git(&host_root, &["commit", "-m", "initial commit"]).expect("git commit");
+
+    let fixture = Fixture::new(root.path()).await.unwrap();
+    let outcome = async {
+        let host = fixture.pair().await.map_err(|error| anyhow::anyhow!("pair fixture: {error:#}"))?;
+        let remote_workspace_id = register(&fixture.host_state, &host_root).await
+            .map_err(|error| anyhow::anyhow!("register workspace: {error:#}"))?;
+
+        // Create an authoritative managed worktree through the production owner route,
+        // which is also what publishes the committed worktree change.
+        let worktree_dir = std::fs::canonicalize(
+            create_owned_worktree(&fixture.host_state, &remote_workspace_id, "feature-test").await?,
+        )?;
+        write_checkpoint(&worktree_dir).map_err(|e| anyhow::anyhow!("write checkpoint: {e}"))?;
+
+        let desktop_path = root.path().join("not-on-this-machine").join("workspace");
+        let binding = PairedDagBinding {
+            host_id: host.host_id.clone(),
+            generation: host.generation,
+            remote_workspace_id: remote_workspace_id.clone(),
+        };
+
+        let mut remote = fixture
+            .client
+            .subscribe_dag_bound(
+                "daemon:fixture",
+                desktop_path.to_str().expect("utf-8 decoy path"),
+                Some(binding),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let (remote_path, remote_runs) = next_inventory(&mut remote)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("remote subscription produced no inventory"))?;
+
+        anyhow::ensure!(
+            remote_path == host_root.to_string_lossy(),
+            "project path must be the remote canonical root, got {remote_path}"
+        );
+
+        // Even though checkpoint is in the worktree subdirectory, the inventory must discover it!
+        anyhow::ensure!(
+            remote_runs.iter().any(|run| run.run_id == RUN_ID),
+            "authenticated remote inventory missing the worktree-located run: {remote_runs:?}"
+        );
+
+        let live_run_id = format!("{RUN_ID}-live-wt");
+        let live_checkpoint = CHECKPOINT.replacen(RUN_ID, &live_run_id, 1);
+        std::fs::write(
+            worktree_dir
+                .join(".omo/senpi-task/dag/runs")
+                .join(format!("{live_run_id}.json")),
+            live_checkpoint,
+        )?;
+        anyhow::ensure!(
+            next_update(&mut remote, &live_run_id).await,
+            "worktree journal write did not reach the desktop as a live update"
+        );
+
+        let dynamic_slug = "feature-dynamic";
+        let dynamic_dir = std::fs::canonicalize(
+            create_owned_worktree(&fixture.host_state, &remote_workspace_id, dynamic_slug).await?,
+        )?;
+        let dynamic_runs = dynamic_dir.join(".omo/senpi-task/dag/runs");
+        let dynamic_run_id = format!("{RUN_ID}-dynamic-wt");
+        std::fs::create_dir_all(&dynamic_runs)?;
+        std::fs::write(
+            dynamic_runs.join(format!("{dynamic_run_id}.json")),
+            CHECKPOINT.replacen(RUN_ID, &dynamic_run_id, 1),
+        )?;
+
+        // The reconcile scan and the freshly armed watcher race for this journal, so the
+        // discovery is keyed on the exact run id in either frame instead of on one of them.
+        anyhow::ensure!(
+            next_run_state(&mut remote, &dynamic_run_id).await,
+            "newly created worktree was not discovered after the committed worktree change"
+        );
+
+        let delete_res = crate::remote::workspace_api::worktrees::owner_mutation(
+            fixture.host_state.clone(),
+            remote_workspace_id.clone(),
+            crate::worktree::WorktreeIdentity {
+                ws_id: remote_workspace_id.clone(),
+                slug: dynamic_slug.into(),
+            },
+            None,
+            Some((true, true)),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("owner_mutation delete failed: {e}"))?;
+
+        match delete_res {
+            crate::daemon::protocol::DaemonResponse::DeleteWorktreeOk { .. } => {}
+            other => panic!("expected DeleteWorktreeOk, got: {:?}", other),
+        };
+
+        // Retirement is proven by ordering, never by a grace-period sleep: the barrier
+        // worktree is committed AFTER the delete, so the reconcile that publishes its run
+        // is the same loop that dropped the removed watcher. Once the barrier event lands,
+        // the retired root is provably no longer watched.
+        let barrier_dir = std::fs::canonicalize(
+            create_owned_worktree(&fixture.host_state, &remote_workspace_id, "feature-barrier")
+                .await?,
+        )?;
+        let barrier_runs = barrier_dir.join(".omo/senpi-task/dag/runs");
+        let barrier_run_id = format!("{RUN_ID}-barrier-wt");
+        std::fs::create_dir_all(&barrier_runs)?;
+        std::fs::write(
+            barrier_runs.join(format!("{barrier_run_id}.json")),
+            CHECKPOINT.replacen(RUN_ID, &barrier_run_id, 1),
+        )?;
+        anyhow::ensure!(
+            next_run_state(&mut remote, &barrier_run_id).await,
+            "the worktree committed after the delete was never discovered, so the retirement barrier cannot be evaluated"
+        );
+
+        // Resurrect the removed path with a fresh journal: a watcher that outlived the
+        // delete would publish it, and the still-live barrier watcher must be served first.
+        std::fs::create_dir_all(&dynamic_runs)?;
+        let post_delete_run_id = format!("{RUN_ID}-post-delete");
+        std::fs::write(
+            dynamic_runs.join(format!("{post_delete_run_id}.json")),
+            CHECKPOINT.replacen(RUN_ID, &post_delete_run_id, 1),
+        )?;
+
+        let post_barrier_run_id = format!("{RUN_ID}-barrier-live");
+        std::fs::write(
+            barrier_runs.join(format!("{post_barrier_run_id}.json")),
+            CHECKPOINT.replacen(RUN_ID, &post_barrier_run_id, 1),
+        )?;
+        await_barrier_without(&mut remote, &post_barrier_run_id, &post_delete_run_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+
         Ok::<_, anyhow::Error>(())
     }
     .await;

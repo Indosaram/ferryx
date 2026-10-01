@@ -1992,6 +1992,11 @@ impl DaemonServer {
         &self.remote_state
     }
 
+    #[cfg(test)]
+    pub fn session_service(&self) -> &Arc<DaemonSessionService> {
+        &self.session_service
+    }
+
     /// The loopback TCP endpoint (`port`, bearer `token`) the agent-state ingress bound, or
     /// `None` while it has not bound. Unix exposes the socket path through
     /// [`agent_state_socket_path`] instead.

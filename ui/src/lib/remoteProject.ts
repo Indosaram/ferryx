@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "./storageKeys";
 import type { RegisteredProject, SpawnTerminalRequest } from "./tauri";
 import type { BranchDeletionPreview, Worktree } from "./types";
@@ -129,8 +129,68 @@ export async function registerRemoteProject(
   return invoke<RegisteredRemoteProject>("cmd_project_register_remote", { request });
 }
 
+export interface RemoteDropUploadProgress {
+  uploadId: string;
+  fileIndex: number;
+  totalFiles: number;
+  fileSentBytes: number;
+  fileTotalBytes: number;
+  aggregateSentBytes: number;
+  aggregateTotalBytes: number;
+}
+
+export interface RemoteDroppedFile {
+  localPath: string;
+  remotePath: string;
+  byteLength: number;
+}
+
+export interface RemoteDropUploadResult {
+  platform: "posix" | "windows" | string;
+  files: RemoteDroppedFile[];
+}
+
+export async function uploadDroppedFilesToRemote(
+  workspaceId: string,
+  paths: string[],
+  uploadId: string,
+  onProgress?: (progress: RemoteDropUploadProgress) => void,
+): Promise<RemoteDropUploadResult | null> {
+  if (!isTauri()) {
+    return null;
+  }
+  const channel = new Channel<RemoteDropUploadProgress>((progress) => {
+    onProgress?.(progress);
+  });
+  return invoke<RemoteDropUploadResult | null>("cmd_remote_upload_dropped_files", {
+    workspaceId,
+    uploadId,
+    paths,
+    progress: channel,
+  });
+}
+
+export async function cancelRemoteDropUpload(uploadId: string): Promise<boolean> {
+  if (!isTauri()) {
+    return false;
+  }
+  return invoke<boolean>("cmd_remote_upload_cancel", { uploadId });
+}
+
+export function quoteRemotePath(path: string, platform: "posix" | "windows" | string): string {
+  if (platform === "windows") {
+    if (/[\s]/.test(path)) {
+      return `"${path}"`;
+    }
+    return path;
+  }
+  if (/[\s'"\\$`!*?[\]();&|<>]/.test(path)) {
+    return `'${path.replace(/'/g, `'\\''`)}'`;
+  }
+  return path;
+}
+
 export interface RemoteWorktree {
-  path: string;
   head: string | null;
   branch: string | null;
   bare: boolean;

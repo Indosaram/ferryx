@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelRemoteDropUpload,
   pasteClipboardImageLocally,
   pasteClipboardImageToRemote,
+  quoteRemotePath,
   registerRemoteProject,
   toRegisteredProject,
   type RegisterRemoteProjectRequest,
@@ -183,5 +185,16 @@ describe("remoteProject adapter", () => {
       gitBranch: "feature/new-ui", gitHead: "deadbeef123", hostLabel: "Server",
       target: { kind: "ssh", hostId: "server" },
     });
+  });
+
+  it("quotes remote paths correctly according to detected platform", () => {
+    expect(quoteRemotePath("/tmp/ferryx-paste/u1/file.txt", "posix")).toBe("/tmp/ferryx-paste/u1/file.txt");
+    expect(quoteRemotePath("/tmp/ferryx-paste/u1/my file.txt", "posix")).toBe("'/tmp/ferryx-paste/u1/my file.txt'");
+    expect(quoteRemotePath("C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\file.txt", "windows")).toBe(
+      "C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\file.txt",
+    );
+    expect(quoteRemotePath("C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\my file.txt", "windows")).toBe(
+      '"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\my file.txt"',
+    );
   });
 });

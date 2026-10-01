@@ -886,3 +886,75 @@ fn ssh_helper_setup_parse_install_output_rejects_missing_marker() {
     let err = parse_install_output(stdout, &loc).expect_err("must error");
     assert_eq!(err.code, IpcErrorCode::IoError);
 }
+
+#[test]
+fn ssh_helper_setup_qualified_location_coexists_with_default_and_predecessor() {
+    let host = sample_host("qa-host-1");
+    let env_posix = sample_posix_env("/home/testuser");
+    let default_loc = default_location(&host, &env_posix).expect("default_location");
+    let qualified_loc = qualified_location(&host, &env_posix, "2026.930.1").expect("qualified_location");
+
+    // Must be completely isolated paths so new runtime never touches predecessor's binary or runtime root
+    assert_ne!(default_loc.executable, qualified_loc.executable);
+    assert_ne!(default_loc.root, qualified_loc.root);
+    assert!(qualified_loc.executable.contains("/.ferryx/versions/2026.930.1/bin/"));
+    assert!(qualified_loc.root.contains("/.ferryx/r/2026.930.1/"));
+
+    let env_win = sample_windows_env("C:\\Users\\testuser");
+    let default_win = default_location(&host, &env_win).expect("default_win");
+    let qualified_win = qualified_location(&host, &env_win, "2026.930.1").expect("qualified_win");
+
+    assert_ne!(default_win.executable, qualified_win.executable);
+    assert_ne!(default_win.root, qualified_win.root);
+    assert!(qualified_win.executable.contains("\\.ferryx\\versions\\2026.930.1\\bin\\"));
+    assert!(qualified_win.root.contains("\\.ferryx\\r\\2026.930.1\\"));
+
+    // Verify upload script preserves live predecessor when installing to qualified location
+    let script = build_posix_upload_script(&qualified_loc, b"QUALIFIED_PAYLOAD");
+    assert!(script.contains(&direct::quote_posix(&qualified_loc.executable)));
+    assert!(script.contains(&direct::quote_posix(&qualified_loc.root)));
+    assert!(!script.contains(&direct::quote_posix(&default_loc.executable)));
+}
+
+#[test]
+fn ssh_helper_setup_qualified_runtime_root_fits_unix_socket_limit() {
+    // macOS rejects a Unix socket path at 104 bytes, so the qualified runtime root is
+    // host-digest compact instead of slug-shaped; these homes (in bytes) must all
+    // fit, including a 37-byte home at the stated bound.
+    for home in [
+        "/home/indo",
+        "/home/indosaram",
+        "/Users/i552267",
+        "/Users/firstname.lastname",
+        "/home/abcdefghijklmnopqrstuvwxyz01234",
+    ] {
+        assert!(home.len() <= 37, "home must stay within the stated bound");
+        let host = sample_host("provision-first-spawn");
+        let env = sample_posix_env(home);
+        let location = qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
+        let socket = Path::new(&location.root).join("helper.sock");
+        assert!(
+            socket.to_string_lossy().len() < 104,
+            "helper socket path exceeds the Unix limit: {}",
+            socket.display()
+        );
+        assert!(location.root.contains("/.ferryx/r/2026.930.1/"));
+        let digest = location.root.rsplit('/').next().expect("digest component");
+        assert_eq!(digest.len(), 32);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // Separator variants stay collision-resistant in the compact root.
+    let env = sample_posix_env("/home/indo");
+    let roots: Vec<String> = ["a:b", "a/b", "a_b"]
+        .iter()
+        .map(|id| {
+            qualified_location(&sample_host(id), &env, "2026.930.1")
+                .expect("qualified_location")
+                .root
+        })
+        .collect();
+    assert_ne!(roots[0], roots[1]);
+    assert_ne!(roots[0], roots[2]);
+    assert_ne!(roots[1], roots[2]);
+}

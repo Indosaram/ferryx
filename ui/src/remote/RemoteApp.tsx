@@ -48,9 +48,14 @@ const MobileChatWorkspace = lazy(() =>
 );
 import {
   getStoredAccountSessionToken,
-  AccountSessionError,
+  getStoredAccountTokenOrigin,
   clearStoredAccountSessionToken,
+  getAccountLastSelectedTarget,
+  setAccountLastSelectedTarget,
+  clearAccountLastSelectedTarget,
+  logoutAccountSession,
   createAccountConnection,
+  AccountSessionError,
   getStoredAccountEntitlementSnapshot,
   storeAccountEntitlementSnapshot,
   clearStoredAccountEntitlementSnapshot,
@@ -516,13 +521,28 @@ export const RemoteHostConnection: React.FC<{
     workspaceRefreshVersionRef.current += 1;
   }, [activeTunnelConnection, hostId]);
 
+  const accountSelectionGenerationRef = useRef(0);
+  const accountSessionTokenRef = useRef<string | null>(accountSessionToken);
+  accountSessionTokenRef.current = accountSessionToken;
+
   const handleLogout = useCallback(() => {
+    accountSelectionGenerationRef.current += 1;
+    accountSessionTokenRef.current = null;
     clearStoredAccountSessionToken();
+    clearAccountLastSelectedTarget();
     clearStoredAccountEntitlementSnapshot(relayUrl);
     setAccountSessionToken(null);
     setPlanLimitNotice(null);
     disconnect();
   }, [disconnect, relayUrl]);
+
+  const handleSignOut = useCallback(() => {
+    if (accountSessionToken) {
+      const issuer = getStoredAccountTokenOrigin() || relayUrl;
+      void logoutAccountSession(issuer, accountSessionToken);
+    }
+    handleLogout();
+  }, [accountSessionToken, handleLogout, relayUrl]);
 
   const accountDiscovery = useAccountWorktrees(
     relayUrl,
@@ -531,6 +551,74 @@ export const RemoteHostConnection: React.FC<{
     handleLogout,
     handlePlanLimit,
   );
+
+  const restoreAttemptInFlightRef = useRef(false);
+  const restoreAttemptedForTokenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!accountSessionToken) {
+      restoreAttemptedForTokenRef.current = null;
+      restoreAttemptInFlightRef.current = false;
+      return;
+    }
+    if (token || activeTunnelConnection || restoreAttemptInFlightRef.current) return;
+    if (!accountDiscovery.initialized || accountDiscovery.loading || accountDiscovery.error) return;
+
+    const storedTarget = getAccountLastSelectedTarget(relayUrl);
+    if (!storedTarget) return;
+
+    const targetMachine = accountDiscovery.machines.find((m) => m.machineId === storedTarget.machineId);
+    if (!targetMachine) {
+      if (accountDiscovery.initialized && !accountDiscovery.loading && !accountDiscovery.error) {
+        clearAccountLastSelectedTarget(relayUrl);
+      }
+      return;
+    }
+
+    if (targetMachine.online === false) {
+      return;
+    }
+
+    const machineStatus = accountDiscovery.machineStatuses[storedTarget.machineId];
+    if (!machineStatus || machineStatus.status === "tunneling" || machineStatus.status === "idle") {
+      return;
+    }
+
+    if (machineStatus.status === "error" || machineStatus.status === "offline") {
+      return;
+    }
+
+    if (machineStatus.status === "ready") {
+      const matchingOpt = accountDiscovery.accountOptions.find(
+        (opt) =>
+          opt.machineId === storedTarget.machineId &&
+          opt.workspaceId === storedTarget.workspaceId &&
+          (opt.worktreeSlug ?? null) === (storedTarget.worktreeSlug ?? null),
+      );
+
+      if (matchingOpt) {
+        if (restoreAttemptedForTokenRef.current !== accountSessionToken) {
+          restoreAttemptInFlightRef.current = true;
+          void selectAccountOption(matchingOpt).then((ok) => {
+            restoreAttemptInFlightRef.current = false;
+            if (ok) {
+              restoreAttemptedForTokenRef.current = accountSessionToken;
+            }
+          });
+        }
+      }
+    }
+  }, [
+    accountSessionToken,
+    token,
+    activeTunnelConnection,
+    accountDiscovery.initialized,
+    accountDiscovery.loading,
+    accountDiscovery.error,
+    accountDiscovery.machines,
+    accountDiscovery.machineStatuses,
+    accountDiscovery.accountOptions,
+    relayUrl,
+  ]);
 
   const sessionEpochsRef = useRef<Map<string, string>>(new Map());
   const [sessionEpochs, setSessionEpochs] = useState<Record<string, string>>({});
@@ -1561,8 +1649,12 @@ export const RemoteHostConnection: React.FC<{
   ) : null;
 
   const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
-    if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return true;
     if (planLimitSuspendedRef.current) return false;
+    if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return false;
+    accountSelectionGenerationRef.current += 1;
+    const currentSelectionGen = accountSelectionGenerationRef.current;
+    const expectedToken = accountSessionToken;
+
     const target = {
       machineId: accountOpt.machineId,
       workspaceId: accountOpt.workspaceId,
@@ -1575,6 +1667,7 @@ export const RemoteHostConnection: React.FC<{
       // Same machine: keep the connection, gate the body until the exact target confirms.
       initialAccountSelectionAttemptedRef.current = false;
       setInitialAccountTarget(target);
+      setAccountLastSelectedTarget(relayUrl, target);
       return true;
     }
 
@@ -1585,8 +1678,21 @@ export const RemoteHostConnection: React.FC<{
     } finally {
       accountAcquireInFlightRef.current = false;
     }
+
     if (planLimitSuspendedRef.current) {
       conn?.close();
+      return false;
+    }
+    if (
+      accountSelectionGenerationRef.current !== currentSelectionGen ||
+      accountSessionTokenRef.current !== expectedToken ||
+      !expectedToken
+    ) {
+      if (conn) {
+        try {
+          conn.close();
+        } catch {}
+      }
       return false;
     }
     if (!conn) {
@@ -1615,6 +1721,7 @@ export const RemoteHostConnection: React.FC<{
     setToken(conn.deviceToken);
     initialAccountSelectionAttemptedRef.current = false;
     setInitialAccountTarget(target);
+    setAccountLastSelectedTarget(relayUrl, target);
     return true;
   };
 
@@ -2003,8 +2110,9 @@ export const RemoteHostConnection: React.FC<{
         open={hostDrawerOpen}
         onOpenChange={setHostDrawerOpen}
         onDisconnect={disconnect}
-        onSignOut={handleLogout}
-        isAccountSession={Boolean(activeTunnelConnection)}
+        onSignOut={handleSignOut}
+        // Account mode keeps sign-out reachable before a worktree tunnel exists.
+        isAccountSession={isAccountMode}
       />
     </div>
   );

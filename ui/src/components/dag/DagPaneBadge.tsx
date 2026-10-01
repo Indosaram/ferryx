@@ -7,6 +7,7 @@ import { DagGraphView } from "./DagGraphView";
 
 export type DagPaneBadgeProps = {
   readonly projectPath?: string;
+  readonly workspaceId?: string;
   /** Identifies this pane as a run owner; sibling panes of one project must not share a run. */
   readonly paneId?: string;
   readonly providerSessionId?: string | null;
@@ -15,6 +16,31 @@ export type DagPaneBadgeProps = {
   readonly agentWorking?: boolean;
   readonly retainSettled?: boolean;
 };
+
+export function resolveDagWatchFailure(
+  watchFailures: ReturnType<typeof dagStore.getState>["watchFailures"] | undefined,
+  projectPath: string | undefined,
+  workspaceId: string | undefined,
+): ReturnType<typeof dagStore.getState>["watchFailures"][string] | null {
+  if (!watchFailures) return null;
+
+  const isRemote = typeof workspaceId === "string" && (workspaceId.startsWith("ssh:") || workspaceId.startsWith("daemon:"));
+
+  // Remote workspaces must never bind directly to a raw local path failure
+  if (!isRemote && projectPath && watchFailures[projectPath]) {
+    return watchFailures[projectPath];
+  }
+  if (!isRemote || !workspaceId) return null;
+
+  const prefix = workspaceId.startsWith("ssh:") ? `ssh:${workspaceId}:` : `paired:${workspaceId}:`;
+  if (projectPath && watchFailures[`${prefix}${projectPath}`]) {
+    return watchFailures[`${prefix}${projectPath}`];
+  }
+  for (const [key, failure] of Object.entries(watchFailures)) {
+    if (key.startsWith(prefix) && failure != null) return failure;
+  }
+  return null;
+}
 
 function collectSessionOwnedRuns(
   state: ReturnType<typeof dagStore.getState>,
@@ -58,6 +84,7 @@ function GraphGlyph(): JSX.Element {
 
 export function DagPaneBadge({
   projectPath,
+  workspaceId,
   providerSessionId,
   retainSettled = false,
 }: DagPaneBadgeProps): JSX.Element | null {
@@ -87,7 +114,11 @@ export function DagPaneBadge({
   );
 
   const run = paneRuns.length > 0 ? paneRuns[0] : null;
-  const watchFailure = projectPath ? (storeState.watchFailures?.[projectPath] ?? null) : null;
+  const watchFailure = resolveDagWatchFailure(
+    storeState.watchFailures,
+    projectPath,
+    workspaceId,
+  );
   const activeRun = (selectedRunId ? paneRuns.find((r) => r.runId === selectedRunId) : null) ?? run;
 
   const visible = run !== null;

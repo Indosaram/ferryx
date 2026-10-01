@@ -12,6 +12,22 @@ export interface HealMissingSshRegistrationsResult {
   failures: Array<{ workspaceId: string; error: unknown }>;
 }
 
+export const SSH_PROJECT_REGISTERED_EVENT = "ferryx:ssh-project-registered";
+
+export interface SshProjectRegisteredDetail {
+  readonly workspaceId: string;
+}
+
+export function dispatchSshProjectRegistered(workspaceId: string): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<SshProjectRegisteredDetail>(SSH_PROJECT_REGISTERED_EVENT, {
+        detail: { workspaceId },
+      }),
+    );
+  }
+}
+
 export async function healMissingSshRegistrations(
   projects: RegisteredProject[],
   api: HealMissingSshRegistrationsApi,
@@ -49,6 +65,7 @@ export async function healMissingSshRegistrations(
         repoPath: repoRoot,
       });
       healed.push(workspaceId);
+      dispatchSshProjectRegistered(workspaceId);
     } catch (error) {
       failures.push({ workspaceId, error });
     }

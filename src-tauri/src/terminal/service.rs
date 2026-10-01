@@ -42,6 +42,10 @@ impl TerminalService {
         &self.paired
     }
 
+    pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+        self.paired.set_agent_sink(sink);
+    }
+
     pub fn remote(&self) -> &Arc<super::remote::RemoteRuntime> {
         &self.remote
     }

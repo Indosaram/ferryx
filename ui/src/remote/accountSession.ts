@@ -376,12 +376,18 @@ export function clearStoredAccountSessionToken(): void {
   const issuer = storage?.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) ?? null;
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
   storage?.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+  clearAccountLastSelectedTarget();
   if (issuer) clearStoredAccountEntitlementSnapshot(issuer);
   dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOrigin());
 }
 
 export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
-const ACCOUNT_TOKEN_ORIGIN_KEY = "ferryx.account.tokenOrigin";
+export const ACCOUNT_TOKEN_ORIGIN_KEY = "ferryx.account.tokenOrigin";
+
+export function getStoredAccountTokenOrigin(): string | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  return window.localStorage.getItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+}
 
 export function getStoredAccountOrigin(
   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
@@ -731,17 +737,24 @@ export async function requestGrant(
     } else if (res.status === 409) {
       code = "ACCOUNT_ENROLLMENT_EPOCH_MISMATCH";
       message = "Machine re-enrolled since machine view was fetched.";
-    } else if (res.status === 401 || res.status === 403) {
-      code = "UNAUTHORIZED";
-      message = "Account session expired or unauthorized.";
     }
     let details: unknown;
     try {
       const data = await res.json();
-      if (data?.code) code = data.code;
-      if (data?.message) message = data.message;
+      if (typeof data?.code === "string" && data.code.trim().length > 0) {
+        code = data.code.trim();
+      }
+      if (typeof data?.message === "string" && data.message.trim().length > 0) {
+        message = data.message.trim();
+      }
       details = errorDetails(data);
     } catch {}
+    if (code === "UNAUTHORIZED" && res.status !== 401) {
+      code = "GRANT_FAILED";
+    }
+    if (res.status === 401 && code === "UNAUTHORIZED") {
+      message = "Account session expired or unauthorized.";
+    }
     throw new AccountSessionError(code, message, res.status, details);
   }
 
@@ -773,9 +786,6 @@ export async function allocateSession(
     if (res.status === 404) {
       code = "ALLOCATE_SESSION_NOT_FOUND";
       message = "Attach session allocation endpoint not found (HTTP 404). Backend relay update may be pending.";
-    } else if (res.status === 401 || res.status === 403) {
-      code = "UNAUTHORIZED";
-      message = "Unauthorized to allocate attach session.";
     }
     let details: unknown;
     try {
@@ -783,12 +793,18 @@ export async function allocateSession(
       if (data?.code === "MACHINE_OFFLINE") {
         code = "MACHINE_OFFLINE";
         message = data.message || "Target machine is offline.";
-      } else if (data?.code) {
-        code = data.code;
-        if (data.message) message = data.message;
+      } else if (typeof data?.code === "string" && data.code.trim().length > 0) {
+        code = data.code.trim();
+        if (typeof data.message === "string" && data.message.trim().length > 0) message = data.message.trim();
       }
       details = errorDetails(data);
     } catch {}
+    if (code === "UNAUTHORIZED" && res.status !== 401) {
+      code = "ALLOCATE_SESSION_FAILED";
+    }
+    if (res.status === 401 && code === "UNAUTHORIZED") {
+      message = "Unauthorized to allocate attach session.";
+    }
     throw new AccountSessionError(code, message, res.status, details);
   }
 
@@ -878,15 +894,21 @@ export async function issueEnrollmentCode(
   if (!res.ok) {
     let code = "ENROLLMENT_CODE_FAILED";
     let message = `Failed to issue enrollment code (${res.status})`;
-    if (res.status === 401 || res.status === 403) {
-      code = "UNAUTHORIZED";
-      message = "Account session expired or unauthorized.";
-    }
     try {
       const data = await res.json();
-      if (data?.code) code = data.code;
-      if (data?.message) message = data.message;
+      if (typeof data?.code === "string" && data.code.trim().length > 0) {
+        code = data.code.trim();
+      }
+      if (typeof data?.message === "string" && data.message.trim().length > 0) {
+        message = data.message.trim();
+      }
     } catch {}
+    if (code === "UNAUTHORIZED" && res.status !== 401) {
+      code = "ENROLLMENT_CODE_FAILED";
+    }
+    if (res.status === 401 && code === "UNAUTHORIZED") {
+      message = "Account session expired or unauthorized.";
+    }
     throw new AccountSessionError(code, message, res.status);
   }
 
@@ -1076,3 +1098,97 @@ export function createAccountConnection(params: {
   };
 }
 
+export interface AccountLastSelectedTarget {
+  machineId: string;
+  workspaceId: string;
+  worktreeSlug?: string | null;
+  worktreeLabel?: string | null;
+}
+
+export function makeAccountLastSelectedTargetKey(relayUrl: string): string {
+  return `ferryx.account.last_target.${encodeURIComponent(cleanOrigin(relayUrl))}`;
+}
+
+export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelectedTarget | null {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(makeAccountLastSelectedTargetKey(relayUrl));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      typeof parsed.machineId !== "string" ||
+      !parsed.machineId ||
+      typeof parsed.workspaceId !== "string" ||
+      !parsed.workspaceId
+    ) {
+      return null;
+    }
+    return {
+      machineId: parsed.machineId,
+      workspaceId: parsed.workspaceId,
+      worktreeSlug: typeof parsed.worktreeSlug === "string" ? parsed.worktreeSlug : null,
+      worktreeLabel: typeof parsed.worktreeLabel === "string" ? parsed.worktreeLabel : null,
+    };
+  } catch (err) {
+    console.warn("Failed to read account last selected target", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export function setAccountLastSelectedTarget(relayUrl: string, target: AccountLastSelectedTarget): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(makeAccountLastSelectedTargetKey(relayUrl), JSON.stringify(target));
+    }
+  } catch (err) {
+    console.warn("Failed to set account last selected target", err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function clearAccountLastSelectedTarget(relayUrl?: string): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      if (relayUrl) {
+        window.localStorage.removeItem(makeAccountLastSelectedTargetKey(relayUrl));
+      } else {
+        const storage = window.localStorage;
+        const toRemove: string[] = [];
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (key && key.startsWith("ferryx.account.last_target.")) {
+            toRemove.push(key);
+          }
+        }
+        for (const key of toRemove) {
+          storage.removeItem(key);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to clear account last selected target", err instanceof Error ? err.message : String(err));
+  }
+}
+
+export async function logoutAccountSession(origin: string, token: string): Promise<void> {
+  if (!token || !origin) return;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
+  try {
+    const res = await fetch(`${cleanOrigin(origin)}/api/account/v1/logout`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      signal: controller?.signal,
+    });
+    if (!res.ok) {
+      console.warn(`Account session logout returned HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.warn("Account session logout request failed", err instanceof Error ? err.message : String(err));
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

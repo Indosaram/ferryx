@@ -470,8 +470,13 @@ pub async fn cmd_ssh_install_project_helper<R: Runtime>(
     let (_, host) =
         super::run_blocking(move || crate::ssh::projects::resolve(&store, &workspace_id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
-    let location = crate::ssh::helper_setup::default_location(&host, &environment)?;
+    let location = crate::ssh::helper_setup::qualified_location(
+        &host,
+        &environment,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )?;
     crate::ssh::helper_setup::install(&host, &environment, &location, &local_binary).await?;
+    crate::ssh::helper_setup::ensure_started(&host, &environment, &location).await?;
     Ok(location)
 }
 
@@ -480,54 +485,41 @@ pub async fn cmd_ssh_prepare_integration(host: SshHost) -> Result<(), IpcError> 
     crate::ssh::direct::ensure_remote_extension_installed(&host).await
 }
 
-pub fn bundled_helper_path<R: Runtime>(
-    app: &AppHandle<R>,
-    target_triple: &str,
-) -> Result<PathBuf, IpcError> {
-    let filename = if target_triple.contains("windows") {
-        "ferryx-remote-helper.exe"
-    } else {
-        "ferryx-remote-helper"
+pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
+    let parsed_target = match target_triple {
+        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
+        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
+        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
+        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
+        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
+        _ => {
+            return Err(IpcError::new(
+                IpcErrorCode::Unsupported,
+                format!("Unsupported target triple for helper asset: '{target_triple}'"),
+            ));
+        }
     };
 
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(
-            resource_dir
-                .join("helpers")
-                .join(target_triple)
-                .join(filename),
-        );
-        candidates.push(
-            resource_dir
-                .join("resources")
-                .join("helpers")
-                .join(target_triple)
-                .join(filename),
-        );
-    }
-    candidates.push(
-        PathBuf::from("src-tauri/resources/helpers")
-            .join(target_triple)
-            .join(filename),
-    );
-    candidates.push(
-        PathBuf::from("resources/helpers")
-            .join(target_triple)
-            .join(filename),
-    );
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(
-            PathBuf::from(manifest_dir)
-                .join("resources/helpers")
-                .join(target_triple)
-                .join(filename),
-        );
+    let mut helper_dir_candidates = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            helper_dir_candidates.push(exe_dir.join("helpers"));
+            helper_dir_candidates.push(exe_dir.join("../Resources/helpers"));
+            helper_dir_candidates.push(exe_dir.join("resources/helpers"));
+        }
     }
 
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Ok(candidate);
+    helper_dir_candidates.push(PathBuf::from("src-tauri/resources/helpers"));
+    helper_dir_candidates.push(PathBuf::from("resources/helpers"));
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        helper_dir_candidates.push(PathBuf::from(manifest_dir).join("resources/helpers"));
+    }
+
+    for dir in &helper_dir_candidates {
+        if dir.join("manifest.json").is_file() {
+            let resolved = crate::ssh::helper_assets::resolve_current_helper_asset(dir, parsed_target)?;
+            return Ok(resolved.binary_path);
         }
     }
 
@@ -535,6 +527,40 @@ pub fn bundled_helper_path<R: Runtime>(
         IpcErrorCode::CliExecutableNotFound,
         format!("Bundled helper binary for target '{target_triple}' not found"),
     ))
+}
+
+pub fn bundled_helper_path<R: Runtime>(
+    app: &AppHandle<R>,
+    target_triple: &str,
+) -> Result<PathBuf, IpcError> {
+    let parsed_target = match target_triple {
+        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
+        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
+        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
+        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
+        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
+        _ => {
+            return Err(IpcError::new(
+                IpcErrorCode::Unsupported,
+                format!("Unsupported target triple for helper asset: '{target_triple}'"),
+            ));
+        }
+    };
+
+    let mut helper_dir_candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        helper_dir_candidates.push(resource_dir.join("helpers"));
+        helper_dir_candidates.push(resource_dir.join("resources").join("helpers"));
+    }
+
+    for dir in &helper_dir_candidates {
+        if dir.join("manifest.json").is_file() {
+            let resolved = crate::ssh::helper_assets::resolve_current_helper_asset(dir, parsed_target)?;
+            return Ok(resolved.binary_path);
+        }
+    }
+
+    resolve_bundled_helper_binary(target_triple)
 }
 
 pub fn bundled_helper_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
@@ -618,6 +644,33 @@ pub async fn resolve_remote_target_triple(
     }
 }
 
+pub async fn ensure_qualified_ssh_helper(
+    host: &crate::ssh::SshHost,
+    environment: &crate::ssh::runtime::RemoteEnvironment,
+) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
+    let location = crate::ssh::helper_setup::qualified_location(
+        host,
+        environment,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )?;
+
+    if crate::ssh::helper_setup::probe_ready_at(host, environment, &location).await
+        == crate::ssh::helper_setup::HelperProbeState::Installed
+    {
+        return Ok(location);
+    }
+
+    let target_triple = resolve_remote_target_triple(host, environment).await?;
+    let binary_path = crate::ipc::run_blocking(move || {
+        resolve_bundled_helper_binary(&target_triple)
+    })
+    .await?;
+
+    crate::ssh::helper_setup::install(host, environment, &location, &binary_path).await?;
+    crate::ssh::helper_setup::ensure_started(host, environment, &location).await?;
+    Ok(location)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelperUpdateState {
@@ -639,7 +692,13 @@ pub async fn cmd_ssh_provision_helper(
     local_binary: PathBuf,
 ) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
     let environment = crate::ssh::runtime::detect(&host).await?;
-    crate::ssh::helper_setup::provision(&host, &environment, &local_binary).await
+    crate::ssh::helper_setup::provision_qualified(
+        &host,
+        &environment,
+        &local_binary,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .await
 }
 
 #[tauri::command]

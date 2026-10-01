@@ -253,6 +253,7 @@ pub struct Runtime {
     owners: Arc<Mutex<HashMap<String, Owner>>>,
     descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
     store_path: Arc<Mutex<Option<PathBuf>>>,
+    agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn crate::terminal::remote::AgentStateSink>>>>,
 }
 
 impl Default for Runtime {
@@ -281,7 +282,12 @@ impl Runtime {
             owners: Arc::new(Mutex::new(HashMap::new())),
             descriptors: Arc::new(Mutex::new(descriptors)),
             store_path: Arc::new(Mutex::new(effective_store_path)),
+            agent_sink: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+        *self.agent_sink.write() = Some(sink);
     }
 
     pub fn set_store_path(&self, path: PathBuf) {
@@ -357,7 +363,10 @@ impl Runtime {
             }
         }
     }
-    pub fn install(&self, proxy: Proxy) -> Result<String, String> {
+    pub fn install(&self, mut proxy: Proxy) -> Result<String, String> {
+        if let Some(sink) = self.agent_sink.read().clone() {
+            proxy.set_agent_sink(sink);
+        }
         let id = proxy.id().to_owned();
         let descriptor = proxy.descriptor().clone();
         let mut owners = self.owners.lock();
@@ -846,6 +855,37 @@ mod tests {
     static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
+    async fn test_runtime_wires_agent_sink_to_installed_proxy() {
+        struct TestSink(std::sync::Mutex<Vec<crate::daemon::agent_state::AgentState>>);
+        impl crate::terminal::remote::AgentStateSink for TestSink {
+            fn accept(&self, state: crate::daemon::agent_state::AgentState) -> bool {
+                self.0.lock().unwrap().push(state);
+                true
+            }
+        }
+
+        let runtime = Runtime::default();
+        let sink = Arc::new(TestSink(std::sync::Mutex::new(Vec::new())));
+        runtime.set_agent_sink(sink.clone());
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let descriptor = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(10),
+                session_id: "test-session".into(),
+            },
+            after_sequence: Some(Epoch(42)),
+        };
+        let proxy = Proxy::new(descriptor.clone(), hub.clone()).unwrap();
+        let id = runtime.install(proxy).unwrap();
+
+        assert_eq!(runtime.descriptor(&id).unwrap().target, descriptor.target);
+    }
+
+    #[tokio::test]
     async fn test_p13_descriptor_survives_actor_termination() {
         let runtime = Runtime::default();
         let hub = Arc::new(TerminalOutputHub::new(32));
@@ -1194,6 +1234,7 @@ mod tests {
     async fn start_mock_relay(
         temp_dir: &tempfile::TempDir,
         send_output_frames: bool,
+        malformed_agent_state: bool,
     ) -> (
         String,
         PairedHostService,
@@ -1282,6 +1323,24 @@ mod tests {
                             ))
                             .await
                             .unwrap();
+                        if malformed_agent_state {
+                            // Required field `state` omitted: a decode failure, not a
+                            // frame the boundary may silently skip.
+                            let _ = socket
+                                .send(Message::Text(
+                                    json!({
+                                        "type": "agent_state",
+                                        "target": {
+                                            "machineId": "a",
+                                            "daemonEpoch": "1",
+                                            "sessionId": "s"
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await;
+                        }
                         if send_output_frames {
                             for seq in 11..=20 {
                                 let frame = encode_frame(
@@ -1351,7 +1410,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let store_path = temp_dir.path().join("paired_descriptors.json");
         let (_relay_origin, service, descriptor, shutdown, server) =
-            start_mock_relay(&temp_dir, true).await;
+            start_mock_relay(&temp_dir, true, false).await;
 
         let hub = Arc::new(TerminalOutputHub::new(32));
         let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();
@@ -1399,11 +1458,41 @@ mod tests {
         let _ = server.await;
     }
 
+    /// A frame whose required fields do not decode must surface as a transport
+    /// contract violation. Dropping it silently would leave the owner loop
+    /// receiving while authoritative agent state is lost.
+    #[tokio::test]
+    async fn test_malformed_agent_state_frame_fails_the_transport_boundary() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_relay_origin, service, descriptor, shutdown, server) =
+            start_mock_relay(&temp_dir, false, true).await;
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let mut proxy = Proxy::new(descriptor, hub).unwrap();
+        proxy
+            .reattach(&MachineClient::new(), &service)
+            .await
+            .unwrap();
+
+        let failure = proxy
+            .receive()
+            .await
+            .err()
+            .expect("malformed agent_state frame must fail the boundary");
+        assert_eq!(
+            failure.code, "PAIRED_HOST_INVALID_RESPONSE",
+            "{failure:?}"
+        );
+
+        let _ = shutdown.send(());
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn test_backpressure_full_channel_write_succeeds_once_slots_free() {
         let temp_dir = tempfile::tempdir().unwrap();
         let (_relay_origin, service, descriptor, shutdown, server) =
-            start_mock_relay(&temp_dir, false).await;
+            start_mock_relay(&temp_dir, false, false).await;
 
         let hub = Arc::new(TerminalOutputHub::new(32));
         let mut proxy = Proxy::new(descriptor, hub).unwrap();
@@ -1480,7 +1569,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let store_path = temp_dir.path().join("paired_descriptors.json");
         let (_relay_origin, service, descriptor, shutdown, server) =
-            start_mock_relay(&temp_dir, true).await;
+            start_mock_relay(&temp_dir, true, false).await;
 
         let hub = Arc::new(TerminalOutputHub::new(32));
         let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();

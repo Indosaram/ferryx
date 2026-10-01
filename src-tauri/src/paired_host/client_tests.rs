@@ -779,6 +779,8 @@ fn paste_upload_chunk_requires_machine_workspace_capability() {
             chunk_index: 0,
             total_chunks: 1,
             data: "aGVsbG8=".into(),
+            offset: None,
+            total_bytes: None,
         },
     };
     let route = operation.route().expect("route succeeds");
@@ -830,6 +832,8 @@ async fn paste_upload_chunk_executes_and_returns_result() {
             chunk_index: 0,
             total_chunks: 1,
             data: "aGVsbG8=".into(),
+            offset: None,
+            total_bytes: None,
         },
     };
     let result = MachineClient::new()

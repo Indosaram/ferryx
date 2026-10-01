@@ -1,6 +1,6 @@
 [package]
 name = "ferryx-remote-helper"
-version = "2026.917.1"
+version = "2026.930.1"
 description = "Standalone SSH remote PTY daemon for Ferryx"
 authors = ["Ferryx Contributors"]
 edition = "2021"
@@ -17,6 +17,7 @@ uuid = { version = "1.26", features = ["v4"] }
 rand = "0.8"
 libc = "0.2"
 base64 = "0.22"
+thiserror = "2.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", default-features = false, features = [

@@ -199,15 +199,45 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
             "ssh-omarchy",
         ]
     );
+    // Launch and lookup must agree on the unit for the same host and root.
+    assert!(text.contains(&format!(
+        "--unit={}",
+        helper_unit_name("ssh-omarchy", std::path::Path::new("/home/u/.ferryx/helper/ssh-omarchy"))
+    )));
 }
 
 #[test]
-fn ssh_helper_unit_name_is_deterministic_and_sanitized() {
-    assert_eq!(helper_unit_name("ssh-omarchy"), "ferryx-helper-ssh-omarchy");
-    assert_eq!(helper_unit_name("a/b:c d"), "ferryx-helper-a-b-c-d");
-    assert_eq!(helper_unit_name(""), "ferryx-helper-default");
+fn ssh_helper_unit_name_is_deterministic_and_scoped_to_the_root() {
+    let root = std::path::Path::new("/home/u/.ferryx/r/2026.930.1/aaaaaaaa");
+    let other_root = std::path::Path::new("/home/u/.ferryx/r/2026.930.1/bbbbbbbb");
+    let other_version = std::path::Path::new("/home/u/.ferryx/r/2026.917.1/aaaaaaaa");
+
+    // Deterministic for the same host and root; never shared across roots.
     assert_eq!(
-        helper_unit_name(&"x".repeat(200)),
-        format!("ferryx-helper-{}", "x".repeat(64))
+        helper_unit_name("ssh-omarchy", root),
+        helper_unit_name("ssh-omarchy", root)
     );
+    assert_ne!(
+        helper_unit_name("ssh-omarchy", root),
+        helper_unit_name("ssh-omarchy", other_root)
+    );
+    assert_ne!(
+        helper_unit_name("ssh-omarchy", root),
+        helper_unit_name("ssh-omarchy", other_version)
+    );
+
+    // Host sanitization and truncation are unchanged, with a 16-hex root suffix.
+    let long_host = "x".repeat(200);
+    for (host, sanitized) in [
+        ("ssh-omarchy", "ssh-omarchy".to_string()),
+        ("a/b:c d", "a-b-c-d".to_string()),
+        ("", "default".to_string()),
+        (long_host.as_str(), "x".repeat(64)),
+    ] {
+        let unit = helper_unit_name(host, root);
+        let (prefix, digest) = unit.rsplit_once('-').expect("unit suffix");
+        assert_eq!(prefix, format!("ferryx-helper-{sanitized}"));
+        assert_eq!(digest.len(), 16);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

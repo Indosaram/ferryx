@@ -14,6 +14,7 @@ use crate::ipc::IpcError;
 /// Upper bound on what one paste may push across the connection. Enforced by the caller so an
 /// oversized clipboard reports why it was refused instead of looking like an empty clipboard.
 pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+pub const MAX_REMOTE_DROP_FILE_BYTES: usize = 30 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardImage {
@@ -464,13 +465,16 @@ pub fn prune_old_paste_files(dir: &std::path::Path) {
         let one_day = std::time::Duration::from_secs(24 * 60 * 60);
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    if let Ok(modified) = meta.modified() {
-                        if let Ok(age) = now.duration_since(modified) {
-                            if age > one_day {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
+                let is_stale = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| now.duration_since(m).ok())
+                    .is_some_and(|age| age > one_day);
+                if is_stale {
+                    if meta.is_dir() {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    } else if meta.is_file() {
+                        let _ = std::fs::remove_file(entry.path());
                     }
                 }
             }
@@ -573,6 +577,311 @@ pub fn save_paste_chunk(
 ) -> Result<Option<std::path::PathBuf>, IpcError> {
     let dir = default_paste_dir();
     save_paste_chunk_in_dir(&dir, upload_id, file_name, chunk_index, total_chunks, data)
+}
+
+pub fn validate_drop_file_name(file_name: &str) -> Result<(), IpcError> {
+    if file_name.is_empty() || file_name.len() > 255 {
+        return Err(invalid_arg("Invalid drop file name length"));
+    }
+    if file_name == "." || file_name == ".." {
+        return Err(invalid_arg("Drop file name cannot be a relative directory reference"));
+    }
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Err(invalid_arg("Path traversal is forbidden"));
+    }
+    if file_name.chars().any(|c| c.is_control()) {
+        return Err(invalid_arg("Control characters forbidden in drop file name"));
+    }
+    if file_name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')) {
+        return Err(invalid_arg("Invalid characters in drop file name"));
+    }
+    if file_name.ends_with(' ') || file_name.ends_with('.') {
+        return Err(invalid_arg("Drop file name cannot end with space or dot"));
+    }
+    Ok(())
+}
+
+/// Sanitizes an arbitrary local file name so it is guaranteed to pass [`validate_drop_file_name`].
+pub fn sanitize_drop_file_name(raw: &str) -> String {
+    let base = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw);
+    let mut sanitized = String::with_capacity(base.len());
+    for ch in base.chars() {
+        if ch.is_control() || matches!(ch, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+            sanitized.push('_');
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    let trimmed = sanitized.trim_matches([' ', '.'].as_slice());
+    let mut candidate = if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    let stem = candidate.split('.').next().unwrap_or(&candidate);
+    let is_reserved = matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
+            | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
+            | "LPT7" | "LPT8" | "LPT9"
+    );
+    if is_reserved {
+        candidate = format!("_{candidate}");
+    }
+
+    if candidate.len() > 200 {
+        let extension = std::path::Path::new(&candidate)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        let stem_budget = 200usize.saturating_sub(extension.len());
+        let mut truncated = String::new();
+        for ch in candidate.chars() {
+            if truncated.len() + ch.len_utf8() > stem_budget {
+                break;
+            }
+            truncated.push(ch);
+        }
+        let clean_stem = truncated.trim_end_matches([' ', '.'].as_slice());
+        candidate = format!("{clean_stem}{extension}");
+        if candidate.is_empty() {
+            candidate = "file".to_string();
+        }
+    }
+    candidate
+}
+
+/// Fallback for legacy hosts whose `validate_paste_file_name` requires ASCII `[a-zA-Z0-9._-]`
+/// and a dot with non-empty extension.
+pub fn legacy_safe_drop_file_name(upload_id: &str, file_name: &str) -> String {
+    let sanitized = sanitize_drop_file_name(file_name);
+    let mut ascii = String::with_capacity(sanitized.len());
+    for ch in sanitized.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            ascii.push(ch);
+        } else {
+            ascii.push('_');
+        }
+    }
+    let prefix = if upload_id.len() >= 8 {
+        &upload_id[..8]
+    } else {
+        "paste"
+    };
+    let mut parts: Vec<&str> = ascii.split('.').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return format!("{prefix}.dat");
+    }
+    let ext = if parts.len() > 1 {
+        parts.pop().unwrap()
+    } else {
+        "dat"
+    };
+    let stem = parts.join("_");
+    let stem = stem.trim_matches(['_', '-'].as_slice());
+    let stem = if stem.is_empty() { "file" } else { stem };
+    let max_stem_len = 120usize.saturating_sub(prefix.len() + 1 + 1 + ext.len());
+    let truncated_stem = if stem.len() > max_stem_len {
+        &stem[..max_stem_len]
+    } else {
+        stem
+    };
+    format!("{prefix}_{truncated_stem}.{ext}")
+}
+
+#[derive(Debug)]
+struct DropUploadPending {
+    created_at: std::time::Instant,
+    file_name: String,
+    total_chunks: u32,
+    total_bytes: u64,
+    received_chunks: std::collections::HashSet<u32>,
+    received_bytes: u64,
+}
+
+static DROP_UPLOAD_STORE: parking_lot::Mutex<
+    Option<std::collections::HashMap<(std::path::PathBuf, String), DropUploadPending>>,
+> = parking_lot::Mutex::new(None);
+
+pub fn save_paste_chunk_v2_in_dir(
+    dir: &std::path::Path,
+    upload_id: &str,
+    file_name: &str,
+    chunk_index: u32,
+    total_chunks: u32,
+    offset: u64,
+    total_bytes: u64,
+    data: &[u8],
+) -> Result<Option<std::path::PathBuf>, IpcError> {
+    validate_drop_file_name(file_name)?;
+    validate_upload_id(upload_id)?;
+
+    if total_bytes == 0 || total_bytes > MAX_REMOTE_DROP_FILE_BYTES as u64 {
+        return Err(IpcError::new(
+            crate::ipc::error::IpcErrorCode::PayloadTooLarge,
+            format!(
+                "Drop upload totalBytes {} exceeds limit of {} bytes",
+                total_bytes, MAX_REMOTE_DROP_FILE_BYTES
+            ),
+        ));
+    }
+    if total_chunks == 0 || chunk_index >= total_chunks {
+        return Err(invalid_arg("Invalid chunk index or total chunks"));
+    }
+    if offset.saturating_add(data.len() as u64) > total_bytes {
+        return Err(invalid_arg(
+            "Chunk offset and length exceed declared total bytes",
+        ));
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| IpcError::internal(format!("Failed to create paste directory: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let staging_dir = dir.join(upload_id);
+    std::fs::create_dir_all(&staging_dir)
+        .map_err(|e| IpcError::internal(format!("Failed to create staging directory: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let staging_path = staging_dir.join(".upload.staging");
+    let final_path = staging_dir.join(file_name);
+
+    if final_path.is_file() {
+        if let Ok(meta) = final_path.metadata() {
+            if meta.len() == total_bytes {
+                return Ok(Some(final_path));
+            }
+        }
+    }
+
+    // Write chunk at exact offset
+    {
+        use std::io::Seek;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&staging_path)
+            .map_err(|e| IpcError::internal(format!("Failed to open staging file: {e}")))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(|e| IpcError::internal(format!("Failed to seek staging file: {e}")))?;
+        file.write_all(data)
+            .map_err(|e| IpcError::internal(format!("Failed to write chunk: {e}")))?;
+        file.flush()
+            .map_err(|e| IpcError::internal(format!("Failed to flush chunk: {e}")))?;
+    }
+
+    // Register receipt in assembly store
+    let key = (dir.to_path_buf(), upload_id.to_string());
+    let mut guard = DROP_UPLOAD_STORE.lock();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+
+    // Evict entries older than 30 minutes
+    let now = std::time::Instant::now();
+    let thirty_mins = std::time::Duration::from_secs(30 * 60);
+    map.retain(|_, v| now.duration_since(v.created_at) < thirty_mins);
+
+    let entry = map.entry(key.clone()).or_insert_with(|| {
+        prune_old_paste_files(dir);
+        DropUploadPending {
+            created_at: now,
+            file_name: file_name.to_string(),
+            total_chunks,
+            total_bytes,
+            received_chunks: std::collections::HashSet::new(),
+            received_bytes: 0,
+        }
+    });
+
+    if entry.file_name != file_name
+        || entry.total_chunks != total_chunks
+        || entry.total_bytes != total_bytes
+    {
+        map.remove(&key);
+        let _ = std::fs::remove_file(&staging_path);
+        return Err(invalid_arg(
+            "Inconsistent metadata across chunks for upload ID",
+        ));
+    }
+
+    if entry.received_chunks.insert(chunk_index) {
+        entry.received_bytes = entry.received_bytes.saturating_add(data.len() as u64);
+    }
+
+    let is_complete = entry.received_chunks.len() == entry.total_chunks as usize
+        && entry.received_bytes == entry.total_bytes;
+
+    if is_complete {
+        map.remove(&key);
+        drop(guard);
+
+        let actual_len = std::fs::metadata(&staging_path)
+            .map_err(|e| IpcError::internal(format!("Failed to read staging metadata: {e}")))?
+            .len();
+        if actual_len != total_bytes {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(IpcError::internal(format!(
+                "Staged file size mismatch: actual {actual_len} != expected {total_bytes}"
+            )));
+        }
+
+        std::fs::rename(&staging_path, &final_path)
+            .map_err(|e| IpcError::internal(format!("Failed to finalize drop file: {e}")))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(Some(final_path))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn save_paste_chunk_v2(
+    upload_id: &str,
+    file_name: &str,
+    chunk_index: u32,
+    total_chunks: u32,
+    offset: u64,
+    total_bytes: u64,
+    data: &[u8],
+) -> Result<Option<std::path::PathBuf>, IpcError> {
+    let dir = default_paste_dir();
+    save_paste_chunk_v2_in_dir(
+        &dir,
+        upload_id,
+        file_name,
+        chunk_index,
+        total_chunks,
+        offset,
+        total_bytes,
+        data,
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -920,6 +1229,131 @@ mod tests {
         let absent: [(&str, &[&str]); 1] = [("ferryx-no-such-clipboard-tool", &["--type"])];
 
         assert_eq!(read_clipboard_image_from(&absent), None);
+    }
+
+    #[test]
+    fn save_paste_chunk_v2_assembles_out_of_order_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("ferryx-paste");
+        let upload_id = "v2-assembly-12345678";
+        let file_name = "test_document.txt";
+        let part1 = b"Part One; ";
+        let part2 = b"Part Two; ";
+        let part3 = b"Part Three.";
+        let total_bytes = (part1.len() + part2.len() + part3.len()) as u64;
+
+        // Deliver part 2 first
+        let res = save_paste_chunk_v2_in_dir(
+            &dir,
+            upload_id,
+            file_name,
+            1,
+            3,
+            part1.len() as u64,
+            total_bytes,
+            part2,
+        )
+        .expect("part 2 ok");
+        assert_eq!(res, None);
+
+        // Deliver part 3 next
+        let res = save_paste_chunk_v2_in_dir(
+            &dir,
+            upload_id,
+            file_name,
+            2,
+            3,
+            (part1.len() + part2.len()) as u64,
+            total_bytes,
+            part3,
+        )
+        .expect("part 3 ok");
+        assert_eq!(res, None);
+
+        // Deliver duplicate part 2 — idempotent write
+        let res = save_paste_chunk_v2_in_dir(
+            &dir,
+            upload_id,
+            file_name,
+            1,
+            3,
+            part1.len() as u64,
+            total_bytes,
+            part2,
+        )
+        .expect("duplicate part 2 ok");
+        assert_eq!(res, None);
+
+        // Deliver part 1 — completes
+        let res = save_paste_chunk_v2_in_dir(
+            &dir,
+            upload_id,
+            file_name,
+            0,
+            3,
+            0,
+            total_bytes,
+            part1,
+        )
+        .expect("part 1 completes");
+        let final_path = res.expect("finalized");
+        assert_eq!(final_path, dir.join(upload_id).join(file_name));
+        let assembled = std::fs::read(&final_path).expect("read assembled");
+        assert_eq!(assembled, b"Part One; Part Two; Part Three.");
+
+        // Re-requesting after finalization returns the existing path idempotently
+        let res_after = save_paste_chunk_v2_in_dir(
+            &dir,
+            upload_id,
+            file_name,
+            0,
+            3,
+            0,
+            total_bytes,
+            part1,
+        )
+        .expect("retry after finalize ok");
+        assert_eq!(res_after, Some(final_path));
+    }
+
+    #[test]
+    fn save_paste_chunk_v2_rejects_payload_above_limit_and_inconsistent_meta() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("ferryx-paste");
+        let upload_id = "v2-limit-12345678";
+
+        // Exceeds 30MB
+        let too_large = (MAX_REMOTE_DROP_FILE_BYTES + 1) as u64;
+        let err = save_paste_chunk_v2_in_dir(&dir, upload_id, "large.bin", 0, 1, 0, too_large, b"x");
+        assert!(err.is_err());
+
+        // Inconsistent metadata across chunks for same upload_id
+        let res1 = save_paste_chunk_v2_in_dir(&dir, upload_id, "name1.txt", 0, 2, 0, 10, b"hello");
+        assert!(res1.is_ok());
+        let res2 = save_paste_chunk_v2_in_dir(&dir, upload_id, "name2.txt", 1, 2, 5, 10, b"world");
+        assert!(res2.is_err(), "mismatched file_name must be rejected");
+    }
+
+    #[test]
+    fn sanitize_and_validate_drop_file_name_handles_unicode_and_reserved_names() {
+        assert!(validate_drop_file_name("보고서.pdf").is_ok());
+        assert!(validate_drop_file_name("my report 2026.docx").is_ok());
+        assert!(validate_drop_file_name(".hidden").is_ok());
+        assert!(validate_drop_file_name("").is_err());
+        assert!(validate_drop_file_name("..").is_err());
+        assert!(validate_drop_file_name("dir/file.txt").is_err());
+        assert!(validate_drop_file_name("dir\\file.txt").is_err());
+        assert!(validate_drop_file_name("trailing. ").is_err());
+
+        assert_eq!(sanitize_drop_file_name("con.txt"), "_con.txt");
+        assert_eq!(sanitize_drop_file_name("my<bad>:name.txt"), "my_bad__name.txt");
+        assert_eq!(sanitize_drop_file_name("보고서 2026.pdf"), "보고서 2026.pdf");
+        assert_eq!(sanitize_drop_file_name("   "), "file");
+
+        let legacy = legacy_safe_drop_file_name("u12345678-abcd", "보고서 2026.pdf");
+        assert!(legacy.starts_with("u1234567_"));
+        assert!(legacy.ends_with(".pdf"));
+        assert!(validate_paste_file_name(&legacy).is_ok());
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

@@ -8,7 +8,30 @@ use std::{
     sync::Arc,
 };
 
-pub const HELPER_VERSION: &str = "2026.917.1";
+pub const HELPER_VERSION: &str = "2026.930.1";
+
+/// Capability tokens this helper can advertise, in handshake order. The last one
+/// is bound at runtime, so the handshake omits it when the listener is unavailable.
+pub const HELPER_CAPABILITIES: [&str; 4] = [
+    "sshHelperV1",
+    "dagStreamingV1",
+    "dagSubscribeV1",
+    "agentStateV1",
+];
+
+/// The single capability that depends on a runtime binding rather than the build.
+pub const CONDITIONAL_AGENT_STATE: &str = "agentStateV1";
+
+/// Machine-readable capability advertisement shared by both stdio adapters.
+pub fn capabilities_report() -> String {
+    json!({
+        "protocol": 1,
+        "helperVersion": HELPER_VERSION,
+        "capabilities": HELPER_CAPABILITIES,
+        "runtimeConditional": [CONDITIONAL_AGENT_STATE],
+    })
+    .to_string()
+}
 
 pub fn run_with_io(
     args: impl IntoIterator<Item = String>,
@@ -17,6 +40,10 @@ pub fn run_with_io(
     let args: Vec<_> = args.into_iter().collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         writeln!(out, "{HELPER_VERSION}").map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--capabilities") {
+        writeln!(out, "{}", capabilities_report()).map_err(|e| e.to_string())?;
         return Ok(());
     }
     run(args)
@@ -472,7 +499,15 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn helper_unit_name(host: &str) -> String {
+/// Unit identity is (host, runtime root): one host with two qualified roots must never
+/// share a unit - an active unit for another root would otherwise satisfy the
+/// "already running" check while the requested root stays dead - and a repeated
+/// start for the same root stays idempotent. Units from older roots keep serving
+/// their own roots untouched.
+///
+/// [`root_unit_digest`] only disambiguates names (it is not a security boundary), so
+/// no hashing dependency is added here.
+fn helper_unit_name(host: &str, root: &Path) -> String {
     let mut sanitized: String = host
         .chars()
         .map(|ch| {
@@ -487,7 +522,19 @@ fn helper_unit_name(host: &str) -> String {
         sanitized.push_str("default");
     }
     sanitized.truncate(64);
-    format!("ferryx-helper-{sanitized}")
+    format!("ferryx-helper-{sanitized}-{}", root_unit_digest(root))
+}
+
+/// Standard-library hash of the runtime root path, rendered as 16 lowercase hex
+/// characters. Only a name disambiguator: an algorithm change across Rust releases
+/// would merely mint a new unit name for the same root, and a same-root conflict is
+/// still caught by the socket/endpoint liveness check.
+#[cfg(any(target_os = "linux", test))]
+fn root_unit_digest(root: &Path) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.to_string_lossy().as_ref().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -533,7 +580,7 @@ pub(crate) fn unit_launch_args(
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "--user".into(),
-        format!("--unit={}", helper_unit_name(host)).into(),
+        format!("--unit={}", helper_unit_name(host, root)).into(),
         "--collect".into(),
         "--quiet".into(),
     ];
@@ -573,7 +620,7 @@ fn unit_active_state(unit: &str) -> Result<String, UnitLaunchError> {
 
 #[cfg(target_os = "linux")]
 fn try_systemd_unit(exe: &Path, root: &Path, host: &str) -> Result<(), UnitLaunchError> {
-    let unit = helper_unit_name(host);
+    let unit = helper_unit_name(host, root);
     let active = matches!(
         unit_active_state(&unit)?.as_str(),
         "active" | "activating" | "reloading"
@@ -684,6 +731,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.into_iter().collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("{HELPER_VERSION}");
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--capabilities") {
+        println!("{}", capabilities_report());
         return Ok(());
     }
     let flag = |name: &str| {

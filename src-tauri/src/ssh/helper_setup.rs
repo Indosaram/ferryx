@@ -57,20 +57,28 @@ struct HelperReadyEvent {
     protocol: u32,
 }
 
-pub(crate) fn host_slug(host_id: &str) -> String {
+/// 32 lowercase hex characters of the host-id digest: the collision-resistant
+/// value [`host_slug`] appends, reused as the compact runtime-root component so
+/// the helper's socket path stays inside the Unix socket limit (`SUN_LEN`).
+pub(crate) fn host_digest(host_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(host_id.as_bytes());
     let digest = hasher.finalize();
     let hex_hash: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    hex_hash[..32].to_string()
+}
+
+pub(crate) fn host_slug(host_id: &str) -> String {
+    let hex_hash = host_digest(host_id);
     let safe_prefix: String = host_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(16)
         .collect();
     if safe_prefix.is_empty() {
-        format!("host-{}", &hex_hash[..32])
+        format!("host-{hex_hash}")
     } else {
-        format!("{}-{}", safe_prefix, &hex_hash[..32])
+        format!("{safe_prefix}-{hex_hash}")
     }
 }
 
@@ -481,6 +489,22 @@ pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> Hel
         Ok(location) => location,
         Err(_) => return HelperProbeState::Unknown,
     };
+    probe_ready_at_location(host, environment, &location).await
+}
+
+pub async fn probe_ready_at(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> HelperProbeState {
+    probe_ready_at_location(host, environment, location).await
+}
+
+async fn probe_ready_at_location(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> HelperProbeState {
     let script = match environment.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
@@ -534,8 +558,11 @@ pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
     None
 }
 
-pub async fn installed_version(host: &SshHost, env: &RemoteEnvironment) -> Option<String> {
-    let location = default_location(host, env).ok()?;
+pub async fn installed_version_at(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> Option<String> {
     let script = match env.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
@@ -555,6 +582,11 @@ pub async fn installed_version(host: &SshHost, env: &RemoteEnvironment) -> Optio
         Ok(stdout) => parse_installed_version_output(&stdout),
         Err(_) => None,
     }
+}
+
+pub async fn installed_version(host: &SshHost, env: &RemoteEnvironment) -> Option<String> {
+    let location = default_location(host, env).ok()?;
+    installed_version_at(host, env, &location).await
 }
 
 /// Parses a calver-style version like "2026.917.1" into comparable numeric parts.
@@ -692,6 +724,54 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
         runtime::powershell_data(&location.root),
         chunked
     )
+}
+
+pub fn qualified_location(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    version_tag: &str,
+) -> Result<HelperLocation, IpcError> {
+    env.platform.validate_path(&env.home)?;
+    // The executable stays under the version-qualified `versions/<tag>` tree; the
+    // runtime root is version-qualified and host-digest scoped but deliberately
+    // compact, because the helper binds `<root>/helper.sock` and that socket path
+    // must stay inside the Unix socket limit (103 bytes on macOS) for typical
+    // remote homes - up to roughly 37 UTF-8 bytes of home path. No length
+    // preflight is enforced here; existing roots are never migrated, because
+    // sessions keep the location persisted in their descriptor.
+    let digest = host_digest(&host.id);
+
+    let (executable, root) = match env.platform {
+        RemotePlatform::Posix => {
+            let home = env.home.trim_end_matches('/');
+            (
+                format!("{home}/.ferryx/versions/{version_tag}/bin/ferryx-remote-helper"),
+                format!("{home}/.ferryx/r/{version_tag}/{digest}"),
+            )
+        }
+        RemotePlatform::Windows => {
+            let home = env.home.trim_end_matches(&['\\', '/'][..]);
+            (
+                format!("{home}\\.ferryx\\versions\\{version_tag}\\bin\\ferryx-remote-helper.exe"),
+                format!("{home}\\.ferryx\\r\\{version_tag}\\{digest}"),
+            )
+        }
+    };
+    env.platform.validate_path(&executable)?;
+    env.platform.validate_path(&root)?;
+    Ok(HelperLocation { executable, root })
+}
+
+pub async fn provision_qualified(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    local_binary: &Path,
+    version_or_tag: &str,
+) -> Result<HelperLocation, IpcError> {
+    let location = qualified_location(host, env, version_or_tag)?;
+    install(host, env, &location, local_binary).await?;
+    ensure_started(host, env, &location).await?;
+    Ok(location)
 }
 
 pub async fn provision(

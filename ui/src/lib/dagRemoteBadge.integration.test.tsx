@@ -9,6 +9,7 @@ import * as bridge from "./tauri";
 
 vi.mock("./tauri", () => ({
   listenDagRunUpdated: vi.fn(),
+  listenDagWatchStatus: vi.fn().mockResolvedValue(vi.fn()),
   watchDagProject: vi.fn(),
   watchDagPairedProject: vi.fn(),
   watchDagSshProject: vi.fn(),
