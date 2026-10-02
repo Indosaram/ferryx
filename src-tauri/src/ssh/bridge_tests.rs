@@ -358,6 +358,129 @@ fn ssh_bridge_handshake_independently_validates_configured_host_and_target_ident
     assert!(validate_target_handshake(&handshake, "host-live", Some(&good_target)).is_ok());
 }
 
+#[test]
+fn ssh_bridge_pty_recovery_capability_gating() {
+    let handshake = HandshakeResult {
+        protocol: 1,
+        capabilities: vec!["sshHelperV1".into()],
+        host_id: "host-live".into(),
+        owner_id: "owner-live".into(),
+        epoch: Epoch(12345),
+        os: "linux".into(),
+        arch: "x86_64".into(),
+    };
+    let (control_write, control_read) = tokio::io::duplex(64);
+    let (reader_write, reader_read) = tokio::io::duplex(64);
+    let mut client = SshBridgeClient {
+        control: Arc::new(Mutex::new(BridgeConnection::new_mock(control_write, control_read))),
+        reader: Arc::new(Mutex::new(BridgeConnection::new_mock(reader_write, reader_read))),
+        host_id: handshake.host_id.clone(),
+        owner_id: handshake.owner_id.clone(),
+        epoch: handshake.epoch,
+        handshake,
+    };
+    assert!(!client.supports_pty_recovery());
+    client.handshake.capabilities.push("ptyRecoveryV1".into());
+    assert!(client.supports_pty_recovery());
+}
+
+#[tokio::test]
+async fn ssh_bridge_pty_recover_framed_roundtrip_and_error_handling() {
+    let (client_write, mut server_read) = tokio::io::duplex(64 * 1024);
+    let (mut server_write, client_read) = tokio::io::duplex(64 * 1024);
+
+    let mut conn = BridgeConnection::new_mock(client_write, client_read);
+
+    let previous_target = TargetRef {
+        host_id: "host-1".into(),
+        owner_id: "owner-1".into(),
+        epoch: Epoch(1),
+        backend_session_id: "old-session".into(),
+    };
+    let new_target = TargetRef {
+        host_id: "host-1".into(),
+        owner_id: "owner-2".into(),
+        epoch: Epoch(2),
+        backend_session_id: "new-session".into(),
+    };
+
+    // 1. Success round-trip: server verifies opcode and exact params, returns SpawnResult
+    let prev_clone = previous_target.clone();
+    let new_clone = new_target.clone();
+    let server_task = tokio::spawn(async move {
+        let req = read_frame_async(&mut server_read, Duration::from_secs(5))
+            .await
+            .expect("read pty.recover request")
+            .expect("pty.recover request frame");
+        assert_eq!(req["op"], "pty.recover");
+        assert_eq!(req["params"]["logicalSessionId"], "logical-session-42");
+        assert_eq!(
+            req["params"]["previousTarget"],
+            serde_json::to_value(&prev_clone).unwrap()
+        );
+
+        let resp = json!({
+            "protocol": 1,
+            "ok": true,
+            "data": {
+                "target": new_clone,
+                "pid": 98765
+            }
+        });
+        write_frame_async(&mut server_write, &resp, Duration::from_secs(5))
+            .await
+            .expect("write pty.recover response");
+
+        (server_read, server_write)
+    });
+
+    let spawn_res = conn
+        .pty_recover("logical-session-42", &previous_target)
+        .await
+        .expect("pty_recover succeeds");
+    assert_eq!(spawn_res.target, new_target);
+    assert_eq!(spawn_res.pid, RemotePid(98765));
+
+    let (mut server_read, mut server_write) = server_task.await.unwrap();
+
+    // 2. Structured error round-trip: server returns explicit refusal, preserves BridgeError::Remote
+    let prev_clone2 = previous_target.clone();
+    let server_err_task = tokio::spawn(async move {
+        let req = read_frame_async(&mut server_read, Duration::from_secs(5))
+            .await
+            .expect("read pty.recover second request")
+            .expect("pty.recover second request frame");
+        assert_eq!(req["op"], "pty.recover");
+        assert_eq!(req["params"]["logicalSessionId"], "logical-session-42");
+        assert_eq!(
+            req["params"]["previousTarget"],
+            serde_json::to_value(&prev_clone2).unwrap()
+        );
+
+        let err_resp = json!({
+            "protocol": 1,
+            "ok": false,
+            "error": "REFUSAL_SAME_BOOT_DETECTED"
+        });
+        write_frame_async(&mut server_write, &err_resp, Duration::from_secs(5))
+            .await
+            .expect("write pty.recover error response");
+    });
+
+    let err = conn
+        .pty_recover("logical-session-42", &previous_target)
+        .await
+        .unwrap_err();
+    match err {
+        BridgeError::Remote(msg) => {
+            assert_eq!(msg, "REFUSAL_SAME_BOOT_DETECTED");
+        }
+        other => panic!("expected BridgeError::Remote, got {other:?}"),
+    }
+
+    server_err_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn ssh_bridge_target_mismatch_on_describe_or_read_is_rejected() {
     let fixture = TestFixture::new("target-mismatch");

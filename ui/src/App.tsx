@@ -85,7 +85,6 @@ import {
 } from "./lib/storageKeys";
 import {
   DEFAULT_WORKSPACE_ID,
-  closeTerminal,
   detectAgents,
   getCliLauncherStatus,
   getAccountEnrollmentStatus,
@@ -113,7 +112,6 @@ import {
   saveSession,
   setBadgeCount,
   spawnTerminal,
-  spawnTerminalDetailed,
   retryTerminalRemoteSession,
   toIpcError,
   writeTerminal,
@@ -125,10 +123,10 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
-import { safeRandomUUID } from "./lib/uuid";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
+import { reconnectSshSession } from "./lib/sshRebootRecovery";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
@@ -1389,63 +1387,16 @@ function WorkspaceApp({
     (sessionId: string) => {
       const existing = reconnectingSshRef.current.get(sessionId);
       if (existing) return existing;
-      const task = (async () => {
-        const current = stateRef.current.sessions;
-        const session = current[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
-        if (!session) return;
-        const targetWorkspaceId = session.workspaceId;
-        if (session.backendSessionId) {
-          try {
-            const res = await retryTerminalRemoteSession(session.backendSessionId);
-            if (res.type === "retryRemoteSessionOk") {
-              return;
-            }
-          } catch {
-            // Retry failed or backend session no longer valid on daemon; fall through to respawn
-          }
-        }
-        if (stateRef.current.workspaceId !== targetWorkspaceId || !stateRef.current.sessions[sessionId]) return;
-        let spawned: Awaited<ReturnType<typeof spawnTerminalDetailed>> | null = null;
-        let adopted = false;
-        try {
-          spawned = await spawnTerminalDetailed({
-            workspaceId: session.workspaceId,
-            worktree: session.worktree,
-            cwd: session.cwd,
-            clientRequestId: `ssh-reconnect-${safeRandomUUID()}`,
-            startup: null,
-          });
-          const latest = stateRef.current;
-          if (latest.workspaceId !== targetWorkspaceId || !latest.sessions[sessionId]) {
-            if (spawned) await closeTerminal(spawned.sessionId).catch(() => undefined);
-            return;
-          }
-          const nextState = workspaceReducer(stateRef.current, {
-            type: "REBIND_SESSION_BACKEND",
-            sessionId,
-            backendSessionId: spawned.sessionId,
-            cwd: spawned.session.cwd ?? session.cwd,
-            daemonEpoch: spawned.daemonEpoch,
-          });
-          dispatchWorkspaceAction({
-            type: "REBIND_SESSION_BACKEND",
-            sessionId,
-            backendSessionId: spawned.sessionId,
-            cwd: spawned.session.cwd ?? session.cwd,
-            daemonEpoch: spawned.daemonEpoch,
-          });
-          adopted = true;
-          try {
-            await persistSessionStrict(targetWorkspaceId, activeProject.repoRoot, nextState);
-          } catch (persistError) {
-            reportRuntimeError(persistError);
-          }
-        } catch (error) {
-          if (spawned && !adopted) await closeTerminal(spawned.sessionId).catch(() => undefined);
-          reportRuntimeError(error);
-          throw error;
-        }
-      })();
+      const task = reconnectSshSession(sessionId, {
+        getSessions: () => {
+          const current = stateRef.current.sessions;
+          if (current[sessionId]) return current;
+          return { ...lastRestoredSessionsRef.current, ...current };
+        },
+        retryRemoteSession: retryTerminalRemoteSession,
+        toIpcError,
+        reportRuntimeError,
+      });
       reconnectingSshRef.current.set(sessionId, task);
       void task
         .catch(() => undefined)
@@ -1454,7 +1405,7 @@ function WorkspaceApp({
         });
       return task;
     },
-    [activeProject.repoRoot, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
+    [reportRuntimeError],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);

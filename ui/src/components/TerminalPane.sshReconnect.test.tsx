@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useReducer } from "react";
@@ -6,12 +7,66 @@ import type { TerminalSession } from "../lib/types";
 import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
 import { TerminalPane } from "./TerminalPane";
 
+vi.mock("../lib/tauri", () => {
+  const isStructuredIpcError = (error: unknown): error is import("../lib/types").StructuredIpcError => {
+    if (!error || typeof error !== "object") return false;
+    const candidate = error as Partial<import("../lib/types").StructuredIpcError>;
+    return (
+      typeof candidate.code === "string" &&
+      typeof candidate.message === "string" &&
+      (candidate.details === undefined ||
+        (typeof candidate.details === "object" && candidate.details !== null && !Array.isArray(candidate.details)))
+    );
+  };
+
+  const toIpcError = (error: unknown): import("../lib/types").StructuredIpcError => {
+    if (isStructuredIpcError(error)) {
+      return { code: error.code, message: error.message, details: error.details ?? {} };
+    }
+    return {
+      code: "UNKNOWN",
+      message: error instanceof Error ? error.message : "Unknown IPC error",
+      details: {},
+    };
+  };
+
+  const uninvoked = (name: string) =>
+    vi.fn(async () => {
+      throw new Error(`Unexpected unmocked tauri mutation call: ${name}`);
+    });
+
+  const unlisten = () => () => undefined;
+
+  return {
+    DEFAULT_WORKSPACE_ID: "default",
+    isStructuredIpcError,
+    toIpcError,
+    spawnTerminal: uninvoked("spawnTerminal"),
+    spawnTerminalDetailed: uninvoked("spawnTerminalDetailed"),
+    spawnTerminalsBatch: uninvoked("spawnTerminalsBatch"),
+    closeTerminal: uninvoked("closeTerminal"),
+    getTerminalCwd: uninvoked("getTerminalCwd"),
+    waitForTerminalExit: uninvoked("waitForTerminalExit"),
+    discoverAgentProviderSession: uninvoked("discoverAgentProviderSession"),
+    describeTerminal: uninvoked("describeTerminal"),
+    getTerminalHistorySnapshot: uninvoked("getTerminalHistorySnapshot"),
+    hibernateTerminal: uninvoked("hibernateTerminal"),
+    suspendTerminal: uninvoked("suspendTerminal"),
+    resumeTerminal: uninvoked("resumeTerminal"),
+    onNativeTerminalAgentState: vi.fn(unlisten),
+    onNativeTerminalBell: vi.fn(unlisten),
+    onNativeTerminalFocus: vi.fn(unlisten),
+    onNativeTerminalTitle: vi.fn(unlisten),
+  };
+});
+
 vi.mock("./NativeTerminalPane", () => ({
   NativeTerminalPane: ({ session }: { session: TerminalSession }) => (
     <div data-testid="native-terminal" data-backend-id={session.backendSessionId} />
   ),
 }));
 vi.mock("./dag/DagPaneBadge", () => ({ DagPaneBadge: () => null }));
+vi.mock("./TerminalSearchOverlay", () => ({ TerminalSearchOverlay: () => null }));
 
 function connectedWorkspace(): WorkspaceState {
   return {
@@ -242,5 +297,147 @@ describe("SSH reconnect after daemon exit", () => {
       spawn,
     })).rejects.toMatchObject({ code: "AGENT_RESUME_INVALID" });
     expect(spawn).not.toHaveBeenCalled();
+  });
+  it("triggers onReconnect callback on expired SSH agent pane and retains stable identity", async () => {
+    const expiredSession: TerminalSession = {
+      ...connectedWorkspace().sessions.pane,
+      lifecycle: "exited",
+      remoteConnectionState: "expired",
+      remoteFailure: { kind: "missing", message: "Target not found on remote helper" },
+    };
+    const target = new EventTarget();
+    const pending = new Promise<void>((resolve) => {
+      target.addEventListener("resolve", () => resolve(), { once: true });
+    });
+    const onReconnect = vi.fn(() => pending);
+
+    render(<TerminalPane session={expiredSession} active onReconnect={onReconnect} />);
+
+    const button = screen.getByRole("button", { name: /recover.*session/i });
+    expect(button).toBeInTheDocument();
+    expect(button).toBeEnabled();
+
+    fireEvent.click(button);
+
+    expect(onReconnect).toHaveBeenCalledExactlyOnceWith("pane");
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      target.dispatchEvent(new Event("resolve"));
+      await pending;
+    });
+
+    expect(expiredSession.backendSessionId).toBe("stable-backend");
+    expect(expiredSession.id).toBe("pane");
+  });
+
+  it("coalesces duplicate recovery clicks while pending on expired SSH agent pane", async () => {
+    const expiredSession: TerminalSession = {
+      ...connectedWorkspace().sessions.pane,
+      lifecycle: "exited",
+      remoteConnectionState: "expired",
+    };
+    const target = new EventTarget();
+    const pending = new Promise<void>((resolve) => {
+      target.addEventListener("resolve", () => resolve(), { once: true });
+    });
+    const onReconnect = vi.fn(() => pending);
+
+    render(<TerminalPane session={expiredSession} active onReconnect={onReconnect} />);
+
+    const button = screen.getByRole("button", { name: /recover.*session/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(onReconnect).toHaveBeenCalledExactlyOnceWith("pane");
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      target.dispatchEvent(new Event("resolve"));
+      await pending;
+    });
+  });
+
+  it("displays typed error on recovery failure, retains stable IDs, and re-enables retry without spawning", async () => {
+    const expiredSession: TerminalSession = {
+      ...connectedWorkspace().sessions.pane,
+      lifecycle: "exited",
+      remoteConnectionState: "expired",
+    };
+    const failure = { code: "REMOTE_RETRY_FAILED", message: "Host rebooted with unrecoverable helper state" };
+    let failAttempt = true;
+
+    function Harness() {
+      const [state, dispatch] = useReducer(workspaceReducer, {
+        ...connectedWorkspace(),
+        sessions: { pane: expiredSession },
+      });
+
+      const handleReconnect = async (_sessionId: string) => {
+        if (failAttempt) {
+          failAttempt = false;
+          throw failure;
+        }
+        dispatch({
+          type: "SESSION_REMOTE_STATUS",
+          status: {
+            sessionId: "stable-backend",
+            state: "connected",
+            generation: 2,
+            failure: null,
+            replayGap: null,
+          },
+        });
+      };
+
+      return <TerminalPane session={state.sessions.pane} active onReconnect={handleReconnect} />;
+    }
+
+    render(<Harness />);
+
+    const button = screen.getByRole("button", { name: /recover.*session/i });
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(failure.message);
+
+    const retryButton = screen.getByRole("button", { name: /retry.*session/i });
+    expect(retryButton).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(retryButton);
+    });
+
+    expect(screen.queryByTestId("terminal-pane-overlay")).toBeNull();
+    expect(screen.getByTestId("native-terminal")).toHaveAttribute("data-backend-id", "stable-backend");
+  });
+
+  it("renders open new shell as separate user action when onOpenNewShell is provided", async () => {
+    const expiredSession: TerminalSession = {
+      ...connectedWorkspace().sessions.pane,
+      lifecycle: "exited",
+      remoteConnectionState: "expired",
+    };
+    const onReconnect = vi.fn();
+    const onOpenNewShell = vi.fn();
+
+    render(<TerminalPane session={expiredSession} active onReconnect={onReconnect} onOpenNewShell={onOpenNewShell} />);
+
+    const recoverButton = screen.getByRole("button", { name: /recover.*session/i });
+    const newShellButton = screen.getByRole("button", { name: "Open new shell" });
+
+    expect(recoverButton).toBeInTheDocument();
+    expect(newShellButton).toBeInTheDocument();
+
+    fireEvent.click(newShellButton);
+
+    expect(onOpenNewShell).toHaveBeenCalledExactlyOnceWith("pane");
+    expect(onReconnect).not.toHaveBeenCalled();
   });
 });

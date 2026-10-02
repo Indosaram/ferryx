@@ -112,6 +112,7 @@ impl RemoteFailure {
             | BridgeError::Remote(_)
             | BridgeError::HostMismatch { .. }
             | BridgeError::TargetMismatch { .. }
+            | BridgeError::RecoveryUnsupported
             | BridgeError::NotTransferable(_) => RemoteFailureKind::Protocol,
         };
         Self::new(kind, text)
@@ -243,8 +244,23 @@ impl Transport for SshBridgeClient {
             .any(|c| c == "agentStateV1")
     }
 }
+pub(crate) trait CheckpointSink: Send + Sync {
+    fn checkpoint<'a>(
+        &'a self,
+        descriptor: &'a RemoteSessionDescriptor,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
 pub(crate) trait Connector: Send + Sync {
     fn connect<'a>(&'a self, d: &'a RemoteSessionDescriptor) -> Rpc<'a, Arc<dyn Transport>>;
+    fn recover<'a>(
+        &'a self,
+        _d: &'a RemoteSessionDescriptor,
+    ) -> Rpc<'a, (Arc<dyn Transport>, SpawnResult)> {
+        Box::pin(async move {
+            Err(BridgeError::RecoveryUnsupported)
+        })
+    }
     fn delay(&self, attempt: u32) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 struct SshConnector;
@@ -260,6 +276,27 @@ impl Connector for SshConnector {
                 )
                 .await?,
             ) as Arc<dyn Transport>)
+        })
+    }
+    fn recover<'a>(
+        &'a self,
+        d: &'a RemoteSessionDescriptor,
+    ) -> Rpc<'a, (Arc<dyn Transport>, SpawnResult)> {
+        Box::pin(async move {
+            let client = SshBridgeClient::connect(
+                &d.config.host,
+                &d.config.environment,
+                &d.config.helper,
+            )
+            .await?;
+            if !client.supports_pty_recovery() {
+                return Err(BridgeError::RecoveryUnsupported);
+            }
+            let spawned = client
+                .pty_recover(&d.client_request_id, &d.target)
+                .await?;
+            client.validate_target(&spawned.target)?;
+            Ok((Arc::new(client) as Arc<dyn Transport>, spawned))
         })
     }
     fn delay(&self, attempt: u32) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -318,6 +355,7 @@ pub struct RemoteRuntime {
     hub: Arc<TerminalOutputHub>,
     connector: Arc<dyn Connector>,
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
+    checkpoint_sink: Arc<parking_lot::RwLock<Option<Arc<dyn CheckpointSink>>>>,
 }
 const MAX_ATTEMPTS: u32 = 5;
 impl RemoteRuntime {
@@ -342,6 +380,7 @@ impl RemoteRuntime {
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(None)),
+            checkpoint_sink: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
     #[cfg(test)]
@@ -355,10 +394,14 @@ impl RemoteRuntime {
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(Some(sink))),
+            checkpoint_sink: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
     pub(crate) fn set_agent_sink(&self, sink: Arc<dyn AgentStateSink>) {
         *self.agent_sink.write() = Some(sink);
+    }
+    pub(crate) fn set_checkpoint_sink(&self, sink: Arc<dyn CheckpointSink>) {
+        *self.checkpoint_sink.write() = Some(sink);
     }
     /// Only this method invokes pty.spawn. Caller supplies an immutable, durable request ID.
     pub async fn create(
@@ -481,7 +524,7 @@ impl RemoteRuntime {
             self.hub.clone(),
         ));
         map.insert(id, entry.clone());
-        self.launch(&entry, transport);
+        self.launch(&entry, transport, false);
         Ok(())
     }
     fn entry(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
@@ -568,18 +611,19 @@ impl RemoteRuntime {
             })?;
         Ok((attachment, ranges, generation))
     }
-    fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>) {
+    fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>, allow_recovery: bool) {
         let mut state = entry.state.lock();
         let generation = state.details.generation;
         let e = entry.clone();
         let hub = self.hub.clone();
         let connector = self.connector.clone();
         let sink = Arc::clone(&self.agent_sink);
+        let checkpoint = Arc::clone(&self.checkpoint_sink);
         state.task = Some(tokio::spawn(async move {
-            run(e, hub, connector, generation, initial, sink).await;
+            run(e, hub, connector, generation, initial, sink, checkpoint, allow_recovery).await;
         }));
     }
-    /// Explicit retry is deduplicated while reconnecting and only describes the stored target.
+    /// Explicit retry may resume the exact stored conversation after a proven OS reboot.
     pub fn retry(&self, id: &str) -> Result<(), RemoteFailure> {
         let e = self.entry(id)?;
         {
@@ -596,10 +640,11 @@ impl RemoteRuntime {
             s.details.generation += 1;
             s.details.state = RemoteConnectionState::Reconnecting;
             s.details.attempts = 0;
+            s.details.failure = None;
             s.transport = None;
             Entry::notify(&s);
         }
-        self.launch(&e, None);
+        self.launch(&e, None, true);
         Ok(())
     }
     /// Admission is synchronous. No queued control lock; future rechecks generation at dispatch.
@@ -925,8 +970,9 @@ impl RemoteRuntime {
         let hub = self.hub.clone();
         let connector = self.connector.clone();
         let sink = Arc::clone(&self.agent_sink);
+        let checkpoint = Arc::clone(&self.checkpoint_sink);
         state.task = Some(tokio::spawn(async move {
-            run_live(e, hub, connector, generation, client, sink).await;
+            run_live(e, hub, connector, generation, client, sink, checkpoint).await;
         }));
     }
 }
@@ -1029,6 +1075,13 @@ fn process_agent_snapshot(
     }
 }
 
+fn handle_recovery_error(original_expired: BridgeError, recovery_err: BridgeError) -> BridgeError {
+    match recovery_err {
+        BridgeError::RecoveryUnsupported => original_expired,
+        other => other,
+    }
+}
+
 async fn run(
     e: Arc<Entry>,
     hub: Arc<TerminalOutputHub>,
@@ -1036,6 +1089,8 @@ async fn run(
     mut generation: u64,
     mut initial: Option<Arc<dyn Transport>>,
     sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
+    checkpoint: Arc<parking_lot::RwLock<Option<Arc<dyn CheckpointSink>>>>,
+    mut allow_recovery: bool,
 ) {
     let mut attempts = e.state.lock().details.attempts;
     loop {
@@ -1053,33 +1108,142 @@ async fn run(
             None => connector.connect(&d).await,
         };
         let outcome = async {
-            let client = connection?;
-            let info = client.describe(&d.target).await?;
-            if info.target != d.target {
-                return Err(BridgeError::TargetMismatch {
-                    expected: d.target.clone(),
-                    actual: info.target,
-                });
-            }
-            if info.exited {
-                return Err(BridgeError::TargetNotFound);
-            }
+            let (client, recovered_spawn, pid) = match connection {
+                Ok(client) => match client.describe(&d.target).await {
+                    Ok(info) => {
+                        if info.target != d.target {
+                            return Err(BridgeError::TargetMismatch {
+                                expected: d.target.clone(),
+                                actual: info.target,
+                            });
+                        }
+                        if info.exited {
+                            return Err(BridgeError::TargetNotFound);
+                        }
+                        (client, None, info.pid)
+                    }
+                    Err(original_expired @ (BridgeError::TargetExpired { .. } | BridgeError::RemoteTargetExpired)) => {
+                        if !allow_recovery {
+                            return Err(original_expired);
+                        }
+                        let (recovered_client, spawned) = match connector.recover(&d).await {
+                            Ok(res) => res,
+                            Err(rec_err) => {
+                                return Err(handle_recovery_error(original_expired, rec_err));
+                            }
+                        };
+                        let alive_info = recovered_client.describe(&spawned.target).await?;
+                        if alive_info.target != spawned.target {
+                            return Err(BridgeError::TargetMismatch {
+                                expected: spawned.target.clone(),
+                                actual: alive_info.target,
+                            });
+                        }
+                        if alive_info.exited {
+                            return Err(BridgeError::TargetNotFound);
+                        }
+                        let pid = alive_info.pid;
+                        (recovered_client, Some(spawned), pid)
+                    }
+                    Err(err) => return Err(err),
+                },
+                Err(original_expired @ (BridgeError::TargetExpired { .. } | BridgeError::RemoteTargetExpired)) => {
+                    if !allow_recovery {
+                        return Err(original_expired);
+                    }
+                    let (recovered_client, spawned) = match connector.recover(&d).await {
+                        Ok(res) => res,
+                        Err(rec_err) => {
+                            return Err(handle_recovery_error(original_expired, rec_err));
+                        }
+                    };
+                    let alive_info = recovered_client.describe(&spawned.target).await?;
+                    if alive_info.target != spawned.target {
+                        return Err(BridgeError::TargetMismatch {
+                            expected: spawned.target.clone(),
+                            actual: alive_info.target,
+                        });
+                    }
+                    if alive_info.exited {
+                        return Err(BridgeError::TargetNotFound);
+                    }
+                    let pid = alive_info.pid;
+                    (recovered_client, Some(spawned), pid)
+                }
+                Err(err) => return Err(err),
+            };
+
             if !client.supports_agent_state() {
                 tracing::info!(
                     session_id = %d.backend_session_id,
                     "Remote helper does not advertise agentStateV1; agent state reporting unavailable for this session"
                 );
             }
-            let mut desired_size: Option<(u16, u16)> = None;
+            let desired_size: Option<(u16, u16)>;
+            let current_target: TargetRef;
             {
                 let _gate = e.control.lock().await;
+
+                if let Some(ref spawned) = recovered_spawn {
+                    let desc_to_save = {
+                        let s = e.state.lock();
+                        if s.details.generation != generation
+                            || s.details.state == RemoteConnectionState::Disconnected
+                        {
+                            return Ok(());
+                        }
+                        let mut next_desc = s.details.descriptor.clone();
+                        next_desc.target = spawned.target.clone();
+                        next_desc.remote_cursor = RemoteCursor(0);
+                        next_desc
+                    };
+
+                    let hook = match checkpoint.read().clone() {
+                        Some(h) => h,
+                        None => {
+                            return Err(BridgeError::Protocol(
+                                "Remote recovery checkpoint sink is unavailable; refusing unpersisted recovery".into(),
+                            ));
+                        }
+                    };
+
+                    // Persist to durable storage BEFORE adopting in-memory target and reporting Connected:
+                    hook.checkpoint(&desc_to_save).await.map_err(|error| {
+                        BridgeError::Protocol(format!(
+                            "Remote recovery checkpoint persistence failed: {error}"
+                        ))
+                    })?;
+
+                    let mut s = e.state.lock();
+                    if s.details.generation != generation
+                        || s.details.state == RemoteConnectionState::Disconnected
+                    {
+                        return Ok(());
+                    }
+
+                    // Checkpoint succeeded! Atomically adopt the replacement target and reset cursor/ack:
+                    s.details.descriptor.target = spawned.target.clone();
+                    s.details.descriptor.remote_cursor = RemoteCursor(0);
+                    s.agent_ack = RemoteCursor(0);
+                    s.details.generation += 1;
+                    generation = s.details.generation;
+                    allow_recovery = false;
+                    hub.publish_gap(&d.backend_session_id);
+                    s.details.replay_gap = Some(RemoteReplayGap {
+                        requested_after_cursor: d.remote_cursor,
+                        available_from_cursor: RemoteCursor(0),
+                    });
+                }
+
                 {
                     let mut s = e.state.lock();
-                    if s.details.generation != generation {
+                    if s.details.generation != generation
+                        || s.details.state == RemoteConnectionState::Disconnected
+                    {
                         return Ok(());
                     }
                     s.transport = Some(client.clone());
-                    s.details.pid = Some(info.pid);
+                    s.details.pid = Some(pid);
                     s.details.state = RemoteConnectionState::Connected;
                     s.details.failure = None;
                     desired_size = Some(
@@ -1088,17 +1252,13 @@ async fn run(
                             .map(|(c, r, _)| (c, r))
                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
                     );
+                    current_target = s.details.descriptor.target.clone();
                     Entry::notify(&s);
                 }
+
                 // Converge the remote PTY onto the last size the daemon knows about
-                // before streaming resumes: a reconnect must not leave the remote shell
-                // at stale spawn defaults while the pane renders a different grid.
-                // This runs while the control gate is still held (state lock released)
-                // so a concurrently dispatched newer resize cannot be overwritten by
-                // this older desired size, and a failed convergence restores the
-                // desired size instead of dropping it.
                 if let Some((cols, rows)) = desired_size {
-                    if client.resize(&d.target, cols, rows).await.is_ok() {
+                    if client.resize(&current_target, cols, rows).await.is_ok() {
                         let mut s = e.state.lock();
                         if s.details.generation != generation {
                             return Ok(());
@@ -1125,7 +1285,7 @@ async fn run(
             // while the independent reader is in a long poll.
             let mut updates = e.state.lock().updates.subscribe();
             loop {
-                let (cursor, agent_ack) = {
+                let (target, cursor, agent_ack) = {
                     let s = e.state.lock();
                     if s.details.generation != generation {
                         return Ok(());
@@ -1133,7 +1293,11 @@ async fn run(
                     if s.details.state != RemoteConnectionState::Connected {
                         return Err(BridgeError::ConnectionClosed);
                     }
-                    (s.details.descriptor.remote_cursor, s.agent_ack)
+                    (
+                        s.details.descriptor.target.clone(),
+                        s.details.descriptor.remote_cursor,
+                        s.agent_ack,
+                    )
                 };
                 let read = tokio::select! {
                     biased;
@@ -1141,13 +1305,13 @@ async fn run(
                         details.generation != generation
                             || details.state != RemoteConnectionState::Connected
                     }) => return Err(BridgeError::ConnectionClosed),
-                    result = client.read(&d.target, cursor, agent_ack) => result?,
+                    result = client.read(&target, cursor, agent_ack) => result?,
                 };
                 let mut s = e.state.lock();
                 if s.details.generation != generation {
                     return Ok(());
                 }
-                if read.target != d.target
+                if read.target != target
                     || read.cursor < cursor
                     || read.chunks.windows(2).any(|w| w[0].cursor >= w[1].cursor)
                     || read.chunks.iter().any(|c| c.cursor > read.cursor)
@@ -1241,6 +1405,7 @@ async fn run_live(
     generation: u64,
     client: Arc<dyn Transport>,
     sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
+    checkpoint: Arc<parking_lot::RwLock<Option<Arc<dyn CheckpointSink>>>>,
 ) {
     if !client.supports_agent_state() {
         tracing::info!(
@@ -1378,7 +1543,7 @@ async fn run_live(
         s.details.generation
     };
     connector.delay(0).await;
-    run(e, hub, connector, next_generation, None, sink).await;
+    run(e, hub, connector, next_generation, None, sink, checkpoint, false).await;
 }
 
 #[cfg(test)]

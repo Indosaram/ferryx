@@ -407,9 +407,61 @@ export function TerminalPane({
                     <span>Reconnecting to remote session...</span>
                   </div>
                 ) : isSshExpired ? (
-                  <p className="text-xs text-muted-foreground">
-                    The remote process has exited or is no longer available on the host.
-                  </p>
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      The remote process has exited or is no longer available on the host.
+                    </p>
+                    {onReconnect && (isAgentSession || session.backendSessionId) ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={isPending}
+                        aria-busy={isPending}
+                        aria-label={
+                          isPending
+                            ? `Recovering ${agentName} session`
+                            : affordance.canRetry || replacementError
+                              ? `Retry ${agentName} session`
+                              : `Recover ${agentName} session`
+                        }
+                        data-testid="ssh-recover-session-button"
+                        onClick={handleReconnect}
+                        className="w-full max-w-[220px]"
+                      >
+                        {isPending ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                            <span>Recovering...</span>
+                          </>
+                        ) : affordance.canRetry || replacementError ? (
+                          <>
+                            <RefreshCw className="size-3.5" aria-hidden="true" />
+                            <span>Retry</span>
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="size-3.5" aria-hidden="true" />
+                            <span>Recover session</span>
+                          </>
+                        )}
+                      </Button>
+                    ) : null}
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={onReconnect && (isAgentSession || session.backendSessionId) ? "ghost" : "secondary"}
+                        disabled={isPending}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="w-full max-w-[220px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
+                  </>
+
                 ) : isSshLegacyLost ? (
                   <p className="text-xs text-muted-foreground">
                     This session was started before process-preserving reconnection was supported and cannot be restored.

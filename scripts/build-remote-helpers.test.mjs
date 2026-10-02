@@ -89,7 +89,13 @@ test('stager records the measured capability surface in the manifest', async t =
   const root = fixture(t);
   const r = receipt(root, { capabilities: [...REQUIRED_HELPER_CAPABILITIES, 'dagStreamingV1'] });
   const manifest = await stage(root, { receipts: [r], requiredTargets: [target] });
-  assert.deepEqual(manifest.artifacts[0].capabilities, ['sshHelperV1', 'dagSubscribeV1', 'agentStateV1', 'dagStreamingV1']);
+  assert.deepEqual(manifest.artifacts[0].capabilities, ['sshHelperV1', 'dagSubscribeV1', 'agentStateV1', 'ptyRecoveryV1', 'dagStreamingV1']);
+});
+test('stager rejects a receipt missing reboot recovery capability evidence', async t => {
+  const root = fixture(t);
+  const r = receipt(root, { capabilities: REQUIRED_HELPER_CAPABILITIES.filter(capability => capability !== 'ptyRecoveryV1') });
+  await assert.rejects(stage(root, { receipts: [r], requiredTargets: [target] }));
+  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
 });
 for (const mismatch of ['hash', 'lock', 'machine', 'duplicate', 'missing_closure', 'stale_source']) test(`stager rejects ${mismatch} receipt`, async t => {
   const root = fixture(t); const r = receipt(root);

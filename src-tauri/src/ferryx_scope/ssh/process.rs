@@ -1,22 +1,24 @@
 //! Blocking portable stdio adapter. Call via spawn_blocking from async application code.
 use super::helper::{read_frame, write_frame, Request, Runtime};
 use serde_json::{json, Value};
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::OsString;
 use std::{
-    ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-pub const HELPER_VERSION: &str = "2026.930.1";
+pub const HELPER_VERSION: &str = "2026.1002.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
-pub const HELPER_CAPABILITIES: [&str; 4] = [
+pub const HELPER_CAPABILITIES: [&str; 5] = [
     "sshHelperV1",
     "dagStreamingV1",
     "dagSubscribeV1",
     "agentStateV1",
+    "ptyRecoveryV1",
 ];
 
 /// The single capability that depends on a runtime binding rather than the build.
@@ -85,61 +87,7 @@ fn serve(mut stream: impl Read + Write, runtime: Arc<Runtime>) -> Result<(), Str
     result
 }
 fn validate_private(path: &Path) -> Result<std::fs::Metadata, String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if metadata.file_type().is_symlink() {
-        return Err("FORBIDDEN: helper IPC cannot be a symlink".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no arguments, pointers, or caller preconditions.
-        let uid = unsafe { libc::geteuid() };
-        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-            return Err(
-                "FORBIDDEN: helper IPC must be owned by the current user and private".into(),
-            );
-        }
-        if metadata.is_file() && metadata.nlink() != 1 {
-            return Err("FORBIDDEN: helper IPC cannot have hard links".into());
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err("FORBIDDEN: helper IPC cannot be a reparse point".into());
-        }
-        validate_windows_acl(path)?;
-    }
-    Ok(metadata)
-}
-
-#[cfg(windows)]
-fn validate_windows_acl(path: &Path) -> Result<(), String> {
-    use base64::Engine as _;
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| "FORBIDDEN: helper IPC path is invalid UTF-8".to_string())?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(path_str.as_bytes());
-    let script = format!(
-        r#"$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop';$raw=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'));if($raw.StartsWith('\\?\UNC\')){{$raw='\\'+$raw.Substring(8)}}elseif($raw.StartsWith('\\?\')){{$raw=$raw.Substring(4)}};$p=[System.IO.Path]::GetFullPath($raw);$item=Get-Item -LiteralPath $p -Force;$acl=$item.GetAccessControl();$u=[System.Security.Principal.WindowsIdentity]::GetCurrent();$allowed=@($u.User.Value,'S-1-5-18','S-1-5-32-544');$owner=try{{$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$null}};if(-not $owner){{try{{$owner=(New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$owner=$acl.Owner}}}};if($allowed -notcontains $owner){{exit 1}};$rules=$acl.Access;if($null -eq $rules -or $rules.Count -eq 0){{exit 2}};$hasAllowed=$false;foreach($r in $rules){{if($r.AccessControlType.ToString() -eq 'Allow'){{$sid=try{{$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}}catch{{$r.IdentityReference.Value}};if($allowed -notcontains $sid){{exit 3}};$hasAllowed=$true}}}};if(-not $hasAllowed){{exit 4}};exit 0;"#
-    );
-    let output = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output()
-        .map_err(|e| format!("FORBIDDEN: cannot execute PowerShell ACL validation: {e}"))?;
-
-    if !output.status.success() {
-        return Err("FORBIDDEN: helper IPC must be owned by the current user and private".into());
-    }
-    Ok(())
+    super::validate_private(path)
 }
 
 fn endpoint(root: &Path) -> Result<Endpoint, String> {
@@ -231,7 +179,14 @@ fn bind_runtime(root: &Path, host: String) -> Result<BoundRuntime, String> {
         }
     }
     let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    let runtime = Arc::new(Runtime::new(root.clone(), host, token.clone())?);
+    let storage_root = super::recovery::default_production_storage_root()?;
+    let runtime = Arc::new(Runtime::new_with_options(
+        root.clone(),
+        host,
+        token.clone(),
+        Some(storage_root),
+        None,
+    )?);
     #[cfg(unix)]
     let (listener, address) = {
         let socket = root.join("helper.sock");
@@ -700,6 +655,7 @@ pub fn bridge(root: &Path, mut input: impl Read, mut output: impl Write) -> Resu
                 | "project.list"
                 | "worktree.create"
                 | "pty.spawn"
+                | "pty.recover"
                 | "pty.list"
                 | "pty.describe"
                 | "pty.read"

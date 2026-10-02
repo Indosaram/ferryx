@@ -1,6 +1,9 @@
 use super::output_hub::TerminalOutputHub;
 use super::remote::*;
-use crate::{scoped_contracts::TargetRef, ssh::bridge::*};
+use crate::{
+    scoped_contracts::{Epoch, TargetRef},
+    ssh::bridge::*,
+};
 use std::{
     future::Future,
     pin::Pin,
@@ -12,6 +15,16 @@ use std::{
 };
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 type Rpc<'a, T> = Pin<Box<dyn Future<Output = Result<T, BridgeError>> + Send + 'a>>;
+
+struct NoopCheckpointSink;
+impl CheckpointSink for NoopCheckpointSink {
+    fn checkpoint<'a>(
+        &'a self,
+        _: &'a RemoteSessionDescriptor,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Ok(()) })
+    }
+}
 struct Fake {
     reads: Mutex<mpsc::UnboundedReceiver<Result<ReadResult, BridgeError>>>,
     describes: AtomicUsize,
@@ -29,11 +42,16 @@ struct Fake {
     /// response can be consumed. Tests await it to order assertions against the pump's handling
     /// of the previous response instead of polling the transport channel.
     read_calls: watch::Sender<usize>,
+    describe_failure: parking_lot::Mutex<Option<BridgeError>>,
 }
 impl Transport for Fake {
     fn describe<'a>(&'a self, t: &'a TargetRef) -> Rpc<'a, DescribeResult> {
+        let failure = self.describe_failure.lock().take();
         Box::pin(async move {
             self.describes.fetch_add(1, Ordering::SeqCst);
+            if let Some(err) = failure {
+                return Err(err);
+            }
             Ok(DescribeResult {
                 target: t.clone(),
                 pid: RemotePid(999999),
@@ -104,6 +122,8 @@ struct Dialer {
     calls: AtomicUsize,
     clock: Arc<Semaphore>,
     failure: parking_lot::Mutex<Option<BridgeError>>,
+    recover_calls: AtomicUsize,
+    recover_result: parking_lot::Mutex<Option<Result<(Arc<Fake>, SpawnResult), BridgeError>>>,
 }
 impl Connector for Dialer {
     fn connect<'a>(&'a self, _: &'a RemoteSessionDescriptor) -> Rpc<'a, Arc<dyn Transport>> {
@@ -113,6 +133,24 @@ impl Connector for Dialer {
                 return Err(error);
             }
             Ok(self.fake.clone() as Arc<dyn Transport>)
+        })
+    }
+    fn recover<'a>(
+        &'a self,
+        _d: &'a RemoteSessionDescriptor,
+    ) -> Rpc<'a, (Arc<dyn Transport>, SpawnResult)> {
+        Box::pin(async move {
+            self.recover_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(res) = self.recover_result.lock().take() {
+                match res {
+                    Ok((fake, spawn)) => Ok((fake as Arc<dyn Transport>, spawn)),
+                    Err(e) => Err(e),
+                }
+            } else {
+                Err(BridgeError::Protocol(
+                    "Remote helper does not advertise 'ptyRecoveryV1' capability".into(),
+                ))
+            }
         })
     }
     fn delay(&self, _: u32) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -129,12 +167,7 @@ fn descriptor() -> RemoteSessionDescriptor {
     "clientRequestId":"request-original","remoteCursor":"0","cols":80,"rows":24
 })).unwrap()
 }
-fn fixture() -> (
-    RemoteRuntime,
-    Arc<TerminalOutputHub>,
-    Arc<Dialer>,
-    mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
-) {
+fn make_fake() -> (Arc<Fake>, mpsc::UnboundedSender<Result<ReadResult, BridgeError>>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let fake = Arc::new(Fake {
         reads: Mutex::new(rx),
@@ -150,12 +183,24 @@ fn fixture() -> (
         supports_agent_state: false,
         agent_acks: parking_lot::Mutex::new(Vec::new()),
         read_calls: watch::channel(0usize).0,
+        describe_failure: parking_lot::Mutex::new(None),
     });
+    (fake, tx)
+}
+fn fixture() -> (
+    RemoteRuntime,
+    Arc<TerminalOutputHub>,
+    Arc<Dialer>,
+    mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
+) {
+    let (fake, tx) = make_fake();
     let dialer = Arc::new(Dialer {
         fake,
         calls: AtomicUsize::new(0),
         clock: Arc::new(Semaphore::new(0)),
         failure: parking_lot::Mutex::new(None),
+        recover_calls: AtomicUsize::new(0),
+        recover_result: parking_lot::Mutex::new(None),
     });
     let hub = Arc::new(TerminalOutputHub::default());
     (
@@ -1009,12 +1054,15 @@ fn agent_fixture(supports_agent_state: bool) -> (
         supports_agent_state,
         agent_acks: parking_lot::Mutex::new(Vec::new()),
         read_calls: watch::channel(0usize).0,
+        describe_failure: parking_lot::Mutex::new(None),
     });
     let dialer = Arc::new(Dialer {
         fake,
         calls: AtomicUsize::new(0),
         clock: Arc::new(Semaphore::new(0)),
         failure: parking_lot::Mutex::new(None),
+        recover_calls: AtomicUsize::new(0),
+        recover_result: parking_lot::Mutex::new(None),
     });
     let hub = Arc::new(TerminalOutputHub::default());
     let (sink, notify) = TestSink::new();
@@ -1394,6 +1442,7 @@ async fn ssh_agent_state_imported_live_pump_publishes_and_acks() {
         supports_agent_state: true,
         agent_acks: parking_lot::Mutex::new(Vec::new()),
         read_calls: watch::channel(0usize).0,
+        describe_failure: parking_lot::Mutex::new(None),
     });
     let hub = Arc::new(TerminalOutputHub::default());
     let (sink, notify) = TestSink::new();
@@ -1567,4 +1616,468 @@ async fn ssh_imported_transport_recovers_after_control_disconnect() {
     assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 1);
     assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
     assert_eq!(dialer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reboot_recovery_target_replacement_keeps_backend_id() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    runtime.set_checkpoint_sink(Arc::new(NoopCheckpointSink));
+    let initial_desc = descriptor();
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::TargetExpired {
+        expected_owner: "owner".into(),
+        expected_epoch: Epoch(1),
+        actual_owner: "new-owner".into(),
+        actual_epoch: Epoch(2),
+    });
+    *dialer.recover_result.lock() = Some(Ok((
+        rec_fake.clone(),
+        SpawnResult {
+            target: new_target.clone(),
+            pid: RemotePid(77777),
+        },
+    )));
+
+    runtime.restore(initial_desc).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+    let connected = state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // Backend session ID must be preserved exactly:
+    assert_eq!(connected.descriptor.backend_session_id, "local-stable");
+    assert_eq!(connected.descriptor.client_request_id, "request-original");
+    // Target was replaced with recovered target:
+    assert_eq!(connected.descriptor.target, new_target);
+    // Remote PID was updated:
+    assert_eq!(connected.pid, Some(RemotePid(999999)));
+    assert_eq!(dialer.recover_calls.load(Ordering::SeqCst), 1);
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_saved_recipe_descriptor_target_update() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    *dialer.recover_result.lock() = Some(Ok((
+        rec_fake.clone(),
+        SpawnResult {
+            target: new_target.clone(),
+            pid: RemotePid(11111),
+        },
+    )));
+
+    struct TestSink {
+        saved: parking_lot::Mutex<Vec<RemoteSessionDescriptor>>,
+        checkpoint_saw_connected: std::sync::atomic::AtomicBool,
+        sub: parking_lot::Mutex<Option<watch::Receiver<RemoteSessionDetails>>>,
+    }
+    impl CheckpointSink for TestSink {
+        fn checkpoint<'a>(
+            &'a self,
+            desc: &'a RemoteSessionDescriptor,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            let desc_clone = desc.clone();
+            Box::pin(async move {
+                if let Some(ref sub) = *self.sub.lock() {
+                    let cur = sub.borrow();
+                    if cur.state == RemoteConnectionState::Connected {
+                        self.checkpoint_saw_connected.store(true, Ordering::SeqCst);
+                    }
+                }
+                self.saved.lock().push(desc_clone);
+                Ok(())
+            })
+        }
+    }
+
+    let sink = Arc::new(TestSink {
+        saved: parking_lot::Mutex::new(Vec::new()),
+        checkpoint_saw_connected: std::sync::atomic::AtomicBool::new(false),
+        sub: parking_lot::Mutex::new(None),
+    });
+    runtime.set_checkpoint_sink(sink.clone());
+
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    *sink.sub.lock() = Some(updates.clone());
+
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let saved = sink.saved.lock().clone();
+    assert_eq!(saved.len(), 1, "exactly one checkpoint on recovery");
+    assert_eq!(saved[0].target, new_target, "checkpointed updated descriptor target");
+    assert!(!sink.checkpoint_saw_connected.load(Ordering::SeqCst), "checkpoint ran BEFORE status became Connected");
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_checkpoint_failure_aborts_without_claiming_connected() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    *dialer.recover_result.lock() = Some(Ok((
+        rec_fake.clone(),
+        SpawnResult {
+            target: new_target.clone(),
+            pid: RemotePid(11111),
+        },
+    )));
+
+    struct FailingSink;
+    impl CheckpointSink for FailingSink {
+        fn checkpoint<'a>(
+            &'a self,
+            _: &'a RemoteSessionDescriptor,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                Err("Disk quota exceeded".into())
+            })
+        }
+    }
+    runtime.set_checkpoint_sink(Arc::new(FailingSink));
+
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+
+    // Must never claim Connected! Must transition to terminal failure
+    let details = state(&mut updates, |d| d.failure.is_some()).await;
+    assert_ne!(details.state, RemoteConnectionState::Connected);
+    assert_eq!(details.failure.as_ref().unwrap().kind, RemoteFailureKind::Protocol);
+    assert!(details.failure.as_ref().unwrap().message.contains("Disk quota exceeded"));
+    // A failed checkpoint must leave the previously persisted identity untouched.
+    assert_eq!(details.descriptor.target, descriptor().target);
+    assert_eq!(rec_fake.stops.load(Ordering::SeqCst), 0);
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_concurrent_retry_coalescing() {
+    let (_r, _hub, dialer, _tx) = fixture();
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    let recover_gate = Arc::new(tokio::sync::Notify::new());
+    let recover_gate_clone = recover_gate.clone();
+
+    struct GatedConnector {
+        dialer: Arc<Dialer>,
+        rec_fake: Arc<Fake>,
+        new_target: TargetRef,
+        gate: Arc<tokio::sync::Notify>,
+        recover_entered: Arc<tokio::sync::Notify>,
+    }
+    impl Connector for GatedConnector {
+        fn connect<'a>(&'a self, d: &'a RemoteSessionDescriptor) -> Rpc<'a, Arc<dyn Transport>> {
+            self.dialer.connect(d)
+        }
+        fn recover<'a>(
+            &'a self,
+            _d: &'a RemoteSessionDescriptor,
+        ) -> Rpc<'a, (Arc<dyn Transport>, SpawnResult)> {
+            let gate = self.gate.clone();
+            let entered = self.recover_entered.clone();
+            let fake = self.rec_fake.clone();
+            let target = self.new_target.clone();
+            self.dialer.recover_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                entered.notify_one();
+                gate.notified().await;
+                Ok((fake as Arc<dyn Transport>, SpawnResult { target, pid: RemotePid(55555) }))
+            })
+        }
+        fn delay(&self, a: u32) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            self.dialer.delay(a)
+        }
+    }
+
+    let recover_entered = Arc::new(tokio::sync::Notify::new());
+    let gated = Arc::new(GatedConnector {
+        dialer: dialer.clone(),
+        rec_fake,
+        new_target,
+        gate: recover_gate,
+        recover_entered: recover_entered.clone(),
+    });
+    let hub = Arc::new(TerminalOutputHub::default());
+    let runtime = RemoteRuntime::with_connector(hub, gated);
+    runtime.set_checkpoint_sink(Arc::new(NoopCheckpointSink));
+
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+
+    let entered = recover_entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+    tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap();
+
+    // While recovery is in-flight (Reconnecting), concurrent calls to retry must coalesce:
+    for _ in 0..5 {
+        assert!(runtime.retry("local-stable").is_ok());
+    }
+
+    // Now release recovery
+    recover_gate_clone.notify_one();
+
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    // Exactly 1 recovery was performed:
+    assert_eq!(dialer.recover_calls.load(Ordering::SeqCst), 1);
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_cursor_generation_reset_and_old_input_rejected() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    runtime.set_checkpoint_sink(Arc::new(NoopCheckpointSink));
+    let mut initial_desc = descriptor();
+    initial_desc.remote_cursor = RemoteCursor(500);
+
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    *dialer.recover_result.lock() = Some(Ok((
+        rec_fake.clone(),
+        SpawnResult {
+            target: new_target.clone(),
+            pid: RemotePid(99999),
+        },
+    )));
+
+    runtime.restore(initial_desc).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+    let connected = state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // Remote cursor must be reset to 0:
+    assert_eq!(connected.descriptor.remote_cursor, RemoteCursor(0));
+    assert!(connected.generation > 1);
+    // Gap must be emitted:
+    assert!(connected.replay_gap.is_some());
+    let gap = connected.replay_gap.unwrap();
+    assert_eq!(gap.requested_after_cursor, RemoteCursor(500));
+    assert_eq!(gap.available_from_cursor, RemoteCursor(0));
+
+    // Stale generation write (generation 1) must be rejected with StaleGeneration:
+    let old_write = runtime.write("local-stable", 1, b"old-input".to_vec());
+    let err = match old_write {
+        Err(e) => e,
+        Ok(_) => panic!("expected stale generation write to fail"),
+    };
+    assert_eq!(err.kind, RemoteFailureKind::StaleGeneration);
+
+    let current_write = runtime.write("local-stable", connected.generation, b"new-input".to_vec());
+    assert!(current_write.is_ok());
+    let res = current_write.unwrap().await;
+    assert!(res.is_ok());
+    assert_eq!(rec_fake.writes.load(Ordering::SeqCst), 1);
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_checkpoint_fails_once_then_retry_succeeds() {
+    let (_unused_runtime, _hub, dialer, _tx) = fixture();
+    let initial_desc = descriptor();
+    let new_target = TargetRef {
+        host_id: "host".into(),
+        owner_id: "new-owner".into(),
+        epoch: Epoch(2),
+        backend_session_id: "remote-recovered".into(),
+    };
+    let (rec_fake, rec_tx) = make_fake();
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+
+    let spawn_res = SpawnResult {
+        target: new_target.clone(),
+        pid: RemotePid(22222),
+    };
+    let rec_fake_clone = rec_fake.clone();
+    let spawn_res_clone = spawn_res.clone();
+
+    struct FlakySink {
+        attempts: AtomicUsize,
+        saved: parking_lot::Mutex<Vec<RemoteSessionDescriptor>>,
+    }
+    impl CheckpointSink for FlakySink {
+        fn checkpoint<'a>(
+            &'a self,
+            desc: &'a RemoteSessionDescriptor,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            let desc_clone = desc.clone();
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err("Temporary disk lock".into())
+                } else {
+                    self.saved.lock().push(desc_clone);
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    let sink = Arc::new(FlakySink {
+        attempts: AtomicUsize::new(0),
+        saved: parking_lot::Mutex::new(Vec::new()),
+    });
+
+    struct IdempotentConnector {
+        dialer: Arc<Dialer>,
+        rec_fake: Arc<Fake>,
+        spawn: SpawnResult,
+    }
+    impl Connector for IdempotentConnector {
+        fn connect<'a>(&'a self, d: &'a RemoteSessionDescriptor) -> Rpc<'a, Arc<dyn Transport>> {
+            Box::pin(async move {
+                self.dialer.calls.fetch_add(1, Ordering::SeqCst);
+                if d.target == self.spawn.target {
+                    Ok(self.rec_fake.clone() as Arc<dyn Transport>)
+                } else {
+                    Err(BridgeError::RemoteTargetExpired)
+                }
+            })
+        }
+        fn recover<'a>(
+            &'a self,
+            _d: &'a RemoteSessionDescriptor,
+        ) -> Rpc<'a, (Arc<dyn Transport>, SpawnResult)> {
+            self.dialer.recover_calls.fetch_add(1, Ordering::SeqCst);
+            let fake = self.rec_fake.clone();
+            let spawn = self.spawn.clone();
+            Box::pin(async move {
+                Ok((fake as Arc<dyn Transport>, spawn))
+            })
+        }
+        fn delay(&self, a: u32) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            self.dialer.delay(a)
+        }
+    }
+
+    let hub = Arc::new(TerminalOutputHub::default());
+    let runtime = RemoteRuntime::with_connector(
+        hub,
+        Arc::new(IdempotentConnector {
+            dialer: dialer.clone(),
+            rec_fake: rec_fake_clone,
+            spawn: spawn_res_clone,
+        }),
+    );
+    runtime.set_checkpoint_sink(sink.clone());
+
+    runtime.restore(initial_desc.clone()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+
+    // 1. First recovery attempt fails during checkpoint:
+    let failed = state(&mut updates, |d| d.failure.is_some()).await;
+    assert_ne!(failed.state, RemoteConnectionState::Connected);
+    assert_eq!(failed.failure.as_ref().unwrap().kind, RemoteFailureKind::Protocol);
+    // Descriptor target must remain unchanged on checkpoint failure:
+    assert_eq!(failed.descriptor.target, initial_desc.target);
+    assert_eq!(sink.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.saved.lock().len(), 0);
+
+    // 2. Retry triggers second recovery attempt:
+    assert!(runtime.retry("local-stable").is_ok());
+
+    // Second recovery succeeds after second checkpoint:
+    let connected = state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    assert_eq!(connected.state, RemoteConnectionState::Connected);
+    assert_eq!(connected.descriptor.target, new_target);
+    assert_eq!(sink.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(sink.saved.lock().len(), 1);
+    assert_eq!(sink.saved.lock()[0].target, new_target);
+
+    // Stale generation 1 write must be rejected:
+    let old_write = runtime.write("local-stable", 1, b"old".to_vec());
+    let err = match old_write {
+        Err(e) => e,
+        Ok(_) => panic!("expected stale generation write to fail"),
+    };
+    assert_eq!(err.kind, RemoteFailureKind::StaleGeneration);
+    drop(rec_tx);
+}
+
+#[tokio::test]
+async fn reboot_recovery_legacy_no_capability_safe() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    let initial_desc = descriptor();
+    *dialer.failure.lock() = Some(BridgeError::TargetExpired {
+        expected_owner: "owner".into(),
+        expected_epoch: Epoch(1),
+        actual_owner: "new-owner".into(),
+        actual_epoch: Epoch(2),
+    });
+    *dialer.recover_result.lock() = Some(Err(BridgeError::RecoveryUnsupported));
+
+    runtime.restore(initial_desc.clone()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    request_reboot_recovery(&runtime, &dialer, &mut updates).await;
+    let terminal = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+
+    // Preserves original Expired failure so legacy behavior is untouched:
+    assert_eq!(terminal.state, RemoteConnectionState::Expired);
+    assert_eq!(terminal.failure.as_ref().unwrap().kind, RemoteFailureKind::Expired);
+    // Target was NOT changed:
+    assert_eq!(terminal.descriptor.target, initial_desc.target);
+    // No arbitrary spawn:
+    assert_eq!(terminal.pid, None);
+}
+
+async fn request_reboot_recovery(
+    runtime: &RemoteRuntime,
+    dialer: &Dialer,
+    updates: &mut watch::Receiver<RemoteSessionDetails>,
+) {
+    state(updates, |d| d.state == RemoteConnectionState::Expired).await;
+    assert_eq!(dialer.recover_calls.load(Ordering::SeqCst), 0, "restoration must not launch an agent");
+    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
+    runtime.retry("local-stable").unwrap();
+}
+#[tokio::test]
+async fn reboot_recovery_no_recovery_after_target_not_found_natural_exit() {
+    let (runtime, _hub, dialer, _tx) = fixture();
+    let initial_desc = descriptor();
+    // Process exited naturally: describe returns TargetNotFound
+    *dialer.fake.describe_failure.lock() = Some(BridgeError::TargetNotFound);
+
+    runtime.restore(initial_desc.clone()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    let terminal = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+
+    // TargetNotFound must NEVER trigger recover:
+    assert_eq!(dialer.recover_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(terminal.state, RemoteConnectionState::Expired);
+    assert_eq!(terminal.failure.as_ref().unwrap().kind, RemoteFailureKind::Missing);
+    assert_eq!(terminal.descriptor.target, initial_desc.target);
 }

@@ -5,7 +5,7 @@ import { resolve, join, dirname, relative, isAbsolute } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
-export const REQUIRED_HELPER_CAPABILITIES = Object.freeze(["sshHelperV1", "dagSubscribeV1", "agentStateV1"]);
+export const REQUIRED_HELPER_CAPABILITIES = Object.freeze(["sshHelperV1", "dagSubscribeV1", "agentStateV1", "ptyRecoveryV1"]);
 
 export function computeSha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");

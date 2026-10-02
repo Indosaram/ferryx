@@ -341,6 +341,9 @@ pub enum BridgeError {
     #[error("Target not found on remote helper")]
     TargetNotFound,
 
+    #[error("Remote helper does not support ptyRecoveryV1 capability")]
+    RecoveryUnsupported,
+
     #[error("Connection closed or poisoned")]
     ConnectionClosed,
 
@@ -455,6 +458,8 @@ pub fn dup_fd(_fd: i32) -> Result<i32, std::io::Error> {
 pub enum BridgeReaderStream {
     Child(tokio::process::ChildStdout),
     Prefetched(tokio::io::Chain<std::io::Cursor<Vec<u8>>, tokio::process::ChildStdout>),
+    #[cfg(test)]
+    Mock(tokio::io::DuplexStream),
 }
 
 impl AsyncRead for BridgeReaderStream {
@@ -466,6 +471,8 @@ impl AsyncRead for BridgeReaderStream {
         match self.get_mut() {
             BridgeReaderStream::Child(c) => Pin::new(c).poll_read(cx, buf),
             BridgeReaderStream::Prefetched(p) => Pin::new(p).poll_read(cx, buf),
+            #[cfg(test)]
+            BridgeReaderStream::Mock(m) => Pin::new(m).poll_read(cx, buf),
         }
     }
 }
@@ -476,6 +483,59 @@ impl std::os::unix::io::AsRawFd for BridgeReaderStream {
         match self {
             BridgeReaderStream::Child(c) => c.as_raw_fd(),
             BridgeReaderStream::Prefetched(p) => p.get_ref().1.as_raw_fd(),
+            #[cfg(test)]
+            BridgeReaderStream::Mock(_) => -1,
+        }
+    }
+}
+
+pub enum BridgeWriterStream {
+    Child(tokio::process::ChildStdin),
+    #[cfg(test)]
+    Mock(tokio::io::DuplexStream),
+}
+
+impl AsyncWrite for BridgeWriterStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_write(cx, buf),
+            #[cfg(test)]
+            BridgeWriterStream::Mock(m) => Pin::new(m).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_flush(cx),
+            #[cfg(test)]
+            BridgeWriterStream::Mock(m) => Pin::new(m).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_shutdown(cx),
+            #[cfg(test)]
+            BridgeWriterStream::Mock(m) => Pin::new(m).poll_shutdown(cx),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for BridgeWriterStream {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        match self {
+            BridgeWriterStream::Child(c) => c.as_raw_fd(),
+            #[cfg(test)]
+            BridgeWriterStream::Mock(_) => -1,
         }
     }
 }
@@ -812,7 +872,7 @@ impl BridgeChildHandle {
 
 /// A single framed SSH bridge connection managing an owned SSH child process.
 pub struct BridgeConnection {
-    writer: Option<BufWriter<tokio::process::ChildStdin>>,
+    writer: Option<BufWriter<BridgeWriterStream>>,
     reader: Option<BufReader<BridgeReaderStream>>,
     child_guard: Option<BridgeChildGuard>,
     stderr_fd: Option<RawFd>,
@@ -1033,7 +1093,7 @@ impl BridgeConnection {
         });
 
         Ok(Self {
-            writer: Some(BufWriter::new(stdin)),
+            writer: Some(BufWriter::new(BridgeWriterStream::Child(stdin))),
             reader: Some(BufReader::new(BridgeReaderStream::Child(stdout))),
             child_guard: Some(guard()),
             stderr_fd,
@@ -1054,6 +1114,27 @@ impl BridgeConnection {
     /// by another process; it is reported for identity and diagnostics and is never signalled.
     pub fn child_id(&self) -> Option<u32> {
         self.child_guard.as_ref().and_then(|g| g.pid())
+    }
+
+    #[cfg(test)]
+    pub fn new_mock(
+        writer: tokio::io::DuplexStream,
+        reader: tokio::io::DuplexStream,
+    ) -> Self {
+        Self {
+            writer: Some(BufWriter::new(BridgeWriterStream::Mock(writer))),
+            reader: Some(BufReader::new(BridgeReaderStream::Mock(reader))),
+            child_guard: None,
+            stderr_fd: None,
+            stderr_capture: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stderr_task: None,
+            prefetched_bytes: Vec::new(),
+            captured_stderr_prefix: Vec::new(),
+            closed: false,
+            poisoned: false,
+            paused: false,
+            detached: false,
+        }
     }
 
     fn check_stderr(&self) -> String {
@@ -1220,6 +1301,26 @@ impl BridgeConnection {
             .await?;
         serde_json::from_value(val)
             .map_err(|e| BridgeError::Protocol(format!("Invalid spawn response: {e}")))
+    }
+
+    /// Recovers an agent PTY session on the remote helper across a host reboot/restart.
+    pub async fn pty_recover(
+        &mut self,
+        logical_session_id: &str,
+        previous_target: &TargetRef,
+    ) -> Result<SpawnResult, BridgeError> {
+        let val = self
+            .request(
+                "pty.recover",
+                json!({
+                    "logicalSessionId": logical_session_id,
+                    "previousTarget": previous_target,
+                }),
+                DEFAULT_RPC_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(val)
+            .map_err(|e| BridgeError::Protocol(format!("Invalid recover response: {e}")))
     }
 
     /// Queries the state of an existing PTY session on the remote helper.
@@ -1610,7 +1711,7 @@ impl BridgeConnection {
             let child_guard = BridgeChildGuard::imported(state.child_pid);
 
             Ok(Self {
-                writer: Some(BufWriter::new(tokio_stdin)),
+                writer: Some(BufWriter::new(BridgeWriterStream::Child(tokio_stdin))),
                 reader: Some(BufReader::new(stream)),
                 child_guard: Some(child_guard),
                 stderr_fd: Some(stored_stderr_fd),
@@ -2004,6 +2105,28 @@ impl SshBridgeClient {
             .capabilities
             .iter()
             .any(|c| c == "agentStateV1")
+    }
+
+    /// True when the helper advertised the `ptyRecoveryV1` capability and therefore supports
+    /// reboot recovery for agent sessions via `pty.recover`.
+    pub fn supports_pty_recovery(&self) -> bool {
+        self.handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "ptyRecoveryV1")
+    }
+
+    /// Recovers an agent PTY session across a reboot using the helper's durable recipe.
+    pub async fn pty_recover(
+        &self,
+        logical_session_id: &str,
+        previous_target: &TargetRef,
+    ) -> Result<SpawnResult, BridgeError> {
+        if !self.supports_pty_recovery() {
+            return Err(BridgeError::RecoveryUnsupported);
+        }
+        let mut ctrl = self.control.lock().await;
+        ctrl.pty_recover(logical_session_id, previous_target).await
     }
 
     /// Reads output on the dedicated reader connection, requesting agent state snapshots

@@ -8,6 +8,8 @@ use crate::session::{load_session_from_path, save_session_to_path};
 use crate::terminal::{PtySessionState, TerminalService};
 use crate::worktree::WorktreeIdentity;
 use parking_lot::{Mutex, RwLock};
+use std::future::Future;
+use std::pin::Pin;
 use std::{
     collections::HashMap,
     fs,
@@ -54,6 +56,10 @@ const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 #[cfg(test)]
 #[path = "session_service_machine_tests.rs"]
 mod machine_tests;
+
+#[cfg(test)]
+#[path = "ssh_reboot_persistence_tests.rs"]
+mod ssh_reboot_persistence_tests;
 
 pub(crate) struct MachineSpawn {
     pub request: crate::remote::machine_protocol::CreateSessionRequest,
@@ -178,6 +184,8 @@ impl From<String> for SpawnError {
 struct DurableRemoteSession {
     descriptor: crate::terminal::remote::RemoteSessionDescriptor,
     metadata: Option<StoredSessionMeta>,
+    #[serde(default, rename = "recoveryTarget")]
+    recovery_target: Option<crate::scoped_contracts::TargetRef>,
 }
 
 /// Blocking cross-process guard for durable remote snapshot read-modify-write
@@ -290,6 +298,32 @@ impl Drop for RemoteSnapshotFileLock {
     }
 }
 
+struct DaemonCheckpointSink {
+    path: PathBuf,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
+}
+
+impl crate::terminal::remote::CheckpointSink for DaemonCheckpointSink {
+    fn checkpoint<'a>(
+        &'a self,
+        descriptor: &'a crate::terminal::remote::RemoteSessionDescriptor,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let path = self.path.clone();
+        let lock = Arc::clone(&self.lock);
+        let metadata = Arc::clone(&self.metadata);
+        Box::pin(async move {
+            DaemonSessionService::checkpoint_remote_session_descriptor(
+                path,
+                lock,
+                descriptor,
+                metadata,
+            )
+            .await
+        })
+    }
+}
+
 /// Entries share disconnect state only with their own socket generation.
 pub(crate) struct MachineController {
     pub device: String,
@@ -370,6 +404,16 @@ impl DaemonSessionService {
         let sink: Arc<dyn crate::terminal::remote::AgentStateSink> = self.agent_states.clone();
         self.terminal_service.remote().set_agent_sink(sink.clone());
         self.terminal_service.set_paired_agent_sink(sink);
+        self.ensure_checkpoint_sink();
+    }
+
+    pub fn ensure_checkpoint_sink(&self) {
+        let sink = Arc::new(DaemonCheckpointSink {
+            path: self.remote_sessions_path.clone(),
+            lock: Arc::clone(&self.remote_persistence_lock),
+            metadata: Arc::clone(&self.session_metadata),
+        });
+        self.terminal_service.remote().set_checkpoint_sink(sink);
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
@@ -970,6 +1014,7 @@ impl DaemonSessionService {
                 runtime.details(id).map(|d| DurableRemoteSession {
                     descriptor: d.descriptor,
                     metadata: metadata.read().get(id).cloned(),
+                    recovery_target: None,
                 })
             })
             .collect();
@@ -978,8 +1023,30 @@ impl DaemonSessionService {
         for record in durable_records {
             merged.insert(record.descriptor.backend_session_id.clone(), record);
         }
-        for record in records {
-            merged.insert(record.descriptor.backend_session_id.clone(), record);
+        for local in records {
+            let key = local.descriptor.backend_session_id.clone();
+            if let Some(existing) = merged.get_mut(&key) {
+                // Forward-only durable target guard:
+                // If existing has a committed recovery target that differs from local's target,
+                // local is an un-adopted or stale older snapshot. Preserve the existing recovered
+                // descriptor, but update metadata if local provided fresh metadata.
+                if let Some(ref committed_target) = existing.recovery_target {
+                    if local.descriptor.target != *committed_target {
+                        if local.metadata.is_some() {
+                            existing.metadata = local.metadata;
+                        }
+                        continue;
+                    }
+                }
+                let preserved_recovery_target = existing.recovery_target.clone();
+                let mut updated = local;
+                if updated.recovery_target.is_none() {
+                    updated.recovery_target = preserved_recovery_target;
+                }
+                *existing = updated;
+            } else {
+                merged.insert(key, local);
+            }
         }
         let records: Vec<DurableRemoteSession> = merged.into_values().collect();
         crate::ipc::run_blocking(move || {
@@ -999,6 +1066,66 @@ impl DaemonSessionService {
         .map_err(|e| e.to_string())
     }
 
+    /// Checkpoints a single recovered remote session descriptor to durable storage.
+    pub(super) async fn checkpoint_remote_session_descriptor(
+        path: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        descriptor: &crate::terminal::remote::RemoteSessionDescriptor,
+        metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
+    ) -> Result<(), String> {
+        let _guard = lock.lock().await;
+        let sidecar = path.with_extension("lock");
+        let read_path = path.clone();
+        let desc = descriptor.clone();
+        let meta = metadata.read().get(&desc.backend_session_id).cloned();
+        crate::ipc::run_blocking(move || {
+            let _file_lock = RemoteSnapshotFileLock::acquire(&sidecar).map_err(|error| {
+                crate::ipc::IpcError::internal(format!(
+                    "Failed to lock durable remote snapshot: {error}"
+                ))
+            })?;
+            let durable_records: Vec<DurableRemoteSession> = match load_session_from_path(&read_path)? {
+                Some(mut persisted) => {
+                    let value = persisted
+                        .extra
+                        .remove("remoteSessions")
+                        .unwrap_or_else(|| serde_json::json!([]));
+                    serde_json::from_value::<Vec<DurableRemoteSession>>(value).map_err(|error| {
+                        crate::ipc::IpcError::internal(format!(
+                            "durable remote snapshot failed to decode: {error}"
+                        ))
+                    })?
+                }
+                None => Vec::new(),
+            };
+            let mut merged: std::collections::BTreeMap<String, DurableRemoteSession> =
+                std::collections::BTreeMap::new();
+            for r in durable_records {
+                merged.insert(r.descriptor.backend_session_id.clone(), r);
+            }
+            merged.insert(
+                desc.backend_session_id.clone(),
+                DurableRemoteSession {
+                    descriptor: desc.clone(),
+                    metadata: meta,
+                    recovery_target: Some(desc.target.clone()),
+                },
+            );
+            let records: Vec<DurableRemoteSession> = merged.into_values().collect();
+            let mut session = load_session_from_path(&read_path)?
+                .unwrap_or_else(crate::session::PersistedWorkspaceSession::default);
+            session.version = 3;
+            session.extra.insert(
+                "remoteSessions".into(),
+                serde_json::to_value(records)
+                    .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?,
+            );
+            save_session_to_path(&read_path, &session)
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     /// Targeted durable-record removal used by the session teardown path.
     /// Removal carries positive evidence that this exact session ended, so it
     /// deletes exactly one record and never rewrites predecessor/successor
@@ -1007,6 +1134,15 @@ impl DaemonSessionService {
         path: PathBuf,
         lock: Arc<tokio::sync::Mutex<()>>,
         session_id: String,
+    ) -> Result<(), String> {
+        Self::remove_persisted_remote_record_guarded(path, lock, session_id, None).await
+    }
+
+    pub(super) async fn remove_persisted_remote_record_guarded(
+        path: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        session_id: String,
+        expected_target: Option<crate::scoped_contracts::TargetRef>,
     ) -> Result<(), String> {
         let _guard = lock.lock().await;
         let sidecar = path.with_extension("lock");
@@ -1030,7 +1166,19 @@ impl DaemonSessionService {
                     ))
                 })?;
             let before = records.len();
-            records.retain(|record| record.descriptor.backend_session_id != session_id);
+            records.retain(|record| {
+                if record.descriptor.backend_session_id != session_id {
+                    return true;
+                }
+                // If caller expected a specific target and the record on disk was committed
+                // with a different recovered target, guard the recovered record against stale removal:
+                if let (Some(ref expected), Some(ref committed)) = (&expected_target, &record.recovery_target) {
+                    if expected != committed {
+                        return true;
+                    }
+                }
+                false
+            });
             if records.len() == before {
                 return Ok(());
             }
@@ -1204,21 +1352,20 @@ impl DaemonSessionService {
         let cleanup_session_id = id.to_string();
         let mut record_removable = false;
         tokio::spawn(async move {
+            let mut last_seen_target;
             loop {
                 let details = rx.borrow_and_update().clone();
-                // A naturally expired session keeps the subscription sender alive, so the
-                // loop would never reach the teardown below without this explicit check.
-                let (expired, vanished) = match runtime.upgrade() {
-                    Some(runtime) => (
-                        details.state
-                            == crate::terminal::remote::RemoteConnectionState::Expired,
-                        runtime.details(cleanup_session_id.as_str()).is_none(),
-                    ),
+                last_seen_target = details.descriptor.target.clone();
+                // A vanished session (removed from runtime via close) should be cleaned up.
+                // Recoverable expired sessions keep their durable records and emit their
+                // terminal_remote_status event so subscribers and retry paths can operate.
+                let vanished = match runtime.upgrade() {
+                    Some(runtime) => runtime.details(cleanup_session_id.as_str()).is_none(),
                     // The runtime itself is gone (daemon teardown): keep durable
                     // records so a restart can restore them.
-                    None => (false, false),
+                    None => false,
                 };
-                if expired || vanished {
+                if vanished {
                     record_removable = true;
                     break;
                 }
@@ -1253,10 +1400,11 @@ impl DaemonSessionService {
             // The remote session ended (or its runtime was dropped): a forwarding child must
             // never outlive its session, whether or not a close/hibernate path ran.
             if record_removable {
-                if let Err(error) = Self::remove_persisted_remote_record(
+                if let Err(error) = Self::remove_persisted_remote_record_guarded(
                     path,
                     lock,
                     cleanup_session_id.clone(),
+                    Some(last_seen_target),
                 )
                 .await
                 {

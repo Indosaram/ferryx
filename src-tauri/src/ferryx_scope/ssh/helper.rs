@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::scoped_contracts::{Epoch, TargetRef};
+pub(super) use super::{private_file, validate_private};
 
 #[path = "../../dag/paths.rs"]
 mod dag_paths;
@@ -23,6 +24,12 @@ pub mod dag_stream;
 
 #[path = "agent_state.rs"]
 pub mod agent_state;
+
+#[path = "boot_identity.rs"]
+pub mod boot_identity;
+
+#[path = "recovery.rs"]
+pub mod recovery;
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const RING_BYTES: usize = 512 * 1024;
@@ -86,7 +93,7 @@ struct Session {
     dimensions: Mutex<(u16, u16)>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     output: Arc<(Mutex<Output>, Condvar)>,
 }
 
@@ -138,8 +145,14 @@ pub struct Runtime {
     spawns_cv: Condvar,
     dag_streams: dag_stream::DagStreams,
     pub(crate) agent_state: Option<Arc<agent_state::AgentStateServer>>,
+    pub(crate) recovery_store: Arc<recovery::RecoveryStore>,
+    boot_id_source: Arc<Mutex<boot_identity::BootIdSource>>,
+    logical_to_backend: Mutex<HashMap<String, String>>,
+    backend_to_logical: Mutex<HashMap<String, String>>,
     #[cfg(test)]
     spawn_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    #[cfg(test)]
+    executable_resolver: Mutex<Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>>,
 }
 
 impl Runtime {
@@ -152,8 +165,30 @@ impl Runtime {
         *self.spawn_hook.lock().unwrap() = hook;
     }
 
+    #[cfg(test)]
+    pub fn set_executable_resolver_for_test(
+        &self,
+        resolver: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    ) {
+        *self.executable_resolver.lock().unwrap() = resolver;
+    }
+
     pub fn new(root: PathBuf, host: String, token: String) -> Result<Self, String> {
+        Self::new_with_options(root, host, token, None, None)
+    }
+
+    pub fn new_with_options(
+        root: PathBuf,
+        host: String,
+        token: String,
+        storage_root: Option<PathBuf>,
+        boot_id_source: Option<boot_identity::BootIdSource>,
+    ) -> Result<Self, String> {
         super::private_file(&root)?;
+        let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+        let recovery_base = storage_root.unwrap_or_else(|| canonical_root.join("recovery"));
+        let recovery_store = Arc::new(recovery::RecoveryStore::new(recovery_base, &host)?);
+        let boot_id = Arc::new(Mutex::new(boot_id_source.unwrap_or_default()));
         let agent_state = match agent_state::AgentStateServer::bind() {
             Ok(server) => Some(Arc::new(server)),
             Err(err) => {
@@ -162,7 +197,7 @@ impl Runtime {
             }
         };
         Ok(Self {
-            root: root.canonicalize().map_err(|e| e.to_string())?,
+            root: canonical_root,
             host,
             owner: uuid::Uuid::new_v4().to_string(),
             epoch: Epoch(rand::random()),
@@ -173,9 +208,29 @@ impl Runtime {
             spawns_cv: Condvar::new(),
             dag_streams: dag_stream::DagStreams::new(),
             agent_state,
+            recovery_store,
+            boot_id_source: boot_id,
+            logical_to_backend: Mutex::new(HashMap::new()),
+            backend_to_logical: Mutex::new(HashMap::new()),
             #[cfg(test)]
             spawn_hook: Mutex::new(None),
+            #[cfg(test)]
+            executable_resolver: Mutex::new(None),
         })
+    }
+
+    pub fn current_boot_id(&self) -> Result<String, String> {
+        self.boot_id_source.lock().unwrap().resolve()
+    }
+
+    #[cfg(test)]
+    pub fn set_boot_id_for_test(&self, boot_id: String) {
+        *self.boot_id_source.lock().unwrap() = boot_identity::BootIdSource::Injected(boot_id);
+    }
+
+    #[cfg(test)]
+    pub fn recovery_store(&self) -> &Arc<recovery::RecoveryStore> {
+        &self.recovery_store
     }
 
     pub fn handle(&self, request: Request) -> Result<Value, String> {
@@ -461,6 +516,7 @@ impl Runtime {
 
                 let projects = self.projects.lock().map_err(|e| e.to_string())?;
                 let root = projects.get(text(p, "projectId")?).ok_or("NOT_FOUND")?;
+                let project_root = root.clone();
                 let worktree_rel = p.get("worktree").and_then(Value::as_str).unwrap_or(".");
                 let cwd = root
                     .join(worktree_rel)
@@ -469,6 +525,7 @@ impl Runtime {
                 if !cwd.starts_with(root) {
                     return Err("FORBIDDEN: cwd outside project".into());
                 }
+                let canonical_cwd = cwd.clone();
                 let cwd = prepare_spawn_cwd(&cwd);
                 ensure_cwd_spawnable(&cwd)?;
 
@@ -486,6 +543,38 @@ impl Runtime {
                     .map_err(|e| e.to_string())?;
 
                 let id = uuid::Uuid::new_v4().to_string();
+                let client_req_id = p.get("clientRequestId").and_then(Value::as_str);
+                let logical_session_id = client_req_id.map(ToString::to_string);
+
+                let target = TargetRef {
+                    host_id: self.host.clone(),
+                    owner_id: self.owner.clone(),
+                    epoch: self.epoch,
+                    backend_session_id: id.clone(),
+                };
+
+                if let Some(ref lid) = logical_session_id {
+                    let current_boot = self.current_boot_id()?;
+                    let record = recovery::RecoveryRecord {
+                        logical_session_id: lid.clone(),
+                        host: self.host.clone(),
+                        exact_previous_target: target.clone(),
+                        boot_id: current_boot,
+                        project_id: text(p, "projectId")?.to_string(),
+                        project_root: project_root.clone(),
+                        worktree: p.get("worktree").and_then(Value::as_str).map(ToString::to_string),
+                        cwd: canonical_cwd,
+                        cols,
+                        rows,
+                        agent: None,
+                        provider_session: None,
+                        disabled: false,
+                        updated_at: recovery::current_timestamp()?,
+                    };
+                    self.recovery_store.save_record(&record)?;
+                    self.logical_to_backend.lock().unwrap().insert(lid.clone(), id.clone());
+                    self.backend_to_logical.lock().unwrap().insert(id.clone(), lid.clone());
+                }
 
                 let output = Arc::new((
                     Mutex::new(Output {
@@ -501,7 +590,17 @@ impl Runtime {
 
                 let (agent_token_opt, mut registration_guard) = if let Some(server) = &self.agent_state {
                     let tok = format!("{:032x}", rand::random::<u128>());
-                    server.register(&id, &tok, output.clone());
+                    let on_report = if let Some(ref lid) = logical_session_id {
+                        let store = self.recovery_store.clone();
+                        let lid_clone = lid.clone();
+                        let expected_target = target.clone();
+                        Some(Arc::new(move |_sess_id: &str, agent_opt: Option<&str>, prov_opt: Option<&Value>| {
+                            store.update_agent_state_for_target(&lid_clone, &expected_target, agent_opt.map(ToString::to_string), prov_opt.cloned())
+                        }) as agent_state::AgentReportCallback)
+                    } else {
+                        None
+                    };
+                    server.register_with_callback(&id, &tok, output.clone(), on_report);
                     let guard = agent_state::AgentRegistrationGuard::new(server.clone(), id.clone());
                     (Some(tok), Some(guard))
                 } else {
@@ -543,7 +642,12 @@ impl Runtime {
 
                 let child = match pair.slave.spawn_command(command) {
                     Ok(c) => c,
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => {
+                        if let Some(ref lid) = logical_session_id {
+                            self.recovery_store.mark_disabled_for_target(lid, &target)?;
+                        }
+                        return Err(e.to_string());
+                    }
                 };
                 drop(pair.slave);
                 let pid = match child.process_id() {
@@ -554,6 +658,8 @@ impl Runtime {
                 if let Some(guard) = registration_guard.as_mut() {
                     guard.defuse();
                 }
+
+                let child_arc = Arc::new(Mutex::new(child));
 
                 let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
                 let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -590,13 +696,6 @@ impl Runtime {
                     }
                 });
 
-                let target = TargetRef {
-                    host_id: self.host.clone(),
-                    owner_id: self.owner.clone(),
-                    epoch: self.epoch,
-                    backend_session_id: id.clone(),
-                };
-
                 self.sessions.lock().map_err(|e| e.to_string())?.insert(
                     id,
                     Arc::new(Session {
@@ -606,7 +705,7 @@ impl Runtime {
                         dimensions: Mutex::new((cols, rows)),
                         master: Mutex::new(pair.master),
                         writer: Mutex::new(writer),
-                        child: Mutex::new(child),
+                        child: child_arc,
                         output,
                     }),
                 );
@@ -624,6 +723,333 @@ impl Runtime {
                     guard.completed = true;
                     self.spawns_cv.notify_all();
                 }
+
+                Ok(json!({ "target": target, "pid": pid }))
+            }
+            "pty.recover" => {
+                let logical_id = text(p, "logicalSessionId")?;
+                let prev_target: TargetRef = serde_json::from_value(
+                    p.get("previousTarget")
+                        .cloned()
+                        .ok_or("INVALID_REQUEST: previousTarget required")?,
+                )
+                .map_err(|e| format!("INVALID_REQUEST: invalid previousTarget: {e}"))?;
+
+                if prev_target.host_id != self.host {
+                    return Err("TARGET_EXPIRED: previousTarget host does not match helper host".into());
+                }
+
+                let _transaction = self.recovery_store.transaction()?;
+                let recovery_lock = self.recovery_store.get_recovery_lock(logical_id);
+                let _guard = recovery_lock.lock().map_err(|e| e.to_string())?;
+
+                let record = self
+                    .recovery_store
+                    .load_record_unlocked(logical_id)?
+                    .ok_or_else(|| "NOT_FOUND: no recovery record for logical session".to_string())?;
+
+                if record.disabled {
+                    return Err("RECOVERY_REFUSED: session was already terminated".into());
+                }
+
+                let current_boot = self.current_boot_id()?;
+
+                if let Some(receipt) = self.recovery_store.load_completion(logical_id)? {
+                    if receipt.source_target == prev_target && receipt.boot_id == current_boot {
+                        if receipt.target != record.exact_previous_target
+                            || receipt.target.owner_id != self.owner || receipt.target.epoch != self.epoch
+                        {
+                            return Err("RECOVERY_REFUSED: recovered execution belongs to another helper".into());
+                        }
+                        let session = self.sessions.lock().map_err(|e| e.to_string())?
+                            .get(&receipt.target.backend_session_id).cloned();
+                        if let Some(session) = session {
+                            let alive = session.child.lock().map_err(|e| e.to_string())?
+                                .try_wait().map_err(|e| e.to_string())?.is_none();
+                            if !alive || session.output.0.lock().map_err(|e| e.to_string())?.exited {
+                                return Err("RECOVERY_REFUSED: recovered execution has exited".into());
+                            }
+                            if receipt.pid != session.pid || receipt.boot_id != record.boot_id {
+                                return Err("CORRUPT_COMPLETION: live execution identity mismatch".into());
+                            }
+                            self.recovery_store.remove_pre_launch(logical_id, receipt.provider_key.as_deref())?;
+                            return Ok(json!({
+                                "target": receipt.target,
+                                "pid": receipt.pid,
+                            }));
+                        }
+                        return Err("RECOVERY_REFUSED: recovered execution is no longer available".into());
+                    }
+                }
+
+                if record.exact_previous_target != prev_target {
+                    return Err("REQUEST_CONFLICT: previousTarget does not match recorded target".into());
+                }
+
+                if current_boot == record.boot_id {
+                    return Err("RECOVERY_REFUSED: automatic recovery requires OS boot identity change".into());
+                }
+
+                if let Some(marker) = self.recovery_store.load_pre_launch(logical_id)? {
+                    if marker.host != self.host || marker.source_target != prev_target {
+                        return Err("REQUEST_CONFLICT: interrupted launch identity mismatch".into());
+                    }
+                    if marker.boot_id == current_boot {
+                        return Err("RECOVERY_FAILED: ambiguous interrupted launch".into());
+                    }
+                    self.recovery_store.remove_pre_launch(logical_id, marker.provider_key.as_deref())?;
+                }
+
+                if !record.project_root.is_absolute() {
+                    return Err("INVALID_REQUEST: project root must be absolute".into());
+                }
+                if !record.project_root.exists() {
+                    return Err("INVALID_REQUEST: project root no longer exists".into());
+                }
+                recovery::validate_recovery_directory(&record.project_root)?;
+                let canonical_project_root = record.project_root.canonicalize()
+                    .map_err(|e| format!("INVALID_REQUEST: invalid project root: {e}"))?;
+                if canonical_project_root != record.project_root {
+                    return Err("INVALID_REQUEST: project root path mismatch".into());
+                }
+
+                {
+                    let mut projects = self.projects.lock().map_err(|e| e.to_string())?;
+                    if let Some(existing) = projects.get(&record.project_id) {
+                        if existing != &canonical_project_root {
+                            return Err("REQUEST_CONFLICT: project ID mapped to different root".into());
+                        }
+                    } else {
+                        projects.insert(record.project_id.clone(), canonical_project_root.clone());
+                    }
+                }
+
+                if !record.cwd.is_absolute() {
+                    return Err("INVALID_REQUEST: cwd must be absolute".into());
+                }
+                if !record.cwd.exists() {
+                    return Err("INVALID_REQUEST: recorded cwd does not exist".into());
+                }
+                recovery::validate_recovery_directory(&record.cwd)?;
+                let canonical_cwd = record.cwd.canonicalize()
+                    .map_err(|e| format!("INVALID_REQUEST: invalid cwd: {e}"))?;
+
+                if canonical_cwd != record.cwd {
+                    return Err("INVALID_REQUEST: cwd path mismatch".into());
+                }
+                if !canonical_cwd.starts_with(&canonical_project_root) {
+                    return Err("FORBIDDEN: cwd outside authorized project root".into());
+                }
+
+                let resume_cmd = recovery::resolve_resume_command(&record, &canonical_cwd)?;
+
+                if let Some(existing_receipt) = self.recovery_store.load_completion_by_provider(&resume_cmd.provider_key)? {
+                    if existing_receipt.logical_session_id != logical_id && existing_receipt.boot_id == current_boot {
+                        return Err("REQUEST_CONFLICT: provider session already recovered under another logical session".into());
+                    }
+                }
+
+                if let Some(marker) = self.recovery_store.check_provider_pre_launch(&resume_cmd.provider_key)? {
+                    if marker.boot_id == current_boot {
+                        return Err("REQUEST_CONFLICT: conflicting simultaneous recovery for same provider session".into());
+                    }
+                    self.recovery_store.remove_pre_launch(&marker.logical_session_id, marker.provider_key.as_deref())?;
+                }
+
+                let cwd = prepare_spawn_cwd(&canonical_cwd);
+                ensure_cwd_spawnable(&cwd)?;
+
+                let attempt_id = uuid::Uuid::new_v4().to_string();
+                let marker = recovery::PreLaunchMarker {
+                    logical_session_id: logical_id.to_string(),
+                    attempt_id: attempt_id.clone(),
+                    host: self.host.clone(),
+                    boot_id: current_boot.clone(),
+                    source_target: prev_target.clone(),
+                    provider_key: Some(resume_cmd.provider_key.clone()),
+                    timestamp: recovery::current_timestamp()?,
+                };
+
+                let cols = record.cols.max(1);
+                let rows = record.rows.max(1);
+
+                let pair = portable_pty::native_pty_system()
+                    .openpty(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                let id = uuid::Uuid::new_v4().to_string();
+                let target = TargetRef {
+                    host_id: self.host.clone(),
+                    owner_id: self.owner.clone(),
+                    epoch: self.epoch,
+                    backend_session_id: id.clone(),
+                };
+                let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+                let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+
+                let output = Arc::new((
+                    Mutex::new(Output {
+                        next: 1,
+                        bytes: 0,
+                        chunks: VecDeque::new(),
+                        exited: false,
+                        agent_revision: 0,
+                        agent_state: None,
+                    }),
+                    Condvar::new(),
+                ));
+
+                let (agent_token_opt, mut registration_guard) = if let Some(server) = &self.agent_state {
+                    let tok = format!("{:032x}", rand::random::<u128>());
+                    let store = self.recovery_store.clone();
+                    let lid_clone = logical_id.to_string();
+                    let expected_target = target.clone();
+                    let on_report = Some(Arc::new(move |_sess_id: &str, agent_opt: Option<&str>, prov_opt: Option<&Value>| {
+                        store.update_agent_state_for_target(&lid_clone, &expected_target, agent_opt.map(ToString::to_string), prov_opt.cloned())
+                    }) as agent_state::AgentReportCallback);
+                    server.register_with_callback(&id, &tok, output.clone(), on_report);
+                    let guard = agent_state::AgentRegistrationGuard::new(server.clone(), id.clone());
+                    (Some(tok), Some(guard))
+                } else {
+                    (None, None)
+                };
+
+                let program_to_run = {
+                    #[cfg(test)]
+                    {
+                        let resolver = self.executable_resolver.lock().unwrap().clone();
+                        if let Some(r) = resolver {
+                            r(&resume_cmd.program).unwrap_or(resume_cmd.program)
+                        } else {
+                            resume_cmd.program
+                        }
+                    }
+                    #[cfg(not(test))]
+                    resume_cmd.program
+                };
+
+                let mut command = recovery::resume_command_builder(&program_to_run, &resume_cmd.args)?;
+                command.cwd(&cwd);
+
+                scrub_reserved_env_vars(&mut command);
+
+                if std::env::var("TERM")
+                    .map(|t| t == "dumb" || t.is_empty())
+                    .unwrap_or(true)
+                {
+                    command.env("TERM", "xterm-256color");
+                }
+
+                scrub_reserved_env_vars(&mut command);
+
+                command.env("FERRYX_SESSION_ID", &id);
+                if let (Some(server), Some(tok)) = (&self.agent_state, &agent_token_opt) {
+                    command.env("FERRYX_AGENT_STATE_PORT", server.port().to_string());
+                    command.env("FERRYX_AGENT_STATE_TOKEN", tok);
+                } else {
+                    command.env_remove("FERRYX_AGENT_STATE_PORT");
+                    command.env_remove("FERRYX_AGENT_STATE_TOKEN");
+                }
+
+                self.recovery_store.record_pre_launch(&marker)?;
+                let child = match pair.slave.spawn_command(command) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.recovery_store.remove_pre_launch(logical_id, Some(&resume_cmd.provider_key))?;
+                        return Err(e.to_string());
+                    }
+                };
+                drop(pair.slave);
+                let pid = match child.process_id() {
+                    Some(p) => p,
+                    None => return Err("REMOTE_SPAWN_FAILED: no PID".into()),
+                };
+
+                if let Some(guard) = registration_guard.as_mut() {
+                    guard.defuse();
+                }
+
+                let child_arc = Arc::new(Mutex::new(child));
+
+                let sink = output.clone();
+                let agent_server_for_exit = self.agent_state.clone();
+                let session_id_for_exit = id.clone();
+
+                std::thread::spawn(move || {
+                    let mut buffer = [0; 8192];
+                    loop {
+                        let read = reader.read(&mut buffer);
+                        let (lock, signal) = &*sink;
+                        let mut state = lock.lock().expect("output mutex poisoned");
+                        match read {
+                            Ok(n) if n > 0 => {
+                                let seq = state.next;
+                                state.next += 1;
+                                state.bytes += n;
+                                state.chunks.push_back((seq, buffer[..n].to_vec()));
+                                while state.bytes > RING_BYTES {
+                                    let (_, bytes) = state.chunks.pop_front().unwrap();
+                                    state.bytes -= bytes.len();
+                                }
+                            }
+                            _ => {
+                                state.exited = true;
+                                signal.notify_all();
+                                break;
+                            }
+                        }
+                        signal.notify_all();
+                    }
+                    if let Some(server) = agent_server_for_exit {
+                        server.revoke(&session_id_for_exit);
+                    }
+                });
+
+                self.sessions.lock().map_err(|e| e.to_string())?.insert(
+                    id.clone(),
+                    Arc::new(Session {
+                        target: target.clone(),
+                        pid,
+                        cwd: canonical_cwd,
+                        dimensions: Mutex::new((cols, rows)),
+                        master: Mutex::new(pair.master),
+                        writer: Mutex::new(writer),
+                        child: child_arc,
+                        output,
+                    }),
+                );
+
+                self.logical_to_backend
+                    .lock()
+                    .unwrap()
+                    .insert(logical_id.to_string(), id.clone());
+                self.backend_to_logical
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), logical_id.to_string());
+
+                let mut updated_record = record;
+                updated_record.exact_previous_target = target.clone();
+                updated_record.boot_id = current_boot.clone();
+                updated_record.updated_at = recovery::current_timestamp()?;
+                self.recovery_store.save_record_unlocked(&updated_record)?;
+
+                let receipt = recovery::CompletionReceipt {
+                    logical_session_id: logical_id.to_string(),
+                    attempt_id,
+                    source_target: prev_target,
+                    target: target.clone(),
+                    pid,
+                    boot_id: current_boot,
+                    provider_key: Some(resume_cmd.provider_key),
+                    timestamp: recovery::current_timestamp()?,
+                };
+                self.recovery_store.record_completion(&receipt)?;
 
                 Ok(json!({ "target": target, "pid": pid }))
             }
@@ -680,6 +1106,15 @@ impl Runtime {
 
                 match op {
                     "pty.describe" => {
+                        if session.child.lock().map_err(|e| e.to_string())?
+                            .try_wait().map_err(|e| e.to_string())?.is_some_and(|status| status.success())
+                        {
+                            if let Some(logical_id) = self.backend_to_logical.lock().map_err(|e| e.to_string())?
+                                .get(&target.backend_session_id).cloned()
+                            {
+                                self.recovery_store.mark_disabled_for_target(&logical_id, &target)?;
+                            }
+                        }
                         let (cols, rows) = *session.dimensions.lock().map_err(|e| e.to_string())?;
                         let (lock, _) = &*session.output;
                         let state = lock.lock().map_err(|e| e.to_string())?;
@@ -734,6 +1169,11 @@ impl Runtime {
                         Ok(json!({ "cols": cols, "rows": rows }))
                     }
                     "pty.stop" => {
+                        let logical_id = self.backend_to_logical.lock().map_err(|e| e.to_string())?
+                            .get(&target.backend_session_id).cloned();
+                        if let Some(lid) = logical_id {
+                            self.recovery_store.mark_disabled_for_target(&lid, &target)?;
+                        }
                         let mut child = session.child.lock().map_err(|e| e.to_string())?;
                         if child
                             .try_wait()
@@ -878,6 +1318,29 @@ impl Runtime {
                 }
             }
             _ => Err("UNSUPPORTED: operation not allowlisted".into()),
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for session in sessions.values() {
+                if let Ok(mut child) = session.child.lock() {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            if let Err(error) = child.kill() {
+                                eprintln!("Ferryx helper child teardown failed: {error}");
+                            }
+                            if let Err(error) = child.wait() {
+                                eprintln!("Ferryx helper child reap failed: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("Ferryx helper child status failed: {error}"),
+                    }
+                }
+            }
         }
     }
 }
@@ -1132,6 +1595,10 @@ fn ensure_cwd_spawnable(cwd: &Path) -> Result<(), String> {
 #[path = "helper_core_tests.rs"]
 #[cfg(test)]
 mod helper_core_tests;
+
+#[path = "reboot_recovery_tests.rs"]
+#[cfg(test)]
+mod reboot_recovery_tests;
 
 #[cfg(test)]
 mod ferryx_scope {

@@ -67,9 +67,13 @@ struct AgentStateWireReport {
     token: Option<String>,
 }
 
+pub type AgentReportCallback =
+    Arc<dyn Fn(&str, Option<&str>, Option<&Value>) -> Result<(), String> + Send + Sync>;
+
 struct SessionRegistration {
     token: String,
     output: Arc<(Mutex<Output>, Condvar)>,
+    on_report: Option<AgentReportCallback>,
 }
 
 /// Interruptible shutdown signal for the accept loop, shaped after the watchdog's
@@ -271,11 +275,22 @@ impl AgentStateServer {
     /// visibility would expose the helper-owned `Output` guard type in a crate-visible
     /// signature (private-interface lint). The helper module and its test children are
     /// the only callers.
+    #[cfg(test)]
     pub(super) fn register(
         &self,
         session_id: &str,
         token: &str,
         output: Arc<(Mutex<Output>, Condvar)>,
+    ) {
+        self.register_with_callback(session_id, token, output, None);
+    }
+
+    pub(super) fn register_with_callback(
+        &self,
+        session_id: &str,
+        token: &str,
+        output: Arc<(Mutex<Output>, Condvar)>,
+        on_report: Option<AgentReportCallback>,
     ) {
         if let Ok(mut reg) = self.registry.lock() {
             reg.insert(
@@ -283,6 +298,7 @@ impl AgentStateServer {
                 SessionRegistration {
                     token: token.to_string(),
                     output,
+                    on_report,
                 },
             );
         }
@@ -474,16 +490,23 @@ fn handle_connection(
         _ => return,
     };
 
-    let output = {
+    let (output, on_report) = {
         let guard = match registry.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         match guard.get(&report.session_id) {
-            Some(reg) if reg.token == *token => reg.output.clone(),
+            Some(reg) if reg.token == *token => (reg.output.clone(), reg.on_report.clone()),
             _ => return,
         }
     };
+
+    if let Some(cb) = on_report {
+        if let Err(e) = cb(&report.session_id, report.agent.as_deref(), report.provider_session.as_ref()) {
+            eprintln!("Ferryx agent report persistence failed: {e}");
+            return;
+        }
+    }
 
     let (lock, signal) = &*output;
     let mut out = match lock.lock() {
