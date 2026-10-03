@@ -1,0 +1,318 @@
+#!/usr/bin/env node
+// Lifecycle scenario adapters for pane-liveness QA (Task 7):
+// - retained-handover: Workload marker -> isolated handover -> preserves incarnation/identity & single reader -> marker again
+// - handover-abort: Successor abort/commit rejection -> relinquishment before predecessor resumes -> no dual read -> workload preserved
+// - suspension-ownership: External stops untouched vs owned auto-resume -> verified actuation receipt -> same PID resumed
+// - stale-binding: Stale/mismatched 5-tuple attach rejected -> valid reattach renders on same backend without new PTY
+
+import { join } from 'node:path';
+import {
+  BUDGETS,
+  HarnessError,
+  MonotonicBudget,
+} from './common-harness.mjs';
+import {
+  MARKER_TEXT,
+  focusWindowByPidDarwin,
+  typeMarkerDarwin,
+  focusWindowWindows,
+  typeMarkerWindows,
+  captureOwnedWindowDarwin,
+  captureOwnedWindowWindows,
+  performInspectionHandshake,
+} from './native-driver.mjs';
+
+// Invariant assertions for lifecycle, handover, and suspension receipts
+export function assertInvariants(names, receipt) {
+  const r = receipt ?? {};
+  if (names.includes('handoverPreservesIncarnation')) {
+    if (!r.originalBackendSessionId || r.adoptedBackendSessionId !== r.originalBackendSessionId) {
+      throw new HarnessError('ASSERTION_FAILURE', `retained-handover: incarnation not preserved across transfer: ${JSON.stringify(r)}`);
+    }
+    if (r.originalIncarnation == null || r.adoptedIncarnation == null) {
+      throw new HarnessError('TASK4_IDENTITY_DEPENDENCY', `retained-handover: baseline incarnation is null - Task 4 identity reconciliation dependency unavailable: ${JSON.stringify(r)}`);
+    }
+    if (typeof r.originalIncarnation !== 'string' || r.adoptedIncarnation !== r.originalIncarnation) {
+      throw new HarnessError('ASSERTION_FAILURE', `retained-handover: creation incarnation changed across transfer: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('relinquishmentBeforeResume')) {
+    if (r.relinquishmentReceiptReceived !== true || typeof r.successorReaderReleased !== 'boolean') {
+      throw new HarnessError('ASSERTION_FAILURE', `handover-abort: no authoritative relinquishment receipt before predecessor resume: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('singleReader')) {
+    if (r.readerCount !== 1) {
+      throw new HarnessError('ASSERTION_FAILURE', `single-reader invariant violated (readerCount=${JSON.stringify(r.readerCount)}): ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('noDualRead')) {
+    if (r.dualReadObserved === true || (Array.isArray(r.readCounts) && r.readCounts.filter(c => c > 0).length > 1)) {
+      throw new HarnessError('ASSERTION_FAILURE', `dual read observed during rollback: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('externalStopsUntouched')) {
+    if (r.externallyStoppedAutoResumed === true) {
+      throw new HarnessError('ASSERTION_FAILURE', `external stop was auto-resumed: ${JSON.stringify(r)}`);
+    }
+    if (r.externallyStoppedProbeState !== 'stopped') {
+      throw new HarnessError('ASSERTION_FAILURE', `external stop not observed as stopped: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('ownedResumeSameProcess')) {
+    if (r.ownedResumePid !== r.ownedSuspendPid || r.ownedResumed !== true) {
+      throw new HarnessError('ASSERTION_FAILURE', `owned suspension did not resume the same process: ${JSON.stringify(r)}`);
+    }
+    if (r.verifiedActuationReceipt !== true) {
+      throw new HarnessError('ASSERTION_FAILURE', `resume without verified actuation receipt: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('staleReceiptRejected')) {
+    if (r.rejected !== true || typeof r.reason !== 'string' || r.reason.length === 0) {
+      throw new HarnessError('ASSERTION_FAILURE', `stale receipt was not explicitly rejected: ${JSON.stringify(r)}`);
+    }
+  }
+  if (names.includes('reattachSameBackend')) {
+    if (!r.backendSessionId || r.newPtyCreated === true) {
+      throw new HarnessError('ASSERTION_FAILURE', `legitimate reattach must reuse the backend without a new PTY: ${JSON.stringify(r)}`);
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 1. retained-handover scenario adapter
+// ---------------------------------------------------------------------------
+export async function runRetainedHandoverScenario(ctx, plan, budget = new MonotonicBudget()) {
+  const { evidence, barrierHub, pid } = ctx;
+
+  // Initial typing of agent workload marker
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await focusWindowByPidDarwin(evidence, pid);
+    await typeMarkerDarwin(evidence, pid);
+  }
+  const initialMarkerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'initial marker'));
+  evidence.action({ action: 'initial-marker', receipt: initialMarkerReceipt });
+
+  // Trigger isolated handover
+  barrierHub.command('trigger-handover', { targetEpoch: 'next', isolated: true });
+  evidence.action({ action: 'trigger-handover', targetEpoch: 'next' });
+
+  // Await handover transfer receipt
+  const transfer = await barrierHub.awaitReceipt('handover-transfer', 0, budget.consume(BUDGETS.attemptCeilingMs, 'handover-transfer'));
+  assertInvariants(['handoverPreservesIncarnation', 'singleReader'], transfer);
+  evidence.action({ action: 'handover-transfer', receipt: transfer });
+
+  // Type marker again in the adopted session
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await typeMarkerDarwin(evidence, pid);
+  }
+
+  const postMarkerReceipt = await barrierHub.awaitReceipt('marker-output', 1, budget.consume(BUDGETS.stagePresentationMs, 'post-handover marker'));
+  if (!String(postMarkerReceipt?.output ?? '').includes(MARKER_TEXT)) {
+    throw new HarnessError('ASSERTION_FAILURE', `fresh visible output not observed after handover: ${JSON.stringify(postMarkerReceipt)}`);
+  }
+  evidence.action({ action: 'post-handover-marker', receipt: postMarkerReceipt });
+
+  // Screenshot and inspection handshake
+  const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
+  let screenshotMetadata;
+  if (ctx.platformPreflight === 'win32') {
+    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
+  } else {
+    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
+  }
+
+  const markerRecognition = await performInspectionHandshake(
+    evidence,
+    barrierHub,
+    { runId: ctx.runId, operationId: ctx.operationId },
+    screenshotMetadata,
+    budget.consume(BUDGETS.stagePresentationMs, 'inspection handshake')
+  );
+
+  return {
+    transferReceipt: transfer,
+    postMarkerReceipt,
+    markerRecognition,
+    screenshotMetadata,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 2. handover-abort scenario adapter
+// ---------------------------------------------------------------------------
+export async function runHandoverAbortScenario(ctx, plan, budget = new MonotonicBudget()) {
+  const { evidence, barrierHub, pid } = ctx;
+
+  // Trigger abort variant (e.g. commit rejection, lost abort reply, or successor exit)
+  const variant = plan.abortVariant ?? 'commit-rejection';
+  barrierHub.command('trigger-handover-abort', { variant });
+  evidence.action({ action: 'trigger-handover-abort', variant });
+
+  // Await rollback relinquishment receipt
+  const rollback = await barrierHub.awaitReceipt('rollback-relinquishment', 0, budget.consume(BUDGETS.attemptCeilingMs, 'rollback-relinquishment'));
+  assertInvariants(['relinquishmentBeforeResume', 'singleReader', 'noDualRead'], rollback);
+  evidence.action({ action: 'rollback-relinquishment', receipt: rollback });
+
+  // Type marker to verify confirmed resolution restores same workload
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await focusWindowByPidDarwin(evidence, pid);
+    await typeMarkerDarwin(evidence, pid);
+  }
+
+  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'restored workload marker'));
+  if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
+    throw new HarnessError('ASSERTION_FAILURE', `marker not observed in restored workload after abort rollback: ${JSON.stringify(markerReceipt)}`);
+  }
+  evidence.action({ action: 'restored-marker', receipt: markerReceipt });
+
+  // Screenshot and inspection handshake
+  const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
+  let screenshotMetadata;
+  if (ctx.platformPreflight === 'win32') {
+    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
+  } else {
+    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
+  }
+
+  const markerRecognition = await performInspectionHandshake(
+    evidence,
+    barrierHub,
+    { runId: ctx.runId, operationId: ctx.operationId },
+    screenshotMetadata,
+    budget.consume(BUDGETS.stagePresentationMs, 'inspection handshake')
+  );
+
+  return {
+    rollbackReceipt: rollback,
+    markerReceipt,
+    markerRecognition,
+    screenshotMetadata,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 3. suspension-ownership scenario adapter
+// ---------------------------------------------------------------------------
+export async function runSuspensionOwnershipScenario(ctx, plan, budget = new MonotonicBudget()) {
+  const { evidence, barrierHub, pid } = ctx;
+
+  // Trigger suspension check
+  barrierHub.command('trigger-suspension-check', { testExternalStop: true });
+  evidence.action({ action: 'trigger-suspension-check' });
+
+  // Await suspension receipt
+  const receipt = await barrierHub.awaitReceipt('suspension-receipt', 0, budget.consume(BUDGETS.attemptCeilingMs, 'suspension-receipt'));
+  assertInvariants(['externalStopsUntouched', 'ownedResumeSameProcess'], receipt);
+  evidence.action({ action: 'suspension-receipt', receipt });
+
+  // Type marker to confirm resumed process is responsive
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await focusWindowByPidDarwin(evidence, pid);
+    await typeMarkerDarwin(evidence, pid);
+  }
+
+  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'resumed marker'));
+  if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
+    throw new HarnessError('ASSERTION_FAILURE', `marker not observed in resumed process: ${JSON.stringify(markerReceipt)}`);
+  }
+  evidence.action({ action: 'resumed-marker', receipt: markerReceipt });
+
+  // Screenshot and inspection handshake
+  const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
+  let screenshotMetadata;
+  if (ctx.platformPreflight === 'win32') {
+    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
+  } else {
+    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
+  }
+
+  const markerRecognition = await performInspectionHandshake(
+    evidence,
+    barrierHub,
+    { runId: ctx.runId, operationId: ctx.operationId },
+    screenshotMetadata,
+    budget.consume(BUDGETS.stagePresentationMs, 'inspection handshake')
+  );
+
+  return {
+    suspensionReceipt: receipt,
+    markerReceipt,
+    markerRecognition,
+    screenshotMetadata,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 4. stale-binding scenario adapter
+// ---------------------------------------------------------------------------
+export async function runStaleBindingScenario(ctx, plan, budget = new MonotonicBudget()) {
+  const { evidence, barrierHub, pid } = ctx;
+
+  // Trigger stale attach where delayed receipt changes identity fields
+  barrierHub.command('trigger-stale-binding', { mutateField: 'attemptGeneration' });
+  evidence.action({ action: 'trigger-stale-binding', mutateField: 'attemptGeneration' });
+
+  // Await stale receipt rejected
+  const rejectedReceipt = await barrierHub.awaitReceipt('stale-receipt-rejected', 0, budget.consume(BUDGETS.attemptCeilingMs, 'stale-receipt-rejected'));
+  assertInvariants(['staleReceiptRejected'], rejectedReceipt);
+  evidence.action({ action: 'stale-receipt-rejected', receipt: rejectedReceipt });
+
+  // Await reattach-marker or trigger legitimate reattach
+  const reattachReceipt = await barrierHub.awaitReceipt('reattach-marker', 0, budget.consume(BUDGETS.attemptCeilingMs, 'reattach-marker'));
+  assertInvariants(['reattachSameBackend'], reattachReceipt);
+  evidence.action({ action: 'reattach-marker', receipt: reattachReceipt });
+
+  // Type marker to confirm valid reattach renders on same backend
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await focusWindowByPidDarwin(evidence, pid);
+    await typeMarkerDarwin(evidence, pid);
+  }
+
+  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'reattach marker'));
+  if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
+    throw new HarnessError('ASSERTION_FAILURE', `marker not observed on legitimate reattach: ${JSON.stringify(markerReceipt)}`);
+  }
+  evidence.action({ action: 'marker-receipt', receipt: markerReceipt });
+
+  // Screenshot and inspection handshake
+  const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
+  let screenshotMetadata;
+  if (ctx.platformPreflight === 'win32') {
+    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
+  } else {
+    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
+  }
+
+  const markerRecognition = await performInspectionHandshake(
+    evidence,
+    barrierHub,
+    { runId: ctx.runId, operationId: ctx.operationId },
+    screenshotMetadata,
+    budget.consume(BUDGETS.stagePresentationMs, 'inspection handshake')
+  );
+
+  return {
+    rejectedReceipt,
+    reattachReceipt,
+    markerReceipt,
+    markerRecognition,
+    screenshotMetadata,
+  };
+}

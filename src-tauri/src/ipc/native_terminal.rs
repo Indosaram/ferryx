@@ -27,6 +27,7 @@ pub const NATIVE_TERMINAL_PRESENTATION_WAIT: std::time::Duration =
 /// until the previous one's receipt arrived. Emitting it lets the command return as soon as the
 /// PTY write lands, while the anchor still updates a moment later.
 pub const NATIVE_TERMINAL_INPUT_RECEIPT_EVENT: &str = "native_terminal_input_receipt";
+pub const NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT: &str = "pane_presentation_receipt";
 use crate::native_terminal::composition::{CellMetrics, LogicalBounds, SurfaceCompositionLayout};
 use crate::native_terminal::snapshot_slot::{PresentedFrame, SnapshotSlot};
 use crate::native_terminal::surface_host::{
@@ -49,6 +50,8 @@ pub struct NativeTerminalLogicalRect {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalBoundsReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     pub presented: bool,
     #[serde(default)]
     pub render_deferred: bool,
@@ -63,6 +66,14 @@ pub struct NativeTerminalBoundsReceipt {
     pub cell_height_px: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_scale_factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalAttachReceipt {
+    pub session_id: String,
+    pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+    pub presented: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -862,11 +873,15 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
     after_sequence: Option<String>,
-) -> Result<(), IpcError> {
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+    remaining_ms: Option<u64>,
+) -> Result<NativeTerminalAttachReceipt, IpcError> {
+    let receipt_state = state.inner().clone();
+    let expected_tuple = attach_tuple.clone();
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000)),
         native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
-            scale_factor, after_sequence),
+            scale_factor, after_sequence, attach_tuple),
     )
     .await
     .map_err(|_| {
@@ -875,7 +890,12 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
             "Terminal attachment timed out. Retry reconnecting this pane.",
         )
         .with_details(serde_json::json!({ "sessionId": session_id, "phase": "attach" }))
-    })?
+    })??;
+    let active = receipt_state.session_attach_tuple(&session_id);
+    if active != expected_tuple {
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+    }
+    Ok(NativeTerminalAttachReceipt { session_id, attach_tuple: active, presented: false })
 }
 
 async fn native_terminal_attach<R: Runtime>(
@@ -886,6 +906,7 @@ async fn native_terminal_attach<R: Runtime>(
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
     after_sequence: Option<String>,
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<(), IpcError> {
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
@@ -899,7 +920,7 @@ async fn native_terminal_attach<R: Runtime>(
         _ => None,
     };
     match state
-        .reattach_existing_session_with_bounds(&session_id, logical_bounds)
+        .reattach_existing_session_with_bounds_and_tuple(&session_id, logical_bounds, attach_tuple.as_ref())
         .map_err(|error| IpcError::internal(error.to_string()))?
     {
         true => return Ok(()),
@@ -910,8 +931,24 @@ async fn native_terminal_attach<R: Runtime>(
     // daemon. Reading the cursor first and awaiting afterwards lets the old pump keep applying
     // output across the await, so the response would be a delta against a cursor the grid has
     // already passed — which classifies as an overlap and destroys resident scrollback.
-    let token = state.begin_replay_request(&session_id);
-    let after_seq = replay_request_cursor(token.map(|token| token.last_sequence), after_sequence);
+    if attach_tuple.as_ref().is_some_and(|tuple| tuple.backend_session_id != session_id) {
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+    }
+    if attach_tuple.is_some() && state.session_attempt_generation(&session_id).is_none() {
+        // Reserve a resident VT before awaiting the daemon, so even the first two concurrent
+        // attaches have a generation and binding against which their completions are checked.
+        let bounds = logical_bounds.unwrap_or(LogicalBounds {
+            x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0,
+        });
+        state.prepare_session_layout(NativeTerminalBoundsRequest {
+            session_id: session_id.clone(), bounds,
+        }, font_metrics_for_bounds(bounds)).map_err(IpcError::from)?;
+    }
+    let token = state.begin_replay_request_with_tuple(&session_id, attach_tuple.clone());
+    if token.is_none() && (attach_tuple.is_some() || state.session_attach_tuple(&session_id).is_some()) {
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+    }
+    let after_seq = replay_request_cursor(token.as_ref().map(|token| token.last_sequence), after_sequence);
     let mut attachment = match daemon_client.attach(&session_id, after_seq).await {
         Ok(attachment) => attachment,
         // The fence already aborted the old stream, so a failed request must not leave the pane
@@ -930,11 +967,15 @@ async fn native_terminal_attach<R: Runtime>(
     // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
     // empty while carrying no gap, which would leave the pane blank. Re-request the full history
     // once the response reveals the epoch actually served.
-    if let Some(token) = token {
+    if let Some(token) = token.as_ref() {
         if after_seq.is_some() && attachment.epoch != token.epoch {
             attachment.stream_task.abort();
             attachment = daemon_client.attach(&session_id, None).await?;
         }
+    }
+    if attach_tuple.as_ref().is_some_and(|tuple| tuple.daemon_epoch != attachment.epoch.to_string()) {
+        attachment.stream_task.abort();
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
     if let Err(err) = state.attach_daemon_attachment_with_bounds_client_and_token(
         &session_id,
@@ -956,13 +997,20 @@ fn replay_request_cursor(resident: Option<Option<u64>>, explicit: Option<String>
     }
 }
 
+fn font_metrics_for_bounds(bounds: LogicalBounds) -> CellMetrics {
+    crate::native_terminal::renderer::font_manager::derived_cell_metrics_for_scale(bounds.scale_factor)
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_detach<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<(), IpcError> {
-    state.detach_session(&session_id);
+    if !state.detach_session_fenced(&session_id, attach_tuple.as_ref()) {
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+    }
     Ok(())
 }
 
@@ -971,8 +1019,11 @@ pub async fn cmd_native_terminal_close<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<(), IpcError> {
-    state.close_session(&session_id);
+    if !state.close_session_fenced(&session_id, attach_tuple.as_ref()) {
+        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+    }
     Ok(())
 }
 
@@ -983,6 +1034,8 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     session_id: String,
     bounds: NativeTerminalLogicalRect,
     scale_factor: f64,
+    remaining_ms: Option<u64>,
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     let request = NativeTerminalBoundsRequest {
         session_id: session_id.clone(),
@@ -1012,7 +1065,11 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         .ok_or_else(|| IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())))?;
     let mut presentations = slot.subscribe_presentations();
     presentations.borrow_and_update();
-    let presentation_deadline = tokio::time::Instant::now() + NATIVE_TERMINAL_PRESENTATION_WAIT;
+    let presentation_deadline = tokio::time::Instant::now()
+        + remaining_ms.map_or(NATIVE_TERMINAL_PRESENTATION_WAIT, |remaining| {
+            std::time::Duration::from_millis(remaining.min(2_000))
+        });
+    let expected_tuple = attach_tuple.or_else(|| state.session_attach_tuple(&session_id));
     let mut initial_request = Some(request);
     loop {
         let state_inner = state.inner().clone();
@@ -1020,6 +1077,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         let (sender, receiver) = oneshot::channel();
         let session_id_clone = session_id.clone();
         let request = initial_request.take();
+        let render_tuple = expected_tuple.clone();
         // Every render path publishes the frame it just computed, so the frame carrying this
         // geometry is strictly newer than the generation observed here. Capturing it before
         // dispatch means a paint that completes while the render is still on the main thread
@@ -1027,11 +1085,16 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         let awaited_generation = slot.generation();
         window
             .run_on_main_thread(move || {
-                let result = match request {
-                    Some(request) => state_inner.render(&surface_window, request),
-                    None => state_inner.render_current(&surface_window, &session_id_clone),
+                if tokio::time::Instant::now() >= presentation_deadline {
+                    let _ = sender.send(Err(IpcError::new(IpcErrorCode::Timeout,
+                        "Native presentation deadline exceeded; retry this pane")));
+                    return;
                 }
-                .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                let result = match request {
+                    Some(request) => state_inner.render_fenced(&surface_window, request, render_tuple.as_ref()),
+                    None => state_inner.render_current_fenced(&surface_window, &session_id_clone, render_tuple.as_ref()),
+                }
+                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt))
                 .map_err(IpcError::from);
                 let _ = sender.send(result);
             })
@@ -1040,14 +1103,19 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                     "Could not dispatch native terminal render: {error}"
                 ))
             })?;
-        let receipt = receiver.await.map_err(|_| {
+        let receipt = tokio::time::timeout_at(presentation_deadline, receiver).await
+            .map_err(|_| IpcError::new(IpcErrorCode::Timeout, "Native presentation deadline exceeded; retry this pane"))?
+            .map_err(|_| {
             IpcError::internal("Main thread stopped before native terminal render completed")
         })??;
+        if state.session_attach_tuple(&session_id) != expected_tuple {
+            return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+        }
         if !receipt.render_deferred {
             return Ok(receipt);
         }
         if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
-            return Ok(into_ipc_receipt(session_id, presented));
+            return Ok(into_bound_ipc_receipt(state.inner(), session_id, presented));
         }
         loop {
             tokio::select! {
@@ -1059,8 +1127,11 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                     result.map_err(|_| {
                         IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
                     })?;
+                    if state.session_attach_tuple(&session_id) != expected_tuple {
+                        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+                    }
                     if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
-                        return Ok(into_ipc_receipt(session_id, presented));
+                        return Ok(into_bound_ipc_receipt(state.inner(), session_id, presented));
                     }
                 }
                 // The geometry is already applied; stop holding the caller's newer bounds back.
@@ -1095,7 +1166,7 @@ fn presented_after(
     presentations: &mut tokio::sync::watch::Receiver<Option<PresentedFrame>>,
     awaited_generation: u64,
 ) -> Option<NativeTerminalSurfaceReceipt> {
-    (*presentations.borrow_and_update())
+    presentations.borrow_and_update().clone()
         .filter(|presented| {
             presented.generation > awaited_generation
                 && slot.is_attached_with_epoch(presented.attachment_epoch)
@@ -1121,7 +1192,7 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
     if let Err(error) = window.run_on_main_thread(move || {
         let result = state_inner
             .set_focus(&surface_window, &session_id_clone, focused)
-            .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
+            .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone.clone(), receipt))
             .map_err(|error| IpcError::internal(error.to_string()));
         let _ = sender.send(result);
     }) {
@@ -1155,7 +1226,7 @@ pub async fn cmd_native_terminal_set_preedit<R: Runtime>(
     if let Err(error) = window.run_on_main_thread(move || {
         let result = state_inner
             .set_preedit(&surface_window, &session_id_clone, preedit)
-            .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
+            .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone.clone(), receipt))
             .map_err(|error| IpcError::internal(error.to_string()));
         let _ = sender.send(result);
     }) {
@@ -1376,13 +1447,13 @@ pub async fn dispatch_native_terminal_receipt<R: Runtime>(
         move || {
             let result = state_inner
                 .get_receipt(&surface_window, &session_id_clone)
-                .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
+                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone.clone(), receipt))
                 .map_err(|error| IpcError::internal(error.to_string()));
             let _ = sender.send(result);
         },
     ) {
         let degraded = state.degraded_receipt(session_id);
-        let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+        let degraded_receipt = into_bound_ipc_receipt(state, session_id.to_string(), degraded);
         let mut details_map = match serde_json::to_value(&degraded_receipt) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => serde_json::Map::new(),
@@ -1401,7 +1472,7 @@ pub async fn dispatch_native_terminal_receipt<R: Runtime>(
         Ok(Ok(receipt_result)) => receipt_result,
         Ok(Err(_)) => {
             let degraded = state.degraded_receipt(session_id);
-            let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+            let degraded_receipt = into_bound_ipc_receipt(state, session_id.to_string(), degraded);
             let mut details_map = match serde_json::to_value(&degraded_receipt) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => serde_json::Map::new(),
@@ -1418,7 +1489,7 @@ pub async fn dispatch_native_terminal_receipt<R: Runtime>(
         }
         Err(_) => {
             let degraded = state.degraded_receipt(session_id);
-            let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+            let degraded_receipt = into_bound_ipc_receipt(state, session_id.to_string(), degraded);
             let mut details_map = match serde_json::to_value(&degraded_receipt) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => serde_json::Map::new(),
@@ -1493,6 +1564,108 @@ where
     Ok(())
 }
 
+pub async fn send_native_terminal_input_with_stage_logging<R: Runtime, F, Fut>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    input: &NativeTerminalInput,
+    generation: Option<u64>,
+    request_id: Option<String>,
+    write_op: F,
+) -> Result<(), IpcError>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let start_instant = std::time::Instant::now();
+    let started_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64() * 1000.0);
+    let op_id = request_id.clone();
+    crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+        "event": "terminal.surface.input.stage.backend_write_start",
+        "details": {
+            "operationId": op_id,
+            "sessionId": session_id,
+            "generation": generation,
+            "startedAt": started_at_unix_ms,
+        }
+    }));
+    // Task 3 (local-split-qa): private QA barrier hook on the REAL write
+    // stage. The channel exists only when the pane-liveness runner installed
+    // a task-owned barrier dir through the inherited env; default builds and
+    // normal runs never reach this code.
+    #[cfg(feature = "local-split-qa")]
+    let qa_write_release_outcome = match crate::ipc::qa_barrier::active_channel() {
+        Some(channel) => {
+            crate::ipc::qa_barrier::hold_backend_write_barrier(
+                &channel,
+                state,
+                session_id,
+                request_id.as_deref(),
+            )
+            .await
+        }
+        None => None,
+    };
+    let write_result = send_native_terminal_input_with_writer(
+        app,
+        state,
+        session_id,
+        input,
+        write_op,
+    )
+    .await;
+    let duration_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+    match &write_result {
+        Ok(()) => {
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": true,
+                    "errorCode": None::<String>,
+                }
+            }));
+        }
+        Err(err) => {
+            let code_str = serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", err.code));
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": false,
+                    "errorCode": Some(crate::ipc::debug::normalize_error_code(&code_str)),
+                }
+            }));
+        }
+    }
+    // Task 3 (local-split-qa): settle with a FRESH real collector snapshot
+    // plus actual stage-progress evidence. The verdict is never forced - an
+    // Unknown recovery reports evidenceMissing with the missing-field list.
+    #[cfg(feature = "local-split-qa")]
+    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+        crate::ipc::qa_barrier::settle_backend_write_barrier(
+            &channel,
+            state,
+            session_id,
+            request_id.as_deref(),
+            qa_write_release_outcome,
+            write_result.is_ok(),
+            duration_ms,
+        );
+    }
+    write_result
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_send_input<R: Runtime>(
     app: AppHandle<R>,
@@ -1501,13 +1674,16 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
     generation: Option<u64>,
+    request_id: Option<String>,
 ) -> Result<(), IpcError> {
     let write_session_id = session_id.clone();
-    send_native_terminal_input_with_writer(
+    send_native_terminal_input_with_stage_logging(
         &app,
         state.inner(),
         &session_id,
         &input,
+        generation,
+        request_id,
         |bytes| async move {
             daemon_client
                 .write_terminal_at_generation(&write_session_id, generation, bytes)
@@ -1515,6 +1691,14 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
         },
     )
     .await
+}
+
+#[tauri::command]
+pub fn cmd_native_terminal_pane_liveness(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<Option<crate::ipc::debug::PaneLivenessSnapshot>, IpcError> {
+    Ok(state.session_liveness_observation(&session_id))
 }
 
 /// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
@@ -1652,11 +1836,11 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
                         bounds: logical_bounds,
                     },
                 )
-                .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt))
                 .map_err(|error| IpcError::internal(error.to_string())),
             None => state_inner
                 .get_receipt(&surface_window, &session_id_clone)
-                .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt))
                 .map_err(|error| IpcError::internal(error.to_string())),
         };
         let _ = sender.send(result);
@@ -2089,7 +2273,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
                                     bounds,
                                 },
                             )
-                            .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                            .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt))
                             .ok()
                     });
                 let _ = sender.send(res);
@@ -2273,6 +2457,7 @@ fn into_ipc_receipt(
     receipt: NativeTerminalSurfaceReceipt,
 ) -> NativeTerminalBoundsReceipt {
     NativeTerminalBoundsReceipt {
+        attach_tuple: None,
         presented: receipt.presented,
         render_deferred: receipt.render_deferred,
         session_id,
@@ -2288,9 +2473,46 @@ fn into_ipc_receipt(
     }
 }
 
+fn into_bound_ipc_receipt(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: String,
+    receipt: NativeTerminalSurfaceReceipt,
+) -> NativeTerminalBoundsReceipt {
+    let (attach_tuple, presented) = state.bound_presentation_observation(&session_id, &receipt);
+    let mut result = into_ipc_receipt(session_id, receipt);
+    result.attach_tuple = attach_tuple;
+    result.presented = presented;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_liveness_native_binding_response_serializes_authoritative_tuple_without_presentation() {
+        let tuple = crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: "backend".into(), incarnation: Some("incarnation".into()),
+            daemon_epoch: "8".into(), frontend_session_id: "frontend".into(),
+            pane_identity: "pane".into(), binding_key: "binding".into(), attempt_generation: 3,
+        };
+        let response = NativeTerminalAttachReceipt {
+            session_id: "backend".into(), attach_tuple: Some(tuple.clone()), presented: false,
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["attachTuple"], serde_json::to_value(&tuple).unwrap());
+        assert_eq!(json["presented"], false);
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("backend", 8, None).unwrap();
+        state.begin_replay_request_with_tuple("backend", Some(tuple.clone())).unwrap();
+        let mut unknown = state.degraded_receipt("backend");
+        unknown.presented = true;
+        let bounds = into_bound_ipc_receipt(&state, "backend".into(), unknown);
+        let json = serde_json::to_value(bounds).unwrap();
+        assert_eq!(json["attachTuple"], serde_json::to_value(tuple).unwrap());
+        assert_eq!(json["presented"], false);
+        state.teardown();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn native_reconnect_attach_settles_when_daemon_never_answers_handshake() {
@@ -2330,7 +2552,7 @@ mod tests {
                 cmd_native_terminal_attach(
                     app.handle().clone(), app.state::<Arc<DaemonClient>>(),
                     app.state::<NativeTerminalSurfaceHostState>(),
-                    "qa-existing-session".into(), None, None, None,
+                    "qa-existing-session".into(), None, None, None, None, None,
                 ),
             ).await;
             // Then the command settles before the test's safety deadline.
@@ -2375,6 +2597,95 @@ mod tests {
                 "{name} must accept captured generation"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_diagnostics_prearmed_producer_write_barrier() {
+        let app = tauri::test::mock_builder()
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+
+        // Attach an active session to surface host state so encode_attached_input succeeds
+        // and establishes a real blocked producer on the write barrier.
+        let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending());
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                "session-test-barrier",
+                crate::daemon::DaemonAttachment {
+                    session_id: "session-test-barrier".into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: bytes::Bytes::new(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task,
+                },
+                Some(app.handle().clone()),
+                None,
+            )
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let input = NativeTerminalInput::Text { text: "test input".into() };
+
+        let recorded_entries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_entries = std::sync::Arc::clone(&recorded_entries);
+
+        let _sink_guard = crate::ipc::debug::set_scoped_sink_for_operation("req-barrier-1", move |entry| {
+            if entry.event.starts_with("terminal.surface.input.stage.") {
+                sink_entries.lock().unwrap().push(entry.clone());
+            }
+        });
+
+        let write_fut = send_native_terminal_input_with_stage_logging(
+            &app.handle(),
+            &state,
+            "session-test-barrier",
+            &input,
+            Some(1),
+            Some("req-barrier-1".into()),
+            |_bytes| async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(())
+            },
+        );
+
+        tokio::pin!(write_fut);
+
+        tokio::select! {
+            _ = &mut write_fut => panic!("write_fut completed before release"),
+            res = started_rx => {
+                assert!(res.is_ok(), "writer entered write_op and signaled barrier");
+                let entries = recorded_entries.lock().unwrap();
+                assert_eq!(entries.len(), 1, "backend_write_start must be emitted before write_op");
+                assert_eq!(entries[0].event, "terminal.surface.input.stage.backend_write_start");
+                assert_eq!(entries[0].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+                assert_eq!(entries[0].details.get("sessionId").and_then(|v| v.as_str()), Some("session-test-barrier"));
+                drop(entries);
+                let _ = release_tx.send(());
+            }
+        }
+
+        let result = write_fut.await;
+        assert!(result.is_ok(), "production write pipeline settled successfully");
+
+        let entries = recorded_entries.lock().unwrap();
+        assert_eq!(entries.len(), 2, "both backend_write_start and backend_write must be emitted");
+        assert_eq!(entries[1].event, "terminal.surface.input.stage.backend_write");
+        assert_eq!(entries[1].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+        assert_eq!(entries[1].details.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        state.teardown();
     }
 
     #[tokio::test]
@@ -3269,5 +3580,296 @@ mod tests {
         // inputWritten: true, which forced every caller to distinguish "the key was lost" from
         // "only the IME anchor was lost" -- and made the next keystroke wait for the rendezvous.
         result.expect("a written keystroke must succeed even when no receipt can be collected");
+    }
+
+    // Task 3 (local-split-qa): the private barrier channel drives the REAL
+    // write-stage producer through the production pipeline, without windows.
+    #[cfg(feature = "local-split-qa")]
+    mod qa_barrier_writer_tests {
+        use super::*;
+        use crate::ipc::qa_barrier::{
+            active_channel, deactivate, install, QaBarrierChannel, PRODUCER_ID, WRITE_BARRIER,
+        };
+        use serde_json::Value;
+
+        const RUN_ID: &str = "qa-run-writer";
+        const OPERATION_ID: &str = "qa-op-writer";
+
+        struct ChannelGuard;
+        impl Drop for ChannelGuard {
+            fn drop(&mut self) {
+                deactivate();
+            }
+        }
+
+        fn arm_backend_write(dir: &std::path::Path) {
+            std::fs::write(
+                dir.join(format!("{WRITE_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": WRITE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 5_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn release_backend_write(dir: &std::path::Path) {
+            std::fs::write(
+                dir.join(format!("{WRITE_BARRIER}.release.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": WRITE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "releasedAt": "2026-10-03T00:00:01.000Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn real_write_stage_holds_and_recovers_through_private_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            // The runner arms BEFORE launch: startup scan must ack it.
+            arm_backend_write(&dir);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            let (acked, rejected) = channel.scan_and_ack_arms();
+            assert_eq!(acked, vec![WRITE_BARRIER.to_string()]);
+            assert!(rejected.is_empty());
+
+            // Prearm exact event subscribers BEFORE driving the write pipeline
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-writer",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-writer".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            let write_fut = send_native_terminal_input_with_stage_logging(
+                &app.handle(),
+                &state,
+                "session-qa-writer",
+                &input,
+                Some(1),
+                Some(OPERATION_ID.into()),
+                |_bytes| async { Ok(()) },
+            );
+            tokio::pin!(write_fut);
+
+            // Await prearmed exact held event from the REAL parked producer
+            let held_event = tokio::select! {
+                event = QaBarrierChannel::await_held_event(&mut held_rx, WRITE_BARRIER) => event,
+                _ = &mut write_fut => panic!("write settled before held event"),
+            };
+            let held = held_event.payload;
+            assert_eq!(held["runId"], serde_json::json!(RUN_ID));
+            assert_eq!(held["operationId"], serde_json::json!(OPERATION_ID));
+            assert_eq!(held["producer"], serde_json::json!(PRODUCER_ID));
+            assert!(held["producerPid"].as_u64().is_some());
+            assert_eq!(held["sessionId"], serde_json::json!("session-qa-writer"));
+            assert_eq!(held["classifierVerdict"], serde_json::json!("BlockedInIpcWrite"));
+            assert!(
+                held["writePendingMs"].as_u64().unwrap() > 250,
+                "held verdict must rest on measured pending age past the classifier threshold"
+            );
+            assert!(dir.join(format!("{WRITE_BARRIER}.held.json")).exists());
+
+            // Await prearmed exact receipt event (line 1: held)
+            let held_receipt = tokio::select! {
+                receipt = QaBarrierChannel::await_receipt_event(&mut receipt_rx, WRITE_BARRIER, 1) => receipt,
+                _ = &mut write_fut => panic!("write settled before held receipt"),
+            };
+            assert_eq!(held_receipt["classifierVerdict"], serde_json::json!("BlockedInIpcWrite"));
+            assert_eq!(held_receipt["operationId"], serde_json::json!(OPERATION_ID));
+            assert!(held_receipt["snapshot"]["writePendingMs"].as_u64().unwrap() > 250);
+
+            // The write stays parked until the correlated release.
+            tokio::select! {
+                _ = &mut write_fut => panic!("write settled before release"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            release_backend_write(&dir);
+            write_fut.await.expect("production write pipeline settled");
+
+            // Await prearmed exact receipt event (line 2: settled)
+            // Recovery receipt: fresh truthful classification plus actual
+            // stage-progress evidence; Idle is never forced.
+            let settled = QaBarrierChannel::await_receipt_event(&mut receipt_rx, WRITE_BARRIER, 2).await;
+            assert_eq!(settled["stage"], serde_json::json!("backend_write_settled"));
+            assert_eq!(
+                settled["stageProgress"]["backendWriteCompleted"],
+                serde_json::json!(true)
+            );
+            assert_eq!(settled["stageProgress"]["success"], serde_json::json!(true));
+            assert_eq!(
+                settled["stageProgress"]["releaseOutcome"],
+                serde_json::json!("released")
+            );
+            let verdict = settled["classifierVerdict"].as_str().unwrap();
+            match verdict {
+                "Idle" => assert_eq!(settled["evidenceMissing"], serde_json::json!(false)),
+                "Unknown" => {
+                    assert_eq!(settled["evidenceMissing"], serde_json::json!(true));
+                    assert!(
+                        !settled["evidenceMissingFields"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                other => panic!("unexpected recovery verdict {other}"),
+            }
+
+            state.teardown();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn wrong_operation_request_id_never_holds_the_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            arm_backend_write(&dir);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-wrong-op",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-wrong-op".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            // A request id that is NOT the runner's operation nonce must not
+            // hold the barrier or fabricate any emission.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                send_native_terminal_input_with_stage_logging(
+                    &app.handle(),
+                    &state,
+                    "session-qa-wrong-op",
+                    &input,
+                    Some(1),
+                    Some("req-unrelated".into()),
+                    |_bytes| async { Ok(()) },
+                ),
+            )
+            .await
+            .expect("unrelated write must not park")
+            .expect("unrelated write must succeed");
+            assert!(!dir.join(format!("{WRITE_BARRIER}.held.json")).exists());
+            assert!(!dir.join(format!("{WRITE_BARRIER}.receipt.jsonl")).exists());
+            state.teardown();
+        }
+
+        #[tokio::test]
+        async fn no_channel_installed_write_pipeline_is_unchanged() {
+            deactivate();
+            let root = tempfile::tempdir().unwrap();
+            let untouched = root.path().join("would-be-barriers");
+            std::fs::create_dir_all(&untouched).unwrap();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-no-channel",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-no-channel".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            send_native_terminal_input_with_stage_logging(
+                &app.handle(),
+                &state,
+                "session-qa-no-channel",
+                &input,
+                Some(1),
+                Some(OPERATION_ID.into()),
+                |_bytes| async { Ok(()) },
+            )
+            .await
+            .expect("write pipeline without the QA channel must behave as today");
+            assert!(
+                std::fs::read_dir(&untouched).unwrap().next().is_none(),
+                "no QA control/receipt file may be written without the channel"
+            );
+            state.teardown();
+        }
     }
 }

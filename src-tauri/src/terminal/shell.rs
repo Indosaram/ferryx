@@ -393,8 +393,35 @@ where
     "sh".to_string()
 }
 
+#[cfg(test)]
+type PathDiscovery = std::sync::Arc<dyn Fn() -> Vec<std::path::PathBuf> + Send + Sync>;
+#[cfg(test)]
+thread_local! {
+    static PATH_DISCOVERY: std::cell::RefCell<Option<PathDiscovery>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_path_discovery<T>(discovery: PathDiscovery, work: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathDiscovery>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PATH_DISCOVERY.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PATH_DISCOVERY.with(|slot| slot.replace(Some(discovery))));
+    work()
+}
+
+pub(crate) fn legacy_search_paths() -> Vec<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(discovery) = PATH_DISCOVERY.with(|slot| slot.borrow().clone()) {
+        return discovery();
+    }
+    crate::ipc::agents::search_paths()
+}
+
 fn is_on_path(exe: &str) -> bool {
-    let search_paths = crate::ipc::agents::search_paths();
+    let search_paths = legacy_search_paths();
     if search_paths.iter().any(|dir| dir.join(exe).is_file()) {
         return true;
     }
@@ -407,6 +434,100 @@ fn is_on_path(exe: &str) -> bool {
         }
     }
     false
+}
+
+/// Reliable ordinary shells never consult the legacy login-shell PATH cache.
+/// Lookup uses the command's inherited environment, including Windows PATHEXT.
+pub(crate) fn resolve_ordinary_shell_command(
+    preference: Option<&str>,
+) -> Result<CommandBuilder, crate::terminal::PtyError> {
+    let environment = CommandBuilder::new("");
+    ordinary_shell_command_with_env(preference, TargetPlatform::CURRENT, |key| {
+        environment.get_env(key).map(std::ffi::OsStr::to_os_string)
+    })
+}
+
+fn ordinary_shell_command_with_env<E>(
+    preference: Option<&str>,
+    platform: TargetPlatform,
+    get_env: E,
+) -> Result<CommandBuilder, crate::terminal::PtyError>
+where
+    E: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    let paths: Vec<_> = get_env("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    let extensions = get_env("PATHEXT");
+    let lookup = |program: &str| {
+        inherited_executable(program, &paths, extensions.as_deref(), platform)
+    };
+    let plan = resolve_shell_command_pure(
+        preference,
+        platform,
+        |program| lookup(program).is_some(),
+        |key| get_env(key).and_then(|value| value.into_string().ok()),
+    );
+    let program = if plan.program.contains('/') || plan.program.contains('\\') {
+        std::path::PathBuf::from(&plan.program)
+    } else {
+        lookup(&plan.program).ok_or_else(|| {
+            crate::terminal::PtyError::SpawnError(format!(
+                "Shell '{}' was not found in inherited PATH; configure an absolute path",
+                plan.program
+            ))
+        })?
+    };
+    let mut command = CommandBuilder::new(program);
+    command.args(&plan.args);
+    Ok(command)
+}
+
+fn inherited_executable(
+    program: &str,
+    paths: &[std::path::PathBuf],
+    pathext: Option<&std::ffi::OsStr>,
+    platform: TargetPlatform,
+) -> Option<std::path::PathBuf> {
+    let extensions: Vec<_> = match platform {
+        TargetPlatform::Windows => pathext
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .collect(),
+        TargetPlatform::MacOS | TargetPlatform::Linux => Vec::new(),
+    };
+    for dir in paths {
+        let candidate = dir.join(program);
+        if inherited_candidate_is_executable(&candidate, platform) {
+            return Some(candidate);
+        }
+        if std::path::Path::new(program).extension().is_none() {
+            for extension in &extensions {
+                let candidate = dir.join(format!("{program}{extension}"));
+                if inherited_candidate_is_executable(&candidate, platform) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn inherited_candidate_is_executable(path: &std::path::Path, platform: TargetPlatform) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if platform != TargetPlatform::Windows {
+            return std::fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = platform;
+    path.is_file()
 }
 
 pub fn resolve_startup_command_pure<P, E>(
@@ -450,7 +571,7 @@ pub fn resolve_startup_command(
     )?;
     if !plan.program.contains('/') && !plan.program.contains('\\') {
         if let Some(resolved) =
-            crate::ipc::agents::resolve_binary(&plan.program, &crate::ipc::agents::search_paths())
+            crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
         {
             plan.program = resolved.to_string_lossy().to_string();
         }
@@ -476,6 +597,86 @@ pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_ordinary_shell_inherited_path_and_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("custom-shell");
+        std::fs::write(&executable, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = std::env::join_paths([root.path()]).unwrap();
+        let command = ordinary_shell_command_with_env(
+            Some("custom-shell"),
+            TargetPlatform::Linux,
+            |key| (key == "PATH").then(|| path.clone()),
+        )
+        .unwrap();
+        assert_eq!(command.get_argv(), &[executable.into_os_string()]);
+        let login = ordinary_shell_command_with_env(None, TargetPlatform::MacOS, |key| {
+            (key == "SHELL").then(|| std::ffi::OsString::from("/custom/login-shell"))
+        })
+        .unwrap();
+        assert_eq!(login.get_argv(), &["/custom/login-shell", "-l"]);
+        let missing = ordinary_shell_command_with_env(
+            Some("missing-shell"),
+            TargetPlatform::Linux,
+            |_| None,
+        );
+        assert!(matches!(
+            missing,
+            Err(crate::terminal::PtyError::SpawnError(_))
+        ));
+    }
+
+    #[test]
+    fn preparation_ordinary_shell_windows_pathext_and_default() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("pwsh.exe"), b"").unwrap();
+        std::fs::write(root.path().join("custom.CMD"), b"").unwrap();
+        let path = std::env::join_paths([root.path()]).unwrap();
+        let environment = |key| match key {
+            "PATH" => Some(path.clone()),
+            "PATHEXT" => Some(std::ffi::OsString::from(".CMD;.EXE")),
+            _ => None,
+        };
+        let default =
+            ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+        assert_eq!(
+            default.get_argv(),
+            &[root.path().join("pwsh.exe").into_os_string()]
+        );
+        let custom =
+            ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
+                .unwrap();
+        assert_eq!(
+            custom.get_argv(),
+            &[root.path().join("custom.CMD").into_os_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparation_inherited_path_skips_non_executable_shadow() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (root, mode) in [(first.path(), 0o600), (second.path(), 0o700)] {
+            let executable = root.join("custom-shell");
+            std::fs::write(&executable, b"").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let resolved = inherited_executable(
+            "custom-shell",
+            &[first.path().to_owned(), second.path().to_owned()],
+            None,
+            TargetPlatform::Linux,
+        );
+        assert_eq!(resolved, Some(second.path().join("custom-shell")));
+    }
 
     #[test]
     fn test_windows_default_pwsh_present() {

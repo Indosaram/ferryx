@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
@@ -64,6 +65,7 @@ pub(crate) struct MachineSpawn {
     pub check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
+tokio::task_local! { static LOCAL_SPLIT_SPAWN: tokio::time::Instant; }
 
 #[derive(Clone)]
 pub(super) struct SpawnCacheEntry {
@@ -342,6 +344,7 @@ pub struct DaemonSessionService {
     pub(super) handover_manager: Weak<super::handover::HandoverManager>,
     pub(super) remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     pub(super) spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
+    pub(super) split_admission: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(super) spawn_lock: Arc<tokio::sync::Mutex<()>>,
     /// Sole authority shared by socket replacement, input, resize and HTTP close.
     pub(crate) machine_controllers: tokio::sync::Mutex<HashMap<String, MachineController>>,
@@ -356,6 +359,259 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub(crate) fn admission_time_unix_ms(&self) -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    }
+
+    pub(crate) async fn split_status(
+        &self,
+        request_id: &str,
+        origin_epoch: u64,
+        current_epoch: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        let root = self.split_root();
+        let key = Self::split_key(request_id, origin_epoch);
+        let now = self.admission_time_unix_ms();
+        let operation = crate::ipc::run_blocking(move || {
+            use crate::daemon::protocol::{SplitOperationResult as R, SplitUnknownReason};
+            let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                .map_err(crate::ipc::IpcError::internal)?;
+            if cancellations.load(&key).map_err(crate::ipc::IpcError::internal)?.is_some() {
+                return Ok(R::Cancelled);
+            }
+            let mut reserved = false;
+            if root.exists() {
+                for scope in fs::read_dir(&root).map_err(crate::ipc::IpcError::internal)? {
+                    let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                    if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                    let journal = super::split_journal::SplitJournal::open(&scope.path())
+                        .map_err(crate::ipc::IpcError::internal)?;
+                    if let Some(record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                        reserved = true;
+                        if let Some(outcome) = record.outcome {
+                            return Ok(outcome);
+                        }
+                    }
+                }
+            }
+            if reserved {
+                return Ok(R::Unknown { reason: SplitUnknownReason::PublicationUncertain });
+            }
+            if origin_epoch != current_epoch {
+                return Ok(R::Unknown { reason: SplitUnknownReason::EpochChanged });
+            }
+            Ok(R::Absent { can_create: expires_at_unix_ms > now })
+        }).await?;
+        if let crate::daemon::protocol::SplitOperationResult::Created {
+            session_id, session: recorded, ownership, ..
+        } = &operation {
+            match self.handle_describe_session(session_id) {
+                DaemonResponse::DescribeSessionOk { session }
+                    if recorded.incarnation.is_some() && recorded.incarnation == session.incarnation
+                        && recorded.workspace_id == session.workspace_id && recorded.worktree == session.worktree =>
+                {
+                    let rebound = crate::daemon::protocol::SplitOperationResult::Created {
+                        session_id: session_id.clone(), daemon_epoch: current_epoch, session,
+                        ownership: *ownership,
+                    };
+                    let root = self.split_root();
+                    let key = Self::split_key(request_id, origin_epoch);
+                    let outcome = rebound.clone();
+                    let cancelled = crate::ipc::run_blocking(move || {
+                        let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                            .map_err(crate::ipc::IpcError::internal)?;
+                        if cancellations.load(&key).map_err(crate::ipc::IpcError::internal)?.is_some() {
+                            return Ok(true);
+                        }
+                        for scope in fs::read_dir(root).map_err(crate::ipc::IpcError::internal)? {
+                            let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                            if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                            let journal = super::split_journal::SplitJournal::open(&scope.path())
+                                .map_err(crate::ipc::IpcError::internal)?;
+                            if let Some(mut record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                                record.outcome = Some(outcome.clone());
+                                journal.upsert(&record).map_err(crate::ipc::IpcError::internal)?;
+                            }
+                        }
+                        Ok(false)
+                    }).await?;
+                    if cancelled { return Ok(crate::daemon::protocol::SplitOperationResult::Cancelled); }
+                    return Ok(rebound);
+                }
+                _ => return Ok(crate::daemon::protocol::SplitOperationResult::Unknown {
+                    reason: crate::daemon::protocol::SplitUnknownReason::PublicationUncertain,
+                }),
+            }
+        }
+        Ok(operation)
+    }
+
+    fn split_root(&self) -> PathBuf {
+        self.remote_sessions_path.with_file_name("local-split-operations")
+    }
+
+    fn split_key(request: &str, epoch: u64) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{epoch}-{:x}", Sha256::digest(request.as_bytes()))
+    }
+
+    fn split_workspace_dir(&self, workspace: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        self.split_root().join(format!("{:x}", Sha256::digest(workspace.as_bytes())))
+    }
+
+    pub(crate) async fn create_split(
+        &self, request_id: &str, workspace: &str, worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>, cols: u16, rows: u16, shell: Option<String>,
+        envelope: crate::daemon::protocol::LocalSplitEnvelope, current_epoch: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        use crate::daemon::protocol::{SplitOperationResult as R, SplitUnknownReason};
+        if envelope.origin_epoch != current_epoch {
+            return Ok(R::Unknown { reason: SplitUnknownReason::EpochChanged });
+        }
+        if crate::ssh::projects::is_remote(workspace) {
+            return Err(crate::ipc::IpcError::internal("Local split cannot target an SSH workspace"));
+        }
+        let gate = self.split_admission.lock().entry(workspace.into())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(
+            envelope.remaining_ms.min(crate::daemon::protocol::STAGE_CREATE_OR_STATUS_MAX_MS));
+        let _guard = tokio::time::timeout_at(deadline, gate.lock_owned()).await
+            .map_err(|_| crate::ipc::IpcError::internal("Local split admission budget exhausted"))?;
+        let fingerprint = serde_json::to_string(&(workspace, &worktree, &cwd, cols, rows, &shell))
+            .map_err(crate::ipc::IpcError::internal)?;
+        let request_directory = self.split_root().join("requests");
+        let request_key = Self::split_key(request_id, current_epoch);
+        let expected_fingerprint = fingerprint.clone();
+        crate::ipc::run_blocking(move || {
+            let journal = super::split_journal::SplitJournal::open(&request_directory)
+                .map_err(crate::ipc::IpcError::internal)?;
+            if let Some(previous) = journal.load(&request_key).map_err(crate::ipc::IpcError::internal)? {
+                if previous.fingerprint != expected_fingerprint {
+                    return Err(crate::ipc::IpcError::spawn_request_conflict(
+                        "Split request identity was reused with different parameters"));
+                }
+            }
+            Ok(())
+        }).await?;
+        let previous = self.split_status(request_id, envelope.origin_epoch, current_epoch,
+            envelope.expires_at_unix_ms).await?;
+        if !matches!(previous, R::Absent { can_create: true }) { return Ok(previous); }
+        if deadline <= tokio::time::Instant::now() {
+            return Err(crate::ipc::IpcError::internal("Local split create budget exhausted"));
+        }
+        let directory = self.split_workspace_dir(workspace);
+        let key = Self::split_key(request_id, current_epoch);
+        let mut entry = super::split_journal::SplitJournalEntry {
+            request_id: key.clone(),
+            fingerprint,
+            expires_at_unix_ms: envelope.expires_at_unix_ms, session_id: None,
+            cancel_requested: false, tombstone: false, outcome: None,
+        };
+        let begin_dir = self.split_root().join("requests");
+        let begin_entry = entry.clone();
+        let reserved = crate::ipc::run_blocking(move || {
+            super::split_journal::SplitJournal::open(&begin_dir)
+                .and_then(|journal| journal.begin(&begin_entry)).map_err(crate::ipc::IpcError::internal)
+        }).await?;
+        if !reserved {
+            return self.split_status(request_id, current_epoch, current_epoch,
+                envelope.expires_at_unix_ms).await;
+        }
+        let workspace_directory = directory.clone();
+        let workspace_entry = entry.clone();
+        crate::ipc::run_blocking(move || {
+            super::split_journal::SplitJournal::open(&workspace_directory)
+                .and_then(|journal| journal.upsert(&workspace_entry))
+                .map_err(crate::ipc::IpcError::internal)
+        }).await?;
+        let result = LOCAL_SPLIT_SPAWN.scope(deadline, self.handle_spawn(
+            request_id, workspace, worktree, cwd, cols, rows, shell,
+            None, #[cfg(test)] None)).await;
+        entry.outcome = Some(match result {
+            Ok(session_id) => {
+                entry.session_id = Some(session_id.clone());
+                match self.handle_describe_session(&session_id) {
+                    DaemonResponse::DescribeSessionOk { session } => R::Created {
+                        session_id, daemon_epoch: current_epoch, session,
+                        ownership: crate::daemon::protocol::SplitOwnership::Created,
+                    },
+                    _ => R::Unknown { reason: SplitUnknownReason::PublicationUncertain },
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Split creation requires authoritative reconciliation");
+                R::Unknown { reason: SplitUnknownReason::PublicationUncertain }
+            },
+        });
+        let cancellation_root = self.split_root().join("cancelled");
+        let request_root = self.split_root().join("requests");
+        let publish = entry.clone();
+        let cancelled = crate::ipc::run_blocking(move || {
+            let journal = super::split_journal::SplitJournal::open(&directory)
+                .map_err(crate::ipc::IpcError::internal)?;
+            journal.upsert(&publish).map_err(crate::ipc::IpcError::internal)?;
+            super::split_journal::SplitJournal::open(&request_root)
+                .and_then(|journal| journal.upsert(&publish))
+                .map_err(crate::ipc::IpcError::internal)?;
+            let cancelled = super::split_journal::SplitJournal::open(&cancellation_root)
+                .map_err(crate::ipc::IpcError::internal)?.load(&key)
+                .map_err(crate::ipc::IpcError::internal)?.is_some();
+            Ok(cancelled)
+        }).await?;
+        if cancelled {
+            return self.cancel_split(request_id, current_epoch, current_epoch).await;
+        }
+        entry.outcome.ok_or_else(|| crate::ipc::IpcError::internal("Split outcome missing"))
+    }
+
+    pub(crate) async fn cancel_split(
+        &self,
+        request_id: &str,
+        origin_epoch: u64,
+        current_epoch: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        if origin_epoch != current_epoch {
+            let status = self.split_status(request_id, origin_epoch, current_epoch, 0).await?;
+            if !matches!(status, crate::daemon::protocol::SplitOperationResult::Created { .. }
+                | crate::daemon::protocol::SplitOperationResult::Cancelled)
+            { return Ok(status); }
+        }
+        let root = self.split_root();
+        let key = Self::split_key(request_id, origin_epoch);
+        // Publish intent first, including cancel-before-create. Creation checks this
+        // fence again after publication and closes only its own returned child.
+        let owned = crate::ipc::run_blocking(move || {
+            let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                .map_err(crate::ipc::IpcError::internal)?;
+            cancellations.tombstone(&key, "").map_err(crate::ipc::IpcError::internal)?;
+            let mut owned = Vec::new();
+            for scope in fs::read_dir(root).map_err(crate::ipc::IpcError::internal)? {
+                let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                let journal = super::split_journal::SplitJournal::open(&scope.path())
+                    .map_err(crate::ipc::IpcError::internal)?;
+                if let Some(record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                    if let Some(session) = record.session_id { owned.push(session); }
+                    journal.tombstone(&key, &record.fingerprint).map_err(crate::ipc::IpcError::internal)?;
+                }
+            }
+            Ok(owned)
+        }).await?;
+        let mut owned = owned;
+        owned.sort_unstable();
+        owned.dedup();
+        for session_id in owned {
+            if self.session_metadata.read().get(&session_id)
+                .is_some_and(|meta| meta.client_request_id == request_id)
+            {
+                self.handle_close(&session_id).await.map_err(crate::ipc::IpcError::internal)?;
+            }
+        }
+        Ok(crate::daemon::protocol::SplitOperationResult::Cancelled)
+    }
+
     pub(crate) fn subscribe_agent_states(&self, session_id: &str) -> crate::daemon::agent_state::AgentStateSubscription {
         self.agent_states.subscribe(session_id)
     }
@@ -1522,15 +1778,17 @@ impl DaemonSessionService {
                 probe("sessionBeforeSpawnGate");
             }
         }
-        let _spawn_guard = if let Some(machine) = &machine {
-            tokio::time::timeout_at(
+        let _spawn_guard = if LOCAL_SPLIT_SPAWN.try_with(|_| ()).is_ok() {
+            None
+        } else if let Some(machine) = &machine {
+            Some(tokio::time::timeout_at(
                 tokio::time::Instant::from_std(machine.deadline),
                 Arc::clone(&self.spawn_lock).lock_owned(),
             )
             .await
-            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?
+            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?)
         } else {
-            Arc::clone(&self.spawn_lock).lock_owned().await
+            Some(Arc::clone(&self.spawn_lock).lock_owned().await)
         };
 
         let (_spawn_guard, previous) = if let Some(machine) = &machine {
@@ -1669,24 +1927,27 @@ impl DaemonSessionService {
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
         let max_machine_sessions = self.max_machine_sessions();
+        let split_deadline = LOCAL_SPLIT_SPAWN.try_with(|deadline| (*deadline).into_std()).ok();
         crate::ipc::run_blocking(move || {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
-            let deadline = machine.as_ref().map(|m| m.deadline);
+            let deadline = split_deadline.or_else(|| machine.as_ref().map(|m| m.deadline));
             let _workspace_gate = match deadline {
                 Some(deadline) => workspace_gate
                     .try_lock_until(deadline)
                     .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_gate.lock(),
             };
-            let _gate = match deadline {
+            let _gate = if split_deadline.is_some() {
+                None
+            } else { Some(match deadline {
                 Some(deadline) => workspace_service
                     .mutation_gate
                     .try_lock_until(deadline)
                     .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_service.mutation_gate.lock(),
-            };
+            }) };
             let result = (|| -> Result<_, SpawnError> {
                 if let Some(machine) = &machine {
                     (machine.check)()?;
@@ -2332,6 +2593,11 @@ impl DaemonSessionService {
                     end_sequence,
                     last_output_age_ms: None,
                     suspended: false,
+                    reader_paused: None,
+                    kernel_stopped: None,
+                    registry_suspended: None,
+                    suspension_source: None,
+                    incarnation: None,
                 },
             };
         }
@@ -2356,6 +2622,11 @@ impl DaemonSessionService {
                         end_sequence,
                         last_output_age_ms: None,
                         suspended: false,
+                        reader_paused: None,
+                        kernel_stopped: None,
+                        registry_suspended: None,
+                        suspension_source: None,
+                        incarnation: None,
                     },
                 };
             }
@@ -2414,6 +2685,11 @@ impl DaemonSessionService {
                     || (cfg!(windows)
                         && self.terminal_service.process_state(session_id)
                             == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended)),
+                reader_paused: None,
+                kernel_stopped: None,
+                registry_suspended: None,
+                suspension_source: None,
+                incarnation: pty_session.incarnation().map(str::to_owned),
             },
         }
     }

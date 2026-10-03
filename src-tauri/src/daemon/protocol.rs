@@ -12,6 +12,217 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
+pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
+pub const LOCAL_SPLIT_VALIDITY_MS: u64 = 600_000;
+
+pub const ATTEMPT_TOTAL_BUDGET_MS: u64 = 15_000;
+pub const STAGE_CREATE_OR_STATUS_MAX_MS: u64 = 9_000;
+pub const STAGE_ATTACH_OR_LISTENER_MAX_MS: u64 = 4_000;
+pub const STAGE_PRESENTATION_MAX_MS: u64 = 2_000;
+pub const STAGE_CWD_PROBE_MAX_MS: u64 = 500;
+pub const CANCEL_ACK_MAX_MS: u64 = 3_000;
+pub const DAEMON_CANCEL_CLEANUP_MAX_MS: u64 = 2_500;
+pub const WARM_NATIVE_READY_TARGET_MS: u64 = 2_000;
+
+#[inline]
+pub fn clip_stage_budget(remaining_total_ms: u64, stage_cap_ms: u64) -> u64 {
+    remaining_total_ms.min(stage_cap_ms)
+}
+
+/// Tauri identity: epochs remain decimal strings across JavaScript boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitIdentity {
+    pub request_id: String,
+    pub origin_epoch: String,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedLocalSplit {
+    pub identity: SplitIdentity,
+    pub workspace_id: String,
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: String,
+    pub shell: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Daemon admission envelope. Attempt budget is deliberately not identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSplitEnvelope {
+    pub origin_epoch: u64,
+    pub expires_at_unix_ms: u64,
+    pub remaining_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitOwnership {
+    Created,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitUnknownReason {
+    EpochChanged,
+    PublicationUncertain,
+}
+
+/// A failed operation proves no child exists; false is not a legal wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "bool", into = "bool")]
+pub struct SplitNoChild;
+
+impl TryFrom<bool> for SplitNoChild {
+    type Error = &'static str;
+
+    fn try_from(value: bool) -> Result<Self, Self::Error> {
+        if value {
+            Ok(Self)
+        } else {
+            Err("noChild must be true")
+        }
+    }
+}
+
+impl From<SplitNoChild> for bool {
+    fn from(_: SplitNoChild) -> Self {
+        true
+    }
+}
+
+/// Daemon uses u64; Tauri uses SplitOperationResult<String>, preserving descriptor fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationResult<Epoch = u64> {
+    Absent {
+        can_create: bool,
+    },
+    Pending {
+        cancel_requested: bool,
+    },
+    Created {
+        session_id: String,
+        daemon_epoch: Epoch,
+        session: DaemonSessionDetails,
+        ownership: SplitOwnership,
+    },
+    Cancelled,
+    Exited,
+    Failed {
+        error: crate::ipc::IpcError,
+        no_child: SplitNoChild,
+    },
+    Unknown {
+        reason: SplitUnknownReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationRequest {
+    Prepare {
+        request_id: String,
+        request: crate::ipc::terminal::SpawnTerminalRequest,
+        remaining_ms: u64,
+    },
+    Status {
+        identity: SplitIdentity,
+        remaining_ms: u64,
+    },
+    Cancel {
+        identity: SplitIdentity,
+        remaining_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationResponse {
+    Prepare {
+        prepared: PreparedLocalSplit,
+    },
+    Status {
+        operation: SplitOperationResult<String>,
+    },
+    Cancel {
+        operation: SplitOperationResult<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitAttachAttempt {
+    pub identity: SplitIdentity,
+    pub frontend_session_id: String,
+    pub generation: u64,
+    pub remaining_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitDelivery {
+    NotSent,
+    Ambiguous,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitErrorDetails {
+    pub request_id: String,
+    pub origin_epoch: String,
+    pub stage: String,
+    pub delivery: SplitDelivery,
+    pub operation_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_local_split: Option<PreparedLocalSplit>,
+}
+
+/// The authoritative 7-field attach/presentation tuple connecting visual state to PTY backend:
+/// (backendSessionId, incarnation, daemonEpoch, frontendSessionId, paneIdentity, bindingKey, attemptGeneration)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneAttachTuple {
+    pub backend_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    pub daemon_epoch: String,
+    pub frontend_session_id: String,
+    pub pane_identity: String,
+    pub binding_key: String,
+    pub attempt_generation: u64,
+}
+
+impl PaneAttachTuple {
+    pub fn is_recoverable_legacy(&self) -> bool {
+        self.incarnation.is_none()
+    }
+
+    pub fn matches_presentation(&self, other: &PaneAttachTuple) -> bool {
+        self.backend_session_id == other.backend_session_id
+            && self.incarnation == other.incarnation
+            && self.daemon_epoch == other.daemon_epoch
+            && self.frontend_session_id == other.frontend_session_id
+            && self.pane_identity == other.pane_identity
+            && self.binding_key == other.binding_key
+            && self.attempt_generation == other.attempt_generation
+    }
+}
+
+/// Emitted strictly upon positive render completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanePresentationReceipt {
+    pub attach_tuple: PaneAttachTuple,
+    pub presented: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_time_unix_ms: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +325,65 @@ pub struct DaemonSessionDetails {
     /// Absent from older daemons, which decode as not suspended.
     #[serde(default)]
     pub suspended: bool,
+    /// Whether the daemon's ring buffer reader is paused for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_paused: Option<bool>,
+    /// Whether the process is stopped in the OS kernel (SIGSTOP/SIGTSTP on Unix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_stopped: Option<bool>,
+    /// Whether the daemon's lifecycle registry records this session as suspended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_suspended: Option<bool>,
+    /// Attribution for process suspension ("unknown" in Task 2, verified in Task 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension_source: Option<String>,
+    /// Stable lifetime PTY incarnation string separate from owner daemonEpoch.
+    /// Absent from older daemons, which decode as None (recoverable-unconfirmed legacy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+}
+
+impl DaemonSessionDetails {
+    pub fn is_recoverable_legacy(&self) -> bool {
+        self.incarnation.is_none()
+    }
+
+    pub fn matches_incarnation(&self, expected: &str) -> bool {
+        self.incarnation.as_deref() == Some(expected)
+    }
+
+    pub fn new(
+        session_id: String,
+        workspace_id: Option<String>,
+        worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        running: bool,
+        start_sequence: Option<u64>,
+        end_sequence: Option<u64>,
+        last_output_age_ms: Option<u64>,
+        suspended: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            workspace_id,
+            worktree,
+            cwd,
+            cols,
+            rows,
+            running,
+            start_sequence,
+            end_sequence,
+            last_output_age_ms,
+            suspended,
+            reader_paused: None,
+            kernel_stopped: None,
+            registry_suspended: None,
+            suspension_source: None,
+            incarnation: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +476,20 @@ pub enum DaemonRequest {
         shell: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         startup: Option<TerminalStartup>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_split: Option<LocalSplitEnvelope>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SpawnOperationStatus {
+        client_request_id: String,
+        origin_epoch: u64,
+        expires_at_unix_ms: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    CancelSpawnOperation {
+        client_request_id: String,
+        origin_epoch: u64,
+        expires_at_unix_ms: u64,
     },
     #[serde(rename_all = "camelCase")]
     Write {
@@ -474,6 +758,10 @@ pub enum DaemonResponse {
         binary_mtime_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         daemon_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission_time_unix_ms: Option<u64>,
     },
     Pong,
     #[serde(rename_all = "camelCase")]
@@ -500,6 +788,10 @@ pub enum DaemonResponse {
         session_id: String,
         epoch: u64,
         session: DaemonSessionDetails,
+    },
+    #[serde(rename_all = "camelCase")]
+    SpawnOperationOk {
+        operation: SplitOperationResult,
     },
     #[serde(rename_all = "camelCase")]
     AgentResumeInvalid {
@@ -1378,6 +1670,7 @@ mod tests {
             rows: 40,
             shell: None,
             startup: None,
+            local_split: None,
         };
         let spawn_json = serde_json::to_string(&spawn_req).expect("serialize spawn");
         assert!(spawn_json.contains(r#""clientRequestId":"req-abc-123""#));
@@ -1402,6 +1695,11 @@ mod tests {
                 end_sequence: Some(50),
                 last_output_age_ms: None,
                 suspended: false,
+                reader_paused: None,
+                kernel_stopped: None,
+                registry_suspended: None,
+                suspension_source: None,
+                incarnation: None,
             },
         };
         let desc_resp_json = serde_json::to_string(&desc_resp).expect("serialize describe resp");
@@ -1470,6 +1768,8 @@ mod tests {
             binary_path: Some("/bin/ferryx".to_string()),
             binary_mtime_ms: Some(1700000000000),
             daemon_version: Some("2026.902.2".to_string()),
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
@@ -1554,6 +1854,7 @@ mod tests {
             rows: 30,
             shell: Some("pwsh".to_string()),
             startup: None,
+            local_split: None,
         };
         let serialized =
             serde_json::to_string(&spawn_with_shell).expect("serialize spawn with shell");

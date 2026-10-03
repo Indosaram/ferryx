@@ -447,8 +447,60 @@ impl Drop for RetirementGuard {
     }
 }
 
+pub(crate) struct SpawnOwnerGuard {
+    manager: Arc<HandoverManager>,
+}
+
+impl Drop for SpawnOwnerGuard {
+    fn drop(&mut self) {
+        let _status = self.manager.status.write();
+        self.manager.spawn_owners.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod spawn_owner_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_split_reliability_handover_private_prepare_after_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().join("private.sock");
+        let manager = Arc::new(HandoverManager::new(canonical.clone()));
+        let terminals = Arc::new(TerminalService::default());
+        let owner = manager.retain_spawn_owner().unwrap();
+        assert_eq!(manager.prepare_handover(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        drop(owner);
+        let (legacy, sessions, listener) = manager.prepare_handover(&terminals).unwrap();
+        assert!(legacy.starts_with(root.path()));
+        assert!(sessions.is_empty());
+        assert!(manager.retain_spawn_owner().is_err());
+        manager.abort_handover().unwrap();
+        drop(listener);
+        assert!(!legacy.exists());
+        assert!(manager.retain_spawn_owner().is_ok());
+    }
+
+    #[test]
+    fn local_split_reliability_handover_prepared_owner_and_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
+        let owner = manager.retain_spawn_owner().unwrap();
+        let terminals = Arc::new(TerminalService::default());
+        assert_eq!(manager.commit_handover_v5(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        drop(owner);
+        *manager.status.write() = HandoverStatus::Prepared;
+        assert!(manager.retain_spawn_owner().is_err());
+        manager.abort_handover().unwrap();
+        assert!(manager.retain_spawn_owner().is_ok());
+    }
+}
+
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
+    spawn_owners: std::sync::atomic::AtomicUsize,
     legacy_socket_path: Arc<RwLock<Option<PathBuf>>>,
     canonical_lock_files: Arc<Mutex<Option<DaemonLockFiles>>>,
     canonical_socket_path: PathBuf,
@@ -461,10 +513,65 @@ pub struct HandoverManager {
 }
 
 impl HandoverManager {
+    pub fn recorded_decision(legacy: &std::path::Path) -> Result<Option<super::handover_transaction::HandoverState>, String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = match fs::read(legacy.with_extension("transaction")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if transaction.transfer_id != legacy.to_string_lossy() { return Err("Handover transaction identity mismatch".into()); }
+        Ok(match transaction.state {
+            HandoverState::Retired => Some(HandoverState::Retired),
+            HandoverState::Active if transaction.rollback_reason.is_some() => Some(HandoverState::Active),
+            _ => None,
+        })
+    }
+
+    fn record_decision(&self, committed: bool) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let Some(legacy) = self.legacy_socket_path.read().clone() else { return Ok(()); };
+        if let Some(decision) = Self::recorded_decision(&legacy)? {
+            return if decision == if committed { HandoverState::Retired } else { HandoverState::Active } {
+                Ok(())
+            } else {
+                Err("Handover transaction already has the opposite decision".into())
+            };
+        }
+        let identity = legacy.to_string_lossy().into_owned();
+        let mut transaction = HandoverTransaction::new_simple(&identity, &identity,
+            std::process::id(), 0, 0, 0, &identity);
+        transaction.state = if committed { HandoverState::Retired } else { HandoverState::Active };
+        transaction.rollback_reason = (!committed).then(|| "predecessor abort decision".into());
+        let bytes = serde_json::to_vec(&transaction).map_err(|error| error.to_string())?;
+        let path = legacy.with_extension("transaction");
+        let temporary = legacy.with_extension("transaction.pending");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().ok_or("Missing transaction parent")?)
+            .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
+        let status = self.status.write();
+        if *status != HandoverStatus::Active {
+            return Err("HANDOVER_BUSY".into());
+        }
+        self.spawn_owners.fetch_add(1, Ordering::Relaxed);
+        Ok(SpawnOwnerGuard { manager: self.clone() })
+    }
+
     pub fn new(canonical_socket_path: PathBuf) -> Self {
         let (client_abort_tx, _) = broadcast::channel(16);
         Self {
             status: Arc::new(RwLock::new(HandoverStatus::Active)),
+            spawn_owners: std::sync::atomic::AtomicUsize::new(0),
             legacy_socket_path: Arc::new(RwLock::new(None)),
             canonical_lock_files: Arc::new(Mutex::new(None)),
             canonical_socket_path,
@@ -533,6 +640,9 @@ impl HandoverManager {
         terminal_service: &Arc<TerminalService>,
     ) -> Result<(PathBuf, Vec<String>, tokio::net::UnixListener), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot prepare handover in state {:?}",
@@ -582,6 +692,9 @@ impl HandoverManager {
     /// descriptor, so it retires only once its last session ends (`check_retirement_if_empty`).
     pub fn commit_handover_v4(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot commit handover in state {:?}",
@@ -602,6 +715,7 @@ impl HandoverManager {
             .map_err(|error| format!("Failed to persist handover route: {error}"))?;
         }
 
+        self.record_decision(true)?;
         match fs::remove_file(&self.canonical_socket_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -632,6 +746,9 @@ impl HandoverManager {
 
     pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot commit v5 handover in state {:?}",
@@ -639,6 +756,7 @@ impl HandoverManager {
             ));
         }
 
+        self.record_decision(true)?;
         if let Some(locks) = self.canonical_lock_files.lock().take() {
             let _ = locks.detach_without_unlock();
         }
@@ -688,6 +806,7 @@ impl HandoverManager {
             ));
         }
 
+        self.record_decision(false)?;
         if let Some(path) = self.legacy_socket_path.write().take() {
             let _ = fs::remove_file(&path);
         }

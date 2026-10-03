@@ -1,6 +1,7 @@
 use crate::terminal::output_hub::TerminalOutputHub;
 #[cfg(unix)]
 use crate::terminal::session::PtySessionExport;
+#[cfg(unix)]
 use crate::terminal::session::PtySessionSnapshot;
 use crate::terminal::{
     session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal,
@@ -149,11 +150,80 @@ mod agent_state_rendezvous_tests {
     }
 }
 
+/// Authority resolved by the daemon under its worktree fence, not rediscovered here.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSpawnContext {
+    pub root: std::path::PathBuf,
+    pub cwd: std::path::PathBuf,
+    pub managed_workspace_id: Option<String>,
+}
+
+impl ResolvedSpawnContext {
+    fn apply(&self, command: &mut CommandBuilder, session_id: &str) {
+        command.cwd(crate::daemon::session_service::normalize_process_cwd(&self.cwd));
+        // A plain-root shell must not inherit the daemon's own managed identity.
+        command.env_remove("FERRYX_WORKSPACE_ID");
+        apply_session_env(
+            command,
+            session_id,
+            &self.root.to_string_lossy(),
+            self.managed_workspace_id.as_deref(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod preparation_context_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_resolved_context_keeps_root_cwd_and_managed_identity_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("subdirectory");
+        let context = ResolvedSpawnContext {
+            root: root.path().to_owned(),
+            cwd: cwd.clone(),
+            managed_workspace_id: Some("managed-ws".into()),
+        };
+        let mut command = CommandBuilder::new("shell");
+        command.arg("custom-argument");
+        command.env("PATH", "inherited-path");
+        context.apply(&mut command, "backend-id");
+        assert_eq!(
+            command.get_cwd().unwrap().to_str().unwrap(),
+            crate::daemon::session_service::normalize_process_cwd(&cwd)
+        );
+        assert_eq!(
+            command.get_env("FERRYX_WORKTREE_PATH").unwrap().to_str().unwrap(),
+            crate::daemon::session_service::normalize_process_cwd(root.path())
+        );
+        assert_eq!(command.get_env("FERRYX_WORKSPACE_ID").unwrap(), "managed-ws");
+        assert_eq!(command.get_env("FERRYX_SESSION_ID").unwrap(), "backend-id");
+        assert_eq!(command.get_env("PATH").unwrap(), "inherited-path");
+        assert_eq!(command.get_argv(), &["shell", "custom-argument"]);
+        ResolvedSpawnContext {
+            managed_workspace_id: None,
+            ..context
+        }
+        .apply(&mut command, "root-id");
+        assert!(command.get_env("FERRYX_WORKSPACE_ID").is_none());
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpawnPathPolicy {
+    LegacyDiscovery,
+    Inherited,
+}
+
 #[derive(Clone)]
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    cwd_probe_permits: Arc<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
+    #[cfg(unix)]
+    transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
 }
 
 impl Default for PtyManager {
@@ -166,8 +236,11 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            cwd_probe_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
             output_hub: Arc::new(RwLock::new(None)),
+            #[cfg(unix)]
+            transfer_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -245,6 +318,7 @@ impl PtyManager {
             &canonical_worktree.to_string_lossy(),
             workspace_id.as_deref(),
         );
+        cmd.env("FERRYX_PTY_INCARNATION", Uuid::new_v4().to_string());
         let rx = self.spawn_with_id_and_worktree(
             session_id.clone(),
             cmd,
@@ -265,19 +339,60 @@ impl PtyManager {
         self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
+    pub(crate) fn spawn_resolved_with_id(
+        &self,
+        session_id: String,
+        mut cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        context: ResolvedSpawnContext,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
+        context.apply(&mut cmd, &session_id);
+        let rx = self.spawn_with_path_policy(
+            session_id.clone(),
+            cmd,
+            cols,
+            rows,
+            Some(context.root),
+            SpawnPathPolicy::Inherited,
+        )?;
+        Ok((session_id, rx))
+    }
+
     fn spawn_with_id_and_worktree(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_path: Option<std::path::PathBuf>,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        self.spawn_with_path_policy(
+            session_id,
+            cmd,
+            cols,
+            rows,
+            worktree_path,
+            SpawnPathPolicy::LegacyDiscovery,
+        )
+    }
+
+    fn spawn_with_path_policy(
         &self,
         session_id: String,
         mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_path: Option<std::path::PathBuf>,
+        path_policy: SpawnPathPolicy,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
         if self.has_session(&session_id) {
             return Err(PtyError::Other(format!(
                 "PTY session '{session_id}' already exists"
             )));
         }
+        let incarnation = Uuid::new_v4().to_string();
+        cmd.env("FERRYX_PTY_INCARNATION", &incarnation);
 
         // The agent extension reports state for the pane it runs in, so it needs the session
         // identity here: this is the first point where the id exists and the child is not yet
@@ -314,8 +429,13 @@ impl PtyManager {
         // GUI-launched daemons inherit minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) on macOS.
         // Direct child spawns (such as agent resumes) fail to find binaries in Homebrew, bun,
         // cargo, nvm unless PATH is augmented with the user's login shell search paths.
-        if let Ok(augmented) = std::env::join_paths(crate::ipc::agents::search_paths()) {
-            cmd.env("PATH", augmented);
+        match path_policy {
+            SpawnPathPolicy::LegacyDiscovery => {
+                if let Ok(augmented) = std::env::join_paths(super::shell::legacy_search_paths()) {
+                    cmd.env("PATH", augmented);
+                }
+            }
+            SpawnPathPolicy::Inherited => {}
         }
 
         // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
@@ -413,6 +533,7 @@ impl PtyManager {
         let session = Arc::new(PtySession::new(PtySessionConfig {
             input,
             id: session_id.clone(),
+            incarnation: Some(incarnation),
             master: pair.master,
             child,
             writer,
@@ -441,7 +562,6 @@ impl PtyManager {
             let Some(session) = manager.get_session(&session_id) else {
                 return;
             };
-            let mut reader_task = session.take_reader_task();
 
             loop {
                 let Some(session) = manager.get_session(&session_id) else {
@@ -488,16 +608,7 @@ impl PtyManager {
                     }
                 }
 
-                if let Some(ref mut handle) = reader_task {
-                    tokio::select! {
-                        _ = handle => {
-                            reader_task = None;
-                        }
-                        _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
-                    }
-                } else {
-                    tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
-                }
+                tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
             }
         });
     }
@@ -712,8 +823,25 @@ impl PtyManager {
         self.sessions.read().contains_key(session_id)
     }
 
+    pub(crate) fn try_acquire_cwd_probe(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let sessions = self.sessions.read();
+        sessions.get(session_id)?;
+        let semaphore = self
+            .cwd_probe_permits
+            .lock()
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone();
+        semaphore.try_acquire_owned().ok()
+    }
+
     fn remove_from_registry(&self, session_id: &str) -> Option<Arc<PtySession>> {
-        self.sessions.write().remove(session_id)
+        let mut sessions = self.sessions.write();
+        self.cwd_probe_permits.lock().remove(session_id);
+        sessions.remove(session_id)
     }
 
     pub fn list_sessions(&self) -> Vec<String> {
@@ -811,7 +939,17 @@ impl PtyManager {
         output_hub: Option<&TerminalOutputHub>,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
         let session_id = snapshot.session_id.clone();
-        if self.has_session(&session_id) {
+        let mut owners = self.transfer_owners.lock();
+        let expected = owners.get(&session_id).ok_or_else(|| PtyError::Other(
+            format!("No authoritative predecessor identity for '{session_id}'; source retained")))?;
+        validate_transfer_identity(expected, &snapshot)?;
+        let mut registry = self.sessions.write();
+        if snapshot.incarnation.as_deref().map(str::is_empty).unwrap_or(true) {
+            return Err(PtyError::Other(format!(
+                "PTY session '{session_id}' has no verifiable incarnation; source ownership retained"
+            )));
+        }
+        if registry.contains_key(&session_id) {
             return Err(PtyError::Other(format!(
                 "PTY session '{session_id}' already exists"
             )));
@@ -838,9 +976,10 @@ impl PtyManager {
             session.set_output_hub(hub);
         }
 
-        self.sessions
-            .write()
-            .insert(session_id.clone(), Arc::clone(&session));
+        registry.insert(session_id.clone(), Arc::clone(&session));
+        owners.remove(&session_id);
+        drop(registry);
+        drop(owners);
 
         match initial_state {
             PtySessionState::Starting | PtySessionState::Running => {
@@ -862,10 +1001,118 @@ impl PtyManager {
         let (master, snapshot) = export.into_parts();
         self.adopt_transferred_session(master, snapshot)
     }
+
+    #[cfg(unix)]
+    pub fn expect_transferred_owner(&self, expected: PtySessionSnapshot) -> Result<(), PtyError> {
+        if expected.incarnation.as_ref().is_none_or(|value| value.is_empty()) {
+            return Err(PtyError::Other("Predecessor identity lacks an incarnation".into()));
+        }
+        self.transfer_owners.lock().insert(expected.session_id.clone(), expected);
+        Ok(())
+    }
+
+    pub async fn relinquish_transferred_session(&self, session_id: &str) -> Result<(), PtyError> {
+        let session = self.get_session(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;
+        if !session.begin_closing() {
+            return Err(PtyError::Other("Successor relinquish conflicts with session teardown".into()));
+        }
+        session.release_paused_reader();
+        session.close_output();
+        if let Some(reader) = session.take_reader_task() {
+            tokio::time::timeout(READER_SHUTDOWN_TIMEOUT, reader).await
+                .map_err(|_| PtyError::Other("Successor reader relinquish was not acknowledged".into()))?
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+        }
+        session.close_io();
+        self.remove_from_registry(session_id);
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn validate_transfer_identity(expected: &PtySessionSnapshot, actual: &PtySessionSnapshot) -> Result<(), PtyError> {
+    if expected.session_id != actual.session_id || expected.incarnation.is_none()
+        || expected.incarnation != actual.incarnation || expected.pid != actual.pid
+        || expected.pgid != actual.pgid || expected.worktree_path != actual.worktree_path
+    {
+        return Err(PtyError::Other("Transferred identity domain differs from authoritative owner; source retained".into()));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_rejected_identity_keeps_source_usable() {
+        let source = super::PtyManager::new();
+        let successor = super::PtyManager::new();
+        let command = if cfg!(windows) {
+            let mut command = portable_pty::CommandBuilder::new("cmd.exe");
+            command.args(["/D", "/Q", "/K"]);
+            command
+        } else {
+            portable_pty::CommandBuilder::new("/bin/sh")
+        };
+        let (id, mut output) = source.spawn(command, 80, 24).unwrap();
+        #[cfg(unix)]
+        {
+        let export = source.export_session(&id).unwrap();
+        let mut expected = export.snapshot();
+        expected.incarnation = Some("wrong-owner".into());
+        successor.expect_transferred_owner(expected).unwrap();
+        assert!(successor.adopt_transferred_export(export).is_err());
+        assert_eq!(source.resume_paused_readers(), 1);
+        }
+        #[cfg(not(unix))]
+        assert!(source.export_session(&id).is_err());
+        let observed = async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = output.recv().await {
+                bytes.extend_from_slice(&chunk);
+                if bytes.windows(b"REJECTED_SOURCE_USABLE".len())
+                    .any(|window| window == b"REJECTED_SOURCE_USABLE") { return; }
+            }
+            panic!("source output ended before marker");
+        };
+        let trigger = async {
+            let input: &[u8] = if cfg!(windows) {
+                b"echo REJECTED_SOURCE_USABLE\r\n"
+            } else {
+                b"printf 'REJECTED_SOURCE_%s\\n' 'USABLE'\n"
+            };
+            source.write_input(&id, input).unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(observed, trigger);
+        }).await.unwrap();
+        source.close_session(&id).await.unwrap();
+    }
+
+    #[test]
+    fn pane_liveness_identity_rejects_wrong_incarnation_and_domain() {
+        let expected = crate::terminal::session::PtySessionSnapshot {
+            session_id: "session".into(), incarnation: Some("owner-a".into()),
+            pid: Some(1), pgid: Some(1), cols: 80, rows: 24,
+            worktree_path: Some(std::path::PathBuf::from("workspace")),
+            state: crate::terminal::PtySessionState::Running, hub_snapshot: None,
+            suspension_receipt: None,
+        };
+        let mut export = expected.clone();
+        export.incarnation = Some("owner-b".into());
+        assert!(super::validate_transfer_identity(&expected, &export).is_err());
+        export = expected.clone();
+        export.worktree_path = Some(std::path::PathBuf::from("other-workspace"));
+        assert!(super::validate_transfer_identity(&expected, &export).is_err());
+        assert!(super::validate_transfer_identity(&expected, &expected).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_missing_successor_cannot_acknowledge() {
+        let successor = super::PtyManager::new();
+        assert!(successor.relinquish_transferred_session("not-owned").await.is_err());
+    }
+
     /// A handover on 2026-09-26 moved 18 of 20 sessions; the two casualties left no trace.
     /// Part of why a failed export is unrecoverable was this ordering: the reader was stopped
     /// BEFORE the export was attempted, so a session whose export failed stayed registered with a
@@ -1379,6 +1626,7 @@ mod tests {
 
         let (master_fd, snapshot) = export.into_parts();
         let snapshot_clone = snapshot.clone();
+        successor_manager.expect_transferred_owner(snapshot.clone()).expect("predecessor identity");
 
         // First adoption succeeds
         let mut succ_rx = successor_manager
@@ -1530,6 +1778,7 @@ mod tests {
         let (master_fd, mut snapshot) = export.into_parts();
         snapshot.pgid = Some(job_group);
         let successor = PtyManager::new();
+        successor.expect_transferred_owner(snapshot.clone()).expect("authoritative fixture owner");
         let _succ_rx = successor
             .adopt_transferred_session(master_fd, snapshot)
             .expect("adopt session");

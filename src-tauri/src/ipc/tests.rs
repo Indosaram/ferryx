@@ -297,6 +297,8 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
         client_state.clone(),
         spawned.session_id.clone(),
         None,
+        None,
+        None,
     )
     .await
     .expect("attach");
@@ -1094,6 +1096,10 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                     end_sequence: None,
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
                                 },
                             },
                             DaemonRequest::Attach { .. } => DaemonResponse::AttachOk {
@@ -3348,6 +3354,8 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
         client_state,
         "daemon-session:orig-p13".into(),
         Some("42".into()),
+        None,
+        None,
     )
     .await
     .expect("attach of paired session must succeed through reinstalled proxy");
@@ -3485,6 +3493,8 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
         client_state,
         "daemon-session:orig-p13-amb".into(),
         None,
+        None,
+        None,
     )
     .await
     .expect_err("ambiguous reattach must fail");
@@ -3590,6 +3600,8 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
         app.handle().clone(),
         client_state,
         "daemon-session:unknown-p13".into(),
+        None,
+        None,
         None,
     )
     .await
@@ -3709,6 +3721,8 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
         app.handle().clone(),
         client_state,
         "daemon-session:orig-hub-absent".into(),
+        None,
+        None,
         None,
     )
     .await

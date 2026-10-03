@@ -20,8 +20,11 @@ import {
   setSessionRebindHandler,
   setSessionSleeping,
   suspendRegisteredSession,
+  subscribeSleepingSessions,
+  getDaemonSuspension,
 } from "./sessionLifecycle";
-import type { TerminalSession } from "./types";
+import type { TerminalSession, TerminalLifecyclePayload } from "./types";
+import { TerminalEventBus } from "./terminalEvents";
 
 function session(backendSessionId: string | null, processState?: TerminalSession["processState"]): TerminalSession {
   return {
@@ -36,9 +39,63 @@ function session(backendSessionId: string | null, processState?: TerminalSession
 }
 
 describe("sessionLifecycle", () => {
+  it("EOF listener mutation cannot notify removed or newly registered owners", async () => {
+    const terminalEvents = new TerminalEventBus();
+    let deliver: ((payload: TerminalLifecyclePayload) => void) | undefined;
+    vi.spyOn(tauri, "onTerminalOutput").mockResolvedValue(() => {});
+    vi.spyOn(tauri, "onTerminalLifecycle").mockImplementation(async (listener) => {
+      deliver = listener;
+      return () => {};
+    });
+    const states: string[] = [];
+    let removeSecond = () => {};
+    let removeNew = () => {};
+    const removeFirst = terminalEvents.subscribeLifecycle(() => {
+      states.push("first-exited");
+      removeSecond();
+      removeNew = terminalEvents.subscribeLifecycle(() => states.push("new-exited"));
+    });
+    removeSecond = terminalEvents.subscribeLifecycle(() => states.push("removed-exited"));
+    await terminalEvents.ensureStarted();
+    expect(deliver).toBeTypeOf("function");
+    deliver!({ sessionId: "eof-owner", state: "exited", exitCode: 0, reason: null });
+    expect(states).toEqual(["first-exited"]);
+    removeFirst();
+    removeSecond();
+    removeNew();
+  });
   afterEach(() => {
     clearSleepingSessions();
     resetSessionLifecycleForTests();
+    vi.restoreAllMocks();
+  });
+
+  it("displays authoritative suspension without resuming on activation", async () => {
+    let resolve: (value: tauri.TerminalDescribeResult) => void = () => {};
+    const reply = new Promise<tauri.TerminalDescribeResult>((done) => { resolve = done; });
+    vi.spyOn(tauri, "describeTerminal").mockImplementation(() => reply);
+    const resume = vi.spyOn(tauri, "resumeTerminal").mockResolvedValue(undefined);
+    const changed = new Promise<void>((done) => {
+      const unsubscribe = subscribeSleepingSessions(() => { unsubscribe(); done(); });
+    });
+    const current = session("back");
+    registerSessionSnapshot(current);
+    setSessionActive(current.id, true);
+    resolve({ sessionId: "back", cols: 80, rows: 24, running: true, suspended: true, kernelStopped: true, suspensionSource: "externalOrUnknownStop" });
+    await changed;
+    expect(isSessionSleeping(current.id)).toBe(true);
+    expect(getDaemonSuspension(current.id)?.suspensionSource).toBe("externalOrUnknownStop");
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("failed explicit resume preserves the suspended state", async () => {
+    vi.spyOn(tauri, "describeTerminal").mockResolvedValue(null);
+    vi.spyOn(tauri, "resumeTerminal").mockRejectedValue({ code: "TIMEOUT", message: "held" });
+    const current = session("back", "suspended");
+    registerSessionSnapshot(current);
+    setSessionSleeping(current.id, true);
+    await expect(resumeRegisteredSession(current.id)).rejects.toMatchObject({ code: "TIMEOUT" });
+    expect(isSessionSleeping(current.id)).toBe(true);
   });
 
   it("represents a restored shell as standby without allocating a real backend", () => {
@@ -65,6 +122,26 @@ describe("sessionLifecycle", () => {
     setSessionSleeping("session-a", false);
     expect(isSessionSleeping("session-a")).toBe(false);
     expect(getSessionProcessState(session("daemon-session-a", "hibernated"))).toBe("running");
+  });
+
+  it("explicit resume invokes resumeTerminal on backend", async () => {
+    const resumeSpy = vi.spyOn(tauri, "resumeTerminal").mockResolvedValue(undefined as any);
+    const sess = session("backend-live-resume", "suspended");
+    registerSessionSnapshot(sess);
+    setSessionSleeping(sess.id, true);
+    await resumeRegisteredSession(sess.id);
+    expect(resumeSpy).toHaveBeenCalledWith("backend-live-resume");
+    expect(isSessionSleeping(sess.id)).toBe(false);
+    resumeSpy.mockRestore();
+  });
+
+  it("preserves durable session across unmount without destroying backing PTY", () => {
+    const sess = session("backend-live-pty", "running");
+    registerSessionSnapshot(sess);
+    setSessionActive(sess.id, true);
+    setSessionActive(sess.id, false);
+    expect(getSessionProcessState(sess)).toBe("running");
+    expect(sess.backendSessionId).toBe("backend-live-pty");
   });
 
   it("manual Hibernate holds an active pane asleep until a real focus transition", () => {

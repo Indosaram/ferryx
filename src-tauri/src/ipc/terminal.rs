@@ -139,14 +139,43 @@ pub(crate) fn is_plausible_session_cwd_text(value: &str) -> bool {
 }
 
 struct PumpHandle {
+    token: PumpToken,
     task: tokio::task::JoinHandle<()>,
     stream_task: tokio::task::JoinHandle<()>,
 }
 
 static ACTIVE_PUMPS: Mutex<Option<HashMap<String, PumpHandle>>> = Mutex::new(None);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpToken(u64);
+static NEXT_PUMP_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static PUMP_BINDINGS: Mutex<Option<HashMap<String, PumpToken>>> = Mutex::new(None);
+
+pub fn reserve_managed_pump(session_id: &str) -> PumpToken {
+    let mut pumps = ACTIVE_PUMPS.lock();
+    let mut bindings = PUMP_BINDINGS.lock();
+    let token = PumpToken(NEXT_PUMP_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    bindings.get_or_insert_with(HashMap::new).insert(session_id.into(), token);
+    if let Some(previous) = pumps.as_mut().and_then(|map| map.remove(session_id)) {
+        previous.task.abort();
+        previous.stream_task.abort();
+    }
+    token
+}
+
+pub fn stop_managed_pump_token(session_id: &str, token: PumpToken) {
+    let mut pumps = ACTIVE_PUMPS.lock();
+    let mut bindings = PUMP_BINDINGS.lock();
+    if bindings.as_ref().and_then(|map| map.get(session_id)).copied() != Some(token) { return; }
+    bindings.as_mut().map(|map| map.remove(session_id));
+    if let Some(pump) = pumps.as_mut().and_then(|map| map.remove(session_id)) {
+        pump.task.abort();
+        pump.stream_task.abort();
+    }
+}
 
 pub fn stop_managed_pump(session_id: &str) {
     let mut guard = ACTIVE_PUMPS.lock();
+    if let Some(bindings) = PUMP_BINDINGS.lock().as_mut() { bindings.remove(session_id); }
     if let Some(map) = guard.as_mut() {
         if let Some(pump) = map.remove(session_id) {
             pump.task.abort();
@@ -161,7 +190,20 @@ pub fn start_managed_pump<R: Runtime>(
     app_handle: AppHandle<R>,
     attachment: DaemonAttachment,
 ) {
+    let token = reserve_managed_pump(&session_id);
+    start_managed_pump_token(session_id, app_handle, attachment, token);
+}
+
+pub fn start_managed_pump_token<R: Runtime>(
+    session_id: String, app_handle: AppHandle<R>, attachment: DaemonAttachment, token: PumpToken,
+) {
     let mut guard = ACTIVE_PUMPS.lock();
+    let bindings = PUMP_BINDINGS.lock();
+    if bindings.as_ref().and_then(|map| map.get(&session_id)).copied() != Some(token) {
+        attachment.stream_task.abort();
+        return;
+    }
+    drop(bindings);
     let map = guard.get_or_insert_with(HashMap::new);
 
     if let Some(old_pump) = map.remove(&session_id) {
@@ -188,6 +230,10 @@ pub fn start_managed_pump<R: Runtime>(
                 tokio::select! {
                     msg = messages.recv() => msg,
                     _ = tokio::time::sleep(BATCH_FLUSH_INTERVAL) => {
+                        let bindings = PUMP_BINDINGS.lock();
+                        if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
+                            return;
+                        }
                         flush_terminal_output(
                             &app,
                             &session_id_clone,
@@ -200,6 +246,10 @@ pub fn start_managed_pump<R: Runtime>(
                 }
             };
 
+            let bindings = PUMP_BINDINGS.lock();
+            if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
+                return;
+            }
             match next {
                 Some(DaemonStreamMessage::Output {
                     sequence,
@@ -387,8 +437,13 @@ pub fn start_managed_pump<R: Runtime>(
                 }
                 None => break,
             }
+            drop(bindings);
         }
 
+        let bindings = PUMP_BINDINGS.lock();
+        if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
+            return;
+        }
         if !buffer.is_empty() {
             flush_terminal_output(
                 &app,
@@ -399,14 +454,17 @@ pub fn start_managed_pump<R: Runtime>(
             );
         }
         crate::terminal::metrics::clear_pending_batch_read(&session_id_clone);
+        drop(bindings);
 
         let mut guard = ACTIVE_PUMPS.lock();
         if let Some(map) = guard.as_mut() {
-            map.remove(&session_id_clone);
+            if map.get(&session_id_clone).is_some_and(|pump| pump.token == token) {
+                map.remove(&session_id_clone);
+            }
         }
     });
 
-    map.insert(session_id, PumpHandle { task, stream_task });
+    map.insert(session_id, PumpHandle { token, task, stream_task });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +487,12 @@ pub struct SpawnTerminalRequest {
     /// Ignored when `cwd` is explicitly provided.
     #[serde(default)]
     pub inherit_from_session_id: Option<String>,
+    #[serde(default)]
+    pub create_only: Option<bool>,
+    #[serde(default)]
+    pub prepared_local_split: Option<crate::daemon::protocol::PreparedLocalSplit>,
+    #[serde(default)]
+    pub remaining_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +565,10 @@ pub struct AttachTerminalResponse {
     pub history: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gap: Option<TerminalReplayGap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1700,6 +1768,87 @@ fn upsert_pending_cleanups(record: CleanupRecord) {
     }
 }
 
+fn split_stage_deadline(remaining_ms: u64, cap: u64) -> Result<tokio::time::Instant, IpcError> {
+    let budget = crate::daemon::protocol::clip_stage_budget(remaining_ms, cap);
+    if budget == 0 {
+        return Err(IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split attempt budget exhausted"));
+    }
+    Ok(tokio::time::Instant::now() + Duration::from_millis(budget))
+}
+
+fn split_wire_epoch(operation: crate::daemon::protocol::SplitOperationResult)
+    -> crate::daemon::protocol::SplitOperationResult<String>
+{
+    use crate::daemon::protocol::SplitOperationResult as R;
+    match operation {
+        R::Absent { can_create } => R::Absent { can_create },
+        R::Pending { cancel_requested } => R::Pending { cancel_requested },
+        R::Created { session_id, daemon_epoch, session, ownership } => R::Created {
+            session_id, daemon_epoch: daemon_epoch.to_string(), session, ownership },
+        R::Cancelled => R::Cancelled,
+        R::Exited => R::Exited,
+        R::Failed { error, no_child } => R::Failed { error, no_child },
+        R::Unknown { reason } => R::Unknown { reason },
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_spawn_operation(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: crate::daemon::protocol::SplitOperationRequest,
+) -> Result<crate::daemon::protocol::SplitOperationResponse, IpcError> {
+    use crate::daemon::protocol::*;
+    match request {
+        SplitOperationRequest::Prepare { request_id, request, remaining_ms } => {
+            if request_id.trim().is_empty() || request.startup.is_some()
+                || crate::ssh::projects::is_remote(&request.workspace_id)
+                || request.workspace_id.starts_with("daemon:")
+            {
+                return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepare requires a local shell workspace and request identity"));
+            }
+            let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
+            let identity = daemon_client.prepare_local_split_until(&request_id, deadline).await?;
+            let inherited = match (&request.cwd, &request.inherit_from_session_id) {
+                (None, Some(parent)) => {
+                    let probe_deadline = deadline.min(tokio::time::Instant::now()
+                        + Duration::from_millis(STAGE_CWD_PROBE_MAX_MS));
+                    daemon_client.describe_session_until(parent, &identity, probe_deadline)
+                        .await?.cwd.map(PathBuf::from)
+                }
+                _ => request.cwd.clone(),
+            };
+            let workspaces = (*registry).clone();
+            let workspace = request.workspace_id.clone();
+            let worktree = request.worktree.clone();
+            let (repo_root, cwd, default_shell) = tokio::time::timeout_at(deadline, run_blocking(move || {
+                let (manager, root) = workspaces.resolve_terminal_target(&workspace, worktree.as_ref())
+                    .map_err(IpcError::from)?;
+                let cwd = resolve_spawn_cwd(inherited, root, |path| manager.canonical_allowed_path(path).map_err(IpcError::from))?;
+                Ok((manager.repo_root().to_string_lossy().into_owned(), cwd,
+                    crate::terminal::cached_terminal_preferences().default_shell.clone()))
+            })).await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split preparation timed out"))??;
+            tokio::time::timeout_at(deadline, daemon_client.register_workspace(&request.workspace_id, &repo_root))
+                .await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split workspace registration timed out"))??;
+            Ok(SplitOperationResponse::Prepare { prepared: PreparedLocalSplit {
+                identity, workspace_id: request.workspace_id, worktree: request.worktree,
+                cwd: cwd.to_string_lossy().into_owned(), shell: request.shell.or(default_shell),
+                cols: request.cols.unwrap_or(80), rows: request.rows.unwrap_or(24),
+            } })
+        }
+        SplitOperationRequest::Status { identity, remaining_ms } => {
+            let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
+            Ok(SplitOperationResponse::Status { operation: split_wire_epoch(
+                daemon_client.local_split_status_until(&identity, deadline).await?) })
+        }
+        SplitOperationRequest::Cancel { identity, remaining_ms } => {
+            let deadline = split_stage_deadline(remaining_ms, CANCEL_ACK_MAX_MS)?;
+            Ok(SplitOperationResponse::Cancel { operation: split_wire_epoch(
+                daemon_client.cancel_local_split_until(&identity, deadline).await?) })
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
@@ -1707,6 +1856,20 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     registry: State<'_, WorkspaceRegistry>,
     request: SpawnTerminalRequest,
 ) -> Result<SpawnTerminalResponse, IpcError> {
+    if request.create_only == Some(true) || request.prepared_local_split.is_some() {
+        let prepared = request.prepared_local_split.as_ref().ok_or_else(||
+            IpcError::new(IpcErrorCode::InvalidArgument, "Create-only requires preparedLocalSplit"))?;
+        if request.create_only != Some(true) || prepared.workspace_id != request.workspace_id
+            || prepared.worktree != request.worktree || request.startup.is_some()
+        {
+            return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepared split identity does not match create request"));
+        }
+        let deadline = split_stage_deadline(request.remaining_ms.unwrap_or(0),
+            crate::daemon::protocol::STAGE_CREATE_OR_STATUS_MAX_MS)?;
+        let result = daemon_client.create_local_split_until(prepared, deadline).await?;
+        return Ok(SpawnTerminalResponse { session_id: result.session_id,
+            daemon_epoch: result.epoch.to_string(), session: result.session });
+    }
     let has_worktree = request.worktree.is_some();
     let has_cwd = request.cwd.is_some();
     let has_client_request_id = request.client_request_id.is_some();
@@ -2259,6 +2422,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 end_sequence: Some(remote_session.end_sequence.0),
                 last_output_age_ms: None,
                 suspended: false,
+                reader_paused: None,
+                kernel_stopped: None,
+                registry_suspended: None,
+                suspension_source: None,
             },
         }
     } else {
@@ -2490,7 +2657,54 @@ pub async fn cmd_terminal_attach<R: Runtime>(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     after_sequence: Option<String>,
+    split_attempt: Option<crate::daemon::protocol::SplitAttachAttempt>,
+    attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<AttachTerminalResponse, IpcError> {
+    if let Some(binding) = attach_tuple {
+        if binding.backend_session_id != session_id || binding.incarnation.is_none() {
+            return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Attach binding must identify the exact backend incarnation"));
+        }
+        let remaining = split_attempt.as_ref().map(|attempt| attempt.remaining_ms)
+            .unwrap_or(crate::daemon::protocol::STAGE_ATTACH_OR_LISTENER_MAX_MS);
+        let deadline = split_stage_deadline(remaining, crate::daemon::protocol::STAGE_ATTACH_OR_LISTENER_MAX_MS)?;
+        let token = reserve_managed_pump(&session_id);
+        let description = if let Some(attempt) = &split_attempt {
+            if attempt.frontend_session_id != binding.frontend_session_id
+                || attempt.generation != binding.attempt_generation
+            { return Err(IpcError::spawn_request_conflict("Attach attempt differs from durable pane binding")); }
+            match daemon_client.local_split_status_until(&attempt.identity, deadline).await? {
+                crate::daemon::protocol::SplitOperationResult::Created { session_id: owned, session, .. }
+                    if owned == session_id => session,
+                _ => return Err(IpcError::new(IpcErrorCode::OperationOutcomeUnknown,
+                    "Attach requires a journal-confirmed creation for this request")),
+            }
+        } else {
+            daemon_client.describe_session_bounded_until(&session_id, deadline).await?
+        };
+        if description.incarnation != binding.incarnation {
+            return Err(IpcError::spawn_request_conflict("Attach incarnation differs from authoritative owner"));
+        }
+        let attachment = daemon_client.attach_until(&session_id,
+            after_sequence.as_deref().and_then(|value| value.parse().ok()), deadline).await?;
+        let mut authoritative = binding;
+        authoritative.daemon_epoch = attachment.epoch.to_string();
+        let response = AttachTerminalResponse {
+            session_id: attachment.session_id.clone(), daemon_epoch: Some(authoritative.daemon_epoch.clone()),
+            incarnation: description.incarnation, attach_tuple: Some(authoritative),
+            history_start_sequence: attachment.start_sequence.map(|value| value.to_string()),
+            history_end_sequence: attachment.end_sequence.map(|value| value.to_string()),
+            history: STANDARD.encode(&attachment.history),
+            gap: attachment.gap.as_ref().map(|gap| TerminalReplayGap {
+                requested_after_sequence: gap.requested_after_sequence.to_string(),
+                available_from_sequence: gap.available_from_sequence.to_string(),
+            }),
+        };
+        start_managed_pump_token(session_id, app, attachment, token);
+        return Ok(response);
+    }
+    if split_attempt.is_some() {
+        return Err(IpcError::unsupported_capability("Split attach requires paneIdentity and bindingKey in attachTuple; upgrade the frontend binding request"));
+    }
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         terminal_attach(app, daemon_client, session_id.clone(), after_sequence),
@@ -2511,6 +2725,7 @@ async fn terminal_attach<R: Runtime>(
     session_id: String,
     after_sequence: Option<String>,
 ) -> Result<AttachTerminalResponse, IpcError> {
+    let pump_token = reserve_managed_pump(&session_id);
     let after_seq = after_sequence
         .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
@@ -2588,8 +2803,26 @@ async fn terminal_attach<R: Runtime>(
         (att, session_id.clone())
     };
 
+    #[cfg(feature = "native-terminal")]
+    let binding = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+        .and_then(|state| state.session_attach_tuple(&target_session_id));
+    #[cfg(not(feature = "native-terminal"))]
+    let binding: Option<crate::daemon::protocol::PaneAttachTuple> = None;
+    let Some(mut binding) = binding else {
+        attachment.stream_task.abort();
+        return Err(IpcError::unsupported_capability(
+            "Attach requires the persisted seven-field pane binding; pass attachTuple"));
+    };
+    let description = daemon_client.describe_session(&target_session_id).await?;
+    if description.incarnation.is_none() || description.incarnation != binding.incarnation {
+        attachment.stream_task.abort();
+        return Err(IpcError::spawn_request_conflict("Attach binding incarnation cannot be proven"));
+    }
+    binding.daemon_epoch = attachment.epoch.to_string();
     let resp = AttachTerminalResponse {
         session_id: attachment.session_id.clone(),
+        incarnation: description.incarnation,
+        attach_tuple: Some(binding),
         daemon_epoch: Some(attachment.epoch.to_string()),
         history_start_sequence: attachment.start_sequence.map(|s| s.to_string()),
         history_end_sequence: attachment.end_sequence.map(|s| s.to_string()),
@@ -2603,7 +2836,11 @@ async fn terminal_attach<R: Runtime>(
     if session_id != target_session_id {
         stop_managed_pump(&session_id);
     }
-    start_managed_pump(target_session_id, app, attachment);
+    if target_session_id == session_id {
+        start_managed_pump_token(target_session_id, app, attachment, pump_token);
+    } else {
+        start_managed_pump(target_session_id, app, attachment);
+    }
 
     Ok(resp)
 }
@@ -2991,6 +3228,71 @@ mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
 
+    #[test]
+    fn pane_liveness_pump_generation_stale_teardown_preserves_new_binding() {
+        let session = format!("pump-test-{}", uuid::Uuid::new_v4());
+        let old = reserve_managed_pump(&session);
+        let current = reserve_managed_pump(&session);
+        stop_managed_pump_token(&session, old);
+        assert_eq!(PUMP_BINDINGS.lock().as_ref().unwrap().get(&session), Some(&current));
+        stop_managed_pump_token(&session, current);
+        assert!(!PUMP_BINDINGS.lock().as_ref().unwrap().contains_key(&session));
+    }
+
+    #[test]
+    fn local_split_reliability_stage_budget_is_clipped() {
+        assert!(split_stage_deadline(0, 9000).is_err());
+        assert_eq!(crate::daemon::protocol::clip_stage_budget(1000, 9000), 1000);
+        assert_eq!(crate::daemon::protocol::clip_stage_budget(9000, 3000), 3000);
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_pump_generation_old_teardown_preserves_new_stream_atomically() {
+        use tauri::Manager;
+        let session = format!("pump-teardown-{}", uuid::Uuid::new_v4());
+        let old = reserve_managed_pump(&session);
+        let current = reserve_managed_pump(&session);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let (sender, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending::<()>());
+        let closed = sender.closed();
+        tokio::pin!(closed);
+        start_managed_pump_token(session.clone(), app.handle().clone(), DaemonAttachment {
+            session_id: session.clone(), epoch: 1, start_sequence: None, end_sequence: None,
+            gap: None, history: bytes::Bytes::new(), history_segments: Vec::new(),
+            pty_cols: None, pty_rows: None, remote_generation: None, messages, stream_task,
+        }, current);
+        stop_managed_pump_token(&session, old);
+        assert_eq!(PUMP_BINDINGS.lock().as_ref().unwrap().get(&session), Some(&current));
+        assert_eq!(ACTIVE_PUMPS.lock().as_ref().unwrap().get(&session).unwrap().token, current);
+        stop_managed_pump_token(&session, current);
+        tokio::time::timeout(Duration::from_secs(1), closed).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_pump_generation_old_completion_cannot_install_new_stream() {
+        use tauri::Manager;
+        let session = format!("pump-install-{}", uuid::Uuid::new_v4());
+        let old = reserve_managed_pump(&session);
+        let current = reserve_managed_pump(&session);
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let (sender, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending::<()>());
+        let closed = sender.closed();
+        tokio::pin!(closed);
+        start_managed_pump_token(session.clone(), app.handle().clone(), DaemonAttachment {
+            session_id: session.clone(), epoch: 1, start_sequence: None, end_sequence: None,
+            gap: None, history: bytes::Bytes::new(), history_segments: Vec::new(),
+            pty_cols: None, pty_rows: None, remote_generation: None, messages, stream_task,
+        }, old);
+        tokio::time::timeout(Duration::from_secs(1), closed).await.unwrap();
+        assert_eq!(PUMP_BINDINGS.lock().as_ref().unwrap().get(&session), Some(&current));
+        assert!(!ACTIVE_PUMPS.lock().as_ref().is_some_and(|map| map.contains_key(&session)));
+        stop_managed_pump_token(&session, current);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn reconnect_attach_settles_when_daemon_never_answers_handshake() {
         use tauri::Manager;
@@ -3028,7 +3330,7 @@ mod tests {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(120),
                 cmd_terminal_attach(app.handle().clone(), app.state::<Arc<DaemonClient>>(),
-                    "qa-existing-session".into(), None),
+                    "qa-existing-session".into(), None, None, None),
             ).await;
             // Then the command itself must settle, not this test's safety bound.
             assert!(result.is_ok(), "reconnect attach exceeded its bounded-error contract");

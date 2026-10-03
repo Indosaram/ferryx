@@ -23,6 +23,8 @@ pub mod native_terminal_hyperlink;
 pub mod notifications;
 pub mod paired_host;
 pub mod permissions;
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub mod qa_barrier;
 pub mod preferences;
 pub mod project;
 pub mod project_remote;
@@ -32,6 +34,8 @@ pub mod remote_file;
 pub mod session;
 pub mod ssh;
 pub mod terminal;
+#[cfg(test)]
+pub mod pane_liveness_contract;
 pub mod updater;
 pub mod worktree;
 pub mod worktree_disk;

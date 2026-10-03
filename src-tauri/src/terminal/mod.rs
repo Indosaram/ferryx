@@ -42,6 +42,7 @@ pub(crate) mod resume_cwd;
 pub mod service;
 pub mod session;
 pub mod shell;
+pub mod suspension;
 
 pub use output_hub::*;
 pub use preferences::*;
@@ -49,6 +50,8 @@ pub use pty::*;
 pub use service::*;
 pub use session::*;
 pub use shell::*;
+pub use suspension::{ActuationReceipt, SuspensionError, SuspensionSource, SuspensionTarget,
+    classify_stop_source, resume_owned, stop_for_owned_suspension};
 
 #[cfg(test)]
 mod tests;

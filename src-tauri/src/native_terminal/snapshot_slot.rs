@@ -12,6 +12,7 @@ pub(crate) struct PublishedFrame {
     pub layout: SurfaceCompositionLayout,
     pub logical_bounds: LogicalBounds,
     pub input: SessionRenderInput,
+    pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 }
 
 /// Receipt of a frame the GPU actually presented, tagged with the frame and attachment it
@@ -85,6 +86,7 @@ impl SnapshotSlot {
         layout: SurfaceCompositionLayout,
         logical_bounds: LogicalBounds,
         input: SessionRenderInput,
+        attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     ) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let attachment_epoch = self.current_epoch();
@@ -94,6 +96,7 @@ impl SnapshotSlot {
             layout,
             logical_bounds,
             input,
+            attach_tuple,
         });
         *self.ready.lock() = Some(frame);
         generation
@@ -122,10 +125,19 @@ impl SnapshotSlot {
         &self,
         generation: u64,
         attachment_epoch: u64,
+        attach_tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
         receipt: NativeTerminalSurfaceReceipt,
     ) -> bool {
-        let _guard = self.ready.lock();
-        if !self.is_attached_with_epoch(attachment_epoch) {
+        let ready = self.ready.lock();
+        let Some(current_frame) = ready.as_ref() else {
+            return false;
+        };
+        if !receipt.presented || receipt.render_deferred || receipt.render_suspended
+            || !self.is_attached_with_epoch(attachment_epoch)
+            || current_frame.generation != generation
+            || current_frame.attachment_epoch != attachment_epoch
+            || current_frame.attach_tuple.as_ref() != attach_tuple
+        {
             return false;
         }
         self.presented.send_replace(Some(PresentedFrame {
@@ -151,6 +163,10 @@ impl SnapshotSlot {
 mod tests {
     use super::*;
     use crate::native_terminal::composition::PhysicalBounds;
+
+    fn no_binding() -> Option<crate::daemon::protocol::PaneAttachTuple> {
+        None
+    }
 
     fn mock_input() -> SessionRenderInput {
         use crate::native_terminal::cursor::{CursorSnapshot, CursorVisualStyle};
@@ -178,6 +194,35 @@ mod tests {
     }
 
     #[test]
+    fn pane_liveness_native_binding_frame_submission_is_not_presentation() {
+        let slot = SnapshotSlot::new();
+        let mut presentations = slot.subscribe_presentations();
+        slot.set_attached(true);
+        presentations.borrow_and_update();
+        let layout = SurfaceCompositionLayout {
+            cols: 80, rows: 24,
+            physical_bounds: PhysicalBounds { x: 0, y: 0, width: 800, height: 480 },
+        };
+        let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
+        let generation = slot.publish(layout, bounds, mock_input(), None);
+        slot.consume().expect("submitted frame");
+        assert!(presentations.borrow().is_none());
+        let mut receipt = NativeTerminalSurfaceReceipt {
+            presented: false, render_deferred: true, render_suspended: false,
+            cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
+            cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
+            effective_scale_factor: Some(1.0),
+        };
+        assert!(!slot.publish_presentation(generation, slot.current_epoch(), None, receipt));
+        assert!(!presentations.has_changed().expect("live channel"));
+        receipt.presented = true;
+        receipt.render_deferred = false;
+        assert!(slot.publish_presentation(generation, slot.current_epoch(), None, receipt));
+        assert!(presentations.has_changed().expect("actual completion notification"));
+        assert!(presentations.borrow_and_update().as_ref().expect("completion").receipt.presented);
+    }
+
+    #[test]
     fn publish_and_consume_updates_generation_and_leaves_frame() {
         let slot = SnapshotSlot::new();
         slot.set_attached(true);
@@ -202,7 +247,7 @@ mod tests {
         assert_eq!(slot.generation(), 0);
         assert!(slot.consume().is_none());
 
-        let gen = slot.publish(layout, bounds, mock_input());
+        let gen = slot.publish(layout, bounds, mock_input(), no_binding());
         assert_eq!(gen, 1);
         assert_eq!(slot.generation(), 1);
 
@@ -218,6 +263,52 @@ mod tests {
         slot.set_attached(false);
         assert!(slot.consume().is_none());
         assert!(!slot.is_attached_with_epoch(consumed.attachment_epoch));
+    }
+
+    #[test]
+    fn pane_liveness_native_binding_each_identity_mismatch_rejects_readiness() {
+        let slot = SnapshotSlot::new();
+        slot.set_attached(true);
+        let mut presentations = slot.subscribe_presentations();
+        let active = crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: "backend".into(), incarnation: Some("incarnation".into()),
+            daemon_epoch: "7".into(), frontend_session_id: "frontend".into(),
+            pane_identity: "pane".into(), binding_key: "binding".into(), attempt_generation: 3,
+        };
+        let layout = SurfaceCompositionLayout {
+            cols: 80, rows: 24,
+            physical_bounds: PhysicalBounds { x: 0, y: 0, width: 800, height: 480 },
+        };
+        let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
+        let generation = slot.publish(layout, bounds, mock_input(), Some(active.clone()));
+        let receipt = NativeTerminalSurfaceReceipt {
+            presented: true, render_deferred: false, render_suspended: false,
+            cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
+            cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
+            effective_scale_factor: Some(1.0),
+        };
+        for field in 0..7 {
+            let mut stale = active.clone();
+            match field {
+                0 => stale.backend_session_id = "other".into(),
+                1 => stale.incarnation = Some("other".into()),
+                2 => stale.daemon_epoch = "8".into(),
+                3 => stale.frontend_session_id = "other".into(),
+                4 => stale.pane_identity = "other".into(),
+                5 => stale.binding_key = "other".into(),
+                6 => stale.attempt_generation = 4,
+                _ => unreachable!(),
+            }
+            assert!(!slot.publish_presentation(generation, slot.current_epoch(), Some(&stale), receipt));
+            assert!(presentations.borrow().is_none());
+        }
+        assert!(slot.publish_presentation(generation, slot.current_epoch(), Some(&active), receipt));
+        presentations.borrow_and_update();
+        let mut stale = active.clone();
+        stale.attempt_generation -= 1;
+        assert!(!slot.publish_presentation(generation, slot.current_epoch(), Some(&stale), receipt));
+        assert!(!presentations.has_changed().unwrap());
+        assert!(presentations.borrow().as_ref().unwrap().receipt.presented);
     }
 
     #[test]
@@ -243,7 +334,7 @@ mod tests {
             height: 480.0,
             scale_factor: 1.0,
         };
-        slot.publish(layout, bounds, mock_input());
+        slot.publish(layout, bounds, mock_input(), no_binding());
 
         assert!(slot.is_attached_with_epoch(epoch1));
         assert!(slot.consume().is_some());
@@ -255,7 +346,7 @@ mod tests {
         // Prior frame had epoch1, so consume rejects it as stale until next publish
         assert!(slot.consume().is_none());
 
-        slot.publish(layout, bounds, mock_input());
+        slot.publish(layout, bounds, mock_input(), no_binding());
         let frame2 = slot.consume().expect("frame available for epoch 2");
         assert_eq!(frame2.attachment_epoch, epoch2);
     }

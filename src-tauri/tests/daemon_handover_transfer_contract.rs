@@ -628,6 +628,16 @@ async fn run_v5_handover_case(v5_flag: Option<&'static str>) {
         post_handover.running,
         "the transferred session must still be running after the predecessor exits: {post_handover:?}"
     );
+    assert_eq!(
+        post_handover.workspace_id.as_deref(),
+        Some(ws_id),
+        "the transferred session must retain its workspace identity"
+    );
+    assert_eq!(
+        post_handover.cwd.as_deref(),
+        Some(canonical_repo.to_string_lossy().as_ref()),
+        "the transferred session must retain its working directory"
+    );
     assert!(
         process_is_alive(child_pid),
         "the transferred child {child_pid} must survive the predecessor's exit"

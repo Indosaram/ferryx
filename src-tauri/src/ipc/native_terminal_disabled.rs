@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ipc::IpcError;
 
+pub const NATIVE_TERMINAL_PRESENTATION_RECEIPT_CAPABILITY: &str = "unsupported";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum NativeTerminalClipboardContent {
@@ -110,6 +112,13 @@ pub async fn cmd_native_terminal_clipboard_content(
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
+
+    #[tokio::test]
+    async fn pane_liveness_native_binding_disabled_render_never_reports_success() {
+        let error = cmd_native_terminal_set_bounds().await.expect_err("unsupported presentation");
+        assert_eq!(error.code, IpcErrorCode::NativeTerminalUnsupported);
+        assert!(cmd_native_terminal_attach().await.is_err());
+    }
 
     #[tokio::test]
     async fn disabled_native_terminal_commands_return_typed_unsupported_error() {

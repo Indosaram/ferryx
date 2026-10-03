@@ -6,6 +6,7 @@ import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { agentDisplayNameForType } from "../lib/agentTitle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
+import { localSplitIntent, retryLocalSplit, cancelLocalSplit } from "../lib/localSplitLifecycle";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import {
   isSessionAutoResumeHeld,
@@ -16,6 +17,7 @@ import {
   setSessionActive,
   setSessionSleeping,
   useSleepingSessionIds,
+  getDaemonSuspension,
 } from "../lib/sessionLifecycle";
 import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
@@ -101,6 +103,9 @@ export function TerminalPane({
   const autoResumeKeyRef = useRef<string | null>(null);
   const sleepingSessionIds = useSleepingSessionIds();
 
+  const splitIntent = localSplitIntent(session);
+  const splitPending = Boolean(splitIntent && session.reconnectLifecycle !== "idle" && session.reconnectLifecycle !== "failed");
+
   const isSshSession = isRemoteWorkspaceId(session.workspaceId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
   const remoteState = session.remoteConnectionState;
@@ -122,13 +127,13 @@ export function TerminalPane({
   const isLocalReconnecting =
     !isSshSession && !affordance.isReconnecting && (remoteState === "reconnecting" || isSpawning);
   const isLocalDisconnected = !isSshSession && !isSpawning && (remoteState === "disconnected" || remoteState === "missing");
-  const isLocalExited = !isSshSession && (
+  const isLocalExited = !isSshSession && (splitIntent ? session.lifecycle === "exited" : (
     isLocalReconnecting ||
     isLocalDisconnected ||
     session.backendSessionId === null ||
     isStandbyBackendSessionId(session.backendSessionId) ||
     session.lifecycle === "exited"
-  );
+  ));
   const isExited = isSshSession ? showSshOverlay : isLocalExited;
   const isSuspended =
     !isExited && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
@@ -217,12 +222,11 @@ export function TerminalPane({
   };
 
   useEffect(() => {
-    if (active && isSuspended && !isSessionAutoResumeHeld(session.id)) {
-      void resumeRegisteredSession(session.id).catch((error) => {
-        console.warn("Failed to auto-resume active suspended session:", error);
-      });
+    if (active && splitIntent && !splitIntent.ready && session.backendSessionId &&
+        session.reconnectLifecycle === "idle" && !splitIntent.cancelRequested) {
+      void retryLocalSplit(session.id).catch((error) => setReplacementError(toIpcError(error).message));
     }
-  }, [active, isSuspended, session.id]);
+  }, [active, session.id, session.backendSessionId, session.reconnectLifecycle, splitIntent]);
 
   useEffect(() => {
     registerSessionSnapshot(session, activity?.state);
@@ -235,7 +239,7 @@ export function TerminalPane({
   }, [active, activity?.state, isExited, session]);
 
   useEffect(() => {
-    if (!isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
+    if (splitIntent || !isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
     const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
     if (autoResumeKeyRef.current === key) return;
     if (isAgentSession) {
@@ -289,7 +293,6 @@ export function TerminalPane({
   return (
     <div
       data-testid="terminal-pane-surface"
-      onClick={isSuspended ? handleResume : undefined}
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
       <DagPaneBadge
@@ -304,6 +307,7 @@ export function TerminalPane({
       <NativeTerminalPane
         sessionId={session.id}
         session={session}
+        splitAttempt={splitIntent ? { frontendSessionId: session.id, generation: splitIntent.generation } : undefined}
         active={active}
         activity={activity}
         needsAttention={needsAttention}
@@ -311,6 +315,53 @@ export function TerminalPane({
           onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
         }}
       />
+      {splitIntent && session.reconnectLifecycle !== "idle" ? (
+        <div
+          role={splitPending ? "status" : "alert"}
+          data-testid="local-split-status"
+          className="absolute inset-0 z-20 flex items-center justify-center bg-background/85 p-6 text-center"
+        >
+          <div className="flex max-w-sm flex-col gap-3 rounded-lg border border-border bg-card p-5">
+            <h2 className="text-sm font-medium text-foreground">
+              {splitPending
+                ? session.backendSessionId
+                  ? "Connecting to shell..."
+                  : "Starting shell..."
+                : session.backendSessionId
+                  ? "Connection failed"
+                  : "Shell startup unconfirmed"}
+            </h2>
+            {!splitPending ? (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  {replacementError ?? session.reconnectError?.message ?? "Startup was not confirmed."}
+                </p>
+                <div className="flex justify-center gap-2">
+                  <Button
+                    onClick={() =>
+                      void retryLocalSplit(session.id).catch((error) =>
+                        setReplacementError(toIpcError(error).message),
+                      )
+                    }
+                  >
+                    Retry
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void cancelLocalSplit(session.id).catch((error) =>
+                        setReplacementError(toIpcError(error).message),
+                      )
+                    }
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {searchOpen ? (
         <TerminalSearchOverlay
           sessionId={session.backendSessionId ?? session.id}
@@ -336,7 +387,14 @@ export function TerminalPane({
               <span className="text-lg">💤</span>
             </div>
             <h2 className="text-sm font-medium text-foreground">Suspended</h2>
-            <p className="mt-1 text-xs text-muted-foreground">Click to resume</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {getDaemonSuspension(session.id)?.suspensionSource ?? "Stop source unconfirmed"}
+            </p>
+            <div className="mt-3">
+              <Button size="sm" onClick={(e) => { e.stopPropagation(); handleResume(); }}>
+                Resume
+              </Button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -377,7 +435,9 @@ export function TerminalPane({
                       ? "Legacy SSH session lost"
                       : "SSH disconnected"
                 : isLocalReconnecting
-                  ? "Reconnecting session..."
+                  ? session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "binding"
+                    ? "Starting shell..."
+                    : "Reconnecting session..."
                   : isStandbyShell
                     ? replacementError
                       ? "Couldn't start shell"

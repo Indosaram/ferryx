@@ -1430,6 +1430,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
+        cmd_terminal_spawn_operation,
         cmd_terminal_spawn_batch,
         cmd_terminal_attach,
         cmd_terminal_history_snapshot,

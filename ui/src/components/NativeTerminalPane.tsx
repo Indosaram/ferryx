@@ -6,6 +6,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 
 import { cn } from "../lib/cn";
+import { matchesAttachTuple } from "../lib/localSplitContract";
+import { persistNativeBinding } from "../lib/localSplitLifecycle";
+import type { PaneAttachTuple } from "../lib/types";
 import type { TerminalActivity } from "../lib/activity";
 import {
   attachNativeTerminalLifecycle,
@@ -13,6 +16,9 @@ import {
   emitNativeTerminalPresentation,
   presentNativeTerminalLifecycle,
   reattachNativeTerminalLifecycle,
+  getDurableNativeBinding,
+  nativeBindingRemainingMs,
+  registerDurableNativeBinding,
   type NativeTerminalPresentationReceipt,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
@@ -84,6 +90,10 @@ export interface TerminalBounds {
 export interface NativeTerminalPaneProps {
   sessionId?: string;
   session?: TerminalSession;
+  splitAttempt?: {
+    readonly frontendSessionId: string;
+    readonly generation: number;
+  };
   className?: string;
   style?: CSSProperties;
   activity?: TerminalActivity;
@@ -110,6 +120,7 @@ function isGeometryEqual(a: GeometryState | null, b: GeometryState | null): bool
 
 interface NativeTerminalReceipt {
   readonly presented: boolean;
+  readonly attachTuple?: PaneAttachTuple;
   readonly renderDeferred?: boolean;
   /** Present on every receipt; needed to route an out-of-band receipt to the pane that owns it. */
   readonly sessionId?: string;
@@ -527,12 +538,15 @@ export function resetNativeTerminalPaneForTest(): void {
 export function NativeTerminalPane({
   sessionId,
   session,
+  splitAttempt,
   className,
   style,
   needsAttention = false,
   active,
   onBackendSessionUnavailable,
 }: NativeTerminalPaneProps): ReactElement {
+  const sessionRef = useRef(session);
+  useLayoutEffect(() => { sessionRef.current = session; }, [session]);
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
@@ -598,7 +612,8 @@ export function NativeTerminalPane({
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
   // Exited sessions have already reaped their daemon PTY and stream tasks; attaching would trigger SESSION_NOT_FOUND.
-  const isExited = session ? session.backendSessionId === null || session.lifecycle === "exited" : false;
+  const isExited = session ? session.backendSessionId === null || session.lifecycle === "exited" ||
+    Boolean(session.spawnIntent && !session.spawnIntent.bindingPersisted && !session.spawnIntent.ready) : false;
   const visible = interactive && !isExited && !suspended;
   const targetSessionId = isExited || suspended
     ? null
@@ -669,13 +684,42 @@ export function NativeTerminalPane({
     readonly paneIdentity: string;
     readonly backendSessionId: string;
     readonly bindingKey: string | null;
+    readonly incarnation: string | null;
+    readonly daemonEpoch: string;
   } | null>(null);
   useLayoutEffect(() => {
     presentationIdentityRef.current = surfaceSessionId && paneIdentity !== undefined
-      ? { paneIdentity, backendSessionId: surfaceSessionId, bindingKey }
+      ? { paneIdentity, backendSessionId: surfaceSessionId, bindingKey,
+          incarnation: session?.incarnation ?? null, daemonEpoch: session?.daemonEpoch ?? "" }
       : null;
     return () => { presentationIdentityRef.current = null; };
-  }, [bindingKey, paneIdentity, surfaceSessionId]);
+  }, [bindingKey, paneIdentity, surfaceSessionId, session?.incarnation, session?.daemonEpoch]);
+
+  const splitAttemptRef = useRef(splitAttempt);
+  useLayoutEffect(() => {
+    splitAttemptRef.current = splitAttempt;
+  }, [splitAttempt]);
+  const splitAttemptGeneration = splitAttempt?.generation ?? 0;
+  useLayoutEffect(() => {
+    const tuple = session?.spawnIntent?.attachTuple;
+    if (tuple && (session?.spawnIntent?.bindingPersisted || session?.spawnIntent?.ready)) {
+      registerDurableNativeBinding(tuple);
+    }
+  }, [session?.spawnIntent?.attachTuple, session?.spawnIntent?.bindingPersisted, session?.spawnIntent?.ready]);
+
+  const rearmBoundsRef = useRef<((attemptGeneration: number) => void) | null>(null);
+  const previousSplitAttemptGenerationRef = useRef(splitAttemptGeneration);
+  useEffect(() => {
+    const previous = previousSplitAttemptGenerationRef.current;
+    previousSplitAttemptGenerationRef.current = splitAttemptGeneration;
+    if (previous === splitAttemptGeneration) return;
+    switchDebug("terminal.surface.attempt.rearm", {
+      paneIdentity,
+      backendSessionId: surfaceSessionId,
+      attemptGeneration: splitAttemptGeneration,
+    });
+    rearmBoundsRef.current?.(splitAttemptGeneration);
+  }, [paneIdentity, splitAttemptGeneration, surfaceSessionId]);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -693,10 +737,23 @@ export function NativeTerminalPane({
   }, [isExited]);
 
   useEffect(() => {
-    if (targetSessionId && typeof remoteGeneration === "number") {
-      terminalInputQueue.invalidateOldGenerations(targetSessionId, remoteGeneration);
+    if (targetSessionId) {
+      if (typeof remoteGeneration === "number") {
+        terminalInputQueue.invalidateOldGenerations(targetSessionId, remoteGeneration);
+      }
+      if (typeof splitAttemptGeneration === "number" && splitAttemptGeneration > 0) {
+        terminalInputQueue.invalidateOldGenerations(targetSessionId, splitAttemptGeneration);
+      }
     }
-  }, [remoteGeneration, targetSessionId]);
+    if (previousTargetSessionIdRef.current && previousTargetSessionIdRef.current !== targetSessionId) {
+      terminalInputQueue.clear(previousTargetSessionIdRef.current);
+    }
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+    isComposingRef.current = false;
+    compositionTailCharRef.current = null;
+  }, [remoteGeneration, splitAttemptGeneration, targetSessionId, bindingKey]);
 
   useEffect(() => {
     previousTargetSessionIdRef.current = targetSessionId;
@@ -1120,14 +1177,36 @@ export function NativeTerminalPane({
     // The lifecycle queue deduplicates by backend ID, not daemon identity.
     const bindingChanged = lastAttachBindingRef.current?.sessionId === targetId && lastAttachBindingRef.current.bindingKey !== owner.bindingKey;
     lastAttachBindingRef.current = { sessionId: targetId, bindingKey: owner.bindingKey };
-    const attachOp = force || bindingChanged ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
+    const attachOp = force || bindingChanged || splitAttemptRef.current ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
+      const session = sessionRef.current;
+      if (!getDurableNativeBinding(targetId) && session && !session.spawnIntent) {
+        const attachTuple: PaneAttachTuple = session.attachTuple ?? {
+          backendSessionId: targetId, incarnation: session.incarnation ?? null,
+          daemonEpoch: session.daemonEpoch ?? "", frontendSessionId: session.id,
+          paneIdentity: session.id, bindingKey: owner.bindingKey ?? "", attemptGeneration: 0,
+        };
+        const started = performance.now();
+        await persistNativeBinding({ ...session, attachTuple });
+        registerDurableNativeBinding(attachTuple, started);
+      }
+      const previousTuple = getDurableNativeBinding(targetId);
+      if (force && previousTuple && session && !session.spawnIntent) {
+        const attachTuple = { ...previousTuple, attemptGeneration: previousTuple.attemptGeneration + 1 };
+        const started = performance.now();
+        await persistNativeBinding({ ...session, attachTuple });
+        if (!registerDurableNativeBinding(attachTuple, started)) throw new Error("Stale native binding");
+      }
       await ensureStreamListenerRef.current();
       if (attachmentOwnerRef.current?.sessionId !== owner.sessionId
         || attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return;
       if (quarantinedBindingRef.current?.sessionId === targetId) return;
+      const attachTuple = getDurableNativeBinding(targetId);
+      if (!attachTuple) throw new Error("Durable native binding is unavailable");
       await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
+        attachTuple,
+        remainingMs: Math.floor(nativeBindingRemainingMs(targetId, 4_000)),
         ...(initialGeometry
           ? {
               bounds: initialGeometry.bounds,
@@ -2383,6 +2462,7 @@ export function NativeTerminalPane({
       return;
     }
 
+    let teardownTuple = getDurableNativeBinding(targetSessionId);
     let isSubscribed = true;
     let observer: ResizeObserver | null = null;
     let lastGeometry: GeometryState | null = null;
@@ -2390,6 +2470,7 @@ export function NativeTerminalPane({
     let pendingGeometry: GeometryState | null = null;
     let isAttached = false;
     let presentationFrame: number | null = null;
+    let rearmForAttemptGeneration: number | null = null;
     // Set when the component-level generation effect re-arms bounds while an
     // older set-bounds request is still in flight; consumed by that request's
     // settle path so the newer attempt's parked geometry dispatches even when
@@ -2412,20 +2493,15 @@ export function NativeTerminalPane({
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
+      const dispatchedTuple = getDurableNativeBinding(targetSessionId);
+      if (!dispatchedTuple) return;
       const presentationReceipt: NativeTerminalPresentationReceipt | null =
-        paneIdentity !== undefined
-          ? {
-              frontendSessionId: paneIdentity,
-              paneIdentity,
-              backendSessionId: targetSessionId,
-              bindingKey,
-              attemptGeneration: 0,
-            }
-          : null;
+        paneIdentity !== undefined ? dispatchedTuple : null;
       if (presentationFrame !== null) {
         cancelAnimationFrame(presentationFrame);
         presentationFrame = null;
       }
+      rearmForAttemptGeneration = null;
       inFlight = true;
       scaleFactorRef.current = nextGeometry.scaleFactor;
       switchDebug("terminal.surface.bounds.start", {
@@ -2439,6 +2515,8 @@ export function NativeTerminalPane({
         sessionId: targetSessionId,
         bounds: nextGeometry.bounds,
         scaleFactor: nextGeometry.scaleFactor,
+        attachTuple: dispatchedTuple,
+        remainingMs: Math.floor(nativeBindingRemainingMs(targetSessionId, 2_000)),
       })
         .then((receipt) => {
           if (isSubscribed) {
@@ -2462,7 +2540,15 @@ export function NativeTerminalPane({
                 currentIdentity !== null &&
                 currentIdentity.paneIdentity === presentationReceipt.paneIdentity &&
                 currentIdentity.backendSessionId === presentationReceipt.backendSessionId &&
-                currentIdentity.bindingKey === presentationReceipt.bindingKey;
+                currentIdentity.bindingKey === presentationReceipt.bindingKey &&
+                getDurableNativeBinding(targetSessionId)?.attemptGeneration === presentationReceipt.attemptGeneration &&
+                currentIdentity.incarnation === presentationReceipt.incarnation &&
+                currentIdentity.daemonEpoch === presentationReceipt.daemonEpoch &&
+                (receipt.attachTuple !== undefined && matchesAttachTuple({
+                  ...presentationReceipt, bindingKey: presentationReceipt.bindingKey ?? "",
+                  incarnation: presentationReceipt.incarnation ?? null,
+                  daemonEpoch: presentationReceipt.daemonEpoch ?? "",
+                }, receipt.attachTuple));
               if (identityMatches) {
                 setPresentation((current) =>
                   current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity && current.bindingKey === bindingKey
@@ -2555,9 +2641,12 @@ export function NativeTerminalPane({
           if (pendingGeometry) {
             const next = pendingGeometry;
             pendingGeometry = null;
-            if (!isGeometryEqual(lastGeometry, next)) {
+            if (rearmForAttemptGeneration !== null || !isGeometryEqual(lastGeometry, next)) {
               dispatchBounds(next);
             }
+          } else if (rearmForAttemptGeneration !== null) {
+            lastGeometry = null;
+            reportBounds();
           }
         });
     };
@@ -2591,12 +2680,20 @@ export function NativeTerminalPane({
         return;
       }
 
-      if (isGeometryEqual(lastGeometry, currentGeometry)) {
+      if (rearmForAttemptGeneration === null && isGeometryEqual(lastGeometry, currentGeometry)) {
         return;
       }
+      rearmForAttemptGeneration = null;
 
       dispatchBounds(currentGeometry);
     };
+
+    const rearmBoundsForAttempt = (attemptGeneration: number) => {
+      lastGeometry = null;
+      rearmForAttemptGeneration = attemptGeneration;
+      reportBounds();
+    };
+    rearmBoundsRef.current = rearmBoundsForAttempt;
 
     const maxRetries = 5;
     // A transient attach failure normally self-heals inside the first two fast retries
@@ -2630,6 +2727,7 @@ export function NativeTerminalPane({
         try {
           await performAttach(targetSessionId, force || retryCount > 0);
           if (!isSubscribed) return;
+          teardownTuple = getDurableNativeBinding(targetSessionId);
           if (
             attachmentOwnerRef.current !== currentOwner ||
             !attachmentOwnerRef.current?.live ||
@@ -2797,6 +2895,9 @@ export function NativeTerminalPane({
       unlistenStreamEnded?.();
       retryAttachRef.current = null;
       retryBoundsRef.current = null;
+      if (rearmBoundsRef.current === rearmBoundsForAttempt) {
+        rearmBoundsRef.current = null;
+      }
       resolutionQuery?.removeEventListener("change", updateDeviceScale);
       window.removeEventListener("resize", updateDeviceScale);
       if (retryTimer) {
@@ -2830,9 +2931,11 @@ export function NativeTerminalPane({
         });
         return;
       }
+      if (!teardownTuple) return;
       void detachNativeTerminalLifecycle(targetSessionId, () =>
         invoke("cmd_native_terminal_detach", {
           sessionId: targetSessionId,
+          attachTuple: teardownTuple,
         }),
       )
         .then((detached) => {

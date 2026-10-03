@@ -70,6 +70,13 @@ pub enum IpcErrorCode {
     InvalidArgument,
     InternalError,
     Unsupported,
+    // Local pane reliable split and liveness capability error codes
+    UnsupportedCapability,
+    SpawnRequestConflict,
+    SpawnRequestExpired,
+    SpawnEpochChanged,
+    SpawnAttemptTimeout,
+    SpawnCancelled,
     // Paired host and machine protocol error codes (P08)
     SessionExpired,
     ParentSessionMismatch,
@@ -204,6 +211,12 @@ impl IpcErrorCode {
             "BROWSER_CLI_UNAVAILABLE" => Self::BrowserCliUnavailable,
             "BROWSER_WAIT_TIMEOUT" => Self::BrowserWaitTimeout,
             "BROWSER_SCREENSHOT_FAILED" => Self::BrowserScreenshotFailed,
+            "UNSUPPORTED_CAPABILITY" => Self::UnsupportedCapability,
+            "SPAWN_REQUEST_CONFLICT" => Self::SpawnRequestConflict,
+            "SPAWN_REQUEST_EXPIRED" => Self::SpawnRequestExpired,
+            "SPAWN_EPOCH_CHANGED" => Self::SpawnEpochChanged,
+            "SPAWN_ATTEMPT_TIMEOUT" => Self::SpawnAttemptTimeout,
+            "SPAWN_CANCELLED" => Self::SpawnCancelled,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -232,8 +245,8 @@ impl IpcError {
         self
     }
 
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(IpcErrorCode::InternalError, message)
+    pub fn internal(message: impl std::fmt::Display) -> Self {
+        Self::new(IpcErrorCode::InternalError, message.to_string())
     }
 
     pub fn native_terminal_unsupported() -> Self {
@@ -241,6 +254,30 @@ impl IpcError {
             IpcErrorCode::NativeTerminalUnsupported,
             "Native terminal support is not compiled into this build (cargo feature `native-terminal` is disabled)",
         )
+    }
+
+    pub fn unsupported_capability(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::UnsupportedCapability, message)
+    }
+
+    pub fn spawn_request_conflict(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnRequestConflict, message)
+    }
+
+    pub fn spawn_request_expired(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnRequestExpired, message)
+    }
+
+    pub fn spawn_epoch_changed(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnEpochChanged, message)
+    }
+
+    pub fn spawn_attempt_timeout(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnAttemptTimeout, message)
+    }
+
+    pub fn spawn_cancelled(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnCancelled, message)
     }
 }
 

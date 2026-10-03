@@ -41,6 +41,7 @@ import { notificationCenterStore } from "./lib/notificationCenter/notificationCe
 import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
+import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -1349,6 +1350,18 @@ function WorkspaceApp({
     return persistSessionStrict(workspaceId, repoRoot, currentState).catch((error) => {
       console.error("Failed to save workspace session:", error);
     });
+  }, [persistSessionStrict]);
+
+  useEffect(() => {
+    setLocalSplitPersistence((owner) => {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === owner.workspaceId);
+      const snapshot = getWorkspaceSnapshot(owner.workspaceId);
+      if (!project || !snapshot) return Promise.reject(new Error("Split persistence owner is unavailable"));
+      return persistSessionStrict(owner.workspaceId, project.repoRoot, {
+        ...snapshot, sessions: { ...snapshot.sessions, [owner.id]: owner },
+      });
+    });
+    return () => setLocalSplitPersistence(undefined);
   }, [persistSessionStrict]);
 
   const handleReconnectAgentSession = useCallback(

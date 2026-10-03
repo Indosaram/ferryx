@@ -1,5 +1,109 @@
 import type { PaneDirection, PaneNode } from "../state/paneTree";
 
+export interface SplitIdentity {
+  readonly requestId: string;
+  readonly originEpoch: string;
+  readonly expiresAtUnixMs: number;
+}
+
+export interface PreparedLocalSplit {
+  readonly identity: SplitIdentity;
+  readonly workspaceId: string;
+  readonly worktree: WorktreeIdentity | null;
+  readonly cwd: string;
+  readonly shell: string | null;
+  readonly cols: number;
+  readonly rows: number;
+}
+
+export type SplitOwnership = "created";
+
+export type SplitUnknownReason = "epochChanged" | "publicationUncertain";
+
+export type SplitOperationResult =
+  | { readonly state: "absent"; readonly canCreate: boolean }
+  | { readonly state: "pending"; readonly cancelRequested: boolean }
+  | {
+      readonly state: "created";
+      readonly sessionId: string;
+      readonly daemonEpoch: string;
+      readonly session: import("./tauri").TerminalDescribeResult;
+      readonly ownership: SplitOwnership;
+    }
+  | { readonly state: "cancelled" | "exited" }
+  | { readonly state: "failed"; readonly error: StructuredIpcError; readonly noChild: true }
+  | { readonly state: "unknown"; readonly reason: SplitUnknownReason };
+
+export type SplitOperationRequest =
+  | {
+      readonly action: "prepare";
+      readonly requestId: string;
+      readonly request: import("./tauri").SpawnTerminalRequest;
+      readonly remainingMs: number;
+    }
+  | { readonly action: "status" | "cancel"; readonly identity: SplitIdentity; readonly remainingMs: number };
+
+export type SplitOperationResponse =
+  | { readonly action: "prepare"; readonly prepared: PreparedLocalSplit }
+  | { readonly action: "status" | "cancel"; readonly operation: SplitOperationResult };
+
+export interface SplitAttachAttempt {
+  readonly identity: SplitIdentity;
+  readonly frontendSessionId: string;
+  readonly generation: number;
+  readonly remainingMs: number;
+}
+
+export type SplitDelivery = "notSent" | "ambiguous" | "confirmed";
+
+export interface SplitErrorDetails {
+  readonly requestId: string;
+  readonly originEpoch: string;
+  readonly stage: string;
+  readonly delivery: SplitDelivery;
+  readonly operationState: string;
+  readonly preparedLocalSplit?: PreparedLocalSplit;
+}
+
+export type SplitErrorCode =
+  | "SPAWN_REQUEST_CONFLICT"
+  | "SPAWN_REQUEST_EXPIRED"
+  | "SPAWN_EPOCH_CHANGED"
+  | "SPAWN_ATTEMPT_TIMEOUT"
+  | "SPAWN_CANCELLED"
+  | "UNSUPPORTED_CAPABILITY";
+
+export interface LocalSplitSpawnOptions {
+  readonly createOnly?: boolean;
+  readonly preparedLocalSplit?: PreparedLocalSplit;
+  readonly remainingMs?: number;
+}
+
+export interface LocalSplitSpawnReceipt {
+  readonly identity?: SplitIdentity;
+  readonly ownership?: "created";
+}
+
+/**
+ * Authoritative 7-field attach/presentation tuple connecting visual UI state to PTY backend:
+ * (backendSessionId, incarnation, daemonEpoch, frontendSessionId, paneIdentity, bindingKey, attemptGeneration)
+ */
+export interface PaneAttachTuple {
+  readonly backendSessionId: string;
+  readonly incarnation?: string | null;
+  readonly daemonEpoch: string;
+  readonly frontendSessionId: string;
+  readonly paneIdentity: string;
+  readonly bindingKey: string;
+  readonly attemptGeneration: number;
+}
+
+export interface PanePresentationReceipt {
+  readonly attachTuple: PaneAttachTuple;
+  readonly presented: boolean;
+  readonly presentationTimeUnixMs?: number;
+}
+
 export type WorktreeIdentity = {
   wsId: string;
   slug: string;
@@ -87,6 +191,7 @@ export type SessionProcessState = "standby" | "running" | "suspended" | "hiberna
 
 export type TerminalSessionSummary = {
   sessionId: string;
+  incarnation?: string | null;
   worktreePath: string | null;
   daemonEpoch?: string | null;
   running?: boolean;
@@ -157,6 +262,9 @@ export type TerminalSession = {
   ownerId?: string | null;
   daemonEpoch?: string | null;
   lastOutputSequence?: string | null;
+  incarnation?: string | null;
+  spawnIntent?: import("./localSplitLifecycle").LocalSplitIntent;
+  attachTuple?: PaneAttachTuple;
   /** Agent type detected for this pane, e.g. "claude". Never minted by Ferryx. */
   agentType?: string | null;
   /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
@@ -510,6 +618,7 @@ export type TerminalReplayGap = {
 export type AttachTerminalRequest = {
   sessionId: string;
   afterSequence?: string | null;
+  splitAttempt?: SplitAttachAttempt | null;
 };
 
 export type AttachTerminalResponse = {
@@ -519,6 +628,8 @@ export type AttachTerminalResponse = {
   historyEndSequence?: string | null;
   history: string;
   gap?: TerminalReplayGap | null;
+  incarnation?: string | null;
+  attachTuple?: PaneAttachTuple | null;
 };
 
 export type TerminalLifecyclePayload = {
@@ -746,6 +857,9 @@ export interface PersistedLayout {
 }
 
 export interface PersistedTerminalSession {
+  attachTuple?: PaneAttachTuple;
+  incarnation?: string | null;
+  spawnIntent?: import("./localSplitLifecycle").LocalSplitIntent;
   /** v2 stable frontend identity; map key remains authoritative. */
   localSessionId?: string;
   /** v2 native PTY identity. `null` means it must be respawned on restore. */
