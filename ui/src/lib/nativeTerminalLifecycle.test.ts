@@ -6,6 +6,9 @@ import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
   presentNativeTerminalLifecycle,
+  subscribeNativeTerminalPresentation,
+  emitNativeTerminalPresentation,
+  type NativeTerminalPresentationReceipt,
   resetNativeTerminalLifecycleForTest,
 } from "./nativeTerminalLifecycle";
 
@@ -170,5 +173,37 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
 
     // Detach operation must have been skipped because generation changed
     expect(detached).toEqual([]);
+  });
+
+  it("delivers matched presentation receipts and respects reset", () => {
+    const received: NativeTerminalPresentationReceipt[] = [];
+    subscribeNativeTerminalPresentation(
+      { paneIdentity: "pane-1", attemptGeneration: 2 },
+      (receipt) => { received.push(receipt); },
+    );
+
+    const nonMatching: NativeTerminalPresentationReceipt = {
+      frontendSessionId: "fs-1",
+      paneIdentity: "pane-2",
+      backendSessionId: "bs-1",
+      bindingKey: "bk-1",
+      attemptGeneration: 2,
+    };
+    expect(emitNativeTerminalPresentation(nonMatching)).toBe(0);
+    expect(received).toHaveLength(0);
+
+    const matching: NativeTerminalPresentationReceipt = {
+      frontendSessionId: "fs-1",
+      paneIdentity: "pane-1",
+      backendSessionId: "bs-1",
+      bindingKey: "bk-1",
+      attemptGeneration: 2,
+    };
+    expect(emitNativeTerminalPresentation(matching)).toBe(1);
+    expect(received).toEqual([matching]);
+
+    resetNativeTerminalLifecycleForTest();
+    expect(emitNativeTerminalPresentation(matching)).toBe(0);
+    expect(received).toHaveLength(1);
   });
 });

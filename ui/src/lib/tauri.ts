@@ -1291,15 +1291,6 @@ export async function listenDagWatchStatus(
   return listen<DagWatchStatusEvent>("dag-watch-status", (event) => handler(event.payload));
 }
 
-export type DagWatchProjectResult = {
-  projectPath: string;
-  generation?: number | null;
-  runs: DagRunSnapshot[];
-  failure?: DagWatchStatusEvent | null;
-};
-
-export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
-  if (!isTauri()) return { projectPath, runs: [] };
 export type AccountEnrollmentStatus = {
   enrolled: boolean;
   accountOrigin: string | null;
@@ -1326,6 +1317,15 @@ export async function enrollThisMachine(
   });
 }
 
+export type DagWatchProjectResult = {
+  projectPath: string;
+  generation?: number | null;
+  runs: DagRunSnapshot[];
+  failure?: DagWatchStatusEvent | null;
+};
+
+export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
+  if (!isTauri()) return { projectPath, runs: [] };
   return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }
 
