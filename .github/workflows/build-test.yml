@@ -24,6 +24,11 @@ jobs:
   precheck:
     name: Lint, unit and integration tests (macOS)
     runs-on: xenoci-macos
+    # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - name: 'Checkout repository (submodules: recursive)'
         uses: actions/checkout@v4
@@ -53,6 +58,10 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          shared-key: xenoci-tests-no-debuginfo-v1
+
+      - name: Report disk space before compilation
+        run: df -h . "$RUNNER_TEMP"
 
       # Fixture suites commit through git. A fresh runner ships no global identity, so
       # `git commit` inside a fixture repository fails before the assertion under test runs.
@@ -144,6 +153,14 @@ jobs:
       # needs the Rust toolchain and the Ghostty submodule.
       - name: Remote Grid Frame Seam (Rust -> TypeScript)
         run: bun run --cwd ui src/remote/gridFrameSeam.check.ts
+
+      - name: Report final disk usage
+        if: always()
+        run: |
+          df -h . "$RUNNER_TEMP"
+          for directory in src-tauri/target remote-helper/target; do
+            if [ -d "$directory" ]; then du -sh "$directory"; fi
+          done
 
   # =========================================================================
   # LEGACY MATRIX: MANUAL DISPATCH ONLY
