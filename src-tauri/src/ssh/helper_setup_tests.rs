@@ -966,26 +966,37 @@ fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
     // `-EncodedCommand` script. The remote pwsh then decoded and executed a
     // program literally named `-Command` (exit 1), so every helper install on
     // Windows failed and no qualified helper could ever be provisioned there.
-    let env = sample_windows_env("C:\\Users\\sook");
     let host = sample_host("ssh-maho-win");
-    let location = qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
-    let (cmd, input) = install_invocation(&env, &location, b"BINARY".to_vec());
+    for executor in [RemoteExecutor::Powershell, RemoteExecutor::Pwsh] {
+        let mut env = sample_windows_env("C:\\Users\\sook");
+        env.executor = executor;
+        let location =
+            qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
+        let (cmd, input) = install_invocation(&env, &location, b"BINARY".to_vec());
 
-    assert!(
-        cmd.starts_with("pwsh -NoLogo -NoProfile -NonInteractive -Command -"),
-        "windows upload must run in stdin mode, got: {cmd}"
-    );
-    assert!(
-        !cmd.contains("-EncodedCommand"),
-        "upload transport must not wrap the stdin marker as a script, got: {cmd}"
-    );
-    assert!(!input.is_empty(), "upload payload must stay attached to stdin");
+        assert_eq!(
+            cmd,
+            format!(
+                "{} -NoLogo -NoProfile -NonInteractive -Command -",
+                executor.program()
+            ),
+            "windows upload must run in raw stdin mode for {}",
+            executor.program()
+        );
+        assert!(
+            !cmd.contains("-EncodedCommand"),
+            "upload transport must not wrap the stdin marker as a script, got: {cmd}"
+        );
+        assert!(!input.is_empty(), "upload payload must stay attached to stdin");
+    }
 
     // Document why the raw path exists: `command` is script-encoding by design,
     // so the stdin-mode helper must bypass it.
-    let encoded = RemoteExecutor::Pwsh.command("-Command -");
-    assert!(
-        encoded.contains("-EncodedCommand"),
-        "executor.command is expected to wrap scripts: {encoded}"
-    );
+    for executor in [RemoteExecutor::Powershell, RemoteExecutor::Pwsh] {
+        let encoded = executor.command("-Command -");
+        assert!(
+            encoded.contains("-EncodedCommand"),
+            "executor.command is expected to wrap scripts: {encoded}"
+        );
+    }
 }
