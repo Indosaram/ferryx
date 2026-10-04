@@ -123,6 +123,13 @@ pub enum IpcErrorCode {
     Custom(String),
 }
 
+impl std::fmt::Display for IpcErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        f.write_str(value.as_str().ok_or(std::fmt::Error)?)
+    }
+}
+
 impl IpcErrorCode {
     pub fn from_code_str(s: &str) -> Self {
         match s {

@@ -1,6 +1,7 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 #[cfg(test)]
@@ -6739,6 +6740,7 @@ mod tests {
                 binary_path,
                 binary_mtime_ms,
                 daemon_version,
+                ..
             } => {
                 assert_eq!(version, DAEMON_PROTOCOL_VERSION);
                 assert_eq!(pid, std::process::id());

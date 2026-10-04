@@ -893,3 +893,58 @@ test('suspension-ownership and stale-binding adapters verify process actuation a
 
   rmSync(root, { recursive: true, force: true });
 });
+
+test('source digest resolves relative paths against an injected base and preserves absolute paths', async () => {
+  const root = fixtureRoot();
+  const path = join(root, 'source.mjs');
+  const bytes = Buffer.from('export const value = 1;');
+  const { createHash } = await import('node:crypto');
+  writeFileSync(path, bytes);
+  try {
+    const expected = createHash('sha256').update(bytes).digest('hex');
+    expect(computeSourceDigest(['source.mjs'], root)).toBe(expected);
+    expect(computeSourceDigest([path])).toBe(expected);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('driver dispatch is explicit, mock-safe, and accepts an injected adapter driver', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  expect(native.selectNativeDriver({ platformPreflight: 'darwin' }).focus).toBe(native.focusWindowByPidDarwin);
+  expect(native.selectNativeDriver({ platformPreflight: 'win32' }).split).toBe(native.windowsDriver);
+
+  const root = fixtureRoot();
+  const path = join(root, 'screenshot.png');
+  writeFileSync(path, Buffer.from('fixture-screenshot'));
+  try {
+    for (const platformPreflight of ['mock', 'linux', undefined]) {
+      const driver = native.selectNativeDriver({ platformPreflight });
+      const evidence = { action: () => { throw new Error('mock driver emitted a native action'); } };
+      await driver.focus(evidence, 1234);
+      await driver.split(evidence, 1234);
+      await driver.typeMarker(evidence, 1234);
+      await driver.retry(evidence, 1234);
+      expect(await driver.capture(evidence, path, 1234)).toEqual({ path, screenshotSha256: computeSourceDigest([path]) });
+      await expect(driver.capture(evidence, join(root, 'missing.png'), 1234)).rejects.toThrow();
+    }
+
+    const calls = [];
+    const driver = {
+      focus: async () => calls.push('focus'),
+      split: async () => calls.push('split'),
+    };
+    expect(native.selectNativeDriver({ platformPreflight: 'darwin', nativeDriver: driver })).toBe(driver);
+    const result = await runSplitCancelScenario({
+      platformPreflight: 'darwin', nativeDriver: driver, pid: 1234,
+      evidence: { action: () => {} },
+      barrierHub: {
+        command: () => calls.push('cancel'),
+        awaitReceipt: async () => {
+          calls.push('receipt');
+          return { cancelAckMs: 1, cleanupReceipt: { authoritative: true } };
+        },
+      },
+    }, { cancel: { phase: 'before-create' } });
+    expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
+    expect(calls).toEqual(['focus', 'split', 'cancel', 'receipt', 'cancel']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

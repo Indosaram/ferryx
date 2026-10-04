@@ -249,7 +249,14 @@ describe("App paired desktop shell", () => {
     expect(native.split).toBeTypeOf("function");
     await act(async () => { native.split!(); });
     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
-    expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "local" }));
+    expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceId: "local" }),
+      expect.objectContaining({
+        createOnly: true,
+        preparedLocalSplit: expect.objectContaining({ workspaceId: "local" }),
+        remainingMs: expect.any(Number),
+      }),
+    );
     await act(async () => { fireEvent.keyDown(window, { key: "Escape", code: "Escape" }); });
     await act(async () => {
       fireEvent.keyDown(window, { key: "t", code: "KeyT", metaKey: isMacShortcutPlatform(), ctrlKey: !isMacShortcutPlatform() });

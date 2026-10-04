@@ -93,8 +93,9 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
   return liveSessions.map((candidate) => ({
     sessionId: candidate.sessionId,
     daemonEpoch: candidate.daemonEpoch ?? null,
+    incarnation: candidate.incarnation ?? null,
     worktreePath: candidate.worktreePath ?? null,
-    running: (candidate as any).running ?? true,
+    running: candidate.running ?? true,
   }));
 }
 

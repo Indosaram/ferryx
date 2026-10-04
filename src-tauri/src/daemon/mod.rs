@@ -5,7 +5,6 @@ pub mod dag_service;
 pub mod handover;
 #[cfg(unix)]
 pub mod handover_socket;
-#[cfg(unix)]
 pub mod handover_transaction;
 #[cfg(unix)]
 pub mod handover_wire;
@@ -32,7 +31,6 @@ pub use client::*;
 pub use handover::*;
 #[cfg(unix)]
 pub use handover_socket::*;
-#[cfg(unix)]
 pub use handover_transaction::*;
 #[cfg(unix)]
 pub use handover_wire::*;

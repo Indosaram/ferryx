@@ -191,11 +191,11 @@ mod preparation_context_tests {
         context.apply(&mut command, "backend-id");
         assert_eq!(
             command.get_cwd().unwrap().to_str().unwrap(),
-            crate::daemon::session_service::normalize_process_cwd(&cwd)
+            crate::daemon::session_service::normalize_process_cwd(&cwd).to_str().unwrap()
         );
         assert_eq!(
             command.get_env("FERRYX_WORKTREE_PATH").unwrap().to_str().unwrap(),
-            crate::daemon::session_service::normalize_process_cwd(root.path())
+            crate::daemon::session_service::normalize_process_cwd(root.path()).to_str().unwrap()
         );
         assert_eq!(command.get_env("FERRYX_WORKSPACE_ID").unwrap(), "managed-ws");
         assert_eq!(command.get_env("FERRYX_SESSION_ID").unwrap(), "backend-id");

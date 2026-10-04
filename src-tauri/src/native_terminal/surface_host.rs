@@ -210,6 +210,8 @@ pub struct RenderScheduleCoordinator {
     state: AtomicU8,
     frame_clock: FrameClock,
     ownership: Mutex<u64>,
+    #[cfg(feature = "local-split-qa")]
+    presentation_claim: Mutex<Option<(String, String)>>,
 }
 
 impl RenderScheduleCoordinator {
@@ -218,6 +220,8 @@ impl RenderScheduleCoordinator {
             state: AtomicU8::new(RENDER_IDLE),
             frame_clock: FrameClock::default(),
             ownership: Mutex::new(0),
+            #[cfg(feature = "local-split-qa")]
+            presentation_claim: Mutex::new(None),
         }
     }
 
@@ -648,7 +652,7 @@ fn emit_native_presentation_receipt_qa(
         .or_else(|| channel.operation_id())
         .unwrap_or_else(|| format!("op-pres-{}", frame_generation));
 
-    channel.schedule_cancellation_receipt(
+    schedule_native_qa_receipt(channel,
         crate::ipc::qa_barrier::PRESENTATION_BARRIER,
         &operation_id,
         serde_json::json!({
@@ -672,6 +676,21 @@ fn emit_native_presentation_receipt_qa(
             "producerComponent": "surface-host-gpu-render",
         }),
     );
+}
+
+#[cfg(feature = "local-split-qa")]
+fn schedule_native_qa_receipt(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    name: &str,
+    operation_id: &str,
+    payload: serde_json::Value,
+) {
+    let channel = Arc::clone(channel);
+    let name = name.to_string();
+    let operation_id = operation_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        channel.append_receipt(&name, &operation_id, payload);
+    });
 }
 
 fn dispatch_scheduled_render<R: Runtime>(
@@ -703,7 +722,7 @@ fn dispatch_owned_render<R: Runtime>(
             let target = match spec.target_backend_session_id.as_deref() {
                 Some(target) if !target.is_empty() => target,
                 _ => {
-                    channel.schedule_cancellation_receipt(
+                    schedule_native_qa_receipt(&channel,
                         crate::ipc::qa_barrier::PRESENTATION_BARRIER,
                         &spec.operation_id,
                         serde_json::json!({
@@ -724,9 +743,14 @@ fn dispatch_owned_render<R: Runtime>(
                 return;
             }
 
-            // Channel-owned claim state: returns false if already claimed by active operation.
-            if !channel.try_claim(crate::ipc::qa_barrier::PRESENTATION_BARRIER, &session_id, &spec.operation_id) {
-                return;
+            // One pending barrier hold per session coordinator; the channel has no claim API.
+            let claim_key = (channel.run_id().to_string(), spec.operation_id.clone());
+            {
+                let mut claim = coordinator.presentation_claim.lock();
+                if claim.is_some() {
+                    return;
+                }
+                *claim = Some(claim_key.clone());
             }
 
             let window_clone = window.clone();
@@ -775,11 +799,12 @@ fn dispatch_owned_render<R: Runtime>(
                 }
 
                 let outcome = channel_clone.wait_for_release(&spec).await;
-                channel_clone.release_claim(
-                    crate::ipc::qa_barrier::PRESENTATION_BARRIER,
-                    &session_id_clone,
-                    &spec.operation_id,
-                );
+                {
+                    let mut claim = coordinator_clone.presentation_claim.lock();
+                    if claim.as_ref() == Some(&claim_key) {
+                        *claim = None;
+                    }
+                }
 
                 match outcome {
                     crate::ipc::qa_barrier::ReleaseOutcome::Released => {
@@ -902,6 +927,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
             .unwrap_or(logical_bounds);
         host.layout = Some(layout);
         host.logical_bounds = Some(effective_bounds);
+        host.presentation_slot = Some(Arc::downgrade(&slot));
         host.update_viewport(Some(effective_bounds));
 
         if render_input.synchronized_output {
@@ -4596,6 +4622,7 @@ struct NativeTerminalSurfaceHost {
     frame_target: HostFrameTarget,
     layout: Option<SurfaceCompositionLayout>,
     logical_bounds: Option<LogicalBounds>,
+    presentation_slot: Option<std::sync::Weak<SnapshotSlot>>,
 }
 
 // Only the native frame target is substituted in headless host tests. Session ownership,
@@ -4615,7 +4642,20 @@ impl NativeTerminalSurfaceHost {
             )?),
             layout: None,
             logical_bounds: None,
+            presentation_slot: None,
         })
+    }
+
+    fn active_presentation_generation(&self) -> Option<u64> {
+        let slot = self.presentation_slot.as_ref()?.upgrade()?;
+        let frame = slot.consume()?;
+        slot.is_attached_with_epoch(frame.attachment_epoch).then_some(frame.generation)
+    }
+
+    fn active_presentation_epoch(&self) -> Option<u64> {
+        let slot = self.presentation_slot.as_ref()?.upgrade()?;
+        let frame = slot.consume()?;
+        slot.is_attached_with_epoch(frame.attachment_epoch).then_some(frame.attachment_epoch)
     }
 
     /// Presentation geometry of the active frame target; injected test targets use the
@@ -5525,6 +5565,7 @@ mod tests {
                 }),
                 layout: state.session_layout(&request.session_id),
                 logical_bounds: Some(request.bounds),
+                presentation_slot: state.session_snapshot_slot(&request.session_id).map(|slot| Arc::downgrade(&slot)),
             };
             state.hosts.lock().insert(request.session_id.clone(), host);
             assert!(!state.is_session_render_pending(&request.session_id));
@@ -5640,6 +5681,25 @@ mod tests {
         assert_eq!(receipt.attach_tuple, tuple);
         assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
         harness._app.unlisten(listener);
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_native_binding_host_accessors_discard_detached_presentation() {
+        let harness = DirectRenderHarness::new(vec![]);
+        harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        let slot = harness.state.session_snapshot_slot(&harness.request.session_id).unwrap();
+        let frame = slot.consume().unwrap();
+        {
+            let hosts = harness.state.hosts.lock();
+            let host = hosts.get(&harness.request.session_id).unwrap();
+            assert_eq!(host.active_presentation_generation(), Some(frame.generation));
+            assert_eq!(host.active_presentation_epoch(), Some(frame.attachment_epoch));
+        }
+        slot.set_attached(false);
+        let hosts = harness.state.hosts.lock();
+        let host = hosts.get(&harness.request.session_id).unwrap();
+        assert_eq!(host.active_presentation_generation(), None);
+        assert_eq!(host.active_presentation_epoch(), None);
     }
 
     #[tokio::test]
@@ -7174,6 +7234,7 @@ mod tests {
                 assert_host_locked: Box::new(|| {}),
             }),
             layout: state.session_layout(session_b),
+            presentation_slot: state.session_snapshot_slot(session_b).map(|slot| Arc::downgrade(&slot)),
             logical_bounds: Some(LogicalBounds {
                 x: 0.0,
                 y: 0.0,

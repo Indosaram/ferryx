@@ -1,4 +1,3 @@
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -169,7 +168,7 @@ impl SplitJournal {
             .create(true)
             .truncate(false)
             .open(self.dir.join(LOCK_FILE))?;
-        lock_file.lock_exclusive()?;
+        lock_file.lock()?;
         Ok(JournalGuard {
             _process_guard: process_guard,
             lock_file,
@@ -243,7 +242,7 @@ struct JournalGuard<'a> {
 
 impl Drop for JournalGuard<'_> {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.lock_file);
+        let _ = self.lock_file.unlock();
     }
 }
 

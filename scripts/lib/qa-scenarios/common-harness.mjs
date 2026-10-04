@@ -781,9 +781,10 @@ function waitForLine(path, minCount, stopPromise) {
 }
 
 // Digest binding the evidence pointer to the exact runner source bytes.
-export function computeSourceDigest(paths) {
+export function computeSourceDigest(paths, baseDir = fileURLToPath(new URL('../../../', import.meta.url))) {
   const hash = createHash('sha256');
-  for (const path of paths) hash.update(readFileSync(path));
+  // Relative source paths belong to the checkout, not the gate's ui/ cwd.
+  for (const path of paths) hash.update(readFileSync(resolve(baseDir, path)));
   return hash.digest('hex');
 }
 

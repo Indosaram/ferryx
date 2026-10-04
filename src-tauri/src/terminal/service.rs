@@ -567,7 +567,7 @@ impl TerminalService {
             session.set_suspension_receipt(None);
             Ok(())
         }).await.map_err(|error| PtyError::Other(error.to_string()))?;
-        self.lifecycle.lock().mark_running(session_id.into());
+        self.lifecycle.lock().mark_running(session_id);
         Ok(())
     }
 

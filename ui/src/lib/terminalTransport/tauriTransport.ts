@@ -18,6 +18,7 @@ export class TauriTerminalTransport implements TerminalTransport {
       sessionId: s.sessionId,
       worktreePath: s.worktreePath,
       daemonEpoch: s.daemonEpoch ?? null,
+      incarnation: s.incarnation ?? null,
       running: s.running ?? true,
     }));
   }

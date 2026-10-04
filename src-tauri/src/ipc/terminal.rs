@@ -2426,6 +2426,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 kernel_stopped: None,
                 registry_suspended: None,
                 suspension_source: None,
+                // Machine Session carries an epoch-qualified target, not a local
+                // split incarnation; do not invent one for the paired proxy.
+                incarnation: None,
             },
         }
     } else {

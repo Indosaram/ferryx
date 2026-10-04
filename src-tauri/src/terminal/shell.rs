@@ -638,20 +638,27 @@ mod tests {
         std::fs::write(root.path().join("pwsh.exe"), b"").unwrap();
         std::fs::write(root.path().join("custom.CMD"), b"").unwrap();
         let path = std::env::join_paths([root.path()]).unwrap();
-        let environment = |key| match key {
-            "PATH" => Some(path.clone()),
-            "PATHEXT" => Some(std::ffi::OsString::from(".CMD;.EXE")),
-            _ => None,
-        };
+        // The environment lookup is written inline at each call site: a closure stored in a local
+        // binding is not inferred as higher-ranked over its `&str` key, so it cannot satisfy the
+        // `Fn(&str)` bound ("implementation of `Fn` is not general enough").
         let default =
-            ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+            ordinary_shell_command_with_env(None, TargetPlatform::Windows, |key| match key {
+                "PATH" => Some(path.clone()),
+                "PATHEXT" => Some(std::ffi::OsString::from(".CMD;.EXE")),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             default.get_argv(),
             &[root.path().join("pwsh.exe").into_os_string()]
         );
         let custom =
-            ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
-                .unwrap();
+            ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, |key| match key {
+                "PATH" => Some(path.clone()),
+                "PATHEXT" => Some(std::ffi::OsString::from(".CMD;.EXE")),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(
             custom.get_argv(),
             &[root.path().join("custom.CMD").into_os_string()]

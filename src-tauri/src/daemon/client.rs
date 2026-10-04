@@ -4504,6 +4504,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -4588,6 +4591,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -4676,6 +4682,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -4824,6 +4833,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
@@ -4910,6 +4922,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
@@ -4960,6 +4975,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             // Connection 1 (desktop control): answer the handshake, receive the Ping,
             // and hold the reply so the control slot stays busy for the whole test.
@@ -5102,6 +5120,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
@@ -5293,6 +5314,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -5370,6 +5394,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -5705,6 +5732,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -5817,6 +5847,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');

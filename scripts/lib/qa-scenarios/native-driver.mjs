@@ -369,6 +369,41 @@ export function assertNativeAutomationSupported() {
   }
 }
 
+// Adapters may inject a complete driver; only explicit native preflights select OS APIs.
+export function selectNativeDriver(ctx) {
+  if (ctx.nativeDriver) return ctx.nativeDriver;
+  if (ctx.platformPreflight === 'win32') {
+    return {
+      focus: focusWindowWindows,
+      split: windowsDriver,
+      typeMarker: typeMarkerWindows,
+      retry: clickRetryWindows,
+      capture: captureOwnedWindowWindows,
+    };
+  }
+  if (ctx.platformPreflight === 'darwin') {
+    return {
+      focus: focusWindowByPidDarwin,
+      split: clickSplitRightDarwin,
+      typeMarker: typeMarkerDarwin,
+      retry: clickRetryDarwin,
+      capture: captureOwnedWindowDarwin,
+    };
+  }
+  // Mock/unsupported contexts never focus, click, type, or capture a real window.
+  // Capture only reads an existing fixture; missing evidence still fails normally.
+  return {
+    focus: async () => {},
+    split: async () => {},
+    typeMarker: async () => {},
+    retry: async () => {},
+    capture: async (_evidence, path) => ({
+      path,
+      screenshotSha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
+    }),
+  };
+}
+
 // Bounded capture-ready and independent inspection handshake.
 // Runner writes capture-ready.json with exact hash, runId, operationId, and bounds,
 // then awaits independent inspection artifact. Rejects mismatched hash, run, bounds, or text.

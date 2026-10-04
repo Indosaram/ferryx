@@ -15,16 +15,7 @@ import {
 } from './common-harness.mjs';
 import {
   MARKER_TEXT,
-  clickSplitRightDarwin,
-  focusWindowByPidDarwin,
-  typeMarkerDarwin,
-  windowsDriver,
-  focusWindowWindows,
-  typeMarkerWindows,
-  clickRetryDarwin,
-  clickRetryWindows,
-  captureOwnedWindowDarwin,
-  captureOwnedWindowWindows,
+  selectNativeDriver,
   performInspectionHandshake,
 } from './native-driver.mjs';
 
@@ -42,14 +33,11 @@ export function assertSinglePty(receipt, label = 'pty-check') {
 // ---------------------------------------------------------------------------
 export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Trigger Split Right
-  if (ctx.platformPreflight === 'win32') {
-    await windowsDriver(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await clickSplitRightDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  await driver.split(evidence, pid);
 
   // Await split-create
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));
@@ -75,12 +63,8 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
   evidence.action({ action: 'presentation-receipt', receipt: presentation });
 
   // Type marker into target pane
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await typeMarkerDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight === 'win32') await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   // Await marker output receipt
   const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs + BUDGETS.stageAttachListenerMs, 'marker-output'));
@@ -95,12 +79,7 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
 
   // Capture owned window screenshot & perform inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,
@@ -124,14 +103,11 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
 // ---------------------------------------------------------------------------
 export async function runSplitAttachStallScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Trigger Split Right
-  if (ctx.platformPreflight === 'win32') {
-    await windowsDriver(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await clickSplitRightDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  await driver.split(evidence, pid);
 
   // Await split-create
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));
@@ -167,11 +143,7 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
   evidence.action({ action: 'barrier.released', barrier: 'attach-handshake' });
 
   // Click actual Retry in the UI
-  if (ctx.platformPreflight === 'win32') {
-    await clickRetryWindows(evidence, pid);
-  } else {
-    await clickRetryDarwin(evidence, pid);
-  }
+  await driver.retry(evidence, pid);
 
   // Contract requirement: Retry retains request/backend identity, but increments attemptGeneration to a NEW generation.
   const retryAttemptGeneration = Number(create.attemptGeneration ?? 1) + 1;
@@ -204,12 +176,8 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
   }
 
   // Type marker and verify output
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await typeMarkerDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight === 'win32') await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'marker output'));
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
@@ -221,12 +189,7 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
 
   // Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,
@@ -249,15 +212,12 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
 // ---------------------------------------------------------------------------
 export async function runSplitCancelScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Crucial fix: Trigger split FIRST before awaiting create receipt!
   // Cancel must trigger split before waiting for held-create and not require created ID.
-  if (ctx.platformPreflight === 'win32') {
-    await windowsDriver(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await clickSplitRightDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  await driver.split(evidence, pid);
 
   // Dispatch cancel request immediately
   const cancelPhase = plan.cancel?.phase ?? 'while-creating';
@@ -295,6 +255,7 @@ export async function runSplitCancelScenario(ctx, plan, budget = new MonotonicBu
 // ---------------------------------------------------------------------------
 export async function runSplitConcurrentScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // 1. Pre-arm and trigger real unrelated remote RPC traffic
   barrierHub.command('trigger-remote-rpc', { rpcKind: 'remote-query', count: 1 });
@@ -305,24 +266,15 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   evidence.action({ action: 'held-rpc.confirmed', heldRpc: true });
 
   // 2. Drive local typing while remote RPC is held (must not block!)
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await typeMarkerDarwin(evidence, pid);
-  }
+  await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   // 3. Drive 16 bounded split requests including duplicate/fingerprint conflict pairs
   barrierHub.command('split-concurrent-batch', { count: 16, testConflicts: true });
   evidence.action({ action: 'split-concurrent-batch', count: 16 });
 
   // 4. Trigger native split
-  if (ctx.platformPreflight === 'win32') {
-    await windowsDriver(evidence, pid);
-  } else {
-    await clickSplitRightDarwin(evidence, pid);
-  }
+  await driver.split(evidence, pid);
 
   // 5. Await local split-create and presentation
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));
@@ -358,12 +310,7 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
 
   // 8. Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,

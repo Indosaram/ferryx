@@ -1280,14 +1280,14 @@ function WorkspaceApp({
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
         if (!isAgent) {
           // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
-          if (session.backendSessionId === null) {
+          if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         } else {
           const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
           if (affordance.canReconnect) {
             hasResumableAgents = true;
-          } else if (session.backendSessionId === null) {
+          } else if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         }
@@ -1306,7 +1306,7 @@ function WorkspaceApp({
         });
       }
     },
-    [restoreWorkspace],
+    [recoveredFromHmr, restoreWorkspace],
   );
 
   // Initial session restore on startup & HMR recovery managed by coordinator.

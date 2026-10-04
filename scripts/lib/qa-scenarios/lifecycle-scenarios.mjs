@@ -13,12 +13,7 @@ import {
 } from './common-harness.mjs';
 import {
   MARKER_TEXT,
-  focusWindowByPidDarwin,
-  typeMarkerDarwin,
-  focusWindowWindows,
-  typeMarkerWindows,
-  captureOwnedWindowDarwin,
-  captureOwnedWindowWindows,
+  selectNativeDriver,
   performInspectionHandshake,
 } from './native-driver.mjs';
 
@@ -85,15 +80,11 @@ export function assertInvariants(names, receipt) {
 // ---------------------------------------------------------------------------
 export async function runRetainedHandoverScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Initial typing of agent workload marker
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await typeMarkerDarwin(evidence, pid);
-  }
+  await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
   const initialMarkerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'initial marker'));
   evidence.action({ action: 'initial-marker', receipt: initialMarkerReceipt });
 
@@ -107,12 +98,8 @@ export async function runRetainedHandoverScenario(ctx, plan, budget = new Monoto
   evidence.action({ action: 'handover-transfer', receipt: transfer });
 
   // Type marker again in the adopted session
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await typeMarkerDarwin(evidence, pid);
-  }
+  if (ctx.platformPreflight === 'win32') await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   const postMarkerReceipt = await barrierHub.awaitReceipt('marker-output', 1, budget.consume(BUDGETS.stagePresentationMs, 'post-handover marker'));
   if (!String(postMarkerReceipt?.output ?? '').includes(MARKER_TEXT)) {
@@ -122,12 +109,7 @@ export async function runRetainedHandoverScenario(ctx, plan, budget = new Monoto
 
   // Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,
@@ -150,6 +132,7 @@ export async function runRetainedHandoverScenario(ctx, plan, budget = new Monoto
 // ---------------------------------------------------------------------------
 export async function runHandoverAbortScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Trigger abort variant (e.g. commit rejection, lost abort reply, or successor exit)
   const variant = plan.abortVariant ?? 'commit-rejection';
@@ -162,13 +145,8 @@ export async function runHandoverAbortScenario(ctx, plan, budget = new Monotonic
   evidence.action({ action: 'rollback-relinquishment', receipt: rollback });
 
   // Type marker to verify confirmed resolution restores same workload
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await typeMarkerDarwin(evidence, pid);
-  }
+  await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'restored workload marker'));
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
@@ -178,12 +156,7 @@ export async function runHandoverAbortScenario(ctx, plan, budget = new Monotonic
 
   // Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,
@@ -206,6 +179,7 @@ export async function runHandoverAbortScenario(ctx, plan, budget = new Monotonic
 // ---------------------------------------------------------------------------
 export async function runSuspensionOwnershipScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Trigger suspension check
   barrierHub.command('trigger-suspension-check', { testExternalStop: true });
@@ -217,13 +191,8 @@ export async function runSuspensionOwnershipScenario(ctx, plan, budget = new Mon
   evidence.action({ action: 'suspension-receipt', receipt });
 
   // Type marker to confirm resumed process is responsive
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await typeMarkerDarwin(evidence, pid);
-  }
+  await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'resumed marker'));
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
@@ -233,12 +202,7 @@ export async function runSuspensionOwnershipScenario(ctx, plan, budget = new Mon
 
   // Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,
@@ -261,6 +225,7 @@ export async function runSuspensionOwnershipScenario(ctx, plan, budget = new Mon
 // ---------------------------------------------------------------------------
 export async function runStaleBindingScenario(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
+  const driver = selectNativeDriver(ctx);
 
   // Trigger stale attach where delayed receipt changes identity fields
   barrierHub.command('trigger-stale-binding', { mutateField: 'attemptGeneration' });
@@ -277,13 +242,8 @@ export async function runStaleBindingScenario(ctx, plan, budget = new MonotonicB
   evidence.action({ action: 'reattach-marker', receipt: reattachReceipt });
 
   // Type marker to confirm valid reattach renders on same backend
-  if (ctx.platformPreflight === 'win32') {
-    await focusWindowWindows(evidence, pid);
-    await typeMarkerWindows(evidence, pid);
-  } else {
-    await focusWindowByPidDarwin(evidence, pid);
-    await typeMarkerDarwin(evidence, pid);
-  }
+  await driver.focus(evidence, pid);
+  await driver.typeMarker(evidence, pid);
 
   const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'reattach marker'));
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
@@ -293,12 +253,7 @@ export async function runStaleBindingScenario(ctx, plan, budget = new MonotonicB
 
   // Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
-  let screenshotMetadata;
-  if (ctx.platformPreflight === 'win32') {
-    screenshotMetadata = await captureOwnedWindowWindows(evidence, screenshotPath, pid);
-  } else {
-    screenshotMetadata = await captureOwnedWindowDarwin(evidence, screenshotPath, pid);
-  }
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
 
   const markerRecognition = await performInspectionHandshake(
     evidence,

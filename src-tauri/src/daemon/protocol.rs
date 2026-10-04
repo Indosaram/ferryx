@@ -1820,6 +1820,7 @@ mod tests {
                 rows,
                 shell,
                 startup,
+                local_split,
             } => {
                 assert_eq!(client_request_id, "req-1");
                 assert_eq!(workspace_id, "ws-1");
@@ -1829,6 +1830,8 @@ mod tests {
                 assert_eq!(rows, 24);
                 assert_eq!(shell, None);
                 assert_eq!(startup, None);
+                // Legacy wire JSON predates the local-split envelope; it must decode as absent.
+                assert_eq!(local_split, None);
             }
             _ => panic!("Expected Spawn variant"),
         }
