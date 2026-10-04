@@ -5686,8 +5686,34 @@ mod tests {
 
     #[tokio::test]
     async fn pane_liveness_native_binding_host_accessors_discard_detached_presentation() {
-        let harness = DirectRenderHarness::new(vec![]);
-        harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        // The direct path paints inline here (`DirectRenderHarness::new` leaves `defer_direct`
+        // off), so one render acquires exactly one drawable. A presented frame neither re-arms
+        // the coordinator nor re-enters the retry loop, so the scripted queue holds the real
+        // production sequence and nothing more: acquire once, present once. The injected target's
+        // `expect` is the retry-loop guard, so an extra acquisition fails loudly here instead of
+        // being absorbed by a longer queue.
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        let receipt = harness
+            .state
+            .render(&harness.window, harness.request.clone())
+            .unwrap();
+        assert!(receipt.presented, "the inline frame must actually present");
+        assert!(!receipt.render_deferred);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented],
+            "a presented frame acquires once and must not retry"
+        );
+        assert!(
+            !harness
+                .state
+                .is_session_render_pending(&harness.request.session_id),
+            "a presented frame must leave no retry armed"
+        );
+        assert!(
+            harness.dispatched.try_recv().is_err(),
+            "a presented frame must dispatch no retry"
+        );
         let slot = harness.state.session_snapshot_slot(&harness.request.session_id).unwrap();
         let frame = slot.consume().unwrap();
         {
