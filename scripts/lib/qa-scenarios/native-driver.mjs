@@ -48,6 +48,13 @@ import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
 import { HarnessError, withDeadline, waitForFile, BUDGETS } from './common-harness.mjs';
 import { asArray, parseWindowsProbeLine } from './windows-interactive.mjs';
+import {
+  PANE_AFFORDANCE_NAMES_WIN32,
+  PANE_AFFORDANCE_AUTOMATION_IDS_WIN32,
+  PANE_AFFORDANCE_SELECTOR_DARWIN,
+} from './pane-binding.mjs';
+
+export { PANE_AFFORDANCE_NAMES_WIN32, PANE_AFFORDANCE_AUTOMATION_IDS_WIN32, PANE_AFFORDANCE_SELECTOR_DARWIN };
 
 export const MARKER_COMMAND_UNIX = "printf 'FERRYX_SPLIT_READY\\n'";
 export const MARKER_TEXT = 'FERRYX_SPLIT_READY';
@@ -115,7 +122,7 @@ function osascript(evidence, source) {
 // pre-existing NATIVE_AUTOMATION_UNSUPPORTED classification.
 export function classifyWindowsFailure(text) {
   const message = String(text ?? '');
-  for (const code of ['NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_DISABLED']) {
+  for (const code of ['NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_DISABLED', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_DISABLED']) {
     if (message.includes(code)) return code;
   }
   return 'NATIVE_AUTOMATION_UNSUPPORTED';
@@ -1059,6 +1066,247 @@ export async function windowsDriver(evidence, pid) {
   return { clicked: true, chosen: verdict.chosen, matchedWindowHwnd: verdict.matchedWindowHwnd };
 }
 
+// ---------------------------------------------------------------------------
+// Pane-creation affordance ("New Terminal") - Job 2 of the task-9 lane.
+//
+// With the UI served the app boots to its EMPTY state (measured: "No open tabs",
+// "Open a terminal or browser tab to get started.", "New Terminal" [Button]), so
+// no pane exists and `Split pane right` has no parent pane to live in. This probe
+// clicks the app's own named button, which runs the product's real
+// `cmd_terminal_spawn` path and gives the scenario a real pane to split.
+//
+// The script uses only managed UIA assemblies - no P/Invoke and no here-string,
+// so it cannot inherit the pass-5 `UnexpectedCharactersAfterHereStringHeader`
+// class of defect. The search is an exact `PropertyCondition` on the accessible
+// name (never a substring match) over every visible owned window, and exactly one
+// ACTIONABLE match may be invoked: an absent, ambiguous or disabled affordance
+// fails typed instead of clicking a guess.
+export function buildWindowsNewPaneScript(pid, options = {}) {
+  const names = asArray(options.names ?? PANE_AFFORDANCE_NAMES_WIN32).map(String);
+  const automationIds = asArray(options.automationIds ?? PANE_AFFORDANCE_AUTOMATION_IDS_WIN32).map(String);
+  if (names.length + automationIds.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', 'the pane affordance probe needs at least one exact accessible name or automation id; refusing to search for nothing');
+  }
+  const searchWindows = asArray(options.windows)
+    .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
+    .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
+  const conditionBindings = [
+    ...names.map((_, index) => `$conditionName${index}`),
+    ...automationIds.map((_, index) => `$conditionAutomationId${index}`),
+  ];
+  const conditionLines = [
+    ...names.map((_, index) => `$conditionName${index} = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $selectorNames[${index}]);`),
+    ...automationIds.map((_, index) => `$conditionAutomationId${index} = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $selectorAutomationIds[${index}]);`),
+  ];
+  const conditionAssembly = conditionBindings.length === 1
+    ? [`$condition = ${conditionBindings[0]};`]
+    : [
+      `$conditionArray = [System.Windows.Automation.Condition[]]@(${conditionBindings.join(', ')});`,
+      '$condition = New-Object System.Windows.Automation.OrCondition -ArgumentList (, $conditionArray);',
+    ];
+  return [
+    "$ErrorActionPreference = 'Stop';",
+    'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes;',
+    `$targetPid = ${pid};`,
+    `$windowHandles = @(${searchWindows.map(window => window.hwnd).join(', ')});`,
+    `$windowTitles = ${psStringArray(searchWindows.map(window => window.title))};`,
+    `$windowClasses = ${psStringArray(searchWindows.map(window => window.className))};`,
+    `$selectorNames = ${psStringArray(names)};`,
+    `$selectorAutomationIds = ${psStringArray(automationIds)};`,
+    '$diag = [ordered]@{',
+    "  probe = 'new-pane';",
+    '  pid = $targetPid;',
+    '  selectorNames = $selectorNames;',
+    '  selectorAutomationIds = $selectorAutomationIds;',
+    '  interactive = [bool][System.Environment]::UserInteractive;',
+    '  sessionId = [int](Get-Process -Id $PID).SessionId;',
+    '  windowsSearched = @();',
+    '  windowsSearchedCount = 0;',
+    '  candidateCount = 0;',
+    '  actionableCount = 0;',
+    '  candidates = @();',
+    '  chosen = $null;',
+    '};',
+    'function Emit { Write-Output ($diag | ConvertTo-Json -Compress -Depth 8) }',
+    'function Fail($code, $detail) { $diag.failure = $code; $diag.detail = $detail; Emit; exit 0 }',
+    ...conditionLines,
+    ...conditionAssembly,
+    '$proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
+    "if ($proc -eq $null) { Fail 'NO_OWNED_WINDOW' 'the launched process exited before its pane affordance could be addressed' }",
+    '$searched = New-Object System.Collections.ArrayList;',
+    'for ($i = 0; $i -lt $windowHandles.Count; $i = $i + 1) {',
+    '  $hwnd = [int64]$windowHandles[$i];',
+    '  if ($hwnd -eq 0) { continue };',
+    '  $root = $null;',
+    '  try { $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new($hwnd)) } catch { $root = $null };',
+    '  if ($root -eq $null) { continue };',
+    '  $searched.Add([ordered]@{ hwnd = $hwnd; title = $windowTitles[$i]; className = $windowClasses[$i]; rootOffscreen = [bool]$root.Current.IsOffscreen }) | Out-Null;',
+    '}',
+    '$diag.windowsSearchedCount = $searched.Count;',
+    '$diag.windowsSearched = @($searched | ForEach-Object { [ordered]@{ hwnd = $_.hwnd; title = $_.title; className = $_.className; rootOffscreen = $_.rootOffscreen } });',
+    "if ($searched.Count -eq 0) { Fail 'NO_OWNED_WINDOW' 'no owned top-level window could be addressed for the pane affordance' }",
+    '$candidates = New-Object System.Collections.ArrayList;',
+    '$elements = New-Object System.Collections.ArrayList;',
+    'foreach ($window in $searched) {',
+    '  $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$window.hwnd));',
+    '  if ($root -eq $null) { continue };',
+    '  $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '  for ($j = 0; $j -lt $items.Count; $j = $j + 1) {',
+    '    try {',
+    '      $item = $items.Item($j);',
+    '      $rect = $item.Current.BoundingRectangle;',
+    '      $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; name = $item.Current.Name; controlType = $item.Current.ControlType.ProgrammaticName; automationId = $item.Current.AutomationId; enabled = [bool]$item.Current.IsEnabled; offscreen = [bool]$item.Current.IsOffscreen; rectEmpty = [bool]$rect.IsEmpty; rect = ("{0},{1},{2},{3}" -f $rect.Left, $rect.Top, $rect.Width, $rect.Height) }) | Out-Null;',
+    '      $elements.Add($item) | Out-Null;',
+    '    } catch {',
+    '      $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; error = $_.Exception.Message }) | Out-Null;',
+    '      $elements.Add($null) | Out-Null;',
+    '    }',
+    '  }',
+    '}',
+    '$diag.candidates = $candidates;',
+    '$diag.candidateCount = $candidates.Count;',
+    '$actionableIndexes = New-Object System.Collections.ArrayList;',
+    'for ($k = 0; $k -lt $candidates.Count; $k = $k + 1) {',
+    '  $candidate = $candidates[$k];',
+    '  if ($null -eq $candidate.error -and $candidate.enabled -eq $true -and $candidate.offscreen -eq $false -and $candidate.rectEmpty -eq $false) { $actionableIndexes.Add($k) | Out-Null }',
+    '}',
+    '$diag.actionableCount = $actionableIndexes.Count;',
+    "if ($diag.candidateCount -eq 0) { Fail 'PANE_AFFORDANCE_NOT_FOUND' 'no owned window exposes the pane-creation affordance by its exact accessible name' }",
+    "elseif ($actionableIndexes.Count -gt 1) { Fail 'PANE_AFFORDANCE_NOT_UNIQUE' 'more than one actionable pane-creation affordance is exposed; refusing to click a guess' }",
+    "elseif ($actionableIndexes.Count -eq 0) { Fail 'PANE_AFFORDANCE_DISABLED' 'the pane-creation affordance is present but not actionable (disabled, offscreen, or empty rect)' }",
+    'else {',
+    '  $chosenIndex = [int]$actionableIndexes[0];',
+    '  $diag.chosen = $candidates[$chosenIndex];',
+    '  $chosen = $elements[$chosenIndex];',
+    '  try {',
+    '    $invoke = $chosen.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern);',
+    '    $invoke.Invoke();',
+    "    $diag.result = 'PANE_CLICKED';",
+    '  } catch {',
+    "    $diag.failure = 'PANE_AFFORDANCE_DISABLED';",
+    '    $diag.detail = "InvokePattern failed: " + $_.Exception.Message;',
+    '  }',
+    '}',
+    'Emit;',
+  ].join('\n');
+}
+
+export function classifyWindowsNewPane(probe) {
+  const candidates = asArray(probe?.candidates);
+  const windowsSearched = asArray(probe?.windowsSearched);
+  const measured = {
+    selectorNames: asArray(probe?.selectorNames).length > 0 ? asArray(probe?.selectorNames) : [...PANE_AFFORDANCE_NAMES_WIN32],
+    selectorAutomationIds: asArray(probe?.selectorAutomationIds),
+    interactive: probe?.interactive ?? null,
+    sessionId: probe?.sessionId ?? null,
+    windowsSearched,
+    windowsSearchedCount: probe?.windowsSearchedCount ?? windowsSearched.length,
+    candidateCount: probe?.candidateCount ?? null,
+    actionableCount: probe?.actionableCount ?? null,
+    candidates,
+    chosen: probe?.chosen ?? null,
+    psFailure: probe?.failure ?? null,
+    psDetail: probe?.detail ?? null,
+  };
+  const evidenceText = JSON.stringify({ ...measured, psFailure: undefined, psDetail: undefined });
+  if (probe?.result === 'PANE_CLICKED') {
+    return { ok: true, code: null, derivedCode: null, detail: 'clicked the single actionable pane-creation affordance', ...measured };
+  }
+  const candidateCount = Number(probe?.candidateCount ?? 0);
+  const actionableCount = Number(probe?.actionableCount ?? 0);
+  const declaredCode = ['NO_OWNED_WINDOW', 'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_DISABLED'].includes(probe?.failure) ? probe.failure : null;
+  const derivedCode = windowsSearched.length < 1
+    ? 'NO_OWNED_WINDOW'
+    : candidateCount === 0
+      ? 'PANE_AFFORDANCE_NOT_FOUND'
+      : actionableCount > 1
+        ? 'PANE_AFFORDANCE_NOT_UNIQUE'
+        : 'PANE_AFFORDANCE_DISABLED';
+  const code = declaredCode ?? derivedCode;
+  const divergence = declaredCode && declaredCode !== derivedCode ? ` (probe reported ${declaredCode}, measured shape derives ${derivedCode})` : '';
+  const detail = code === 'NO_OWNED_WINDOW'
+    ? `no owned visible window to address${divergence}: ${evidenceText}`
+    : code === 'PANE_AFFORDANCE_NOT_UNIQUE'
+      ? `more than one actionable ${JSON.stringify(measured.selectorNames[0] ?? null)} affordance is exposed${divergence}: ${evidenceText}`
+      : code === 'PANE_AFFORDANCE_NOT_FOUND'
+        ? `the ${JSON.stringify(measured.selectorNames[0] ?? null)} affordance could not be identified by its exact accessible name${divergence}: ${evidenceText}`
+        : `the ${JSON.stringify(measured.selectorNames[0] ?? null)} affordance is present but not actionable${divergence}: ${evidenceText}`;
+  return { ok: false, code, derivedCode, detail, ...measured };
+}
+
+// Click the app's own pane-creation affordance over every visible owned window.
+// The window set is enumerated from the pid (never assumed from
+// `MainWindowHandle`), and a click is recorded only when the probe really invoked
+// exactly one actionable match.
+export async function windowsNewPane(evidence, pid) {
+  const enumeration = await awaitOwnedWindowsWindows(evidence, pid);
+  if (enumeration.searchOrder.length === 0) {
+    throw new HarnessError('NO_OWNED_WINDOW', enumeration.detail);
+  }
+  const stdout = await powershell(evidence, buildWindowsNewPaneScript(pid, { windows: enumeration.searchOrder }));
+  const parsed = parseWindowsProbeLine(stdout, 'new-pane');
+  if (!parsed.ok) {
+    throw new HarnessError('PANE_AFFORDANCE_NOT_FOUND', `new-pane probe produced no structured evidence (${parsed.reason}): stdout=${JSON.stringify(stdout)}`);
+  }
+  const verdict = classifyWindowsNewPane(parsed.probe);
+  evidence.action({
+    action: 'click-pane-affordance',
+    selectorNames: [...PANE_AFFORDANCE_NAMES_WIN32],
+    selectorAutomationIds: [...PANE_AFFORDANCE_AUTOMATION_IDS_WIN32],
+    pid,
+    assertedUniqueEnabled: verdict.ok,
+    code: verdict.code,
+    interactive: verdict.interactive,
+    sessionId: verdict.sessionId,
+    windowsSearched: verdict.windowsSearched,
+    windowsSearchedCount: verdict.windowsSearchedCount,
+    candidateCount: verdict.candidateCount,
+    actionableCount: verdict.actionableCount,
+    candidates: verdict.candidates,
+    chosen: verdict.chosen,
+    detail: verdict.detail,
+  });
+  if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);
+  return { clicked: true, chosen: verdict.chosen };
+}
+
+// macOS: the same affordance, clicked through the AX API. `entire contents` is
+// the recursive enumeration needed to reach a button rendered inside the webview.
+export async function clickNewPaneDarwin(evidence, pid) {
+  const label = PANE_AFFORDANCE_SELECTOR_DARWIN.title;
+  const source = [
+    'tell application "System Events"',
+    `  set owned to (every process whose unix id is ${pid})`,
+    '  if (count of owned) is not 1 then error "PID_NOT_UNIQUE"',
+    '  set p to item 1 of owned',
+    '  set frontmost of p to true',
+    '  set win to first window of p',
+    `  set matches to (every button of (entire contents of win) whose name is ${JSON.stringify(label)})`,
+    '  if (count of matches) > 1 then error "PANE_AFFORDANCE_NOT_UNIQUE"',
+    '  if (count of matches) is 0 then error "PANE_AFFORDANCE_NOT_FOUND"',
+    '  set theItem to item 1 of matches',
+    '  if enabled of theItem is not true then error "PANE_AFFORDANCE_DISABLED"',
+    '  click theItem',
+    'end tell',
+  ].join('\n');
+  try {
+    await osascript(evidence, source);
+  } catch (error) {
+    const message = error.message ?? '';
+    for (const code of ['PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_DISABLED']) {
+      if (message.includes(code)) throw new HarnessError(code, `pane-creation affordance ${JSON.stringify(label)}: ${message}`);
+    }
+    // A window that is not up yet (or is ambiguous) is the same typed block the
+    // Windows lane reports, so a blocked run keeps its identity on both hosts.
+    if (message.includes('PID_NOT_UNIQUE') || message.includes('NO_OWNED_WINDOW')) {
+      throw new HarnessError('NO_OWNED_WINDOW', `pane-creation affordance ${JSON.stringify(label)} could not be addressed: ${message}`);
+    }
+    throw new HarnessError('PANE_AFFORDANCE_NOT_FOUND', `pane-creation affordance ${JSON.stringify(label)} could not be clicked: ${message}`);
+  }
+  evidence.action({ action: 'click-pane-affordance', selector: PANE_AFFORDANCE_SELECTOR_DARWIN, pid, assertedUniqueEnabled: true });
+  return { clicked: true };
+}
+
 // Review blocker 5: the Windows marker must be typed on EVERY marker path,
 // not only inside the split flow. Focus the task-owned process window, then
 // send the marker command through SendKeys (real OS input events).
@@ -1107,6 +1355,7 @@ export function selectNativeDriver(ctx) {
     return {
       focus: focusWindowWindows,
       split: windowsDriver,
+      newPane: windowsNewPane,
       typeMarker: typeMarkerWindows,
       retry: clickRetryWindows,
       capture: captureOwnedWindowWindows,
@@ -1116,6 +1365,7 @@ export function selectNativeDriver(ctx) {
     return {
       focus: focusWindowByPidDarwin,
       split: clickSplitRightDarwin,
+      newPane: clickNewPaneDarwin,
       typeMarker: typeMarkerDarwin,
       retry: clickRetryDarwin,
       capture: captureOwnedWindowDarwin,
@@ -1126,6 +1376,7 @@ export function selectNativeDriver(ctx) {
   return {
     focus: async () => {},
     split: async () => {},
+    newPane: async () => ({}),
     typeMarker: async () => {},
     retry: async () => {},
     capture: async (_evidence, path) => ({

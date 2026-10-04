@@ -26,8 +26,10 @@ import {
   MARKER_TEXT, assertAxTrustDarwin, assertNativeAutomationSupported, assertScreenCapture,
   captureScreenshot, clickSplitRightDarwin, focusWindowByPidDarwin, typeMarkerDarwin,
   awaitMarkerRecognition, focusWindowWindows, typeMarkerWindows, windowsDriver,
-  awaitOwnedWindowWindows,
+  awaitOwnedWindowWindows, selectNativeDriver,
 } from '../lib/qa-scenarios/native-driver.mjs';
+import { ensureFrontendServed } from '../lib/qa-scenarios/frontend-server.mjs';
+import { bindPaneSession } from '../lib/qa-scenarios/pane-binding.mjs';
 import { admitWindowsInteractiveDesktop, readWindowsRelaunchRecord } from '../lib/qa-scenarios/windows-interactive.mjs';
 import {
   runSplitHappyScenario,
@@ -54,6 +56,8 @@ const SOURCE_FILES = [
   'scripts/lib/qa-scenarios/split-scenarios.mjs',
   'scripts/lib/qa-scenarios/lifecycle-scenarios.mjs',
   'scripts/lib/qa-scenarios/windows-interactive.mjs',
+  'scripts/lib/qa-scenarios/frontend-server.mjs',
+  'scripts/lib/qa-scenarios/pane-binding.mjs',
 ];
 const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
@@ -71,25 +75,25 @@ export const SCENARIO_PLANS = {
     receipts: ['fixture-setup', 'backend-write', 'presentation', 'marker-output'],
   },
   'split-happy': {
-    barriers: [], marker: true, splitMenu: true,
+    barriers: [], marker: true, splitMenu: true, pane: true,
     receipts: ['fixture-setup', 'split-create', 'presentation', 'marker-output'],
     fiveTuple: true, timings: true, singlePty: true,
   },
   'split-attach-stall': {
-    barriers: ['attach-handshake'], barrierHoldMs: 16_000, marker: true, splitMenu: true,
+    barriers: ['attach-handshake'], barrierHoldMs: 16_000, marker: true, splitMenu: true, pane: true,
     // The actionable failure settles on the held attach-handshake barrier; there
     // is no separate `failure-classified` receipt file.
     receipts: ['fixture-setup', 'split-create', 'attach-handshake'],
     failureDeadlineMs: BUDGETS.attemptCeilingMs, sameIdRetry: true, singlePty: true,
   },
   'split-cancel': {
-    barriers: [], marker: false, splitMenu: true,
+    barriers: [], marker: false, splitMenu: true, pane: true,
     receipts: ['fixture-setup', 'cancel-ack'],
     cancel: { request: 'split-cancel', phase: 'while-creating' },
     cancelAckCeilingMs: BUDGETS.cancelAckCeilingMs, singlePty: true,
   },
   'split-concurrent': {
-    barriers: ['held-rpc'], marker: true, splitMenu: true,
+    barriers: ['held-rpc'], marker: true, splitMenu: true, pane: true,
     receipts: ['fixture-setup', 'held-rpc', 'split-create', 'presentation', 'marker-output'],
     requireHeldRpc: true, fiveTuple: true, timings: true, singlePty: true,
   },
@@ -127,6 +131,16 @@ export const BLOCKED_CODES = Object.freeze([
   // a state in which it owns a visible window and a unique affordance.
   'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
   'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+  // Task-9 lane: the debug binary's devUrl was not served by this run (dist
+  // missing, port held by a foreign listener, server not answering with the
+  // app's own root document, or the config's devUrl drifted).
+  'FRONTEND_DIST_MISSING', 'FRONTEND_PORT_OCCUPIED', 'FRONTEND_NOT_SERVED',
+  'FRONTEND_DEVURL_MISMATCH',
+  // Task-9 lane: the app boots empty, so no pane existed to split - either the
+  // pane-creation affordance was absent/ambiguous/disabled, or the pane it
+  // created never presented a session this run could bind.
+  'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_DISABLED',
+  'PANE_BINDING_UNBOUND', 'PANE_BINDING_AMBIGUOUS',
 ]);
 
 export function classifyNativeFailure(code) {
@@ -167,6 +181,18 @@ async function runNativeScenario(ctx) {
   }
 
   const isolated = buildIsolatedEnv(ctx);
+
+  // Job 1 (task-9 root cause 1): the debug binary boots against its
+  // `devUrl` (`http://127.0.0.1:5173`), and with nothing serving it the webview
+  // renders Chromium's ERR_CONNECTION_REFUSED page - the 29-node UIA tree pass 7
+  // measured and misread as an accessibility defect. The frontend is served HERE,
+  // before the app boots, from the already-built `ui/dist` (deterministic: no
+  // rebuild, no watcher, no HMR) and on this run's own port only: an occupied
+  // port is a typed refusal and a foreign listener is never killed or reused.
+  const frontend = await ensureFrontendServed({
+    rootDir: runnerRoot, registry: ctx.registry, evidence,
+  });
+
   evidence.action({
     action: 'launch.binary',
     binary: ctx.binary,
@@ -184,11 +210,14 @@ async function runNativeScenario(ctx) {
   const pid = child.pid;
   ctx.pid = pid;
 
-  // Monotonic budget tracker: all waits consume remaining budget
-  const budget = new MonotonicBudget(BUDGETS.attemptCeilingMs);
+  // Pre-trigger SETUP budget: fixture settlement, window admission, the UI pane
+  // step and barrier registration are setup. The frozen `attemptCeilingMs`
+  // correctness ceiling below measures trigger -> settlement and must not be
+  // spent on them (task 9 added a real UI step here, so this clock exists).
+  const setupBudget = new MonotonicBudget(BUDGETS.setupCeilingMs);
 
   // Scenario-specific fixture setup validation (never requires all four fixtures for basic split!)
-  const rawFixture = await barrierHub.awaitReceipt('fixture-setup', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'fixture-setup'));
+  const rawFixture = await barrierHub.awaitReceipt('fixture-setup', 0, setupBudget.consume(BUDGETS.stagePrepareCreateStatusMs, 'fixture-setup'));
   const fixture = validateFixtureSetup(rawFixture, ctx.scenario);
   evidence.action({ action: 'fixture-setup', sessions: fixture.sessions });
 
@@ -199,14 +228,36 @@ async function runNativeScenario(ctx) {
   // session id and per-window visibility) instead of letting a driver click a
   // window it does not own. macOS is unchanged.
   if (ctx.platformPreflight === 'win32') {
-    await awaitOwnedWindowWindows(evidence, pid, budget.consume(BUDGETS.ownedWindowReadyMs, 'owned-window'));
+    await awaitOwnedWindowWindows(evidence, pid, setupBudget.consume(BUDGETS.ownedWindowReadyMs, 'owned-window'));
+  }
+
+  // Job 2 (task-9 root cause 2): with the UI served the app boots to its EMPTY
+  // state ("No open tabs" + "New Terminal" [Button]) - no pane, so no pane
+  // toolbar and no split affordance. Scenarios that split click the app's own
+  // named affordance (which runs the real `cmd_terminal_spawn` path) and then
+  // bind the pane to the session the app ITSELF presents, so every later
+  // assertion refers to a real pane instead of to a phantom one.
+  let paneBinding = null;
+  if (plan.pane) {
+    const driver = selectNativeDriver(ctx);
+    await driver.newPane(evidence, pid);
+    paneBinding = await bindPaneSession({
+      evidence,
+      barrierHub,
+      fixture,
+      timeoutMs: setupBudget.consume(BUDGETS.paneBindingReadyMs, 'pane binding'),
+    });
+    ctx.paneBinding = paneBinding;
   }
 
   // Every armed barrier must be registered by the product before triggers.
   for (const barrier of plan.barriers) {
-    await barrierHub.awaitRegistered(barrier, budget.consume(BUDGETS.barrierAckTimeoutMs, `register ${barrier}`));
+    await barrierHub.awaitRegistered(barrier, setupBudget.consume(BUDGETS.barrierAckTimeoutMs, `register ${barrier}`));
   }
   if (plan.barriers.length > 0) evidence.action({ action: 'barriers.registered', barriers: [...plan.barriers] });
+
+  // Monotonic budget tracker for the MEASURED attempt: it starts at the trigger.
+  const budget = new MonotonicBudget(BUDGETS.attemptCeilingMs);
 
   let scenarioResult;
   let triggerLabel = 'split-menu-click';
@@ -275,6 +326,8 @@ async function runNativeScenario(ctx) {
     triggerLabel,
     markerRecognition: scenarioResult?.markerRecognition ?? null,
     scenarioResult,
+    paneBinding,
+    frontend: { url: frontend.url, port: frontend.port, distDir: frontend.distDir, indexBytes: frontend.indexBytes },
   };
 }
 
@@ -384,6 +437,8 @@ export async function main(argv) {
         triggerLabel: native.triggerLabel,
         deadlineAt: native.deadlineAt,
         markerRecognition: native.markerRecognition,
+        paneBinding: native.paneBinding,
+        frontend: native.frontend,
         screenshot: join(evidence.runDir, 'screenshot.png'),
         barriers: barrierHub.snapshot(),
         commands: barrierHub.commands,
@@ -426,6 +481,9 @@ export async function main(argv) {
         processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
         sockets: registry.sockets,
         directories: registry.directories,
+        // In-process listeners this run opened (the static frontend server on the
+        // debug binary's devUrl). Closed by this same cleanup pass.
+        servers: registry.servers.map(entry => entry.label),
       },
       reaped: registry.reaped,
       receipts,

@@ -284,6 +284,23 @@ export const BUDGETS = Object.freeze({
   cleanupRootRetryIntervalMs: 250,
   cleanupRootRetryAttempts: 8,
   cleanupHolderProbeMs: 8_000,
+  // Task-9 root cause 1: the debug binary boots against `devUrl`
+  // (`http://127.0.0.1:5173`) and renders Chromium's ERR_CONNECTION_REFUSED
+  // page when nothing serves it (pass-7 measured exactly 29 nodes of that error
+  // page). Serving is pre-launch setup: its waits are bounded here and never
+  // charged to `attemptCeilingMs`, which stays the trigger->settlement ceiling.
+  frontendPortProbeMs: 2_000,
+  frontendRequestMs: 4_000,
+  frontendReadyMs: 8_000,
+  frontendCloseMs: 2_000,
+  // Task-9 root cause 2: with the UI served the app boots EMPTY ("No open
+  // tabs"), so no pane - and therefore no pane toolbar and no split affordance
+  // - exists. The pre-trigger UI pane step (click "New Terminal", then bind the
+  // pane session the app itself presents) gets its own bounded budget for the
+  // same reason: it is setup, not the measured attempt.
+  paneAffordanceWaitMs: 8_000,
+  paneBindingReadyMs: 8_000,
+  setupCeilingMs: 45_000,
 });
 
 // Exit codes: 0 is reserved for a truthful native PASS (or a completed,
@@ -313,6 +330,21 @@ export const TYPED_ERRORS = Object.freeze(new Set([
   // condition blocked it instead of collapsing into NATIVE_AUTOMATION_UNSUPPORTED.
   'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
   'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+  // Frontend-serve lane (task-9 root cause 1). Each condition keeps its own
+  // typed identity so a run says exactly which part of "something must serve
+  // the dev URL" failed - and a port already held by a foreign listener is
+  // refused, never killed and never reused.
+  'FRONTEND_DIST_MISSING', 'FRONTEND_PORT_OCCUPIED', 'FRONTEND_NOT_SERVED',
+  'FRONTEND_DEVURL_MISMATCH',
+  // Pane-binding lane (task-9 root cause 2). The app boots to its empty state,
+  // so the split affordance has no pane to live in until one is created through
+  // the UI and bound to the session the app really presents.
+  'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_DISABLED',
+  'PANE_BINDING_UNBOUND', 'PANE_BINDING_AMBIGUOUS',
+  // The marker was typed into a pane whose session never reported it: the pane
+  // under test produced no output, so the scenario's own marker assertion is
+  // measured as a product failure instead of riding another pane's receipt.
+  'MARKER_SESSION_UNBOUND',
 ]));
 
 export class HarnessError extends Error {
@@ -700,6 +732,10 @@ export class ResourceRegistry {
     this.processes = []; // { pid, label, child, executable }
     this.sockets = [];
     this.directories = [];
+    // In-process listeners this run opened (the static frontend server). They
+    // are closed by the SAME cleanup pass as everything else, so a served
+    // frontend cannot outlive the run.
+    this.servers = []; // { server, label }
     this.reaped = [];
     // Injectable only so the runner unit suite can replay teardown decisions
     // deterministically; production always uses the bounded real helpers.
@@ -712,6 +748,11 @@ export class ResourceRegistry {
   }
 
   registerSocket(path) { this.sockets.push(path); }
+
+  registerServer(server, label = 'server') {
+    this.servers.push({ server, label });
+    return server;
+  }
 
   registerDirectory(path) { this.directories.push(path); }
 
@@ -751,6 +792,12 @@ export class ResourceRegistry {
       try { rmSync(socketPath, { force: true }); removed = !existsSync(socketPath); } catch { removed = false; }
       receipts.push({ kind: 'socket', path: socketPath, removed });
     }
+    // In-process listeners first: a still-open listener would keep serving (and
+    // keep a port held) while the roots below are removed.
+    for (const entry of this.servers) {
+      const closed = await closeServerBounded(entry.server, { timeoutMs: deps.serverCloseMs ?? BUDGETS.frontendCloseMs });
+      receipts.push({ kind: 'server', label: entry.label, closed });
+    }
     for (const dir of this.directories) {
       const removal = await removePathWithRetry(dir, {
         remove: deps.remove, exists: deps.exists, sleep: deps.sleep, now: deps.now,
@@ -768,6 +815,26 @@ export class ResourceRegistry {
     }
     return receipts;
   }
+}
+
+// Close one in-process listener within a bounded deadline. The listener lives
+// inside this process, so a run that returns still cannot leave it serving; the
+// receipt reports what was really observed instead of assuming the close.
+export async function closeServerBounded(server, { timeoutMs = BUDGETS.frontendCloseMs } = {}) {
+  if (!server || typeof server.close !== 'function') return true;
+  if (server.listening === false) return true;
+  return new Promise(resolvePromise => {
+    const timer = setTimeout(() => {
+      try { server.closeAllConnections?.(); } catch { /* nothing left to close */ }
+      resolvePromise(false);
+    }, timeoutMs);
+    try {
+      server.close(() => { clearTimeout(timer); resolvePromise(true); });
+    } catch {
+      clearTimeout(timer);
+      resolvePromise(false);
+    }
+  });
 }
 
 // Force-reap ONE process this run spawned, together with its own tree. The
@@ -970,6 +1037,67 @@ export class BarrierHub {
     return parsed;
   }
 
+  // Event-driven wait for the first receipt line that satisfies `match`, over
+  // lines already settled as well as lines appended while waiting.
+  //
+  // Needed because one receipt stream can carry more than one session's
+  // settlements: with a real pane present, the app's own pane AND the scenario's
+  // split pane both present frames into `presentation.receipt.jsonl`, so a line
+  // INDEX binds the assertion to whichever pane happened to present first. A
+  // session-addressed wait binds it to the pane under test - the assertion is
+  // unchanged, only the line it reads is.
+  async awaitReceiptMatching(name, { match, timeoutMs = BUDGETS.attemptCeilingMs, label = name } = {}) {
+    if (typeof match !== 'function') {
+      throw new HarnessError('ASSERTION_FAILURE', `awaitReceiptMatching(${name}) requires a match predicate`);
+    }
+    const path = join(this.dir, `${name}.receipt.jsonl`);
+    const stop = deferredStop();
+    const outcome = await withDeadline(
+      waitForMatchingLine(path, match, stop.promise),
+      timeoutMs,
+      `barrier ${name} matching receipt`,
+      { onStop: stop.stop },
+    );
+    if (outcome.timedOut) throw new HarnessError('BARRIER_ACK_TIMEOUT', `${label}: no ${name} receipt matched within ${timeoutMs}ms`);
+    if (outcome.error) throw outcome.error instanceof HarnessError ? outcome.error : new HarnessError('BARRIER_ACK_TIMEOUT', `${label}: ${outcome.error.message}`);
+    const entry = this.armed.get(name);
+    const parsed = correlateReceipt(JSON.parse(outcome.value), this, label);
+    if (entry) entry.receipts.push(parsed);
+    return parsed;
+  }
+
+  // Every settled line of one receipt stream, for evidence and for the
+  // ambiguity/absence reports below. A missing file is an empty stream, never
+  // an error: "nothing settled yet" is a measurement.
+  receiptLines(name) {
+    const path = join(this.dir, `${name}.receipt.jsonl`);
+    let text;
+    try { text = readFileSync(path, 'utf8'); } catch { return []; }
+    const parsed = [];
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line);
+        if (record && typeof record === 'object') parsed.push(record);
+      } catch { /* a torn line is not a settlement */ }
+    }
+    return parsed;
+  }
+
+  // A receipt addressed by the session it names: `sessionId` for producer
+  // receipts (marker-output) and the presentation receipt's own
+  // `attachTuple.backendSessionId`.
+  async awaitReceiptForSession(name, sessionId, timeoutMs = BUDGETS.attemptCeilingMs, label = name) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new HarnessError('ASSERTION_FAILURE', `awaitReceiptForSession(${name}) requires a concrete session id, got ${JSON.stringify(sessionId)}`);
+    }
+    return this.awaitReceiptMatching(name, {
+      timeoutMs,
+      label: `${label} for session ${sessionId}`,
+      match: receipt => receipt?.sessionId === sessionId || receipt?.attachTuple?.backendSessionId === sessionId,
+    });
+  }
+
   // Runner->product command through the same private channel (e.g. the
   // split-cancel request). The product side is a proposed hook
   // (task-3-rust-proposal.md); without it the scenario fails explicitly.
@@ -1143,6 +1271,46 @@ export function assertPositiveRecovery(receipt, label) {
     throw new HarnessError('RECOVERY_UNPROVEN', `${label}: post-release verdict is Unknown${receipt?.evidenceMissing === true ? ' (evidenceMissing)' : ''} - recovery was not positively observed; release alone is not recovery`);
   }
   throw new HarnessError('RECOVERY_UNPROVEN', `${label}: post-release verdict ${JSON.stringify(verdict)} is not a positive recovery observation`);
+}
+
+// The predicate form of `waitForLine`: resolve the first line of `path` that
+// `match` accepts, watching the directory for appends until the outer deadline
+// cancels the wait (the same bounded, event-driven shape as every other wait in
+// this file - no fixed sleeps and no polling loop of its own).
+function waitForMatchingLine(path, match, stopPromise) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const found = () => {
+      let text;
+      try { text = readFileSync(path, 'utf8'); } catch { return null; }
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        let parsed;
+        try { parsed = JSON.parse(line); } catch { continue; }
+        if (parsed && typeof parsed === 'object' && match(parsed)) return line;
+      }
+      return null;
+    };
+    const initial = found();
+    if (initial !== null) return resolvePromise(initial);
+    let watcher;
+    const finish = error => {
+      if (watcher) watcher.close();
+      clearTimeout(timer);
+      if (error) rejectPromise(error);
+      else {
+        const value = found();
+        if (value === null) rejectPromise(new HarnessError('BARRIER_ACK_TIMEOUT', `receipt line race: ${path}`));
+        else resolvePromise(value);
+      }
+    };
+    const timer = setTimeout(() => finish(new HarnessError('BARRIER_ACK_TIMEOUT', `deadline waiting for a matching line of ${path}`)), 60_000);
+    if (stopPromise) {
+      stopPromise.then(() => finish(new HarnessError('BARRIER_ACK_TIMEOUT', `wait cancelled by outer deadline: ${path}`)));
+    }
+    try {
+      watcher = watch(dirname(path), { persistent: true }, () => { if (found() !== null) finish(); });
+    } catch (error) { finish(error); }
+  });
 }
 
 function waitForLine(path, minCount, stopPromise) {

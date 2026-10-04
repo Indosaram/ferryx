@@ -18,6 +18,7 @@ import {
   selectNativeDriver,
   performInspectionHandshake,
 } from './native-driver.mjs';
+import { awaitMarkerReceiptForSession } from './pane-binding.mjs';
 
 export { requireSevenTupleReceipt, requireFiveTupleReceipt };
 
@@ -49,8 +50,13 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
   }
   evidence.action({ action: 'split-create', receipt: create, boundBackendSessionId: create.backendSessionId });
 
-  // Await positive 7-tuple presentation receipt
-  const presentation = await barrierHub.awaitReceipt('presentation', 0, budget.consume(BUDGETS.stagePresentationMs, 'presentation'));
+  // Await positive 7-tuple presentation receipt FOR THE SPLIT PANE. The app's
+  // own pane - created by the pre-trigger UI step, because the app boots to its
+  // empty state - presents frames into this same stream, so the receipt is
+  // addressed by the split's own session instead of by line index. The assertion
+  // (positive seven-field tuple for the pane that was split) is unchanged; only
+  // the line it reads is, and it can no longer ride the other pane's receipt.
+  const presentation = await barrierHub.awaitReceiptForSession('presentation', create.backendSessionId, budget.consume(BUDGETS.stagePresentationMs, 'presentation'), 'split-happy presentation');
   requireSevenTupleReceipt(presentation, {
     backendSessionId: create.backendSessionId,
     incarnation: create.incarnation,
@@ -67,7 +73,10 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
   await driver.typeMarker(evidence, pid);
 
   // Await marker output receipt
-  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs + BUDGETS.stageAttachListenerMs, 'marker-output'));
+  // The marker is addressed to the pane the split created: a receipt from the
+  // app's own pane would not be evidence that the SPLIT pane is live, and its
+  // per-session `ptyCreatedCount` would not be the split's PTY accounting.
+  const markerReceipt = await awaitMarkerReceiptForSession(barrierHub, create.backendSessionId, budget.consume(BUDGETS.stagePresentationMs + BUDGETS.stageAttachListenerMs, 'marker-output'), 'split-happy marker');
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
     throw new HarnessError('ASSERTION_FAILURE', `marker ${MARKER_TEXT} not observed in output receipt: ${JSON.stringify(markerReceipt)}`);
   }
@@ -163,7 +172,7 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
   // Await presentation receipt following Retry: must reuse SAME backendSessionId but verify NEW attemptGeneration
   if (barrierHub.isArmed('presentation')) {
     barrierHub.bindBackendSession('presentation', authoritativeSessionId);
-    const retryPresentation = await barrierHub.awaitReceipt('presentation', 0, budget.consume(BUDGETS.stagePresentationMs, 'retry presentation'));
+    const retryPresentation = await barrierHub.awaitReceiptForSession('presentation', authoritativeSessionId, budget.consume(BUDGETS.stagePresentationMs, 'retry presentation'), 'split-attach-stall retry presentation');
     requireSevenTupleReceipt(retryPresentation, {
       backendSessionId: authoritativeSessionId,
       incarnation: create.incarnation,
@@ -179,7 +188,10 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
   if (ctx.platformPreflight === 'win32') await driver.focus(evidence, pid);
   await driver.typeMarker(evidence, pid);
 
-  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'marker output'));
+  // The retry's own session must report the marker: `assertSinglePty` below is
+  // the "Retry never creates a replacement PTY" invariant, and it is only
+  // measured on the retried session if the receipt names that session.
+  const markerReceipt = await awaitMarkerReceiptForSession(barrierHub, authoritativeSessionId, budget.consume(BUDGETS.stagePresentationMs, 'marker output'), 'split-attach-stall marker');
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
     throw new HarnessError('ASSERTION_FAILURE', `marker not observed in retried session: ${JSON.stringify(markerReceipt)}`);
   }
@@ -283,7 +295,7 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   }
   evidence.action({ action: 'split-create', receipt: create, boundBackendSessionId: create.backendSessionId });
 
-  const presentation = await barrierHub.awaitReceipt('presentation', 0, budget.consume(BUDGETS.stagePresentationMs, 'presentation'));
+  const presentation = await barrierHub.awaitReceiptForSession('presentation', create.backendSessionId, budget.consume(BUDGETS.stagePresentationMs, 'presentation'), 'split-concurrent presentation');
   requireSevenTupleReceipt(presentation, {
     backendSessionId: create.backendSessionId,
     incarnation: create.incarnation,
@@ -296,7 +308,15 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   evidence.action({ action: 'presentation-receipt', receipt: presentation });
 
   // 6. Await marker output
-  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'marker output'));
+  // 6. Await marker output. The marker was typed BEFORE the split, into the pane
+  // the pre-trigger UI step created, so that pane's session is the session the
+  // typing really addressed - addressed by identity here instead of by index.
+  const typedIntoSessionId = ctx.paneBinding?.backendSessionId;
+  if (typeof typedIntoSessionId !== 'string' || typedIntoSessionId.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', 'split-concurrent requires the pre-trigger pane binding (ctx.paneBinding) to address the pane the marker was typed into');
+  }
+  evidence.action({ action: 'marker-target-pane', backendSessionId: typedIntoSessionId, splitBackendSessionId: create.backendSessionId });
+  const markerReceipt = await awaitMarkerReceiptForSession(barrierHub, typedIntoSessionId, budget.consume(BUDGETS.stagePresentationMs, 'marker output'), 'split-concurrent marker');
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
     throw new HarnessError('ASSERTION_FAILURE', `marker not observed under concurrent RPC: ${JSON.stringify(markerReceipt)}`);
   }

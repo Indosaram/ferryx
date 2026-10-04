@@ -941,6 +941,30 @@ test('split-attach-stall asserts actionable failure, releases hold, and executes
       }
       throw new Error(`unexpected receipt ${name}`);
     },
+    // Task-9: the retried pane's presentation and its marker are addressed by
+    // session identity, not by line index (the app's own pane settles into the
+    // same receipt streams), so the fake answers the session-addressed reads too.
+    awaitReceiptForSession: async (name, sessionId) => {
+      if (name === 'presentation') {
+        return {
+          attachTuple: {
+            backendSessionId: sessionId,
+            incarnation: 'inc-stall',
+            daemonEpoch: '1',
+            frontendSessionId: 'f-stall',
+            paneIdentity: 'p-stall',
+            bindingKey: 'k-stall',
+            attemptGeneration: 2,
+          },
+          presented: true,
+        };
+      }
+      if (name === 'marker-output') {
+        return { sessionId, output: MARKER_TEXT, frameSubmitted: true, ptyCreatedCount: 1 };
+      }
+      throw new Error(`unexpected awaitReceiptForSession ${name}`);
+    },
+    receiptLines: () => [],
     recordCaptureReady: (meta) => hub.recordCaptureReady(meta),
   };
 
@@ -1135,6 +1159,7 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
       const evidence = { action: () => { throw new Error('mock driver emitted a native action'); } };
       await driver.focus(evidence, 1234);
       await driver.split(evidence, 1234);
+      await driver.newPane(evidence, 1234);
       await driver.typeMarker(evidence, 1234);
       await driver.retry(evidence, 1234);
       expect(await driver.capture(evidence, path, 1234)).toEqual({ path, screenshotSha256: computeSourceDigest([path]) });
@@ -1350,6 +1375,9 @@ test('windows automation failures keep their typed identity instead of collapsin
   expect(native.classifyWindowsFailure('SPLIT_RIGHT_DISABLED')).toBe('SPLIT_RIGHT_DISABLED');
   expect(native.classifyWindowsFailure('... NO_OWNED_WINDOW ...')).toBe('NO_OWNED_WINDOW');
   expect(native.classifyWindowsFailure('... NO_INTERACTIVE_SESSION ...')).toBe('NO_INTERACTIVE_SESSION');
+  expect(native.classifyWindowsFailure('PANE_AFFORDANCE_NOT_FOUND')).toBe('PANE_AFFORDANCE_NOT_FOUND');
+  expect(native.classifyWindowsFailure('PANE_AFFORDANCE_NOT_UNIQUE')).toBe('PANE_AFFORDANCE_NOT_UNIQUE');
+  expect(native.classifyWindowsFailure('PANE_AFFORDANCE_DISABLED')).toBe('PANE_AFFORDANCE_DISABLED');
   expect(native.classifyWindowsFailure('RETRY_BUTTON_NOT_FOUND')).toBe('NATIVE_AUTOMATION_UNSUPPORTED');
   expect(native.classifyWindowsFailure('')).toBe('NATIVE_AUTOMATION_UNSUPPORTED');
 });
@@ -1359,6 +1387,13 @@ test('windows lane blocks are typed, nonzero, and never a pass', async () => {
   const windowsCodes = [
     'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
     'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+    // Task-9 lane: the frontend the debug binary expects, and the pane the split
+    // affordance needs. Every one of them is a BLOCKED environment/harness
+    // condition - nonzero, and never a pass.
+    'FRONTEND_DIST_MISSING', 'FRONTEND_PORT_OCCUPIED', 'FRONTEND_NOT_SERVED',
+    'FRONTEND_DEVURL_MISMATCH',
+    'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_DISABLED',
+    'PANE_BINDING_UNBOUND', 'PANE_BINDING_AMBIGUOUS',
   ];
   for (const code of windowsCodes) {
     expect(runner.classifyNativeFailure(code)).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.nativeAutomationUnsupported });
@@ -1375,6 +1410,10 @@ test('windows lane blocks are typed, nonzero, and never a pass', async () => {
   expect(runner.classifyNativeFailure('TASK4_IDENTITY_DEPENDENCY')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.task4IdentityDependency });
   expect(runner.classifyNativeFailure('ASSERTION_FAILURE')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
   expect(runner.classifyNativeFailure('RECOVERY_UNPROVEN')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
+  // Task-9: a marker that never reached the pane under test is a FAIL (the pane
+  // really produced no output) and keeps its typed identity.
+  expect(runner.classifyNativeFailure('MARKER_SESSION_UNBOUND')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
+  expect(new HarnessError('MARKER_SESSION_UNBOUND', 'detail').code).toBe('MARKER_SESSION_UNBOUND');
 });
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1592,7 @@ test('no generated PowerShell script merges a statement onto the here-string hea
   const scripts = {
     'owned-window wait': native.buildWindowsWindowWaitScript(4242, 8000),
     'split-right': native.buildWindowsSplitRightScript(4242, 2500),
+    'new-pane': native.buildWindowsNewPaneScript(4242, { windows: [{ hwnd: 19663500, title: 'F', className: 'T' }] }),
     'owned-window capture': native.buildWindowsCaptureScript(4242, "C:\\ev\\shot's.png"),
     'retry': native.buildWindowsRetryScript(4242),
     'focus': native.buildWindowsFocusScript(4242),
@@ -1769,4 +1809,349 @@ test('split-affordance not-found path keeps the typed verdict and emits a bounde
   for (const code of ['NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED']) {
     expect(script).toContain(code);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task-9 lane (authored; executed by the sole remote verifier). Two root causes,
+// both established by the decisive control in
+// `.omo/evidence/local-pane-liveness-completion-replan/task-9/ACCESSIBILITY-EXPERIMENT.md`:
+//   1. the debug binary boots against `devUrl` 127.0.0.1:5173 and the runner
+//      served nothing, so the webview rendered ERR_CONNECTION_REFUSED;
+//   2. with the UI served the app boots EMPTY, so no pane - and no pane toolbar
+//      and no split affordance - existed.
+// These tests replay the serve decision and the pane binding; nothing here
+// launches a server on a fixed port, a product process, a window, or a task.
+
+test('frontend serve decision uses the built ui/dist and fails typed when it is absent', async () => {
+  const frontend = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const root = fixtureRoot();
+  try {
+    // No dist at all: the debug binary's devUrl would render an error page, so
+    // the run blocks typed instead of launching into that page.
+    expect(() => frontend.resolveFrontendDist(root)).toThrowError(/FRONTEND_DIST_MISSING/);
+    expect(new HarnessError('FRONTEND_DIST_MISSING', 'x').code).toBe('FRONTEND_DIST_MISSING');
+    // A dist directory without its index document is still a block.
+    mkdirSync(join(root, frontend.FRONTEND_DIST_RELATIVE), { recursive: true });
+    expect(() => frontend.resolveFrontendDist(root)).toThrowError(/FRONTEND_DIST_MISSING/);
+    // The built assets resolve to the exact index the served route must answer
+    // with, and an explicit distDir overrides the default location.
+    writeFileSync(join(root, frontend.FRONTEND_DIST_RELATIVE, frontend.FRONTEND_INDEX_FILE), '<!doctype html><div id="root"></div>');
+    const resolved = frontend.resolveFrontendDist(root);
+    expect(resolved.indexPath).toBe(join(root, frontend.FRONTEND_DIST_RELATIVE, frontend.FRONTEND_INDEX_FILE));
+    expect(existsSync(resolved.indexPath)).toBe(true);
+    expect(frontend.resolveFrontendDist(root, join(root, frontend.FRONTEND_DIST_RELATIVE)).distDir).toBe(resolved.distDir);
+    // The frozen devUrl is the one the config declares.
+    expect(frontend.FRONTEND_DEV_URL).toBe('http://127.0.0.1:5173');
+    expect(frontend.FRONTEND_PORT).toBe(5173);
+    expect(frontend.contentTypeFor('/x/y/index.html')).toContain('text/html');
+    expect(frontend.contentTypeFor('/x/y/app.js')).toContain('text/javascript');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the served frontend is checked against the config devUrl, and a drift blocks typed', async () => {
+  const frontend = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const root = fixtureRoot();
+  try {
+    // A tree without the config has nothing to compare: not a block.
+    expect(frontend.assertFrontendDevUrlMatches(root)).toEqual({ devUrl: null, checked: false });
+    mkdirSync(join(root, 'src-tauri'), { recursive: true });
+    writeFileSync(join(root, frontend.TAURI_CONF_RELATIVE), JSON.stringify({ build: { devUrl: 'http://127.0.0.1:5173', frontendDist: '../ui/dist' } }));
+    expect(frontend.assertFrontendDevUrlMatches(root)).toMatchObject({ devUrl: 'http://127.0.0.1:5173', checked: true });
+    // A drift would put the run back on the error page: typed, fail-closed.
+    writeFileSync(join(root, frontend.TAURI_CONF_RELATIVE), JSON.stringify({ build: { devUrl: 'http://127.0.0.1:5199' } }));
+    expect(() => frontend.assertFrontendDevUrlMatches(root)).toThrowError(/FRONTEND_DEVURL_MISMATCH/);
+    writeFileSync(join(root, frontend.TAURI_CONF_RELATIVE), '{ not json');
+    expect(() => frontend.assertFrontendDevUrlMatches(root)).toThrowError(/FRONTEND_DEVURL_MISMATCH/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the frontend port is probed, never assumed: a real listener reads occupied and a released one reads free', async () => {
+  const { probePortOccupied } = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const { createServer } = await import('node:http');
+  const foreign = createServer((_req, res) => res.end('foreign'));
+  await new Promise(resolvePromise => foreign.listen(0, '127.0.0.1', resolvePromise));
+  const port = foreign.address().port;
+  try {
+    expect(await probePortOccupied({ host: '127.0.0.1', port, timeoutMs: 2000 })).toBe(true);
+  } finally {
+    await new Promise(resolvePromise => foreign.close(resolvePromise));
+  }
+  // The same port, now genuinely free: the probe measures, it does not guess.
+  expect(await probePortOccupied({ host: '127.0.0.1', port, timeoutMs: 2000 })).toBe(false);
+});
+
+test('the served frontend answers with the app root document and is torn down by the registry cleanup', async () => {
+  const frontend = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const root = fixtureRoot();
+  const registry = new ResourceRegistry();
+  const actions = [];
+  try {
+    mkdirSync(join(root, 'ui', 'dist'), { recursive: true });
+    writeFileSync(join(root, 'ui', 'dist', frontend.FRONTEND_INDEX_FILE), '<!doctype html><div id="root">Ferryx</div>');
+    const served = await frontend.ensureFrontendServed({ rootDir: root, registry, evidence: { action: action => actions.push(action) }, port: 0 });
+    expect(served.port).toBeGreaterThan(0);
+    expect(served.indexBytes).toBeGreaterThan(0);
+    expect(served.route).toBe('static-ui-dist');
+    expect(actions.map(action => action.action)).toEqual(['frontend.served']);
+    expect(served.server.listening).toBe(true);
+    // Teardown rides the existing cleanup path, with a receipt.
+    const receipts = await registry.cleanup();
+    expect(receipts.find(receipt => receipt.kind === 'server')).toMatchObject({ label: 'frontend-dist', closed: true });
+    expect(served.server.listening).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an occupied frontend port is refused typed and the foreign listener is left running', async () => {
+  const frontend = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const { createServer } = await import('node:http');
+  const root = fixtureRoot();
+  const registry = new ResourceRegistry();
+  const foreign = createServer((_req, res) => res.end('<div id="root">foreign</div>'));
+  await new Promise(resolvePromise => foreign.listen(0, '127.0.0.1', resolvePromise));
+  const port = foreign.address().port;
+  try {
+    mkdirSync(join(root, 'ui', 'dist'), { recursive: true });
+    writeFileSync(join(root, 'ui', 'dist', frontend.FRONTEND_INDEX_FILE), '<div id="root"></div>');
+    await expect(frontend.ensureFrontendServed({ rootDir: root, registry, port })).rejects.toThrowError(/FRONTEND_PORT_OCCUPIED/);
+    // Never killed, never signalled, never reused - and nothing was registered
+    // for cleanup because this run opened no listener.
+    expect(foreign.listening).toBe(true);
+    expect(registry.servers).toHaveLength(0);
+    const stillOccupied = await frontend.probePortOccupied({ host: '127.0.0.1', port, timeoutMs: 2000 });
+    expect(stillOccupied).toBe(true);
+  } finally {
+    await new Promise(resolvePromise => foreign.close(resolvePromise));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a frontend that does not answer with the app root document blocks typed and is still torn down', async () => {
+  const frontend = await import('../lib/qa-scenarios/frontend-server.mjs');
+  const root = fixtureRoot();
+  const registry = new ResourceRegistry();
+  try {
+    mkdirSync(join(root, 'ui', 'dist'), { recursive: true });
+    writeFileSync(join(root, 'ui', 'dist', frontend.FRONTEND_INDEX_FILE), '<div id="root"></div>');
+    // A 200 without the app's own root document is not readiness.
+    await expect(frontend.ensureFrontendServed({
+      rootDir: root, registry, port: 0,
+      deps: { fetchIndexBody: async () => ({ status: 200, body: '<html>some other page</html>' }) },
+    })).rejects.toThrowError(/FRONTEND_NOT_SERVED/);
+    // A request that never answers is the same typed block.
+    await expect(frontend.ensureFrontendServed({
+      rootDir: root, registry, port: 0,
+      deps: { fetchIndexBody: async () => { throw new Error('connection reset'); } },
+    })).rejects.toThrowError(/FRONTEND_NOT_SERVED/);
+    // Both attempts are closed by the same cleanup pass: a blocked run leaves no
+    // listener behind.
+    const receipts = await registry.cleanup();
+    expect(receipts.filter(receipt => receipt.kind === 'server').map(receipt => receipt.closed)).toEqual([true, true]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('pane binding reads the app\'s own presentation receipt and excludes the fixture sessions', async () => {
+  const { bindPaneSession, PANE_PRESENTATION_RECEIPT } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const hub = new BarrierHub(root, { runId: 'run-pane', operationId: 'op-pane' });
+  const actions = [];
+  const tuple = backendSessionId => ({
+    backendSessionId, incarnation: 'inc-1', daemonEpoch: '7',
+    frontendSessionId: `f-${backendSessionId}`, paneIdentity: `p-${backendSessionId}`,
+    bindingKey: `k-${backendSessionId}`, attemptGeneration: 1,
+  });
+  const line = payload => JSON.stringify({ runId: 'run-pane', operationId: 'op-pane', producer: 'surface-host-gpu-render', ...payload });
+  try {
+    // The fixture session is a daemon session the product created at boot, before
+    // any pane existed; it can never be the pane this step opened.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
+      `${line({ sessionId: 'b-fixture', attachTuple: tuple('b-fixture'), presented: true })}\n`
+      + `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`);
+    const binding = await bindPaneSession({
+      evidence: { action: action => actions.push(action) },
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      timeoutMs: 500,
+    });
+    expect(binding.backendSessionId).toBe('b-pane');
+    expect(binding.paneIdentity).toBe('p-b-pane');
+    expect(binding.fixtureSessionIds).toEqual(['b-fixture']);
+    expect(binding.observedPaneSessionIds).toEqual(['b-pane']);
+    expect(actions.map(action => action.action)).toEqual(['pane-session-bound']);
+    // A pane that never presents is a typed block, never an assumed binding.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
+      `${line({ sessionId: 'b-fixture', attachTuple: tuple('b-fixture'), presented: true })}\n`);
+    await expect(bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      timeoutMs: 300,
+    })).rejects.toThrowError(/PANE_BINDING_UNBOUND/);
+    // Two distinct non-fixture panes cannot be told apart: ambiguous, typed.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
+      `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`
+      + `${line({ sessionId: 'b-other', attachTuple: tuple('b-other'), presented: true })}\n`);
+    await expect(bindPaneSession({ barrierHub: hub, timeoutMs: 500 })).rejects.toThrowError(/PANE_BINDING_AMBIGUOUS/);
+    // A receipt without the authoritative seven fields is not a binding.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
+      `${line({ sessionId: 'b-pane', attachTuple: { backendSessionId: 'b-pane' }, presented: true })}\n`);
+    await expect(bindPaneSession({ barrierHub: hub, timeoutMs: 500 })).rejects.toThrowError(/missing 7-tuple field/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('marker receipts are addressed by session, so another pane cannot satisfy the assertion', async () => {
+  const { awaitMarkerReceiptForSession } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const hub = new BarrierHub(root, { runId: 'run-marker', operationId: 'op-marker' });
+  const line = payload => JSON.stringify({ runId: 'run-marker', operationId: 'op-marker', producer: 'terminal-output-observer', ...payload });
+  try {
+    writeFileSync(join(hub.dir, 'marker-output.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', output: MARKER_TEXT, frameSubmitted: true, ptyCreatedCount: 1 })}\n`);
+    const receipt = await awaitMarkerReceiptForSession(hub, 'b-pane', 500, 'unit marker');
+    expect(receipt.sessionId).toBe('b-pane');
+    expect(receipt.ptyCreatedCount).toBe(1);
+    // The pane under test produced nothing: typed FAIL with the observed
+    // sessions, instead of a pass that rode the other pane's receipt.
+    await expect(awaitMarkerReceiptForSession(hub, 'b-split', 300, 'unit marker'))
+      .rejects.toThrowError(/MARKER_SESSION_UNBOUND/);
+    await expect(awaitMarkerReceiptForSession(hub, 'b-split', 300, 'unit marker'))
+      .rejects.toThrowError(/\["b-pane"\]/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('split scenarios declare the pre-trigger pane step; scenarios that never split do not', () => {
+  for (const scenario of ['split-happy', 'split-attach-stall', 'split-cancel', 'split-concurrent']) {
+    expect([scenario, SCENARIO_PLANS[scenario].pane]).toEqual([scenario, true]);
+    // The fixture contract of every split scenario is unchanged: they still
+    // declare and validate their own fixture kinds.
+    expect(SCENARIO_FIXTURE_REQUIREMENTS[scenario]).toEqual(['source']);
+  }
+  for (const scenario of ['diagnostic-classifier', 'retained-handover', 'handover-abort', 'suspension-ownership', 'stale-binding']) {
+    expect([scenario, Boolean(SCENARIO_PLANS[scenario].pane)]).toEqual([scenario, false]);
+  }
+});
+
+test('split-happy binds its presentation and marker receipts to the SPLIT pane, not to the app pane that settled first', async () => {
+  const { runSplitHappyScenario } = await import('../lib/qa-scenarios/split-scenarios.mjs');
+  const root = fixtureRoot();
+  const runId = 'run-split-bind';
+  const operationId = 'op-split-bind';
+  const hub = new BarrierHub(root, { runId, operationId });
+  const line = payload => JSON.stringify({ runId, operationId, producer: 'surface-host-gpu-render', ...payload });
+  const tuple = backendSessionId => ({
+    backendSessionId, incarnation: 'inc-split', daemonEpoch: '3',
+    frontendSessionId: `f-${backendSessionId}`, paneIdentity: `p-${backendSessionId}`,
+    bindingKey: `k-${backendSessionId}`, attemptGeneration: 1,
+  });
+  const screenshotPath = join(root, 'screenshot.png');
+  writeFileSync(screenshotPath, Buffer.from('split-bind-screenshot'));
+  writeFileSync(join(hub.dir, 'marker-recognition.json'), JSON.stringify({
+    runId, operationId, recognizer: 'test-inspector', text: MARKER_TEXT,
+    paneBounds: { x: 0, y: 0, w: 400, h: 400 }, screenshotSha256: computeSourceDigest([screenshotPath]),
+  }));
+  try {
+    writeFileSync(join(hub.dir, 'split-create.receipt.jsonl'),
+      `${line({ backendSessionId: 'b-split', incarnation: 'inc-split', daemonEpoch: '3', attemptGeneration: 1 })}\n`);
+    // The app's own pane (created by the UI step) presents FIRST, then the split.
+    writeFileSync(join(hub.dir, 'presentation.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`
+      + `${line({ sessionId: 'b-split', attachTuple: tuple('b-split'), presented: true })}\n`);
+    writeFileSync(join(hub.dir, 'marker-output.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', output: MARKER_TEXT, frameSubmitted: true, ptyCreatedCount: 1 })}\n`
+      + `${line({ sessionId: 'b-split', output: MARKER_TEXT, frameSubmitted: true, ptyCreatedCount: 1 })}\n`);
+    const result = await runSplitHappyScenario({
+      scenario: 'split-happy',
+      evidence: { action: () => {} },
+      barrierHub: hub,
+      pid: 1234,
+      platformPreflight: 'mock',
+      evidenceRunDir: root,
+      runId,
+      operationId,
+    }, SCENARIO_PLANS['split-happy'], new MonotonicBudget());
+    // Both the seven-field tuple and the marker belong to the split's own pane.
+    expect(result.createReceipt.backendSessionId).toBe('b-split');
+    expect(result.presentationReceipt.attachTuple.backendSessionId).toBe('b-split');
+    expect(result.markerReceipt.sessionId).toBe('b-split');
+    expect(result.markerReceipt.ptyCreatedCount).toBe(1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a split whose own pane never presents or reports cannot pass on the app pane receipts', async () => {
+  const { runSplitHappyScenario } = await import('../lib/qa-scenarios/split-scenarios.mjs');
+  const root = fixtureRoot();
+  const runId = 'run-split-absent';
+  const operationId = 'op-split-absent';
+  const hub = new BarrierHub(root, { runId, operationId });
+  const line = payload => JSON.stringify({ runId, operationId, producer: 'surface-host-gpu-render', ...payload });
+  const tuple = backendSessionId => ({
+    backendSessionId, incarnation: 'inc-split', daemonEpoch: '3',
+    frontendSessionId: `f-${backendSessionId}`, paneIdentity: `p-${backendSessionId}`,
+    bindingKey: `k-${backendSessionId}`, attemptGeneration: 1,
+  });
+  const ctx = {
+    scenario: 'split-happy',
+    evidence: { action: () => {} },
+    barrierHub: hub,
+    pid: 1234,
+    platformPreflight: 'mock',
+    evidenceRunDir: root,
+    runId,
+    operationId,
+  };
+  try {
+    writeFileSync(join(hub.dir, 'split-create.receipt.jsonl'),
+      `${line({ backendSessionId: 'b-split', incarnation: 'inc-split', daemonEpoch: '3', attemptGeneration: 1 })}\n`);
+    // Only the app's own pane settles: the split pane is absent, so the scenario
+    // must NOT pass on the other pane's tuple.
+    writeFileSync(join(hub.dir, 'presentation.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`);
+    await expect(runSplitHappyScenario(ctx, SCENARIO_PLANS['split-happy'], new MonotonicBudget(400)))
+      .rejects.toThrowError(/BARRIER_ACK_TIMEOUT/);
+    // The split pane presents but never reports the marker: typed FAIL.
+    writeFileSync(join(hub.dir, 'presentation.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`
+      + `${line({ sessionId: 'b-split', attachTuple: tuple('b-split'), presented: true })}\n`);
+    writeFileSync(join(hub.dir, 'marker-output.receipt.jsonl'),
+      `${line({ sessionId: 'b-pane', output: MARKER_TEXT, frameSubmitted: true, ptyCreatedCount: 1 })}\n`);
+    await expect(runSplitHappyScenario(ctx, SCENARIO_PLANS['split-happy'], new MonotonicBudget(400)))
+      .rejects.toThrowError(/MARKER_SESSION_UNBOUND/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the pane affordance is searched by its exact accessible name and only one actionable match is clicked', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  expect(native.PANE_AFFORDANCE_NAMES_WIN32).toEqual(['New Terminal']);
+  expect(native.PANE_AFFORDANCE_AUTOMATION_IDS_WIN32).toEqual([]);
+  expect(native.PANE_AFFORDANCE_SELECTOR_DARWIN).toEqual({ role: 'button', title: 'New Terminal' });
+  const script = native.buildWindowsNewPaneScript(4242, { windows: [{ hwnd: 19663500, title: 'F', className: 'T' }] });
+  const lines = powerShellScriptLines(script);
+  expect(lines).toContain("$selectorNames = @('New Terminal');");
+  expect(lines).toContain('$windowHandles = @(19663500);');
+  expect(lines).toContain("$windowTitles = @('F');");
+  expect(lines).toContain('$condition = $conditionName0;');
+  expect(lines).toContain('$invoke.Invoke();');
+  // Exact property conditions only: no substring filter and no index pick.
+  expect(script).not.toMatch(/Name -match|Name -like/);
+  // No here-string and no P/Invoke, so the pass-5 defect class cannot recur.
+  expect(script).not.toContain('@"');
+  expect(script).not.toContain('DllImport');
+  expect(lines).not.toContain('');
+  expect(() => native.buildWindowsNewPaneScript(4242, { names: [], automationIds: [] })).toThrowError(/refusing to search for nothing/);
+
+  const base = {
+    probe: 'new-pane', selectorNames: ['New Terminal'], interactive: true, sessionId: 1,
+    windowsSearched: [{ hwnd: 1, title: 'F', className: 'T' }], windowsSearchedCount: 1,
+  };
+  const candidate = over => ({
+    windowHwnd: 1, name: 'New Terminal', controlType: 'ControlType.Button', automationId: '',
+    enabled: true, offscreen: false, rectEmpty: false, rect: '1,1,10,10', ...over,
+  });
+  const clicked = native.classifyWindowsNewPane({ ...base, candidateCount: 1, actionableCount: 1, candidates: [candidate()], chosen: candidate(), result: 'PANE_CLICKED' });
+  expect(clicked.ok).toBe(true);
+  expect(clicked.code).toBeNull();
+  expect(native.classifyWindowsNewPane({ ...base, candidateCount: 0, actionableCount: 0, candidates: [], failure: 'PANE_AFFORDANCE_NOT_FOUND' }).code).toBe('PANE_AFFORDANCE_NOT_FOUND');
+  expect(native.classifyWindowsNewPane({ ...base, candidateCount: 2, actionableCount: 2, candidates: [candidate(), candidate({ windowHwnd: 2 })] }).code).toBe('PANE_AFFORDANCE_NOT_UNIQUE');
+  expect(native.classifyWindowsNewPane({ ...base, candidateCount: 1, actionableCount: 0, candidates: [candidate({ enabled: false })] }).code).toBe('PANE_AFFORDANCE_DISABLED');
+  expect(native.classifyWindowsNewPane({ probe: 'new-pane', windowsSearched: [], failure: 'NO_OWNED_WINDOW' }).code).toBe('NO_OWNED_WINDOW');
+  // Every pre-existing split verdict is untouched by the new probe.
+  expect(native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' }).code).toBe('SPLIT_RIGHT_NOT_FOUND');
 });
