@@ -5920,9 +5920,16 @@ mod tests {
 
     #[tokio::test]
     async fn bounds_ipc_presents_when_browser_child_is_open() {
-        // Given: the shell and an embedded browser share the main native window.
-        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        // Given: the shell and an embedded browser share the main native window, and the native
+        // target defers the direct render to the scheduled GPU pass exactly like production.
+        let mut harness =
+            DirectRenderHarness::with_deferred_direct_frames(vec![SimulatedAcquisition::Frame]);
         harness._app.manage(harness.state.clone());
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
         let _browser = harness
             ._app
             .get_window("main")
@@ -5940,9 +5947,10 @@ mod tests {
         let bounds = harness.request.bounds;
 
         // When: the frontend updates an attached terminal's bounds.
-        let receipt = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
-            harness._app.state::<NativeTerminalSurfaceHostState>(),
+        let app_handle = harness._app.handle().clone();
+        let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            app_handle.clone(),
+            app_handle.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
                 x: bounds.x,
@@ -5953,9 +5961,22 @@ mod tests {
             bounds.scale_factor,
             None,
             None,
-        )
-        .await
-        .expect("browser child must not make the main terminal window unavailable");
+        ));
+        assert!(
+            futures_util::poll!(command.as_mut()).is_pending(),
+            "the direct call only defers; nothing has reached the screen yet"
+        );
+        assert!(
+            harness.events.lock().is_empty(),
+            "the direct path must not paint inline; the GPU pass owns presentation"
+        );
+
+        // The scheduled GPU pass is the only paint, and its presentation ends the wait.
+        harness.execute_dispatched().await;
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+            .await
+            .expect("browser child must not make the main terminal window unavailable")
+            .expect("browser child must not make the main terminal window unavailable");
 
         // Then: the normal surface host presents the frame and acknowledges it.
         assert!(receipt.presented);
@@ -6012,7 +6033,9 @@ mod tests {
 
     #[tokio::test]
     async fn synchronized_output_bounds_ipc_waits_for_actual_presentation() {
-        let harness = DirectRenderHarness::new(vec![
+        // The native target defers every direct render, so the acknowledgement can only come from
+        // the GPU pass that paints the frame the transaction releases.
+        let mut harness = DirectRenderHarness::with_deferred_direct_frames(vec![
             SimulatedAcquisition::Frame,
             SimulatedAcquisition::Frame,
         ]);
@@ -6022,10 +6045,13 @@ mod tests {
             .state::<RenderDispatch>()
             .require_deferred
             .store(false, Ordering::SeqCst);
+        // Settle the surface's first frame before the transaction opens, so the only paint left to
+        // observe is the replacement frame the transaction releases.
         harness
             .state
             .render(&harness.window, harness.request.clone())
             .unwrap();
+        harness.execute_dispatched().await;
         harness.events.lock().clear();
         harness
             .state
@@ -6034,9 +6060,10 @@ mod tests {
             })
             .unwrap();
         let bounds = harness.request.bounds;
+        let app_handle = harness._app.handle().clone();
         let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
-            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            app_handle.clone(),
+            app_handle.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
                 x: bounds.x,
@@ -6065,6 +6092,9 @@ mod tests {
             })
             .await
             .unwrap();
+        // The transaction has ended: the pump's frame is presented by its GPU pass, and that
+        // presentation is the only signal the bounds IPC accepts.
+        harness.execute_dispatched().await;
         let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
             .await
             .unwrap()
@@ -6080,7 +6110,7 @@ mod tests {
     #[tokio::test]
     async fn deferred_bounds_retry_does_not_restore_obsolete_width() {
         for newest_finishes_first in [false, true] {
-            let harness = DirectRenderHarness::new(vec![
+            let mut harness = DirectRenderHarness::with_deferred_direct_frames(vec![
                 SimulatedAcquisition::Frame,
                 SimulatedAcquisition::Frame,
                 SimulatedAcquisition::Frame,
@@ -6091,10 +6121,13 @@ mod tests {
                 .state::<RenderDispatch>()
                 .require_deferred
                 .store(false, Ordering::SeqCst);
+            // Settle the surface's first frame before the transaction opens, so the only paint
+            // left to observe is the replacement frame the transaction releases.
             harness
                 .state
                 .render(&harness.window, harness.request.clone())
                 .unwrap();
+            harness.execute_dispatched().await;
             let resizes = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&resizes);
             assert!(harness
@@ -6108,10 +6141,11 @@ mod tests {
                     terminal.feed_str("\x1b[?2026hpartial")
                 })
                 .unwrap();
+            let app_handle = harness._app.handle().clone();
             let mut old_command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    harness._app.handle().clone(),
-                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    app_handle.clone(),
+                    app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
                         x: 0.0,
@@ -6126,8 +6160,8 @@ mod tests {
             assert!(futures_util::poll!(old_command.as_mut()).is_pending());
             let mut latest_command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    harness._app.handle().clone(),
-                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    app_handle.clone(),
+                    app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
                         x: 0.0,
@@ -6159,6 +6193,9 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            // The transaction has ended: the pump's frame is presented by its GPU pass, and that
+            // presentation resolves both outstanding bounds requests.
+            harness.execute_dispatched().await;
             let (old_receipt, latest) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     if newest_finishes_first {
@@ -6221,7 +6258,8 @@ mod tests {
     #[tokio::test]
     async fn synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end() {
         for detach in [false, true] {
-            let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+            let mut harness =
+                DirectRenderHarness::with_deferred_direct_frames(vec![SimulatedAcquisition::Frame]);
             harness._app.manage(harness.state.clone());
             harness
                 .window
@@ -6235,10 +6273,11 @@ mod tests {
                 })
                 .unwrap();
             let bounds = harness.request.bounds;
+            let app_handle = harness._app.handle().clone();
             let mut command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    harness._app.handle().clone(),
-                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    app_handle.clone(),
+                    app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
                         x: bounds.x,
@@ -6257,6 +6296,9 @@ mod tests {
             } else {
                 let (replacement, _) = tokio::sync::mpsc::channel(1);
                 drop(std::mem::replace(&mut harness._output, replacement));
+                // The stream ends with the transaction still open: the pump's own frame is the
+                // paint that finishes the request, so run its GPU pass before awaiting it.
+                harness.execute_dispatched().await;
             }
             let result = tokio::time::timeout(std::time::Duration::from_secs(5), command)
                 .await
