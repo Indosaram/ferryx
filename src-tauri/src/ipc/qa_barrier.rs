@@ -1035,6 +1035,47 @@ pub struct QaFixtureSession {
     pub ownership_receipt: Value,
 }
 
+/// The surface host's own per-session observation, read through a handle a
+/// spawned future may safely hold.
+///
+/// `NativeTerminalSurfaceHostState` owns the WGPU worker, so a future that holds
+/// Tauri's `State<'_, NativeTerminalSurfaceHostState>` - or a plain
+/// `&NativeTerminalSurfaceHostState` - across an `await` forces the compiler to
+/// prove that managed state's `Sync` through the whole WGPU object graph
+/// (`NumericDimension` -> `InterfaceVar` -> ... -> `ResourceState`). That
+/// derivation is deep enough to overflow the default recursion limit, which fails
+/// `cargo build --features local-split-qa` with `E0275` while `cargo check` passes.
+///
+/// Every implementation resolves the state inside one synchronous call and returns
+/// only the owned snapshot, so no future's `Send` proof ever mentions the managed
+/// state itself.
+pub trait SurfaceHostObservations {
+    /// The host's own observation for the session, or `None` when this process
+    /// holds none - the honest "not observed" the classifier requires instead of a
+    /// defaulted `false`.
+    fn observe_session(&self, session_id: &str) -> Option<PaneLivenessSnapshot>;
+}
+
+/// The GUI boot lane holds no host reference: it resolves the managed state on
+/// demand, inside a call that contains no `await`.
+impl<R: tauri::Runtime> SurfaceHostObservations for tauri::AppHandle<R> {
+    fn observe_session(&self, session_id: &str) -> Option<PaneLivenessSnapshot> {
+        // One statement, no `await`: the `State` borrow ends with it.
+        self.state::<NativeTerminalSurfaceHostState>()
+            .session_liveness_observation(session_id)
+    }
+}
+
+/// Lanes that already hold the host read it directly (tests, in-process
+/// fixtures). Nothing in those lanes is spawned, so no auto-trait proof is
+/// involved; the impl is test-only so no spawned lane can reach for it.
+#[cfg(test)]
+impl SurfaceHostObservations for &NativeTerminalSurfaceHostState {
+    fn observe_session(&self, session_id: &str) -> Option<PaneLivenessSnapshot> {
+        self.session_liveness_observation(session_id)
+    }
+}
+
 /// GUI-lane `fixture-setup` inventory.
 ///
 /// The runner awaits `fixture-setup` line 0 immediately after launch, before any
@@ -1048,9 +1089,14 @@ pub struct QaFixtureSession {
 /// this boot really created through the local-split create path is claimed as
 /// `created`. A kind the daemon's reply does not support is refused and reported,
 /// and a session the daemon does not report running is listed but never claimed.
-pub async fn collect_gui_fixture_sessions(
+///
+/// The host is read through [`SurfaceHostObservations`] rather than as a
+/// `&NativeTerminalSurfaceHostState`: the GUI boot lane awaits this collector
+/// inside a spawned future, and holding the managed-state borrow across those
+/// awaits would demand the `Sync` proof described on that trait.
+pub async fn collect_gui_fixture_sessions<H: SurfaceHostObservations>(
     daemon_client: &crate::daemon::DaemonClient,
-    surface_host: &NativeTerminalSurfaceHostState,
+    surface_host: H,
     creation: &GuiFixtureCreation,
 ) -> GuiFixtureInventory {
     let mut inventory = GuiFixtureInventory::default();
@@ -1068,7 +1114,7 @@ pub async fn collect_gui_fixture_sessions(
             inventory.not_running.push(session_id);
             continue;
         }
-        let observed = surface_host.session_liveness_observation(&session_id);
+        let observed = surface_host.observe_session(&session_id);
         let intended = creation.assigned_kind(&session_id);
         let classification = classify_fixture_session(&details, observed.as_ref(), intended);
         if let Some(refusal) = classification.refusal {
@@ -1384,10 +1430,14 @@ pub fn start_gui_boot_channel<R: tauri::Runtime>(
         let fixture_client = Arc::clone(&daemon_client);
         let fixture_app = app.clone();
         tauri::async_runtime::spawn(async move {
+            // The settlement reads the surface host through this owned handle
+            // (see `SurfaceHostObservations`), so the spawned future holds no
+            // `State` borrow across an await and its `Send` proof never reaches
+            // the WGPU object graph.
             let outcome = emit_gui_fixture_setup(
                 &fixture_channel,
                 &fixture_client,
-                &fixture_app,
+                fixture_app,
                 &fixture_kinds,
             )
             .await;
@@ -1399,7 +1449,31 @@ pub fn start_gui_boot_channel<R: tauri::Runtime>(
             }
         });
     }
-    tauri::async_runtime::spawn(run_stale_binding_watcher(channel, daemon_client, app));
+    // The stale-binding watch calls an async method ON the managed surface host,
+    // so its future holds `State<'_, NativeTerminalSurfaceHostState>` across its
+    // awaits - a borrow no restructure in this file can drop, and one whose `Sync`
+    // proof through the WGPU object graph overflows the default recursion limit
+    // (`E0275` on `cargo build --features local-split-qa`). A dedicated thread
+    // imposes no `Send` obligation on that future, and the closure captures only
+    // owned `Send` data.
+    let watch = std::thread::Builder::new()
+        .name("ferryx-qa-stale-binding".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("FERRYX_QA_STALE_BINDING_WATCH_UNSTARTED: runtime: {error}");
+                    return;
+                }
+            };
+            runtime.block_on(run_stale_binding_watcher(channel, daemon_client, app));
+        });
+    if let Err(error) = watch {
+        eprintln!("FERRYX_QA_STALE_BINDING_WATCH_UNSTARTED: thread: {error}");
+    }
 }
 
 /// Runner->product control that asks the product to offer a stale attempt against
@@ -1415,6 +1489,9 @@ const STALE_BINDING_WATCH_MS: u64 = 60_000;
 const STALE_BINDING_TICK_MS: u64 = 25;
 
 /// Bounded watch for the runner's `trigger-stale-binding` control.
+///
+/// Driven by a dedicated thread (see `start_gui_boot_channel`) rather than spawned,
+/// because the future below holds the managed surface host across its awaits.
 ///
 /// The scenario pre-arms no barrier, so this command file is the only channel
 /// between the runner and the product. The watch reads through the channel's own
@@ -1464,6 +1541,10 @@ async fn run_stale_binding_watcher<R: tauri::Runtime>(
 /// GUI-lane `fixture-setup`: construct the requested fixtures through the real
 /// product paths, then settle line 0 from the real inventory.
 ///
+/// The app handle is taken by value so the caller's spawned future holds an owned
+/// `Send` handle instead of a `&AppHandle<R>`: the collector reads the surface host
+/// through it, never through a managed-state borrow held across an await.
+///
 /// Creation and settlement share one deadline derived from the runner's own
 /// `fixture-setup` budget, so a daemon that is slow to answer cannot push the
 /// settlement past it: the truth of the attempt is always emitted, and a fixture
@@ -1472,7 +1553,7 @@ async fn run_stale_binding_watcher<R: tauri::Runtime>(
 pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
     channel: &QaBarrierChannel,
     daemon_client: &crate::daemon::DaemonClient,
-    app: &tauri::AppHandle<R>,
+    app: tauri::AppHandle<R>,
     kinds: &[QaFixtureKind],
 ) -> GuiFixtureSetupOutcome {
     let deadline =
@@ -1493,12 +1574,7 @@ pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
     for failure in &creation.failures {
         eprintln!("FERRYX_QA_FIXTURE_CREATE_FAILED: {failure}");
     }
-    let inventory = collect_gui_fixture_sessions(
-        daemon_client,
-        &app.state::<NativeTerminalSurfaceHostState>(),
-        &creation,
-    )
-    .await;
+    let inventory = collect_gui_fixture_sessions(daemon_client, app, &creation).await;
     for refusal in &inventory.refused {
         eprintln!("FERRYX_QA_FIXTURE_CLAIM_REFUSED: {refusal}");
     }
@@ -2662,11 +2738,18 @@ mod tests {
         assert_eq!(with_host.basis, FixtureKindBasis::DaemonIdleFactsAndSurfaceHost);
 
         // 4. `created` is claimed only from this boot's own split-create
-        //    provenance; without it the same session is honestly a `source`.
+        //    provenance. With no intention at all the session is reported as the
+        //    daemon's own reply describes it - an observation is never erased by
+        //    the absence of an intention, so full idle facts stay `idle` instead of
+        //    collapsing to the `source` fallback.
         let created = classify_fixture_session(&idle_facts(), None, Some(QaFixtureKind::Created));
         assert_eq!(created.kind, "created");
         assert_eq!(created.basis, FixtureKindBasis::QaLocalSplitCreate);
-        assert_eq!(classify_fixture_session(&idle_facts(), None, None).kind, "source");
+        let unclaimed = classify_fixture_session(&idle_facts(), None, None);
+        assert_eq!(unclaimed.kind, "idle");
+        assert_eq!(unclaimed.basis, FixtureKindBasis::DaemonIdleFacts);
+        assert_eq!(unclaimed.stop_probe_state, None);
+        assert_eq!(unclaimed.refusal, None);
 
         // 5. The kinds this lane cannot construct are refused with a reason.
         for kind in [QaFixtureKind::Adopted, QaFixtureKind::ExternallyStopped] {
