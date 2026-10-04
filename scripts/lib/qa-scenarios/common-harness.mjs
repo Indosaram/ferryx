@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  accessSync, constants, createWriteStream, existsSync, mkdirSync, rmSync, statSync,
+  accessSync, constants, copyFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync,
   watch, writeFileSync, realpathSync, lstatSync, renameSync, readFileSync, readlinkSync,
 } from 'node:fs';
 import { homedir, platform, release, arch } from 'node:os';
@@ -1004,6 +1004,120 @@ export function appStdioResult(sink) {
     closed: receipt.closed === true,
     closedOk: receipt.closedOk,
   };
+}
+
+// The app-stdio sink's byte counters at ONE moment: the cheap, in-memory reading
+// a run needs to answer "did the app write anything new across this step?"
+// without reading the artifacts back. Used as the split step's self-check on the
+// claim that the split flow is invisible in the app's stderr - a byte DELTA of
+// zero across the click supports that claim, a growing one falsifies it.
+// A sink that is not wired is reported as `null` instead of throwing: a missing
+// diagnostic sink must never be able to fail a run.
+export function appStdioBytes(sink) {
+  if (!sink || typeof sink.receipt !== 'function') return null;
+  const receipt = sink.receipt();
+  const bytesOf = name => receipt.streams.find(entry => entry.name === name)?.bytes ?? 0;
+  const stdout = bytesOf('stdout');
+  const stderr = bytesOf('stderr');
+  return { stdout, stderr, total: stdout + stderr };
+}
+
+// ---------------------------------------------------------------------------
+// Barrier-hub preservation (task-9 pass-22 observability gap).
+
+// The barrier hub is where the product settles everything this harness reads:
+// `<name>.arm.json`, `<name>.armed-ack.json`, `<name>.bound-ack.json`,
+// `<name>.held.json`, `<name>.bind.json`, `<name>.release.json`,
+// `<name>.request.json`, `<name>.receipt.jsonl` and `marker-recognition.json`.
+// It lives INSIDE the isolation root (`<isolationRoot>/barriers`), which the
+// cleanup pass removes - so the whole stream was discarded, and in pass 21 a
+// receipt question ("was `split-create` settled?") could only be answered by
+// inference from the app's stderr instead of by reading the stream. This is the
+// bounded copy that keeps it: taken unconditionally by the runner's
+// finalization pass, so no future pass has to remember an env var to get it.
+export const BARRIER_ARCHIVE_MAX_BYTES = 1 << 20; // 1 MiB
+
+// Copy the barrier hub's regular files into `<evidenceRunDir>/barrier-hub/`.
+//
+// CONTRACT: this NEVER throws and is NEVER fatal to the run. A hub that cannot
+// be archived is reported (`ok: false` + typed `reason`); a file that cannot be
+// stat'd or copied is named in `filesSkipped` with its own reason; the copy is
+// bounded by `maxBytes`, and the files the cap left behind are named in
+// `filesSkipped` (never silently dropped). Files are visited in sorted order so
+// the cap bites at a deterministic point. The archive is a SNAPSHOT taken at
+// teardown - `bytes`/`filesCopied` say exactly what was preserved.
+export function archiveBarrierHub(barrierDir, evidenceRunDir, {
+  maxBytes = BARRIER_ARCHIVE_MAX_BYTES,
+  listDir = readdirSync,
+  stat = statSync,
+  copy = copyFileSync,
+  mkdir = mkdirSync,
+  exists = existsSync,
+} = {}) {
+  const destDir = typeof evidenceRunDir === 'string' && evidenceRunDir.length > 0
+    ? join(evidenceRunDir, 'barrier-hub')
+    : null;
+  const receipt = {
+    sourceDir: typeof barrierDir === 'string' ? barrierDir : null,
+    dir: destDir,
+    ok: false,
+    reason: null,
+    filesCopied: [],
+    filesSkipped: [],
+    bytes: 0,
+    truncated: false,
+    maxBytes,
+  };
+  try {
+    if (destDir === null) {
+      receipt.reason = 'EVIDENCE_DIR_UNSET';
+      return receipt;
+    }
+    if (receipt.sourceDir === null || receipt.sourceDir.length === 0) {
+      receipt.reason = 'BARRIER_DIR_UNSET';
+      return receipt;
+    }
+    if (!exists(receipt.sourceDir)) {
+      receipt.reason = 'BARRIER_DIR_MISSING';
+      return receipt;
+    }
+    const names = listDir(receipt.sourceDir).filter(name => typeof name === 'string').sort();
+    mkdir(destDir, { recursive: true, mode: 0o700 });
+    for (const name of names) {
+      const source = join(receipt.sourceDir, name);
+      let size;
+      try {
+        const info = stat(source);
+        if (info.isFile() !== true) {
+          receipt.filesSkipped.push({ name, reason: 'NOT_A_FILE' });
+          continue;
+        }
+        size = info.size;
+      } catch (error) {
+        receipt.filesSkipped.push({ name, reason: `STAT_FAILED: ${error?.message ?? error}` });
+        continue;
+      }
+      if (receipt.bytes + size > maxBytes) {
+        receipt.truncated = true;
+        receipt.filesSkipped.push({ name, reason: `BYTE_CAP: ${size} bytes would exceed the ${maxBytes}-byte archive cap` });
+        continue;
+      }
+      try {
+        copy(source, join(destDir, name));
+        receipt.bytes += size;
+        receipt.filesCopied.push(name);
+      } catch (error) {
+        receipt.filesSkipped.push({ name, reason: `COPY_FAILED: ${error?.message ?? error}` });
+      }
+    }
+    receipt.ok = true;
+    return receipt;
+  } catch (error) {
+    // A diagnostic that cannot be taken is reported, never thrown: the verdict
+    // of the run it describes must not depend on it.
+    receipt.reason = `ARCHIVE_FAILED: ${error?.message ?? error}`;
+    return receipt;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -150,7 +150,14 @@ export function createPaneInventoryReader({
   if (typeof dir !== 'string' || dir.length === 0) {
     throw new HarnessError('ASSERTION_FAILURE', 'createPaneInventoryReader requires an isolationRoot or an explicit runtimeDir');
   }
-  const snapshot = async label => {
+  // The reading this reader took LAST. The split step's own post-click read
+  // (`split-inventory-after`) is measured against the reading taken just before
+  // the split click, which is the pane step's `pane-inventory-after` - so the
+  // baseline is remembered HERE, by the one reader that really took both reads,
+  // instead of being re-derived (or invented) by a caller.
+  let lastReading = null;
+
+  const snapshot = async (label, { compareToPrevious = false, extra = null } = {}) => {
     // Charged to the caller's pre-trigger setup budget (the pane step is setup,
     // not the measured attempt), capped by whatever the reader's own default is.
     const boundedTotalMs = budget && typeof budget.consume === 'function'
@@ -161,9 +168,23 @@ export function createPaneInventoryReader({
       platform,
       ...(boundedTotalMs === undefined ? {} : { totalMs: boundedTotalMs }),
     });
+    // A delta is only ever computed from two REAL reads of this daemon, with the
+    // same arithmetic the pane binding uses (`computeInventoryDelta`): when
+    // either read failed there is NO delta, never a zero that would read as
+    // "nothing changed". The baseline's own label and session list travel with
+    // it, so a reader can always see what the delta was measured against.
+    const previous = compareToPrevious ? lastReading : null;
+    const delta = previous?.result?.ok === true && result.ok === true
+      ? computeInventoryDelta({ before: previous.result, after: result })
+      : null;
+    // Extra measurement fields are sampled HERE, after the read, so that they
+    // describe the same moment as the session list - which is why a function is
+    // accepted as well as a plain object.
+    const extraFields = typeof extra === 'function' ? (extra() ?? {}) : (extra ?? {});
     // The daemon's bearer token is never part of this record: only its path is.
     evidence?.action?.({
       action: label,
+      ...extraFields,
       ok: result.ok === true,
       code: result.code ?? null,
       detail: result.detail ?? null,
@@ -173,10 +194,21 @@ export function createPaneInventoryReader({
       sessionIds: result.ok === true ? [...result.sessions].sort() : null,
       epoch: result.epoch ?? null,
       elapsedMs: result.elapsedMs ?? null,
+      ...(delta === null ? {} : {
+        delta: {
+          added: delta.added,
+          removed: delta.removed,
+          beforeCount: delta.beforeCount,
+          afterCount: delta.afterCount,
+          baselineLabel: previous.label,
+          baselineSessionIds: [...(previous.result.sessions ?? [])].sort(),
+        },
+      }),
     });
+    lastReading = { label, result };
     return result;
   };
-  return { runtimeDir: dir, platform, snapshot };
+  return { runtimeDir: dir, platform, snapshot, lastReading: () => lastReading };
 }
 
 // Bind the pane the UI step just created to the session the app itself presents.

@@ -19,9 +19,10 @@ import {
   requireSevenTupleReceipt, requireFiveTupleReceipt,
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
   AppStdioSink, appStdioResult, APP_STDIO_TRUNCATION_MARKER,
+  appStdioBytes, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
-import { assertInvariants, assertSinglePty, SCENARIO_PLANS } from './pane-liveness.mjs';
+import { assertInvariants, assertSinglePty, SCENARIO_PLANS, archiveRunBarrierHub } from './pane-liveness.mjs';
 import {
   MARKER_TEXT,
   performInspectionHandshake,
@@ -32,6 +33,9 @@ import {
   runSplitAttachStallScenario,
   runSplitCancelScenario,
   runSplitConcurrentScenario,
+  SPLIT_INVENTORY_ACTION,
+  PRE_SPLIT_INVENTORY_ACTION,
+  INVENTORY_READER_MISSING,
 } from '../lib/qa-scenarios/split-scenarios.mjs';
 import {
   runRetainedHandoverScenario,
@@ -2747,4 +2751,249 @@ test('the pane affordance is searched by its exact accessible name and only one 
   expect(native.classifyWindowsNewPane({ probe: 'new-pane', windowsSearched: [], failure: 'NO_OWNED_WINDOW' }).code).toBe('NO_OWNED_WINDOW');
   // Every pre-existing split verdict is untouched by the new probe.
   expect(native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' }).code).toBe('SPLIT_RIGHT_NOT_FOUND');
+});
+
+// ---------------------------------------------------------------------------
+// Task-9 pass-22 observability: the post-split daemon inventory (a local split
+// create adds a daemon session, so 2 -> 3 separates "the split really created"
+// from "the flow bailed before create") and the app-stdio byte self-check on the
+// claim that the split flow is invisible in the app's stderr. Both are
+// MEASUREMENTS: neither may change a verdict.
+
+test('the split step records a post-click daemon inventory with its session delta and the app-stdio byte self-check', async () => {
+  const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const runId = 'run-split-inventory';
+  const operationId = 'op-split-inventory';
+  const hub = new BarrierHub(root, { runId, operationId });
+  const actions = [];
+  const sequence = [];
+  // The two readings the daemon really answered: the pane step's own after-read
+  // (2 sessions: the fixture and the UI pane) and the split click's effect
+  // (3 sessions: the split created a daemon session).
+  const inventories = [['fixture-1', 'pane-1'], ['fixture-1', 'pane-1', 'split-1']];
+  let readIndex = 0;
+  const reader = createPaneInventoryReader({
+    runtimeDir: join(root, 'runtime'),
+    platform: 'win32',
+    evidence: { action: action => actions.push(action) },
+    readInventory: async request => {
+      expect(request.runtimeDir).toBe(join(root, 'runtime'));
+      sequence.push(`read:${readIndex}`);
+      const sessions = inventories[Math.min(readIndex, inventories.length - 1)];
+      readIndex += 1;
+      return {
+        ok: true, code: null, detail: null, transport: 'loopback-port',
+        endpoint: { transport: 'loopback-port', portPath: join(root, 'runtime', 'daemon.port'), tokenPath: join(root, 'runtime', 'daemon.token') },
+        sessions, epoch: 11, elapsedMs: 1,
+      };
+    },
+  });
+  // The always-on app-stdio sink the split step self-checks against. The click
+  // writes one app line, exactly the kind the lead's reading says the split flow
+  // cannot produce - so the recorded byte delta has to show it.
+  const appLine = '[cmd_terminal_spawn] request received has_worktree=false has_cwd=true\n';
+  const sink = new AppStdioSink(join(root, 'app-stdio'), { label: 'app' });
+  const child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+  sink.attach(child);
+  const driver = {
+    focus: async () => sequence.push('focus'),
+    split: async () => { sequence.push('split-click'); child.stderr.emit('data', Buffer.from(appLine)); },
+  };
+  const fakeHub = {
+    ...hub,
+    command: name => sequence.push(`command:${name}`),
+    awaitReceipt: async () => ({ cancelAckMs: 120, timerDispatchLatencyMs: 5, cleanupReceipt: { authoritative: true, reapedPids: [] }, createdIdRequired: false }),
+  };
+  try {
+    // The pane step's own after-read, exactly as the runner takes it: this is the
+    // pre-split reading the split's delta must be measured against.
+    await reader.snapshot('pane-inventory-after');
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1234,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: reader,
+      appStdio: sink,
+    }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
+    expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
+
+    // (1) the order: the click, then the cancel request (the scenario's own
+    // measured moment), then the post-click inventory read - never before the
+    // click, and never a second baseline read, because the pane step's own
+    // after-read is reused as the baseline.
+    expect(sequence.slice(0, 5)).toEqual(['read:0', 'focus', 'split-click', 'command:split-cancel', 'read:1']);
+    expect(actions.map(action => action.action)).not.toContain(PRE_SPLIT_INVENTORY_ACTION);
+
+    // (2) the recorded action: sessionCount, sessionIds, and the delta against
+    // the pre-split reading.
+    const after = actions.find(action => action.action === SPLIT_INVENTORY_ACTION);
+    expect(after.ok).toBe(true);
+    expect(after.sessionCount).toBe(3);
+    expect(after.sessionIds).toEqual(['fixture-1', 'pane-1', 'split-1']);
+    expect(after.delta).toEqual({
+      added: ['split-1'],
+      removed: [],
+      beforeCount: 2,
+      afterCount: 3,
+      baselineLabel: 'pane-inventory-after',
+      baselineSessionIds: ['fixture-1', 'pane-1'],
+    });
+
+    // (3) the app-stdio byte self-check at the same moment: the bytes really grew
+    // across the click, so this evidence falsifies the invisibility claim rather
+    // than hiding it.
+    expect(after.appStdioBytes.before).toEqual({ stdout: 0, stderr: 0, total: 0 });
+    expect(after.appStdioBytes.after.total).toBe(Buffer.byteLength(appLine));
+    expect(after.appStdioBytes.delta).toEqual({ stdout: 0, stderr: Buffer.byteLength(appLine), total: Buffer.byteLength(appLine) });
+    // The projection itself, read straight off the sink: the same counters the
+    // action carried, with no file read and no side effect.
+    expect(appStdioBytes(sink)).toEqual({ stdout: 0, stderr: Buffer.byteLength(appLine), total: Buffer.byteLength(appLine) });
+  } finally {
+    await sink.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the post-split inventory falls back to a fresh pre-split read, and a run with no reader records a typed reason instead of failing', async () => {
+  const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const actions = [];
+  const reader = createPaneInventoryReader({
+    runtimeDir: join(root, 'runtime'),
+    platform: 'win32',
+    evidence: { action: action => actions.push(action) },
+    readInventory: async () => ({
+      ok: true, code: null, detail: null, transport: 'unix-socket',
+      endpoint: { transport: 'unix-socket', socketPath: join(root, 'runtime', 'daemon.sock') },
+      sessions: actions.filter(action => action.action.startsWith('pane-inventory')).length === 0 ? ['fixture-1'] : ['fixture-1', 'split-1'],
+      epoch: 3, elapsedMs: 1,
+    }),
+  });
+  const driver = { focus: async () => {}, split: async () => {} };
+  const fakeHub = {
+    command: () => {},
+    awaitReceipt: async () => ({ cancelAckMs: 5, cleanupReceipt: { authoritative: true } }),
+  };
+  try {
+    // (a) NO pane-step after-read (the pane binding settled on the product's own
+    // presentation receipt instead): the baseline is taken HERE, before the click,
+    // so the pane step's own session can never be folded into the split's delta.
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: reader,
+    }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
+    expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
+    const inventoryActions = actions
+      .filter(action => action.action.startsWith('pane-inventory') || action.action === SPLIT_INVENTORY_ACTION)
+      .map(action => action.action);
+    expect(inventoryActions).toEqual([PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
+    expect(actions.find(action => action.action === SPLIT_INVENTORY_ACTION).delta)
+      .toMatchObject({ added: ['split-1'], beforeCount: 1, afterCount: 2, baselineLabel: PRE_SPLIT_INVENTORY_ACTION, baselineSessionIds: ['fixture-1'] });
+
+    // (b) no reader wired at all: the action says so, typed, and the scenario's
+    // own verdict is untouched - a missing measurement can never turn a blocked
+    // run into a failure.
+    actions.length = 0;
+    const noReader = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+    }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
+    expect(noReader.cancelReceipt.cancelAckMs).toBe(5);
+    const missing = actions.find(action => action.action === SPLIT_INVENTORY_ACTION);
+    expect([missing.ok, missing.code, missing.sessionCount, missing.sessionIds, missing.delta, missing.baselineLabel])
+      .toEqual([false, INVENTORY_READER_MISSING, null, null, null, null]);
+    expect(missing.appStdioBytes).toEqual({ before: null, after: null, delta: null });
+
+    // The same wiring in a second adapter: split-happy still fails with its own
+    // typed BARRIER_ACK_TIMEOUT (never ASSERTION_FAILURE) when the measurement
+    // cannot be taken.
+    actions.length = 0;
+    const happyHub = { awaitReceipt: async () => { throw new HarnessError('BARRIER_ACK_TIMEOUT', 'no split-create receipt'); } };
+    await expect(runSplitHappyScenario({
+      scenario: 'split-happy',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: happyHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+    }, SCENARIO_PLANS['split-happy'], new MonotonicBudget()))
+      .rejects.toThrowError(/BARRIER_ACK_TIMEOUT/);
+    expect(actions.find(action => action.action === SPLIT_INVENTORY_ACTION).code).toBe(INVENTORY_READER_MISSING);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the run preserves the barrier hub directory into its evidence dir, bounded and never fatal', () => {
+  const root = fixtureRoot();
+  const hubDir = join(root, 'isolation', 'barriers');
+  const runDir = join(root, 'evidence', 'task-3-harness', 'split-happy', 'run-x');
+  mkdirSync(hubDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  // The four artifact families a hub really holds: the pre-armed spec, the
+  // product's registration ACK, its live binding ACK, and the append-only
+  // receipt stream the pass-21 question was about.
+  const artifacts = {
+    'split-create.arm.json': '{"name":"split-create"}',
+    'split-create.armed-ack.json': '{"producer":"qa-barrier"}\n',
+    'attach-handshake.bound-ack.json': '{"targetBackendSessionId":"b1"}\n',
+    'split-create.receipt.jsonl': '{"backendSessionId":"b1"}\n',
+  };
+  for (const [name, text] of Object.entries(artifacts)) writeFileSync(join(hubDir, name), text);
+  mkdirSync(join(hubDir, 'nested'), { recursive: true });
+  const artifactBytes = Object.values(artifacts).reduce((total, text) => total + Buffer.byteLength(text), 0);
+  try {
+    // (1) every regular file is preserved byte for byte under the run's own
+    // evidence dir, and the subdirectory is named as skipped, not silently lost.
+    const archive = archiveBarrierHub(hubDir, runDir);
+    expect([archive.ok, archive.reason, archive.truncated, archive.maxBytes])
+      .toEqual([true, null, false, BARRIER_ARCHIVE_MAX_BYTES]);
+    expect(archive.dir).toBe(join(runDir, 'barrier-hub'));
+    expect(archive.filesCopied).toEqual(Object.keys(artifacts).sort());
+    expect(archive.filesSkipped).toEqual([{ name: 'nested', reason: 'NOT_A_FILE' }]);
+    expect(archive.bytes).toBe(artifactBytes);
+    for (const [name, text] of Object.entries(artifacts)) {
+      expect(readFileSync(join(runDir, 'barrier-hub', name), 'utf8')).toBe(text);
+    }
+
+    // (2) the byte cap bites at a deterministic point and names what it left
+    // behind instead of dropping it.
+    const capped = archiveBarrierHub(hubDir, join(root, 'evidence-capped'), { maxBytes: 40 });
+    expect(capped.truncated).toBe(true);
+    expect(capped.bytes).toBeLessThanOrEqual(40);
+    const cappedSkips = capped.filesSkipped.filter(skip => skip.reason.startsWith('BYTE_CAP'));
+    expect(cappedSkips.length).toBeGreaterThan(0);
+    expect(capped.filesCopied.length + cappedSkips.length).toBe(Object.keys(artifacts).length);
+
+    // (3) never fatal: a missing hub, an unset evidence dir, an unset hub and an
+    // fs failure are each a typed reason, never a throw.
+    expect(archiveBarrierHub(join(root, 'no-such-hub'), runDir))
+      .toMatchObject({ ok: false, reason: 'BARRIER_DIR_MISSING', filesCopied: [], bytes: 0 });
+    expect(archiveBarrierHub(hubDir, null)).toMatchObject({ ok: false, reason: 'EVIDENCE_DIR_UNSET' });
+    expect(archiveBarrierHub(null, runDir)).toMatchObject({ ok: false, reason: 'BARRIER_DIR_UNSET' });
+    const statFails = archiveBarrierHub(hubDir, join(root, 'evidence-stat'), { stat: () => { throw new Error('boom'); } });
+    expect([statFails.ok, statFails.filesCopied, statFails.filesSkipped.every(skip => skip.reason.startsWith('STAT_FAILED'))])
+      .toEqual([true, [], true]);
+    const copyFails = archiveBarrierHub(hubDir, join(root, 'evidence-copy'), { copy: () => { throw new Error('boom'); } });
+    expect(copyFails.filesCopied).toEqual([]);
+    expect(copyFails.filesSkipped.filter(skip => skip.reason.startsWith('COPY_FAILED')).length).toBe(Object.keys(artifacts).length);
+
+    // (4) the runner's own finalization seam archives the hub into the evidence
+    // RUN dir - this is exactly what the runner's `finally` block calls.
+    const seamRunDir = join(root, 'evidence-seam');
+    const seam = archiveRunBarrierHub({ barrierHub: { dir: hubDir }, evidence: { runDir: seamRunDir } });
+    expect(seam.ok).toBe(true);
+    expect(existsSync(join(seamRunDir, 'barrier-hub', 'split-create.receipt.jsonl'))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

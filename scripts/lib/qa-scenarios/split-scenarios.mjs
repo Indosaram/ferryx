@@ -10,6 +10,7 @@ import {
   BUDGETS,
   HarnessError,
   MonotonicBudget,
+  appStdioBytes,
   requireSevenTupleReceipt,
   requireFiveTupleReceipt,
 } from './common-harness.mjs';
@@ -48,6 +49,95 @@ export function assertConflictWaveReported(batch, label = 'split-concurrent-batc
 }
 
 // ---------------------------------------------------------------------------
+// 0. Post-click observability the split scenarios share (task-9 pass-22)
+//
+// PASS 21 measured the split affordance click RESOLVING and the scenario then
+// stopping one stage later (`BLOCKED` / `BARRIER_ACK_TIMEOUT`: "product did not
+// settle barrier split-create receipt[0] within 9000ms"). The lead established by
+// reading source that the split flow is INVISIBLE in the app's stderr - the
+// `split-create` receipt is emitted only on `cmd_terminal_spawn`'s create-only
+// early path, which returns BEFORE that command's only log line - and that
+// `splitPane` / `handleSplitActive` have silent guard returns. So "clicked, no
+// spawn, no receipt" had two readings the old harness could not tell apart:
+//   (a) the split flow BAILED before create (a silent guard), or
+//   (b) the split happened and only the receipt is the gap.
+// A local split create creates a DAEMON SESSION, so the inventory delta measured
+// across the click separates them: 2 -> 3 sessions means the create really
+// happened, an unchanged count means it did not. The app-stdio byte delta taken
+// at the same instant is the deliberate self-check on the invisibility claim: if
+// the bytes GROW across the click, that claim is falsified and this evidence says
+// so rather than hiding it.
+//
+// Both measurements ride machinery that already exists: the pane step's own
+// read-only inventory reader (`createPaneInventoryReader`, whose delta arithmetic
+// is `computeInventoryDelta`) and the always-on app-stdio sink. Neither is an
+// assertion: the split scenarios' verdicts are unchanged, and a measurement that
+// cannot be taken is recorded as a typed reason, never as a failure.
+export const SPLIT_INVENTORY_ACTION = 'split-inventory-after';
+export const PRE_SPLIT_INVENTORY_ACTION = 'pane-inventory-pre-split';
+export const PANE_INVENTORY_AFTER_ACTION = 'pane-inventory-after';
+export const INVENTORY_READER_MISSING = 'INVENTORY_READER_MISSING';
+
+// Called immediately BEFORE the split click: remembers the app-stdio byte
+// counters and makes sure the reader holds a PRE-SPLIT reading for the delta to be
+// measured against. The pane step's own after-read (`pane-inventory-after`) is
+// that reading whenever it was taken; when the pane binding settled on the
+// product's presentation receipt instead, no after-read happened, so one is taken
+// here - before the click - rather than letting the delta silently fold the pane
+// step's own session into the split's.
+export async function armSplitInventory(ctx) {
+  const reader = typeof ctx?.paneInventory?.snapshot === 'function' ? ctx.paneInventory : null;
+  const armed = { reader, baselineLabel: null, appStdioBytesBefore: appStdioBytes(ctx?.appStdio) };
+  if (reader === null) return armed;
+  const previous = typeof reader.lastReading === 'function' ? reader.lastReading() : null;
+  if (previous?.label === PANE_INVENTORY_AFTER_ACTION) {
+    armed.baselineLabel = previous.label;
+    return armed;
+  }
+  await reader.snapshot(PRE_SPLIT_INVENTORY_ACTION);
+  armed.baselineLabel = PRE_SPLIT_INVENTORY_ACTION;
+  return armed;
+}
+
+// Called immediately AFTER the split click returns: the post-click daemon
+// inventory (`split-inventory-after`) carrying its delta against the pre-split
+// reading, plus the app-stdio byte self-check sampled at the same moment. Returns
+// the read result, or null when this run had no inventory reader wired (recorded
+// as a typed reason on the action, never thrown: this is a measurement, and a
+// missing measurement must not be able to change a verdict).
+export async function recordSplitInventory(ctx, armed, label = SPLIT_INVENTORY_ACTION) {
+  const reader = armed?.reader ?? null;
+  const bytesBefore = armed?.appStdioBytesBefore ?? null;
+  const byteSelfCheck = () => {
+    const after = appStdioBytes(ctx?.appStdio);
+    return {
+      appStdioBytes: {
+        before: bytesBefore,
+        after,
+        delta: bytesBefore && after
+          ? { stdout: after.stdout - bytesBefore.stdout, stderr: after.stderr - bytesBefore.stderr, total: after.total - bytesBefore.total }
+          : null,
+      },
+    };
+  };
+  if (reader === null) {
+    ctx?.evidence?.action?.({
+      action: label,
+      ...byteSelfCheck(),
+      ok: false,
+      code: INVENTORY_READER_MISSING,
+      detail: 'this run wired no daemon inventory reader into the pane step, so no post-split session count was measurable',
+      sessionCount: null,
+      sessionIds: null,
+      delta: null,
+      baselineLabel: null,
+    });
+    return null;
+  }
+  return reader.snapshot(label, { compareToPrevious: true, extra: byteSelfCheck });
+}
+
+// ---------------------------------------------------------------------------
 // 1. split-happy scenario adapter
 // ---------------------------------------------------------------------------
 export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBudget()) {
@@ -56,7 +146,11 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
 
   // Trigger Split Right
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  const splitInventory = await armSplitInventory(ctx);
   await driver.split(evidence, pid);
+  // Immediately after the click resolved: the post-click daemon inventory (a
+  // local split create adds a daemon session) and the app-stdio byte self-check.
+  await recordSplitInventory(ctx, splitInventory);
 
   // Await split-create
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));
@@ -134,7 +228,11 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
 
   // Trigger Split Right
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  const splitInventory = await armSplitInventory(ctx);
   await driver.split(evidence, pid);
+  // Immediately after the click resolved: the post-click daemon inventory (a
+  // local split create adds a daemon session) and the app-stdio byte self-check.
+  await recordSplitInventory(ctx, splitInventory);
 
   // Await split-create
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));
@@ -247,12 +345,20 @@ export async function runSplitCancelScenario(ctx, plan, budget = new MonotonicBu
   // Crucial fix: Trigger split FIRST before awaiting create receipt!
   // Cancel must trigger split before waiting for held-create and not require created ID.
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
+  const splitInventory = await armSplitInventory(ctx);
   await driver.split(evidence, pid);
 
   // Dispatch cancel request immediately
   const cancelPhase = plan.cancel?.phase ?? 'while-creating';
   barrierHub.command('split-cancel', { phase: cancelPhase });
   evidence.action({ action: 'cancel-request', request: 'split-cancel', phase: cancelPhase });
+
+  // The post-click measurement is taken AFTER the cancel request is on the wire,
+  // never before it: the cancel is what this scenario measures, and delaying its
+  // dispatch behind a daemon read would move the measured moment from "cancel
+  // while creating" to "cancel after create". The request is already written, so
+  // the product's own settlement path is untouched by the read that follows.
+  await recordSplitInventory(ctx, splitInventory);
 
   // Await cancel acknowledgement receipt within bound
   const cancel = await barrierHub.awaitReceipt('cancel-ack', 0, budget.consume(BUDGETS.cancelAckCeilingMs, 'cancel-ack'));
@@ -304,7 +410,11 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   evidence.action({ action: 'split-concurrent-batch', count: 16 });
 
   // 4. Trigger native split
+  const splitInventory = await armSplitInventory(ctx);
   await driver.split(evidence, pid);
+  // Immediately after the click resolved: the post-click daemon inventory (a
+  // local split create adds a daemon session) and the app-stdio byte self-check.
+  await recordSplitInventory(ctx, splitInventory);
 
   // 5. Await local split-create and presentation
   const create = await barrierHub.awaitReceipt('split-create', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'split-create'));

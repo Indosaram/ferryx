@@ -20,7 +20,7 @@ import {
   computeCleanupGate, computeSourceDigest, withDeadline,
   assertPositiveRecovery, BARRIER_ROLES, MonotonicBudget, validateFixtureSetup,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
-  AppStdioSink, appStdioResult,
+  AppStdioSink, appStdioResult, archiveBarrierHub,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import {
@@ -284,6 +284,12 @@ async function runNativeScenario(ctx) {
       timeoutMs: setupBudget.consume(BUDGETS.paneBindingReadyMs, 'pane binding'),
     });
     ctx.paneBinding = paneBinding;
+    // The SAME read-only reader is handed to the split step (task-9 pass-22). The
+    // post-click inventory delta the split step measures is only meaningful
+    // against the reading THIS step just took, so both reads come from one reader
+    // whose own last reading is the baseline - there is no second inventory
+    // implementation, and no caller can compare against a stale or invented one.
+    ctx.paneInventory = inventory;
   }
 
   // Every armed barrier must be registered by the product before triggers.
@@ -365,6 +371,15 @@ async function runNativeScenario(ctx) {
     paneBinding,
     frontend: { url: frontend.url, port: frontend.port, distDir: frontend.distDir, indexBytes: frontend.indexBytes },
   };
+}
+
+// The finalization pass's barrier-hub archive. It is a named seam so the runner
+// suite can drive exactly what the `finally` block drives: a real `main()` run
+// needs a product binary, so this is the runnable entry point for the behaviour
+// (bounded copy into the run's evidence dir, never fatal). See
+// `archiveBarrierHub` in common-harness.mjs for the contract.
+export function archiveRunBarrierHub({ barrierHub, evidence } = {}) {
+  return archiveBarrierHub(barrierHub?.dir ?? null, evidence?.runDir ?? null);
 }
 
 export async function main(argv) {
@@ -506,6 +521,15 @@ export async function main(argv) {
   } finally {
     // Evidence persisted BEFORE temporary roots are unlinked; cleanup.json is
     // always emitted, including on deliberate assertion failures.
+    //
+    // The barrier hub (`<isolationRoot>/barriers`) is where the product settles
+    // every receipt this run read, and it lives INSIDE the isolation root that
+    // this pass removes - so the whole stream used to be discarded, and in pass
+    // 21 a receipt question ("was `split-create` settled?") had to be answered by
+    // inference from the app's stderr instead of by reading the stream. It is
+    // archived into this run's own evidence dir HERE, before the roots go:
+    // bounded, skip-on-failure, and never fatal to the run.
+    const barrierArchive = archiveRunBarrierHub({ barrierHub, evidence });
     const receipts = await registry.cleanup();
     const gate = computeCleanupGate(registry, receipts);
     // Pass-6: when an isolation root is still held after the forced reap of this
@@ -531,6 +555,9 @@ export async function main(argv) {
     // The app's own stdout/stderr as drained by the sink: the paths a reader
     // needs to find the app's log without guessing, plus what the cap did.
     result.appStdio = appStdioResult(appStdio);
+    // Where the barrier hub's own files were preserved (task-9 pass-22): the
+    // receipt says what was copied, what the byte cap left behind, and why.
+    result.barrierArchive = barrierArchive;
     evidence.write('cleanup.json', {
       registered: {
         processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
@@ -546,6 +573,9 @@ export async function main(argv) {
       reaped: registry.reaped,
       receipts,
       gate,
+      // The barrier hub as it stood at teardown, preserved before the isolation
+      // root (which contains it) was removed.
+      barrierArchive,
     });
     evidence.finish(result);
   }
