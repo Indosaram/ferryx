@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import type { LandingLocale } from "@/lib/locale";
 
 // Astro hydrates this island on visibility; import the workspace only after that.
 const LiveFerryxDemo = lazy(() => import("./LiveFerryxDemo"));
@@ -6,7 +7,7 @@ const LiveFerryxDemo = lazy(() => import("./LiveFerryxDemo"));
 const PLACEHOLDER =
   "flex h-[560px] items-center justify-center rounded-[20px] border border-line bg-surface text-[13px] text-ink-soft";
 
-export default function LazyLiveDemo() {
+export default function LazyLiveDemo({ locale }: { locale: LandingLocale }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [mount, setMount] = useState(false);
 
@@ -39,16 +40,16 @@ export default function LazyLiveDemo() {
         event.stopPropagation();
         const target = event.shiftKey
           ? document.querySelector<HTMLAnchorElement>('#preview > a')
-          : document.querySelector<HTMLAnchorElement>('#how-it-works a');
+          : document.querySelector<HTMLAnchorElement>('#features a');
         target?.focus();
       }
     }}>
       {mount ? (
-        <Suspense fallback={<div className={PLACEHOLDER}>Loading the live preview...</div>}>
+        <Suspense fallback={<div className={PLACEHOLDER}>{locale.code === 'en' ? 'Loading the live preview...' : '正在加载实时预览……'}</div>}>
           <LiveFerryxDemo />
         </Suspense>
       ) : (
-        <div className={PLACEHOLDER}>The live preview loads as you scroll to it.</div>
+        <div className={PLACEHOLDER}>{locale.code === 'en' ? 'The live preview loads as you scroll to it.' : '滚动到此处时将加载实时预览。'}</div>
       )}
     </div>
   );

@@ -3,13 +3,15 @@ import { Download, ChevronDown, ExternalLink, Sparkles } from 'lucide-react';
 import { PLATFORMS, detectUserPlatform, GITHUB_RELEASE_LATEST, type PlatformId, type DownloadAsset } from '@/lib/downloads';
 import { PlatformIcon } from '@/components/ui/PlatformIcons';
 import { cn } from '@/lib/utils';
+import { getLocale, type LandingLocale } from '@/lib/locale';
 
 export interface DownloadMenuProps {
   variant?: 'hero' | 'navbar' | 'compact';
   className?: string;
+  locale?: LandingLocale;
 }
 
-export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps) {
+export function DownloadMenu({ variant = 'hero', className, locale = getLocale('en', '/') }: DownloadMenuProps) {
   const [detectedPlatform, setDetectedPlatform] = useState<PlatformId>('macos');
   const [isOpen, setIsOpen] = useState(false);
   const [maxPanelHeight, setMaxPanelHeight] = useState<number>();
@@ -45,6 +47,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setIsOpen(false);
+        menuRef.current?.querySelector<HTMLButtonElement>('button[aria-expanded]')?.focus();
       }
     }
     if (isOpen) {
@@ -70,7 +73,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
             className="inline-flex items-center gap-2.5 px-5 h-11 text-[15px] font-medium text-page rounded-l-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <PlatformIcon platform={detectedPlatform} className="h-5 w-5" />
-            <span>Download for {currentPlatformConfig.name}</span>
+            <span>{locale.code === 'en' ? `Download for ${currentPlatformConfig.name}` : `下载 ${currentPlatformConfig.name} 版`}</span>
             <span className="hidden sm:inline-block text-xs font-mono font-normal bg-page/15 text-page/90 px-1.5 py-0.5 rounded">
               {primaryAsset.fileType}
             </span>
@@ -78,7 +81,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
           <button
             type="button"
             onClick={() => setIsOpen(!isOpen)}
-            aria-label="Select platform and architecture"
+            aria-label={locale.download.select}
             aria-expanded={isOpen}
             className="inline-flex items-center px-3.5 border-l border-page/15 text-page/80 hover:text-page rounded-r-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
@@ -93,12 +96,12 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-page rounded-l-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <Download className="h-3.5 w-3.5" />
-            <span>Download</span>
+            <span>{locale.code === 'en' ? 'Download' : '下载'}</span>
           </a>
           <button
             type="button"
             onClick={() => setIsOpen(!isOpen)}
-            aria-label="Select platform"
+            aria-label={locale.download.platform}
             aria-expanded={isOpen}
             className="inline-flex items-center px-2 py-1.5 border-l border-page/15 text-page/80 hover:text-page rounded-r-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
@@ -113,7 +116,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
           className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-ink bg-surface border border-line rounded-lg hover:border-line-strong hover:bg-page-raised transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
         >
           <Download className="h-4 w-4" />
-          <span>All Platforms</span>
+          <span>{locale.download.all}</span>
           <ChevronDown className={cn('h-3.5 w-3.5 transition-transform duration-200', isOpen && 'rotate-180')} />
         </button>
       )}
@@ -132,11 +135,11 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
         >
           <div className="px-2 py-1.5 border-b border-line mb-2 flex items-center justify-between">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-              Download Ferryx
+              {locale.download.label}
             </span>
             {/* Releases are calendar-versioned and published often, so the label names the
                 channel these links resolve against rather than a number that goes stale. */}
-            <span className="text-[10px] text-ink-faint font-mono">latest release</span>
+            <span className="text-[10px] text-ink-faint font-mono">{locale.nav.release}</span>
           </div>
 
           <div className="space-y-3 min-h-0 flex-1 overflow-y-auto pr-1">
@@ -153,7 +156,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
                     </div>
                     {isCurrent && (
                       <span className="text-[10px] px-1.5 py-0.5 text-ink-soft bg-page border border-line rounded">
-                        Detected
+                        {locale.download.detected}
                       </span>
                     )}
                   </div>
@@ -174,14 +177,14 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
                         <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-1.5">
                             <span className={cn('font-medium', asset.recommended ? 'text-page' : 'text-ink')}>
-                              {asset.name}
+                              {locale.code === 'en' ? asset.name : asset.id === 'macos-universal' ? '通用 DMG (.dmg)' : asset.id === 'windows-installer' ? 'Windows 安装程序 (.exe)' : asset.id === 'linux-deb' ? 'Debian 软件包 (.deb)' : asset.name}
                             </span>
                             {asset.recommended && (
                               <Sparkles className="h-3 w-3 text-page/70 inline" />
                             )}
                           </div>
-                          <span className={cn('text-[11px] font-mono', asset.recommended ? 'text-page/60' : 'text-ink-faint')}>
-                            {asset.architecture}
+                          <span className={cn('text-[11px] font-mono', asset.recommended ? 'text-page/80' : 'text-ink-faint')}>
+                            {locale.code === 'zh-cn' && asset.id === 'macos-universal' ? 'Apple Silicon + Intel（通用二进制）' : locale.code === 'zh-cn' && asset.id === 'linux-appimage' ? '通用 x86_64' : asset.architecture}
                           </span>
                         </div>
                         <div className="flex items-center gap-1">
@@ -206,7 +209,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
               className="hover:text-ink flex items-center gap-1 transition-colors"
             >
               <ExternalLink className="h-3 w-3" />
-              All releases on GitHub
+              {locale.download.allReleases}
             </a>
           </div>
         </div>

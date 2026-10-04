@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { THEME_STORAGE_KEY, type Theme } from "@/lib/theme";
+import type { LandingLocale } from "@/lib/locale";
 
 function currentTheme(): Theme {
   return document.documentElement.classList.contains("dark") ? "dark" : "light";
 }
 
-export function ThemeToggle() {
+export function ThemeToggle({ locale }: { locale: LandingLocale }) {
   // The inline head script owns the pre-paint class; mirror the DOM after hydration.
   const [theme, setTheme] = useState<Theme>("light");
 
@@ -28,7 +29,8 @@ export function ThemeToggle() {
     <button
       type="button"
       onClick={toggle}
-      aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      aria-label={locale.code === 'en' ? (theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme') : (theme === 'dark' ? '切换为浅色主题' : '切换为深色主题')}
+      data-ferryx-theme
       className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink-soft transition-colors hover:bg-ink/[0.06] hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
     >
       <Sun className="h-4 w-4 dark:hidden" />

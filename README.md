@@ -1,5 +1,7 @@
 <div align="center">
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 <img src="site/public/ferryx-icon.png" alt="Ferryx" width="120" height="120" />
 
 # Ferryx
