@@ -41,11 +41,134 @@ pub const PRESENTATION_BARRIER: &str = "presentation";
 /// no arm to read it from, yet every emission must echo it or
 /// `correlateReceipt` rejects the line.
 pub const OPERATION_ID_ENV: &str = "FERRYX_QA_OPERATION_ID";
-/// GUI-lane `fixture-setup` retry bound: the app's daemon attaches during
-/// startup, so the first inventory read may race it. The wait is bounded and
-/// the truth of the final attempt is always emitted.
-const FIXTURE_BOOT_ATTEMPTS: u32 = 20;
-const FIXTURE_BOOT_RETRY_MS: u64 = 250;
+/// Runner contract: the fixture kinds the GUI lane must CONSTRUCT before it
+/// settles `fixture-setup`, as a comma-separated list handed over in the same
+/// private env as the channel itself. Absent or empty constructs nothing, so a
+/// normal launch - and a runner that predates the key - reaches no creation path
+/// at all.
+pub const FIXTURE_KINDS_ENV: &str = "FERRYX_QA_FIXTURE_KINDS";
+
+/// The slice of the runner's `fixture-setup` budget this boot spends building
+/// fixtures.
+///
+/// The runner awaits receipt line 0 with `BUDGETS.stagePrepareCreateStatusMs`
+/// (9 s, `scripts/lib/qa-scenarios/common-harness.mjs`) measured from the launch
+/// it performs, and this boot starts seconds into that window - the pass-2 probe
+/// measured a settlement at T+10 s against the same 9 s budget. Creation is
+/// therefore bounded by a deadline on the daemon's own replies (never a fixed
+/// sleep): a fixture that cannot be built inside it is reported unbuilt with the
+/// daemon's own error, and the settlement still lands inside the runner's budget.
+const FIXTURE_CREATE_BUDGET_MS: u64 = 3_500;
+
+/// The private fixture workspace, created inside the runner's own barrier dir so
+/// the runner's isolation-root cleanup removes it with the rest of the run.
+const FIXTURE_WORKSPACE_DIR: &str = "fixture-workspace";
+
+/// The workspace id the fixture sessions are registered under in the daemon: the
+/// daemon refuses a spawn in a workspace it does not know, exactly as it does for
+/// the GUI's own spawn.
+const FIXTURE_WORKSPACE_ID: &str = "qa-fixture";
+
+/// Fixture geometry: the daemon's default shell at a warm size.
+const FIXTURE_COLS: u16 = 80;
+const FIXTURE_ROWS: u16 = 24;
+
+/// One fixture kind the runner can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QaFixtureKind {
+    /// A session that exists and is running.
+    Source,
+    /// A session this QA boot really created through the local-split create path.
+    Created,
+    /// A session the daemon reports running and unblocked.
+    Idle,
+    /// A genuinely stopped, unowned session.
+    ExternallyStopped,
+    /// A session adopted through a real retained handover.
+    Adopted,
+}
+
+impl QaFixtureKind {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "source" => Some(Self::Source),
+            "created" => Some(Self::Created),
+            "idle" => Some(Self::Idle),
+            "externally-stopped" => Some(Self::ExternallyStopped),
+            "adopted" => Some(Self::Adopted),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Created => "created",
+            Self::Idle => "idle",
+            Self::ExternallyStopped => "externally-stopped",
+            Self::Adopted => "adopted",
+        }
+    }
+
+    /// The real construction path this lane can drive for the kind, or the exact
+    /// hook the kind needs instead of a session this lane cannot honestly build.
+    pub fn creation(self) -> FixtureCreation {
+        match self {
+            Self::Source | Self::Idle => FixtureCreation::PlainSpawn,
+            Self::Created => FixtureCreation::LocalSplit,
+            // A stopped-but-unowned session needs a REAL external stop of a
+            // fixture PTY. This process holds no PID for a daemon-owned PTY (the
+            // daemon's describe does not carry one) and the local describe arm
+            // reports no ownership attribution, so neither half of the kind
+            // exists in the GUI lane.
+            Self::ExternallyStopped => FixtureCreation::Unsupported(
+                "needs a real external stop of a fixture PTY plus local-describe ownership attribution: terminal/qa_liveness.rs::run_suspension_ownership_check observes an already-stopped unowned session but never stops one, and daemon/session_service.rs's local describe arm hardcodes registry_suspended/suspension_source to None, so externally-stopped cannot be attested from the GUI lane",
+            ),
+            // An adopted session needs a real retained handover: the
+            // predecessor-export/successor-adopt producers over daemon/handover.rs.
+            Self::Adopted => FixtureCreation::Unsupported(
+                "needs a real retained handover (predecessor-export/successor-adopt producers in daemon/qa_producers.rs over daemon/handover.rs); out of scope for fixture construction",
+            ),
+        }
+    }
+}
+
+/// How this lane can really construct one fixture kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixtureCreation {
+    /// The daemon's plain spawn (`DaemonRequest::Spawn`), the request the GUI
+    /// issues when it opens a terminal.
+    PlainSpawn,
+    /// The local-split create path (`prepare_local_split_until` ->
+    /// `create_local_split_until`), the path the GUI's create-only branch uses.
+    LocalSplit,
+    /// Not constructible from this lane: the exact hook the kind needs.
+    Unsupported(&'static str),
+}
+
+/// Parses the runner's comma-separated fixture-kind list.
+///
+/// An unknown name is refused rather than dropped: a runner typo must fail loudly
+/// instead of producing a half-built fixture that then reads as a product defect.
+/// Duplicates collapse, because one session per kind is what the runner's fixture
+/// validator asks for.
+pub fn parse_fixture_kinds(raw: Option<&str>) -> Result<Vec<QaFixtureKind>, String> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut kinds = Vec::new();
+    for name in raw.split(',') {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let kind = QaFixtureKind::parse(name).ok_or_else(|| format!("unknown fixture kind '{name}'"))?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    Ok(kinds)
+}
 
 /// Release-watch cadence of the feature-gated watcher task. Never a hot path:
 /// the channel only exists when the runner installed a private barrier dir.
@@ -787,13 +910,25 @@ impl QaBarrierChannel {
 
     /// `fixture-setup` settlement for the GUI lane: the real isolated-profile
     /// session inventory, one object per session as the runner's
-    /// `validateFixtureSetup` requires. Returns false when the runner supplied
-    /// no operation nonce, so a missing correlation is reported instead of
-    /// writing an uncorrelatable line.
-    pub fn emit_fixture_setup_from_sessions(&self, sessions: &[QaFixtureSession]) -> bool {
+    /// `validateFixtureSetup` requires, plus the audit of what this boot really
+    /// created and what it could not. Returns false when the runner supplied no
+    /// operation nonce, so a missing correlation is reported instead of writing
+    /// an uncorrelatable line.
+    pub fn emit_fixture_setup_from_sessions(
+        &self,
+        inventory: &GuiFixtureInventory,
+        creation: &GuiFixtureCreation,
+    ) -> bool {
         let Some(operation_id) = self.operation_id() else {
             return false;
         };
+        let sessions = &inventory.sessions;
+        let mut claimed: Vec<&str> = Vec::new();
+        for session in sessions {
+            if !claimed.contains(&session.kind.as_str()) {
+                claimed.push(session.kind.as_str());
+            }
+        }
         self.append_receipt(
             "fixture-setup",
             &operation_id,
@@ -804,6 +939,25 @@ impl QaBarrierChannel {
                     .unwrap_or_default(),
                 "sessions": sessions,
                 "fixtureKind": "gui-session-inventory",
+                // The audit of the construction attempt: what was asked for, what
+                // was really built, what was refused, and how long it took. A kind
+                // that could not be built is reported here instead of being
+                // silently absent from `sessions`.
+                "fixtureKindsRequested": creation
+                    .requested
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>(),
+                "fixtureKindsClaimed": claimed,
+                "fixtureKindsUnsupported": creation
+                    .unsupported
+                    .iter()
+                    .map(|(kind, hook)| json!({ "kind": kind.as_str(), "hook": hook }))
+                    .collect::<Vec<_>>(),
+                "fixtureCreationFailures": creation.failures,
+                "fixtureCreationElapsedMs": creation.elapsed_ms,
+                "fixtureClaimsRefused": inventory.refused,
+                "sessionsNotRunning": inventory.not_running,
             }),
         );
         true
@@ -883,44 +1037,50 @@ pub struct QaFixtureSession {
 
 /// GUI-lane `fixture-setup` inventory.
 ///
-/// The runner awaits `fixture-setup` line 0 immediately after launch, before
-/// any trigger, so the GUI boot path reports the private fixture sessions that
-/// really exist in the isolated profile. A kind is claimed only from the daemon's
-/// own reply about that session: `idle` when its real collector snapshot (with
-/// the daemon's reader/kernel facts applied) classifies as `Idle`,
-/// `externally-stopped` when the kernel reports the process stopped and the
-/// daemon's own lifecycle registry does not own that stop, and `source`
-/// otherwise. The ownership kinds that need a lifecycle record this lane cannot
-/// read (`created`, `adopted`) are still never claimed here - a receipt that
-/// fabricated them would be simulated evidence.
+/// The runner awaits `fixture-setup` line 0 immediately after launch, before any
+/// trigger, so the GUI boot path reports the private fixture sessions that really
+/// exist in the isolated profile. Every claim is made from the daemon's own reply
+/// about that session (plus the surface host's observation when this process has
+/// one), never from the request: `externally-stopped` when the kernel reports the
+/// process stopped and the daemon's own lifecycle registry does not own that stop,
+/// `idle` when the daemon reports the session running with its reader unpaused,
+/// its process not kernel-stopped and not suspended, `source` otherwise. The kind
+/// this boot really created through the local-split create path is claimed as
+/// `created`. A kind the daemon's reply does not support is refused and reported,
+/// and a session the daemon does not report running is listed but never claimed.
 pub async fn collect_gui_fixture_sessions(
     daemon_client: &crate::daemon::DaemonClient,
     surface_host: &NativeTerminalSurfaceHostState,
-) -> Vec<QaFixtureSession> {
+    creation: &GuiFixtureCreation,
+) -> GuiFixtureInventory {
+    let mut inventory = GuiFixtureInventory::default();
     let Ok(session_ids) = daemon_client.list_sessions().await else {
-        return Vec::new();
+        return inventory;
     };
     let daemon_epoch = daemon_client.epoch();
-    let mut sessions = Vec::new();
     for session_id in session_ids {
         let Ok(details) = daemon_client.describe_session(&session_id).await else {
             continue;
         };
-        // The daemon's OWN reader/kernel/suspension facts are what let the
-        // classifier call this session idle; without them the snapshot stays
-        // `Unknown` and the session is never claimed as `idle`.
-        let mut snapshot = surface_host
-            .session_liveness_observation(&session_id)
-            .unwrap_or_default();
-        daemon_liveness_from_details(&details, daemon_epoch).apply(&mut snapshot);
-        let idle = snapshot.stage.is_none()
-            && snapshot.has_unpresented_frames == Some(false)
-            && classify_pane_liveness(&snapshot) == PaneLivenessVerdict::Idle;
-        let (kind, stop_probe_state) = gui_fixture_kind(&details, idle);
-        sessions.push(QaFixtureSession {
+        // A fixture has to be a session that really runs: a listed but exited
+        // session is observed and reported, never claimed as a usable fixture.
+        if !details.running {
+            inventory.not_running.push(session_id);
+            continue;
+        }
+        let observed = surface_host.session_liveness_observation(&session_id);
+        let intended = creation.assigned_kind(&session_id);
+        let classification = classify_fixture_session(&details, observed.as_ref(), intended);
+        if let Some(refusal) = classification.refusal {
+            inventory.refused.push(format!(
+                "{session_id}: intended {} refused: {refusal}",
+                intended.map(QaFixtureKind::as_str).unwrap_or("observed-kind")
+            ));
+        }
+        inventory.sessions.push(QaFixtureSession {
             backend_session_id: session_id.clone(),
-            kind: kind.to_string(),
-            stop_probe_state: stop_probe_state.map(str::to_string),
+            kind: classification.kind.to_string(),
+            stop_probe_state: classification.stop_probe_state.map(str::to_string),
             ownership_receipt: json!({
                 "backendSessionId": session_id,
                 "incarnation": details.incarnation,
@@ -928,47 +1088,261 @@ pub async fn collect_gui_fixture_sessions(
                 "running": details.running,
                 "workspaceId": details.workspace_id,
                 "cwd": details.cwd,
-                // The real probe the kind classification was made from.
+                // The real probes the classification was made from.
                 "readerPaused": details.reader_paused,
                 "kernelStopped": details.kernel_stopped,
                 "suspended": details.suspended,
                 "registrySuspended": details.registry_suspended,
                 "suspensionSource": details.suspension_source,
+                // The exact evidence the kind claim rests on, so the claim is
+                // auditable instead of asserted.
+                "fixtureKindBasis": classification.basis.as_str(),
+                "qaCreated": intended.is_some(),
             }),
         });
     }
-    sessions
+    inventory
 }
 
-/// Classifies one session from the daemon's own reply about it.
+/// The real isolated-profile inventory one `fixture-setup` settlement reports.
+#[derive(Debug, Clone, Default)]
+pub struct GuiFixtureInventory {
+    pub sessions: Vec<QaFixtureSession>,
+    /// Intended kinds the daemon's own reply refused to support, named with the
+    /// missing evidence: a refused claim is reported, never silently downgraded
+    /// and never replaced by an invented session.
+    pub refused: Vec<String>,
+    /// Listed sessions the daemon does not report running: observed, never claimed
+    /// as a fixture.
+    pub not_running: Vec<String>,
+}
+
+impl GuiFixtureInventory {
+    /// An observed inventory with no claim refusals, for callers that have no
+    /// creation step (and for the settlement tests).
+    pub fn from_sessions(sessions: Vec<QaFixtureSession>) -> Self {
+        Self {
+            sessions,
+            ..Default::default()
+        }
+    }
+}
+
+/// The evidence one fixture kind claim rests on. Every variant names a fact this
+/// process really observed; there is no "assumed" basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixtureKindBasis {
+    /// The daemon reports the session running.
+    DaemonRunning,
+    /// This QA boot created the session through the real local-split create path.
+    QaLocalSplitCreate,
+    /// The daemon reports the session running, its reader unpaused, its process
+    /// not kernel-stopped and not suspended.
+    DaemonIdleFacts,
+    /// The same facts, plus the surface host's own observation of no pending
+    /// render for this session.
+    DaemonIdleFactsAndSurfaceHost,
+    /// The kernel reports the process stopped and the daemon's own lifecycle
+    /// registry does not own that stop.
+    KernelStopUnowned,
+}
+
+impl FixtureKindBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DaemonRunning => "daemon-reports-running",
+            Self::QaLocalSplitCreate => "qa-local-split-create",
+            Self::DaemonIdleFacts => "daemon-idle-facts",
+            Self::DaemonIdleFactsAndSurfaceHost => "daemon-idle-facts+surface-host",
+            Self::KernelStopUnowned => "kernel-stop-unowned",
+        }
+    }
+}
+
+/// One running session's honest fixture classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixtureClassification {
+    pub kind: &'static str,
+    pub basis: FixtureKindBasis,
+    /// Set only for `externally-stopped`: the runner's validator requires
+    /// `stopped` evidence on that kind, so no other kind may carry a probe state.
+    pub stop_probe_state: Option<&'static str>,
+    /// Set when an intended kind had to be refused, naming the missing evidence.
+    pub refusal: Option<&'static str>,
+}
+
+/// Classifies one running session for `fixture-setup`.
 ///
+/// `intended` is the kind this QA boot really established for the session (the
+/// local-split create reply for `created`, the spawn reply for `source`/`idle`).
+/// It is provenance, not evidence: an observation the daemon really reported
+/// outranks it, and an intention the daemon's reply does not support is refused
+/// and reported instead of being downgraded silently.
+fn classify_fixture_session(
+    details: &crate::daemon::protocol::DaemonSessionDetails,
+    observed: Option<&PaneLivenessSnapshot>,
+    intended: Option<QaFixtureKind>,
+) -> FixtureClassification {
+    let observation = observation_classification(details, observed);
+    let Some(intended) = intended else {
+        return observation;
+    };
+    // A real external stop is an observation: it is reported whatever kind was
+    // asked for, and it carries the stop probe the runner's validator requires.
+    if observation.kind == "externally-stopped" {
+        return observation;
+    }
+    match intended {
+        QaFixtureKind::Created => FixtureClassification {
+            kind: "created",
+            basis: FixtureKindBasis::QaLocalSplitCreate,
+            stop_probe_state: None,
+            refusal: None,
+        },
+        QaFixtureKind::Source => FixtureClassification {
+            kind: "source",
+            basis: FixtureKindBasis::DaemonRunning,
+            stop_probe_state: None,
+            refusal: None,
+        },
+        QaFixtureKind::Idle => match idle_basis(details, observed) {
+            Ok(basis) => FixtureClassification {
+                kind: "idle",
+                basis,
+                stop_probe_state: None,
+                refusal: None,
+            },
+            Err(refusal) => FixtureClassification {
+                refusal: Some(refusal),
+                ..observation
+            },
+        },
+        // This lane cannot construct these kinds (the creation step reports the
+        // hook each one needs), so it never claims them either.
+        QaFixtureKind::ExternallyStopped | QaFixtureKind::Adopted => FixtureClassification {
+            refusal: Some("kind-not-constructible-in-this-lane"),
+            ..observation
+        },
+    }
+}
+
+/// The kind an unclaimed session is honestly observed as.
+fn observation_classification(
+    details: &crate::daemon::protocol::DaemonSessionDetails,
+    observed: Option<&PaneLivenessSnapshot>,
+) -> FixtureClassification {
+    if external_stop_basis(details).is_some() {
+        return FixtureClassification {
+            kind: "externally-stopped",
+            basis: FixtureKindBasis::KernelStopUnowned,
+            stop_probe_state: Some("stopped"),
+            refusal: None,
+        };
+    }
+    match idle_basis(details, observed) {
+        Ok(basis) => FixtureClassification {
+            kind: "idle",
+            basis,
+            stop_probe_state: None,
+            refusal: None,
+        },
+        Err(_) => FixtureClassification {
+            kind: "source",
+            basis: FixtureKindBasis::DaemonRunning,
+            stop_probe_state: None,
+            refusal: None,
+        },
+    }
+}
+
 /// `externally-stopped` is an OBSERVATION, never a guess: the kernel must report
 /// the process stopped (`kernelStopped`) AND the daemon must report that its own
 /// lifecycle registry does not own the stop (`registrySuspended == Some(false)`,
 /// or the explicit `external-kernel` attribution). A stopped session whose
 /// ownership the daemon does not report at all stays `source`: this lane cannot
-/// tell an external stop from a Ferryx-owned one, and claiming the kind would be
-/// a fabricated fixture.
-fn gui_fixture_kind(
+/// tell an external stop from a Ferryx-owned one, and claiming the kind would be a
+/// fabricated fixture.
+fn external_stop_basis(
     details: &crate::daemon::protocol::DaemonSessionDetails,
-    idle: bool,
-) -> (&'static str, Option<&'static str>) {
-    let externally_stopped = details.kernel_stopped == Some(true)
-        && (details.registry_suspended == Some(false)
-            || details.suspension_source.as_deref() == Some("external-kernel"));
-    if externally_stopped {
-        return ("externally-stopped", Some("stopped"));
+) -> Option<FixtureKindBasis> {
+    let stopped = details.kernel_stopped == Some(true);
+    let unowned = details.registry_suspended == Some(false)
+        || details.suspension_source.as_deref() == Some("external-kernel");
+    (stopped && unowned).then_some(FixtureKindBasis::KernelStopUnowned)
+}
+
+/// The evidence an `idle` claim may rest on, or the reason it may not be made.
+///
+/// The daemon's own reader/kernel/suspension facts are required in full: an
+/// unobserved field is never read as "not blocked", because the classifier reads
+/// a defaulted `false` as a verified fact. When this process also holds the
+/// surface host's observation for the session, that observation vetoes the claim
+/// if it contradicts it.
+fn idle_basis(
+    details: &crate::daemon::protocol::DaemonSessionDetails,
+    observed: Option<&PaneLivenessSnapshot>,
+) -> Result<FixtureKindBasis, &'static str> {
+    if details.reader_paused.is_none() || details.kernel_stopped.is_none() {
+        return Err("daemon-did-not-report-reader-and-kernel-facts");
     }
-    if idle {
-        return ("idle", None);
+    if details.reader_paused == Some(true) {
+        return Err("daemon-reports-reader-paused");
     }
-    ("source", None)
+    if details.kernel_stopped == Some(true) {
+        return Err("daemon-reports-process-kernel-stopped");
+    }
+    if details.suspended {
+        return Err("daemon-reports-session-suspended");
+    }
+    match observed {
+        None => Ok(FixtureKindBasis::DaemonIdleFacts),
+        Some(snapshot) => {
+            if snapshot.stage.is_some() {
+                return Err("surface-host-observes-an-active-stage");
+            }
+            if snapshot.has_unpresented_frames != Some(false) {
+                return Err("surface-host-observes-unpresented-frames");
+            }
+            Ok(FixtureKindBasis::DaemonIdleFactsAndSurfaceHost)
+        }
+    }
+}
+
+/// What the QA boot really established for the fixture, and what it could not.
+///
+/// `assignments` is provenance, not evidence: the settlement still re-reads the
+/// daemon's own reply about each session and refuses any claim that reply does
+/// not support.
+#[derive(Debug, Clone, Default)]
+pub struct GuiFixtureCreation {
+    /// The kinds the runner asked for (`FERRYX_QA_FIXTURE_KINDS`).
+    pub requested: Vec<QaFixtureKind>,
+    /// Session id -> the kind this boot really created it as.
+    pub assignments: Vec<(String, QaFixtureKind)>,
+    /// Kinds this lane cannot construct, each with the exact hook it needs.
+    pub unsupported: Vec<(QaFixtureKind, &'static str)>,
+    /// Real creation failures, with the daemon's own error.
+    pub failures: Vec<String>,
+    /// Wall time the creation step spent, so the runner's budget question is
+    /// answered with a measurement instead of an estimate.
+    pub elapsed_ms: u64,
+}
+
+impl GuiFixtureCreation {
+    /// The kind this boot really created the session as, if it created it.
+    pub fn assigned_kind(&self, session_id: &str) -> Option<QaFixtureKind> {
+        self.assignments
+            .iter()
+            .find(|(id, _)| id == session_id)
+            .map(|(_, kind)| *kind)
+    }
 }
 
 /// Outcome of the GUI-lane `fixture-setup` settlement.
 pub struct GuiFixtureSetupOutcome {
     pub emitted: bool,
     pub sessions: Vec<QaFixtureSession>,
+    pub creation: GuiFixtureCreation,
 }
 
 /// GUI-boot entry point. Installs the channel when the runner handed the
@@ -992,14 +1366,31 @@ pub fn start_gui_boot_channel<R: tauri::Runtime>(
     // The GUI lane's own daemon client, kept for the settlements that must report
     // the daemon's reader/kernel facts instead of inventing them.
     install_daemon_client(Arc::clone(&daemon_client));
+    // The runner's fixture request travels in the same private env as the channel
+    // itself. A name this lane does not know constructs nothing and is reported: a
+    // runner typo must fail loudly rather than build a half fixture that then
+    // reads as a product defect.
+    let fixture_kinds = match parse_fixture_kinds(std::env::var(FIXTURE_KINDS_ENV).ok().as_deref())
+    {
+        Ok(kinds) => kinds,
+        Err(error) => {
+            eprintln!("FERRYX_QA_FIXTURE_KINDS_REJECTED: {error}");
+            Vec::new()
+        }
+    };
     let channel = Arc::clone(&boot.channel);
     {
         let fixture_channel = Arc::clone(&channel);
         let fixture_client = Arc::clone(&daemon_client);
         let fixture_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let outcome =
-                emit_gui_fixture_setup(&fixture_channel, &fixture_client, &fixture_app).await;
+            let outcome = emit_gui_fixture_setup(
+                &fixture_channel,
+                &fixture_client,
+                &fixture_app,
+                &fixture_kinds,
+            )
+            .await;
             if !outcome.emitted {
                 eprintln!(
                     "FERRYX_QA_FIXTURE_SETUP_UNSETTLED: {} real session(s) observed but no operation nonce was supplied",
@@ -1070,29 +1461,209 @@ async fn run_stale_binding_watcher<R: tauri::Runtime>(
     }
 }
 
-/// Bounded GUI-lane `fixture-setup`: the app's daemon attaches during startup,
-/// so the first inventory read may race it. The wait is bounded and the truth
-/// of the final attempt is always emitted.
+/// GUI-lane `fixture-setup`: construct the requested fixtures through the real
+/// product paths, then settle line 0 from the real inventory.
+///
+/// Creation and settlement share one deadline derived from the runner's own
+/// `fixture-setup` budget, so a daemon that is slow to answer cannot push the
+/// settlement past it: the truth of the attempt is always emitted, and a fixture
+/// that could not be built is reported unbuilt with the daemon's own error.
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
     channel: &QaBarrierChannel,
     daemon_client: &crate::daemon::DaemonClient,
     app: &tauri::AppHandle<R>,
+    kinds: &[QaFixtureKind],
 ) -> GuiFixtureSetupOutcome {
-    let mut sessions = Vec::new();
-    for attempt in 0..FIXTURE_BOOT_ATTEMPTS {
-        sessions = collect_gui_fixture_sessions(
-            daemon_client,
-            &app.state::<NativeTerminalSurfaceHostState>(),
-        )
-        .await;
-        if !sessions.is_empty() || attempt + 1 == FIXTURE_BOOT_ATTEMPTS {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(FIXTURE_BOOT_RETRY_MS)).await;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(FIXTURE_CREATE_BUDGET_MS);
+    let creation = create_gui_fixture_sessions(
+        daemon_client,
+        kinds,
+        channel.dir().join(FIXTURE_WORKSPACE_DIR),
+        deadline,
+    )
+    .await;
+    for (kind, hook) in &creation.unsupported {
+        eprintln!(
+            "FERRYX_QA_FIXTURE_KIND_UNSUPPORTED: kind={} hook={hook}",
+            kind.as_str()
+        );
     }
-    let emitted = channel.emit_fixture_setup_from_sessions(&sessions);
-    GuiFixtureSetupOutcome { emitted, sessions }
+    for failure in &creation.failures {
+        eprintln!("FERRYX_QA_FIXTURE_CREATE_FAILED: {failure}");
+    }
+    let inventory = collect_gui_fixture_sessions(
+        daemon_client,
+        &app.state::<NativeTerminalSurfaceHostState>(),
+        &creation,
+    )
+    .await;
+    for refusal in &inventory.refused {
+        eprintln!("FERRYX_QA_FIXTURE_CLAIM_REFUSED: {refusal}");
+    }
+    let emitted = channel.emit_fixture_setup_from_sessions(&inventory, &creation);
+    GuiFixtureSetupOutcome {
+        emitted,
+        sessions: inventory.sessions,
+        creation,
+    }
+}
+
+/// Constructs the fixture sessions the runner asked for, with the real product
+/// paths and inside one deadline.
+///
+/// Every session here is a REAL daemon session created through the same request
+/// the GUI issues: `source`/`idle` through `DaemonRequest::Spawn`
+/// (`DaemonClient::spawn_terminal_with_startup`, the call `cmd_terminal_spawn`
+/// makes for a local workspace), `created` through the local-split create path
+/// (`prepare_local_split_until` -> `create_local_split_until`, the path
+/// `cmd_terminal_spawn`'s create-only branch uses). Kinds this lane cannot
+/// construct are reported with the exact hook they need; nothing is invented and
+/// no session is created without the runner's private env.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+async fn create_gui_fixture_sessions(
+    client: &crate::daemon::DaemonClient,
+    kinds: &[QaFixtureKind],
+    fixture_root: PathBuf,
+    deadline: tokio::time::Instant,
+) -> GuiFixtureCreation {
+    let started = tokio::time::Instant::now();
+    let mut creation = GuiFixtureCreation {
+        requested: kinds.to_vec(),
+        ..Default::default()
+    };
+    for kind in kinds {
+        if let FixtureCreation::Unsupported(hook) = kind.creation() {
+            creation.unsupported.push((*kind, hook));
+        }
+    }
+    let constructible: Vec<QaFixtureKind> = kinds
+        .iter()
+        .copied()
+        .filter(|kind| !matches!(kind.creation(), FixtureCreation::Unsupported(_)))
+        .collect();
+    if !constructible.is_empty() {
+        match register_fixture_workspace(client, fixture_root, deadline).await {
+            Err(error) => {
+                for kind in &constructible {
+                    creation.failures.push(format!("{}: {error}", kind.as_str()));
+                }
+            }
+            Ok(cwd) => {
+                for kind in &constructible {
+                    let created = match kind.creation() {
+                        FixtureCreation::PlainSpawn => {
+                            create_plain_fixture_session(client, &cwd, deadline).await
+                        }
+                        FixtureCreation::LocalSplit => {
+                            create_split_fixture_session(client, &cwd, deadline).await
+                        }
+                        // Filtered out above; reported rather than panicking if it
+                        // ever is not.
+                        FixtureCreation::Unsupported(hook) => Err(hook.to_string()),
+                    };
+                    match created {
+                        Ok(session_id) => creation.assignments.push((session_id, *kind)),
+                        Err(error) => creation.failures.push(format!("{}: {error}", kind.as_str())),
+                    }
+                }
+            }
+        }
+    }
+    creation.elapsed_ms = started.elapsed().as_millis() as u64;
+    creation
+}
+
+/// Creates and registers the private fixture workspace.
+///
+/// The daemon refuses a spawn in a workspace it does not know, exactly as it does
+/// for the GUI's own spawn, so the fixture workspace is registered through the
+/// same `RegisterWorkspace` request the GUI's split preparation issues.
+async fn register_fixture_workspace(
+    client: &crate::daemon::DaemonClient,
+    fixture_root: PathBuf,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    // Directory creation is blocking disk I/O: it runs off the async reactor like
+    // every other filesystem step in this crate.
+    let cwd = tokio::time::timeout_at(
+        deadline,
+        crate::ipc::run_blocking(move || {
+            std::fs::create_dir_all(&fixture_root).map_err(crate::ipc::IpcError::internal)?;
+            Ok(fixture_root.to_string_lossy().into_owned())
+        }),
+    )
+    .await
+    .map_err(|_| "fixture workspace directory timed out".to_string())?
+    .map_err(|error| format!("fixture workspace directory failed: {error}"))?;
+    tokio::time::timeout_at(
+        deadline,
+        client.register_workspace(FIXTURE_WORKSPACE_ID, &cwd),
+    )
+    .await
+    .map_err(|_| "fixture workspace registration timed out".to_string())?
+    .map_err(|error| format!("fixture workspace registration failed: {error:?}"))?;
+    Ok(cwd)
+}
+
+/// One fixture session through the daemon's plain spawn: the same
+/// `DaemonRequest::Spawn` the GUI issues when it opens a terminal.
+async fn create_plain_fixture_session(
+    client: &crate::daemon::DaemonClient,
+    cwd: &str,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    let spawned = tokio::time::timeout_at(
+        deadline,
+        client.spawn_terminal_with_startup(
+            uuid::Uuid::new_v4().to_string(),
+            FIXTURE_WORKSPACE_ID.to_string(),
+            None,
+            Some(cwd.to_string()),
+            FIXTURE_COLS,
+            FIXTURE_ROWS,
+            None,
+            None,
+        ),
+    )
+    .await
+    .map_err(|_| "daemon spawn timed out".to_string())?
+    .map_err(|error| format!("daemon spawn failed: {error:?}"))?;
+    Ok(spawned.session_id)
+}
+
+/// One fixture session through the local-split create path: the same two calls
+/// `cmd_terminal_spawn`'s create-only branch makes, with this boot's own request
+/// identity.
+///
+/// No `split-create` receipt is written for it: that receipt belongs to the
+/// scenario's own trigger (the QA split producers in `ipc/terminal.rs`), and a
+/// fixture settlement must never be mistaken for the scenario's split.
+async fn create_split_fixture_session(
+    client: &crate::daemon::DaemonClient,
+    cwd: &str,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let identity = client
+        .prepare_local_split_until(&request_id, deadline)
+        .await
+        .map_err(|error| format!("local split prepare failed: {error:?}"))?;
+    let prepared = crate::daemon::protocol::PreparedLocalSplit {
+        identity,
+        workspace_id: FIXTURE_WORKSPACE_ID.to_string(),
+        worktree: None,
+        cwd: cwd.to_string(),
+        shell: None,
+        cols: FIXTURE_COLS,
+        rows: FIXTURE_ROWS,
+    };
+    let created = client
+        .create_local_split_until(&prepared, deadline)
+        .await
+        .map_err(|error| format!("local split create failed: {error:?}"))?;
+    Ok(created.session_id)
 }
 
 /// Real collector snapshot for a session attached to surface host state. The
@@ -1661,7 +2232,10 @@ mod tests {
 
         // Zero observed sessions must still settle truthfully: an empty
         // inventory, never an invented fixture.
-        assert!(channel.emit_fixture_setup_from_sessions(&[]));
+        assert!(channel.emit_fixture_setup_from_sessions(
+            &GuiFixtureInventory::from_sessions(Vec::new()),
+            &GuiFixtureCreation::default()
+        ));
         let empty = read_lines(&dir, "fixture-setup");
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0]["sessions"], json!([]));
@@ -1693,7 +2267,10 @@ mod tests {
                 }),
             },
         ];
-        assert!(channel.emit_fixture_setup_from_sessions(&observed));
+        assert!(channel.emit_fixture_setup_from_sessions(
+            &GuiFixtureInventory::from_sessions(observed.clone()),
+            &GuiFixtureCreation::default()
+        ));
         let lines = read_lines(&dir, "fixture-setup");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1]["sessionId"], json!("pty-real-1"));
@@ -1722,7 +2299,10 @@ mod tests {
         // Without a correlation identity the line is refused instead of
         // written uncorrelatable.
         let uncorrelated = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
-        assert!(!uncorrelated.emit_fixture_setup_from_sessions(&observed));
+        assert!(!uncorrelated.emit_fixture_setup_from_sessions(
+            &GuiFixtureInventory::from_sessions(observed.clone()),
+            &GuiFixtureCreation::default()
+        ));
         assert_eq!(read_lines(&dir, "fixture-setup").len(), 2);
     }
 
@@ -1920,11 +2500,64 @@ mod tests {
         assert_eq!(classify_pane_liveness(&snapshot), PaneLivenessVerdict::Idle);
     }
 
-    // The fixture kind: `externally-stopped` is claimed only from the daemon's own
-    // report that the kernel stopped the process and its lifecycle registry does
-    // not own that stop.
+    // The runner's fixture request: an unknown kind is refused instead of being
+    // silently dropped, duplicates collapse to the one session per kind the
+    // runner's validator asks for, and the kinds this lane cannot construct stay
+    // parseable because they are reported (with their hook), never invented.
     #[test]
-    fn gui_fixture_kind_claims_external_stop_only_from_the_daemons_own_report() {
+    fn fixture_kind_requests_are_parsed_and_unknown_names_refused() {
+        assert!(parse_fixture_kinds(None).unwrap().is_empty());
+        assert!(parse_fixture_kinds(Some("   ")).unwrap().is_empty());
+        assert_eq!(
+            parse_fixture_kinds(Some(" source , created ,idle ")).unwrap(),
+            vec![
+                QaFixtureKind::Source,
+                QaFixtureKind::Created,
+                QaFixtureKind::Idle
+            ]
+        );
+        assert_eq!(
+            parse_fixture_kinds(Some("idle,idle")).unwrap(),
+            vec![QaFixtureKind::Idle]
+        );
+        assert_eq!(
+            parse_fixture_kinds(Some("adopted,externally-stopped")).unwrap(),
+            vec![QaFixtureKind::Adopted, QaFixtureKind::ExternallyStopped]
+        );
+        let error = parse_fixture_kinds(Some("source,bogus")).unwrap_err();
+        assert!(
+            error.contains("bogus"),
+            "the unknown kind must be named: {error}"
+        );
+    }
+
+    // Only the kinds with a real product path are constructible here; the two
+    // that are not must each report their own hook, never a session this lane
+    // cannot attest.
+    #[test]
+    fn unconstructible_fixture_kinds_report_a_hook_instead_of_a_session() {
+        assert_eq!(QaFixtureKind::Source.creation(), FixtureCreation::PlainSpawn);
+        assert_eq!(QaFixtureKind::Idle.creation(), FixtureCreation::PlainSpawn);
+        // `created` is the only kind with local-split-create provenance.
+        assert_eq!(QaFixtureKind::Created.creation(), FixtureCreation::LocalSplit);
+
+        let mut hooks = Vec::new();
+        for kind in [QaFixtureKind::ExternallyStopped, QaFixtureKind::Adopted] {
+            match kind.creation() {
+                FixtureCreation::Unsupported(hook) => hooks.push(hook),
+                other => panic!("{} must not be constructible: {other:?}", kind.as_str()),
+            }
+        }
+        assert!(hooks.iter().all(|hook| !hook.is_empty()));
+        assert_ne!(hooks[0], hooks[1], "each unsupported kind names its own hook");
+    }
+
+    // The kind claims: an observation the daemon really reported outranks an
+    // intended kind, an intention the daemon's reply does not support is refused
+    // (never downgraded silently), and the kinds this lane cannot construct are
+    // never invented.
+    #[test]
+    fn fixture_kind_claims_follow_the_daemons_own_reply() {
         let base = || {
             crate::daemon::protocol::DaemonSessionDetails::new(
                 "backend-1".into(),
@@ -1940,56 +2573,277 @@ mod tests {
                 false,
             )
         };
+        let idle_facts = || crate::daemon::protocol::DaemonSessionDetails {
+            reader_paused: Some(false),
+            kernel_stopped: Some(false),
+            ..base()
+        };
 
+        // 1. A real external stop is an observation: it is reported whatever kind
+        //    was asked for, with the stop probe the runner's validator requires.
         let stopped_and_unowned = crate::daemon::protocol::DaemonSessionDetails {
             kernel_stopped: Some(true),
             registry_suspended: Some(false),
             ..base()
         };
-        assert_eq!(
-            gui_fixture_kind(&stopped_and_unowned, false),
-            ("externally-stopped", Some("stopped"))
+        let external = classify_fixture_session(
+            &stopped_and_unowned,
+            None,
+            Some(QaFixtureKind::Created),
         );
+        assert_eq!(external.kind, "externally-stopped");
+        assert_eq!(external.stop_probe_state, Some("stopped"));
+        assert_eq!(external.basis, FixtureKindBasis::KernelStopUnowned);
 
+        // 2. A stop the daemon's registry owns, or one it cannot attribute, is
+        //    never claimed as external.
         let stopped_and_owned = crate::daemon::protocol::DaemonSessionDetails {
             kernel_stopped: Some(true),
             registry_suspended: Some(true),
             ..base()
         };
-        assert_eq!(gui_fixture_kind(&stopped_and_owned, false), ("source", None));
-
-        // Ownership unobserved: this lane cannot tell an external stop from an
-        // owned one, so it claims no kind for it.
+        assert_eq!(
+            classify_fixture_session(&stopped_and_owned, None, None).kind,
+            "source"
+        );
         let stopped_unattributed = crate::daemon::protocol::DaemonSessionDetails {
             kernel_stopped: Some(true),
             ..base()
         };
-        assert_eq!(
-            gui_fixture_kind(&stopped_unattributed, false),
-            ("source", None)
-        );
-
+        let unattributed = classify_fixture_session(&stopped_unattributed, None, None);
+        assert_eq!(unattributed.kind, "source");
+        assert_eq!(unattributed.stop_probe_state, None);
         let explicitly_external = crate::daemon::protocol::DaemonSessionDetails {
             kernel_stopped: Some(true),
             suspension_source: Some("external-kernel".into()),
             ..base()
         };
         assert_eq!(
-            gui_fixture_kind(&explicitly_external, false),
-            ("externally-stopped", Some("stopped"))
+            classify_fixture_session(&explicitly_external, None, None).kind,
+            "externally-stopped"
         );
 
-        let running = crate::daemon::protocol::DaemonSessionDetails {
-            kernel_stopped: Some(false),
-            ..base()
-        };
-        assert_eq!(gui_fixture_kind(&running, true), ("idle", None));
-        assert_eq!(gui_fixture_kind(&running, false), ("source", None));
-        // A stopped session is never reported as idle.
+        // 3. `idle` only from the daemon's real facts - plus the surface host's own
+        //    observation when this process has one, which vetoes the claim - and
+        //    never from a defaulted field.
+        let idle = classify_fixture_session(&idle_facts(), None, Some(QaFixtureKind::Idle));
+        assert_eq!(idle.kind, "idle");
+        assert_eq!(idle.basis, FixtureKindBasis::DaemonIdleFacts);
+        let unobserved = classify_fixture_session(&base(), None, Some(QaFixtureKind::Idle));
+        assert_eq!(unobserved.kind, "source");
         assert_eq!(
-            gui_fixture_kind(&stopped_and_unowned, true),
-            ("externally-stopped", Some("stopped"))
+            unobserved.refusal,
+            Some("daemon-did-not-report-reader-and-kernel-facts")
         );
+        let frames_pending = PaneLivenessSnapshot {
+            has_unpresented_frames: Some(true),
+            ..Default::default()
+        };
+        let vetoed = classify_fixture_session(
+            &idle_facts(),
+            Some(&frames_pending),
+            Some(QaFixtureKind::Idle),
+        );
+        assert_eq!(vetoed.kind, "source");
+        assert_eq!(
+            vetoed.refusal,
+            Some("surface-host-observes-unpresented-frames")
+        );
+        let frames_clear = PaneLivenessSnapshot {
+            has_unpresented_frames: Some(false),
+            ..Default::default()
+        };
+        let with_host = classify_fixture_session(
+            &idle_facts(),
+            Some(&frames_clear),
+            Some(QaFixtureKind::Idle),
+        );
+        assert_eq!(with_host.kind, "idle");
+        assert_eq!(with_host.basis, FixtureKindBasis::DaemonIdleFactsAndSurfaceHost);
+
+        // 4. `created` is claimed only from this boot's own split-create
+        //    provenance; without it the same session is honestly a `source`.
+        let created = classify_fixture_session(&idle_facts(), None, Some(QaFixtureKind::Created));
+        assert_eq!(created.kind, "created");
+        assert_eq!(created.basis, FixtureKindBasis::QaLocalSplitCreate);
+        assert_eq!(classify_fixture_session(&idle_facts(), None, None).kind, "source");
+
+        // 5. The kinds this lane cannot construct are refused with a reason.
+        for kind in [QaFixtureKind::Adopted, QaFixtureKind::ExternallyStopped] {
+            let refused = classify_fixture_session(&base(), None, Some(kind));
+            assert_eq!(refused.refusal, Some("kind-not-constructible-in-this-lane"));
+            assert_eq!(refused.kind, "source");
+        }
+    }
+
+    // The settlement carries the construction audit, so a kind that could not be
+    // built is visible in the receipt instead of being silently absent.
+    #[test]
+    fn fixture_settlement_carries_the_creation_audit() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = QaBarrierChannel::from_env_values(
+            dir.to_str().unwrap(),
+            TEST_RUN_ID,
+            Some(TEST_OPERATION_ID),
+        )
+        .unwrap();
+
+        let inventory = GuiFixtureInventory::from_sessions(vec![QaFixtureSession {
+            backend_session_id: "pty-real-1".to_string(),
+            kind: "source".to_string(),
+            stop_probe_state: None,
+            ownership_receipt: json!({
+                "backendSessionId": "pty-real-1",
+                "fixtureKindBasis": "daemon-reports-running",
+                "qaCreated": true,
+            }),
+        }]);
+        let creation = GuiFixtureCreation {
+            requested: vec![QaFixtureKind::Source, QaFixtureKind::Adopted],
+            assignments: vec![("pty-real-1".to_string(), QaFixtureKind::Source)],
+            unsupported: vec![(QaFixtureKind::Adopted, "needs a real retained handover")],
+            failures: vec!["created: local split create failed: timeout".to_string()],
+            elapsed_ms: 412,
+        };
+
+        assert!(channel.emit_fixture_setup_from_sessions(&inventory, &creation));
+        let lines = read_lines(&dir, "fixture-setup");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["sessionId"], json!("pty-real-1"));
+        assert_eq!(lines[0]["fixtureKindsRequested"], json!(["source", "adopted"]));
+        assert_eq!(lines[0]["fixtureKindsClaimed"], json!(["source"]));
+        assert_eq!(lines[0]["fixtureKindsUnsupported"][0]["kind"], json!("adopted"));
+        assert_eq!(
+            lines[0]["fixtureKindsUnsupported"][0]["hook"],
+            json!("needs a real retained handover")
+        );
+        assert_eq!(
+            lines[0]["fixtureCreationFailures"],
+            json!(["created: local split create failed: timeout"])
+        );
+        assert_eq!(lines[0]["fixtureCreationElapsedMs"], json!(412));
+        assert_eq!(
+            lines[0]["sessions"][0]["ownershipReceipt"]["fixtureKindBasis"],
+            json!("daemon-reports-running")
+        );
+
+        // Without a correlation identity the settlement is refused instead of
+        // written uncorrelatable.
+        let uncorrelated = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
+        assert!(!uncorrelated.emit_fixture_setup_from_sessions(&inventory, &creation));
+        assert_eq!(read_lines(&dir, "fixture-setup").len(), 1);
+    }
+
+    // The creation path against a REAL daemon on a private socket: `source`/`idle`
+    // come from the plain spawn, `created` from the local-split create path, and
+    // the settlement claims each kind from the daemon's own reply about the
+    // session this boot really created.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixture_creation_uses_the_real_daemon_paths() {
+        use crate::daemon::DaemonServer;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("qa-fixture.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let server_task = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            server.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let client = crate::daemon::DaemonClient::new_with_socket(socket_path);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let kinds = vec![
+            QaFixtureKind::Source,
+            QaFixtureKind::Idle,
+            QaFixtureKind::Created,
+        ];
+        let creation = create_gui_fixture_sessions(
+            &client,
+            &kinds,
+            dir.path().join(FIXTURE_WORKSPACE_DIR),
+            deadline,
+        )
+        .await;
+        assert!(
+            creation.failures.is_empty(),
+            "creation failed: {:?}",
+            creation.failures
+        );
+        assert!(creation.unsupported.is_empty());
+        assert_eq!(creation.assignments.len(), 3);
+
+        let session_for = |kind: QaFixtureKind| {
+            creation
+                .assignments
+                .iter()
+                .find(|(_, assigned)| *assigned == kind)
+                .map(|(session_id, _)| session_id.clone())
+                .unwrap_or_else(|| panic!("no session was created for {}", kind.as_str()))
+        };
+        let source_id = session_for(QaFixtureKind::Source);
+        let idle_id = session_for(QaFixtureKind::Idle);
+        let created_id = session_for(QaFixtureKind::Created);
+        assert_ne!(source_id, idle_id);
+        assert_ne!(source_id, created_id);
+        assert_ne!(idle_id, created_id);
+
+        let inventory = collect_gui_fixture_sessions(
+            &client,
+            &NativeTerminalSurfaceHostState::default(),
+            &creation,
+        )
+        .await;
+        assert!(inventory.refused.is_empty(), "refused: {:?}", inventory.refused);
+        assert!(inventory.not_running.is_empty());
+        assert_eq!(inventory.sessions.len(), 3);
+
+        let session = |session_id: &str| {
+            inventory
+                .sessions
+                .iter()
+                .find(|session| session.backend_session_id == session_id)
+                .unwrap_or_else(|| panic!("session {session_id} is missing from the inventory"))
+        };
+        assert_eq!(session(&source_id).kind, "source");
+        assert_eq!(session(&idle_id).kind, "idle");
+        assert_eq!(session(&created_id).kind, "created");
+
+        // The evidence each claim rests on, and the real receipt fields: every
+        // fixture carries its backend session id, the daemon's epoch and the
+        // basis its kind was claimed from.
+        let basis = |session_id: &str| {
+            session(session_id).ownership_receipt["fixtureKindBasis"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(basis(&source_id), "daemon-reports-running");
+        assert_eq!(basis(&idle_id), "daemon-idle-facts");
+        assert_eq!(basis(&created_id), "qa-local-split-create");
+        for fixture in &inventory.sessions {
+            assert_eq!(
+                fixture.ownership_receipt["backendSessionId"],
+                json!(fixture.backend_session_id)
+            );
+            assert!(fixture.ownership_receipt["daemonEpoch"].is_string());
+            assert_eq!(fixture.ownership_receipt["qaCreated"], json!(true));
+            assert!(fixture.stop_probe_state.is_none());
+        }
+
+        server_task.abort();
     }
 
     // Without a daemon client (the headless lane) the write settlement reports no
