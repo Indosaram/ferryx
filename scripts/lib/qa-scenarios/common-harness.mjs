@@ -266,6 +266,13 @@ export const BUDGETS = Object.freeze({
   cancelDaemonResponseBudgetMs: 2_500,
   cleanupVerifyTimeoutMs: 10_000,
   barrierAckTimeoutMs: 5_000,
+  // Windows interactive-desktop lane (pass-4 blockers NO_OWNED_WINDOW /
+  // SPLIT_RIGHT_NOT_UNIQUE): bounded probe/wait budgets, all inside the
+  // attempt ceiling or the outer launcher's own bound.
+  windowsSessionProbeMs: 5_000,
+  ownedWindowReadyMs: 8_000,
+  splitFocusWaitMs: 4_000,
+  interactiveRelaunchTimeoutMs: 180_000,
 });
 
 // Exit codes: 0 is reserved for a truthful native PASS (or a completed,
@@ -290,6 +297,11 @@ export const TYPED_ERRORS = Object.freeze(new Set([
   'NATIVE_AUTOMATION_UNSUPPORTED', 'BARRIER_ACK_TIMEOUT', 'ASSERTION_FAILURE',
   'MARKER_RECOGNITION_UNVERIFIED',
   'RECOVERY_UNPROVEN',
+  // Windows interactive-desktop lane: each condition keeps its own typed
+  // identity so a blocked run says exactly which window/session/selector
+  // condition blocked it instead of collapsing into NATIVE_AUTOMATION_UNSUPPORTED.
+  'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+  'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
 ]));
 
 export class HarnessError extends Error {

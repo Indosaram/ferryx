@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  BUDGETS, HEADLESS_ELIGIBLE, SCENARIOS, HarnessError, parseInvocation, preflight,
+  BUDGETS, EXIT, HEADLESS_ELIGIBLE, SCENARIOS, HarnessError, parseInvocation, preflight,
   BarrierHub, ResourceRegistry, correlateReceipt, computeCleanupGate,
   computeSourceDigest, withDeadline, assertPositiveRecovery, spawnOwned,
   MonotonicBudget, validateFixtureSetup, SCENARIO_FIXTURE_REQUIREMENTS, BARRIER_ROLES,
@@ -1010,4 +1010,200 @@ test('private channel env carries the operation nonce so barrier-less scenarios 
   const bare = new BarrierHub(join(root, 'bare'), { runId: 'run-bare' });
   expect(bare.env().FERRYX_QA_OPERATION_ID).toBeUndefined();
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-4 blockers (Windows interactive desktop lane). These replay the runner's
+// own expressions; nothing here launches a product, a PowerShell probe, or a
+// scheduled task.
+
+test('windows session admission relaunches into the active console session or fails typed', async () => {
+  const { classifyWindowsSession, asArray } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  // Measured pass-4 shape: SSH lands in session 0 (`services`, Disc) while
+  // session 1 (`console`/sook) is Active with explorer/winlogon/dwm.
+  const session0 = {
+    probe: 'windows-session', interactive: false, sessionId: 0,
+    activeConsoleSessionId: 1, explorerSessions: [1],
+    qwinsta: [' services                0  Disc', ' console      sook        1  Active'],
+  };
+  expect(classifyWindowsSession(session0)).toMatchObject({ interactive: false, sessionId: 0, consoleSessionId: 1, code: null });
+  // A relaunch was already attempted and this process is still non-interactive:
+  // typed block, never a second relaunch (no loop).
+  expect(classifyWindowsSession(session0, { alreadyRelaunched: true }).code).toBe('NO_INTERACTIVE_SESSION');
+  // No active console session at all.
+  expect(classifyWindowsSession({ probe: 'windows-session', interactive: false, sessionId: 0, activeConsoleSessionId: null, explorerSessions: [] }).code)
+    .toBe('NO_INTERACTIVE_SESSION');
+  // The only "console" session is this very non-interactive session.
+  expect(classifyWindowsSession({ interactive: false, sessionId: 0, activeConsoleSessionId: 0, explorerSessions: [0] }).code)
+    .toBe('NO_INTERACTIVE_SESSION');
+  // A malformed/absent probe can never be read as interactive.
+  expect(classifyWindowsSession({}).code).toBe('NO_INTERACTIVE_SESSION');
+  expect(classifyWindowsSession({ interactive: 'true', sessionId: 1 }).interactive).toBe(false);
+  // The delegated run itself (session 1) is interactive.
+  expect(classifyWindowsSession({ interactive: true, sessionId: 1, activeConsoleSessionId: null }).interactive).toBe(true);
+  // A process whose own session IS the active console session is on the
+  // interactive desktop even if the UserInteractive API reports a quirk; the
+  // owned-window wait remains the stronger second gate.
+  expect(classifyWindowsSession({ interactive: false, sessionId: 1, activeConsoleSessionId: 1 }).interactive).toBe(true);
+  // Session 0 is never interactive, whatever the API reports.
+  expect(classifyWindowsSession({ interactive: true, sessionId: 0, activeConsoleSessionId: 0, explorerSessions: [0] }).interactive).toBe(false);
+  // PowerShell single-element arrays are normalized at the boundary.
+  expect(asArray(undefined)).toEqual([]);
+  expect(asArray(1)).toEqual([1]);
+  expect(asArray([1])).toEqual([1]);
+});
+
+test('windows interactive admission is inert off win32 and on the headless lane', async () => {
+  const { admitWindowsInteractiveDesktop } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  // macOS keeps its existing launch path: admission never probes or relaunches.
+  expect(await admitWindowsInteractiveDesktop({ invocation: { headless: false }, context: { platform: 'darwin' }, rawArgv: [] })).toBeNull();
+  // The headless lane never touches a GUI window, so it is never relaunched.
+  expect(await admitWindowsInteractiveDesktop({ invocation: { headless: true }, context: { platform: 'win32' }, rawArgv: [] })).toBeNull();
+});
+
+test('windows probe stdout is parsed tolerantly and never invented', async () => {
+  const { parseWindowsProbeLine, parseRelaunchExitFile } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  expect(parseWindowsProbeLine('noise\n{"probe":"owned-window","ok":true}\n', 'owned-window'))
+    .toMatchObject({ ok: true, probe: { ok: true } });
+  expect(parseWindowsProbeLine('{"probe":"split-right"}', 'owned-window').ok).toBe(false);
+  expect(parseWindowsProbeLine('', 'owned-window').ok).toBe(false);
+  expect(parseWindowsProbeLine('null', 'owned-window').ok).toBe(false);
+  expect(parseWindowsProbeLine('[1,2]', 'owned-window').ok).toBe(false);
+  expect(parseRelaunchExitFile(' 1\r\n')).toBe(1);
+  expect(parseRelaunchExitFile('0')).toBe(0);
+  expect(parseRelaunchExitFile('')).toBeNull();
+  expect(parseRelaunchExitFile('ErrorLevel 1')).toBeNull();
+});
+
+test('interactive relaunch plan keeps the frozen argv and uses the proven scheduled-task mechanism', async () => {
+  const { buildInteractiveRelaunchPlan, WINDOWS_INTERACTIVE_RELAUNCH_ENV, WINDOWS_RELAUNCH_RECORD_ENV } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const runnerArgs = [
+    '--scenario', 'split-happy',
+    '--binary', 'C:\\repo\\src-tauri\\target\\debug\\ferryx.exe',
+    '--evidence-dir', 'C:\\ev',
+    '--isolation-root', 'C:\\iso',
+  ];
+  const plan = buildInteractiveRelaunchPlan({
+    taskName: 'ferryx-qa-split-happy-1-abc123',
+    batDir: 'C:\\relaunch',
+    nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+    runnerPath: 'C:\\repo\\scripts\\qa\\pane-liveness.mjs',
+    runnerArgs,
+    cwd: 'C:\\repo',
+  });
+  // The verifier's proven recipe: /it binds the task to the interactive console user.
+  expect(plan.createArgs).toEqual(['/create', '/tn', 'ferryx-qa-split-happy-1-abc123', '/tr', plan.batPath, '/sc', 'once', '/st', '00:00', '/f', '/it']);
+  expect(plan.runArgs).toEqual(['/run', '/tn', 'ferryx-qa-split-happy-1-abc123']);
+  expect(plan.deleteArgs).toEqual(['/delete', '/tn', 'ferryx-qa-split-happy-1-abc123', '/f']);
+  // The scenario argv shape is passed through unchanged, argument for argument.
+  expect(plan.command).toBe(
+    '"C:\\Program Files\\nodejs\\node.exe" "C:\\repo\\scripts\\qa\\pane-liveness.mjs" "--scenario" "split-happy" "--binary" "C:\\repo\\src-tauri\\target\\debug\\ferryx.exe" "--evidence-dir" "C:\\ev" "--isolation-root" "C:\\iso"',
+  );
+  expect(plan.batBody).toContain(`set ${WINDOWS_INTERACTIVE_RELAUNCH_ENV}=1`);
+  expect(plan.batBody).toContain(`set ${WINDOWS_RELAUNCH_RECORD_ENV}=${plan.recordPath}`);
+  expect(plan.batBody).toContain('cd /d "C:\\repo"');
+  expect(plan.batBody).toContain(`echo %ERRORLEVEL% > "${plan.exitPath}"`);
+});
+
+test('owned-window wait fails typed with the measured session id and window visibility', async () => {
+  const { classifyWindowsWindowProbe } = await import('../lib/qa-scenarios/native-driver.mjs');
+  const session0 = {
+    probe: 'owned-window', pid: 3924, interactive: false, sessionId: 0, budgetMs: 8000, waitedMs: 8000,
+    mainWindowHandle: 0, processExited: false, ok: false,
+    windows: [
+      { hwnd: 24838986, visible: false, className: 'T', title: 'F' },
+      { hwnd: 107151794, visible: false, className: 'T', title: '' },
+      { hwnd: 8389492, visible: false, className: 'C', title: 'C' },
+    ],
+  };
+  const nonInteractive = classifyWindowsWindowProbe(session0);
+  expect(nonInteractive.ok).toBe(false);
+  expect(nonInteractive.code).toBe('NO_INTERACTIVE_SESSION');
+  expect(nonInteractive.detail).toContain('sessionId=0');
+  expect(nonInteractive.detail).toContain('"visible":false');
+  // An interactive session that never shows an owned window is the distinct code.
+  const noWindow = classifyWindowsWindowProbe({ ...session0, interactive: true, sessionId: 1 });
+  expect(noWindow.code).toBe('NO_OWNED_WINDOW');
+  expect(noWindow.detail).toContain('mainWindowHandle=0');
+  // A real owned, visible window passes.
+  const ready = classifyWindowsWindowProbe({
+    ...session0, interactive: true, sessionId: 1, waitedMs: 900, mainWindowHandle: 8389492, ok: true,
+    windows: [{ hwnd: 8389492, visible: true, className: 'T', title: 'Ferryx' }],
+  });
+  expect(ready.ok).toBe(true);
+  expect(ready.mainWindowHandle).toBe(8389492);
+  // A zero handle can never pass, whatever the probe claims.
+  expect(classifyWindowsWindowProbe({ ...session0, ok: true }).ok).toBe(false);
+});
+
+test('split-right selection is scoped to the focused pane and never picks the first match', async () => {
+  const { classifyWindowsSplitRight } = await import('../lib/qa-scenarios/native-driver.mjs');
+  const base = {
+    probe: 'split-right', selector: 'Split pane right', interactive: true, sessionId: 1,
+    mainWindowHandle: 8389492, windowVisible: true, focusedFound: true,
+    focusSource: 'pane-focus-sink', scopeDepth: 3, scopeIsWindowRoot: false,
+  };
+  const candidate = (index, extra = {}) => ({
+    index, name: 'Split pane right', controlType: 'ControlType.Button', automationId: '',
+    enabled: true, offscreen: false, rectEmpty: false, rect: '10,10,20,20', inWindow: true, ...extra,
+  });
+  // Exactly one actionable affordance inside the focused pane scope: click it.
+  const unique = classifyWindowsSplitRight({ ...base, result: 'SPLIT_CLICKED', candidateCount: 1, actionableCount: 1, candidates: [candidate(0)], chosen: candidate(0) });
+  expect(unique.ok).toBe(true);
+  expect(unique.chosen.index).toBe(0);
+  // The pass-4 blocker: more than one actionable match in the pane scope stays
+  // typed and is never resolved by taking the first match.
+  const ambiguous = classifyWindowsSplitRight({ ...base, candidateCount: 2, actionableCount: 2, candidates: [candidate(0), candidate(1)] });
+  expect(ambiguous.ok).toBe(false);
+  expect(ambiguous.code).toBe('SPLIT_RIGHT_NOT_UNIQUE');
+  expect(ambiguous.candidates).toHaveLength(2);
+  // Present but not actionable (disabled / offscreen / empty rect / outside the window).
+  expect(classifyWindowsSplitRight({ ...base, candidateCount: 1, actionableCount: 0, candidates: [candidate(0, { enabled: false })] }).code).toBe('SPLIT_RIGHT_DISABLED');
+  expect(classifyWindowsSplitRight({ ...base, candidateCount: 1, actionableCount: 0, candidates: [candidate(0, { offscreen: true })] }).code).toBe('SPLIT_RIGHT_DISABLED');
+  // Absent, or no focused pane identified: never a click.
+  expect(classifyWindowsSplitRight({ ...base, candidateCount: 0, actionableCount: 0, candidates: [] }).code).toBe('SPLIT_RIGHT_NOT_FOUND');
+  expect(classifyWindowsSplitRight({ ...base, focusedFound: false, candidateCount: 0, actionableCount: 0, candidates: [] }).code).toBe('SPLIT_RIGHT_NOT_FOUND');
+  // Window scope: a handle that is zero or not visible fails closed.
+  expect(classifyWindowsSplitRight({ ...base, mainWindowHandle: 0, windowVisible: false, candidateCount: 1, actionableCount: 1, candidates: [candidate(0)] }).code).toBe('NO_OWNED_WINDOW');
+  expect(classifyWindowsSplitRight({ ...base, windowVisible: false, candidateCount: 1, actionableCount: 1, candidates: [candidate(0)] }).code).toBe('NO_OWNED_WINDOW');
+  // The probe's own typed verdict is honoured, and a divergence from the
+  // measured shape is disclosed in the recorded detail.
+  const declared = classifyWindowsSplitRight({ ...base, candidateCount: 2, actionableCount: 2, candidates: [candidate(0), candidate(1)], failure: 'SPLIT_RIGHT_DISABLED', detail: 'InvokePattern failed: not invokable' });
+  expect(declared.code).toBe('SPLIT_RIGHT_DISABLED');
+  expect(declared.derivedCode).toBe('SPLIT_RIGHT_NOT_UNIQUE');
+  expect(declared.detail).toContain('measured shape derives SPLIT_RIGHT_NOT_UNIQUE');
+});
+
+test('windows automation failures keep their typed identity instead of collapsing', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  expect(native.classifyWindowsFailure('SPLIT_RIGHT_NOT_UNIQUE\r\n  + CategoryInfo ...')).toBe('SPLIT_RIGHT_NOT_UNIQUE');
+  expect(native.classifyWindowsFailure('SPLIT_RIGHT_NOT_FOUND')).toBe('SPLIT_RIGHT_NOT_FOUND');
+  expect(native.classifyWindowsFailure('SPLIT_RIGHT_DISABLED')).toBe('SPLIT_RIGHT_DISABLED');
+  expect(native.classifyWindowsFailure('... NO_OWNED_WINDOW ...')).toBe('NO_OWNED_WINDOW');
+  expect(native.classifyWindowsFailure('... NO_INTERACTIVE_SESSION ...')).toBe('NO_INTERACTIVE_SESSION');
+  expect(native.classifyWindowsFailure('RETRY_BUTTON_NOT_FOUND')).toBe('NATIVE_AUTOMATION_UNSUPPORTED');
+  expect(native.classifyWindowsFailure('')).toBe('NATIVE_AUTOMATION_UNSUPPORTED');
+});
+
+test('windows lane blocks are typed, nonzero, and never a pass', async () => {
+  const runner = await import('./pane-liveness.mjs');
+  const windowsCodes = [
+    'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+    'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+  ];
+  for (const code of windowsCodes) {
+    expect(runner.classifyNativeFailure(code)).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.nativeAutomationUnsupported });
+    expect(runner.classifyNativeFailure(code).exitCode).not.toBe(0);
+    // The typed code survives HarnessError instead of collapsing to ASSERTION_FAILURE.
+    expect(new HarnessError(code, 'detail').code).toBe(code);
+  }
+  // Every pre-existing mapping is unchanged.
+  expect(runner.classifyNativeFailure('AX_UNTRUSTED')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.axUntrusted });
+  expect(runner.classifyNativeFailure('CAPTURE_DENIED')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.captureDenied });
+  expect(runner.classifyNativeFailure('NATIVE_AUTOMATION_UNSUPPORTED')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.nativeAutomationUnsupported });
+  expect(runner.classifyNativeFailure('BARRIER_ACK_TIMEOUT')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.barrierUnsupported });
+  expect(runner.classifyNativeFailure('MARKER_RECOGNITION_UNVERIFIED')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.markerRecognitionUnverified });
+  expect(runner.classifyNativeFailure('TASK4_IDENTITY_DEPENDENCY')).toEqual({ verdict: 'BLOCKED', exitCode: EXIT.task4IdentityDependency });
+  expect(runner.classifyNativeFailure('ASSERTION_FAILURE')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
+  expect(runner.classifyNativeFailure('RECOVERY_UNPROVEN')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
 });

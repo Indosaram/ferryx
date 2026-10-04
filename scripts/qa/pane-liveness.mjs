@@ -26,7 +26,9 @@ import {
   MARKER_TEXT, assertAxTrustDarwin, assertNativeAutomationSupported, assertScreenCapture,
   captureScreenshot, clickSplitRightDarwin, focusWindowByPidDarwin, typeMarkerDarwin,
   awaitMarkerRecognition, focusWindowWindows, typeMarkerWindows, windowsDriver,
+  awaitOwnedWindowWindows,
 } from '../lib/qa-scenarios/native-driver.mjs';
+import { admitWindowsInteractiveDesktop, readWindowsRelaunchRecord } from '../lib/qa-scenarios/windows-interactive.mjs';
 import {
   runSplitHappyScenario,
   runSplitAttachStallScenario,
@@ -51,6 +53,7 @@ const SOURCE_FILES = [
   'scripts/lib/qa-scenarios/diagnostic-classifier.mjs',
   'scripts/lib/qa-scenarios/split-scenarios.mjs',
   'scripts/lib/qa-scenarios/lifecycle-scenarios.mjs',
+  'scripts/lib/qa-scenarios/windows-interactive.mjs',
 ];
 const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
@@ -112,12 +115,52 @@ export const SCENARIO_PLANS = {
   },
 };
 
+// Typed native failures keep their identity in result.error.code. The verdict
+// and exit code stay fail-closed and unchanged for the pre-existing codes: an
+// environment/harness block is BLOCKED and nonzero, a product assertion failure
+// is FAIL, and the cleanup gate can still force FAIL - a blocked run never
+// becomes a pass.
+export const BLOCKED_CODES = Object.freeze([
+  'AX_UNTRUSTED', 'CAPTURE_DENIED', 'NATIVE_AUTOMATION_UNSUPPORTED', 'BARRIER_ACK_TIMEOUT',
+  'MARKER_RECOGNITION_UNVERIFIED', 'TASK4_IDENTITY_DEPENDENCY',
+  // Windows interactive-desktop lane (pass-4 blockers): the run could not reach
+  // a state in which it owns a visible window and a unique affordance.
+  'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+  'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+]);
+
+export function classifyNativeFailure(code) {
+  const verdict = BLOCKED_CODES.includes(code) ? 'BLOCKED' : 'FAIL';
+  const exitCode = code === 'AX_UNTRUSTED' ? EXIT.axUntrusted
+    : code === 'CAPTURE_DENIED' ? EXIT.captureDenied
+    : code === 'NATIVE_AUTOMATION_UNSUPPORTED' ? EXIT.nativeAutomationUnsupported
+    : code === 'BARRIER_ACK_TIMEOUT' ? EXIT.barrierUnsupported
+    : code === 'MARKER_RECOGNITION_UNVERIFIED' ? EXIT.markerRecognitionUnverified
+    : code === 'TASK4_IDENTITY_DEPENDENCY' ? EXIT.task4IdentityDependency
+    : BLOCKED_CODES.includes(code) ? EXIT.nativeAutomationUnsupported
+    : EXIT.scenarioFailure;
+  return { verdict, exitCode };
+}
+
 async function runNativeScenario(ctx) {
   const plan = SCENARIO_PLANS[ctx.scenario];
   const { evidence, barrierHub } = ctx;
 
   // Permission gates FIRST: typed rejections with no native actions recorded.
   assertNativeAutomationSupported();
+  // Pass-4 blocker 1: a Windows run launched from an SSH session lands in
+  // session 0, where no window can ever be shown. The admission decision (and,
+  // when it failed, the measured session/interactivity evidence) is recorded
+  // before any launch; a blocked admission never launches and never passes.
+  if (ctx.windowsAdmission) {
+    evidence.action({ action: 'windows-interactive-admission', ...ctx.windowsAdmission.evidence });
+    if (ctx.windowsAdmission.mode === 'blocked') {
+      throw new HarnessError(ctx.windowsAdmission.code, ctx.windowsAdmission.detail);
+    }
+  }
+  if (ctx.windowsRelaunchRecord) {
+    evidence.action({ action: 'windows-interactive-relaunch', ...ctx.windowsRelaunchRecord });
+  }
   if (ctx.platformPreflight === 'darwin') {
     await assertAxTrustDarwin(evidence);
     await assertScreenCapture(evidence);
@@ -148,6 +191,16 @@ async function runNativeScenario(ctx) {
   const rawFixture = await barrierHub.awaitReceipt('fixture-setup', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'fixture-setup'));
   const fixture = validateFixtureSetup(rawFixture, ctx.scenario);
   evidence.action({ action: 'fixture-setup', sessions: fixture.sessions });
+
+  // Pass-4 blocker 1 (continued): the driver may only address a window this run
+  // really owns and that is really visible. In Windows session 0 the app's
+  // windows are created but can never be shown, so this bounded wait fails
+  // typed (`NO_INTERACTIVE_SESSION` / `NO_OWNED_WINDOW`, with the measured
+  // session id and per-window visibility) instead of letting a driver click a
+  // window it does not own. macOS is unchanged.
+  if (ctx.platformPreflight === 'win32') {
+    await awaitOwnedWindowWindows(evidence, pid, budget.consume(BUDGETS.ownedWindowReadyMs, 'owned-window'));
+  }
 
   // Every armed barrier must be registered by the product before triggers.
   for (const barrier of plan.barriers) {
@@ -244,6 +297,26 @@ export async function main(argv) {
 
   const { EvidenceWriter, ResourceRegistry, BarrierHub, spawnOwned: spawnOwnedFn } = await import('../lib/qa-scenarios/common-harness.mjs');
 
+  // Pass-4 blocker 1: a Windows run launched from an SSH session lands in
+  // session 0, where the app can never own a visible window. Admission probes
+  // the session before anything else; when an active console session is
+  // reachable it re-runs THIS runner with the unchanged argv inside that
+  // session (scheduled task with /it - the mechanism the verifier proved) and
+  // adopts the delegated exit code, so the delegated run owns
+  // result.json/latest.json and this process writes no verdict of its own. A
+  // session that cannot be reached fails typed, never as a pass.
+  const windowsAdmission = await admitWindowsInteractiveDesktop({ invocation, context, rawArgv: argv });
+  if (windowsAdmission?.mode === 'delegated') {
+    process.stderr.write(`${JSON.stringify({
+      verdict: 'DELEGATED-TO-INTERACTIVE-SESSION',
+      code: null,
+      session: windowsAdmission.evidence?.verdict ?? null,
+      delegated: windowsAdmission.relaunch,
+    })}\n`);
+    if (windowsAdmission.innerStdout) process.stdout.write(windowsAdmission.innerStdout);
+    return windowsAdmission.exitCode;
+  }
+
   // Review blocker 8: exactly ONE evidence writer, registry, barrier hub and
   // nonce pair, created here and shared with every callee as fullContext.
   const runId = `qa-run-${randomUUID()}`;
@@ -257,6 +330,8 @@ export async function main(argv) {
     evidence, registry, barrierHub, runId, operationId,
     evidenceRunDir: evidence.runDir,
     platformPreflight: context.platform,
+    windowsAdmission,
+    windowsRelaunchRecord: readWindowsRelaunchRecord(),
     spawnOwned: (command, args, options) => spawnOwnedFn(registry, command, args, options),
   };
 
@@ -317,15 +392,10 @@ export async function main(argv) {
     }
   } catch (error) {
     const code = error.code ?? 'ASSERTION_FAILURE';
-    result.verdict = ['AX_UNTRUSTED', 'CAPTURE_DENIED', 'NATIVE_AUTOMATION_UNSUPPORTED', 'BARRIER_ACK_TIMEOUT', 'MARKER_RECOGNITION_UNVERIFIED', 'TASK4_IDENTITY_DEPENDENCY'].includes(code) ? 'BLOCKED' : 'FAIL';
+    const classified = classifyNativeFailure(code);
+    result.verdict = classified.verdict;
     result.error = { code, message: error.message };
-    exitCode = code === 'AX_UNTRUSTED' ? EXIT.axUntrusted
-      : code === 'CAPTURE_DENIED' ? EXIT.captureDenied
-      : code === 'NATIVE_AUTOMATION_UNSUPPORTED' ? EXIT.nativeAutomationUnsupported
-      : code === 'BARRIER_ACK_TIMEOUT' ? EXIT.barrierUnsupported
-      : code === 'MARKER_RECOGNITION_UNVERIFIED' ? EXIT.markerRecognitionUnverified
-      : code === 'TASK4_IDENTITY_DEPENDENCY' ? EXIT.task4IdentityDependency
-      : EXIT.scenarioFailure;
+    exitCode = classified.exitCode;
   } finally {
     // Evidence persisted BEFORE temporary roots are unlinked; cleanup.json is
     // always emitted, including on deliberate assertion failures.
