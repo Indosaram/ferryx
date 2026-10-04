@@ -70,7 +70,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
+          - platform: 'xenoci-macos'
             os_name: 'macos'
             target: 'aarch64-apple-darwin'
           - platform: 'windows-latest'
