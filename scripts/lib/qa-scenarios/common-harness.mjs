@@ -191,6 +191,47 @@ export class MonotonicBudget {
   isExceeded() {
     return Date.now() > this.deadlineAt;
   }
+
+  // Pass-22 audit F2-11 (residual): give the window back the wall clock a
+  // MEASUREMENT spent inside it, so the window bounds the SCENARIO's own time
+  // rather than the harness's own observability. Additive and opt-in: a budget
+  // nobody extends behaves exactly as it did before.
+  extendBy(ms) {
+    const extra = Number.isFinite(ms) && ms > 0 ? ms : 0;
+    this.deadlineAt += extra;
+    return this.deadlineAt;
+  }
+}
+
+// The wall clock the measurements inside the measured attempt window spent
+// (pass-22 audit F2-11 residual). That window is the scenario's own correctness
+// budget, so this clock hands its time back to the window as it is spent: a stage
+// cap (`remainingMs`) and the correctness ceiling (`isExceeded`, and the runner's
+// `attemptBudgetAccounting`) then both bound the scenario, not the measurement.
+//
+// Nothing is relaxed and nothing moved: the reads stay inside the window at the
+// same moments, each read's cost is still bounded per read (`charge.boundMs`) and
+// reported per read (the action's `elapsedMs`), and the total handed back is
+// therefore bounded by those same caps. A clock with no budget attached still
+// accumulates, so the accounting can be read without one.
+export class InstrumentationClock {
+  constructor({ budget = null } = {}) {
+    this.budget = budget;
+    this.total = 0;
+    this.samples = [];
+  }
+
+  note(label, ms) {
+    const spent = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+    this.total += spent;
+    this.samples.push({ label, ms: spent });
+    this.budget?.extendBy?.(spent);
+    return spent;
+  }
+
+  totalMs() {
+    return this.total;
+  }
 }
 
 // Scenario-specific fixture requirements: basic split scenarios only need source/target,

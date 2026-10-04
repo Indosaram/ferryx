@@ -254,6 +254,19 @@ export function createPaneInventoryReader({
         };
       }
     }
+    // A read that reports `ok` WITHOUT a session list has broken its own contract:
+    // there is no list to count, no list to diff and no list to remember as a
+    // baseline. It is typed here, once, so no downstream line can throw on a shape
+    // the reader never guaranteed (pass-22 audit R3) - and so a `sessionCount` of
+    // null can never be mistaken for a measured zero.
+    if (result.ok === true && !Array.isArray(result.sessions)) {
+      result = {
+        ok: false, code: SPLIT_INVENTORY_READ_FAILED, cause: null,
+        detail: 'the inventory read reported ok without a session list, so no count, delta or baseline could be taken from it',
+        transport: result.transport ?? null, endpoint: result.endpoint ?? null,
+        sessions: null, epoch: result.epoch ?? null, elapsedMs: result.elapsedMs ?? null,
+      };
+    }
     // A delta is only ever computed from two REAL reads of this daemon, with the
     // same arithmetic the pane binding uses (`computeInventoryDelta`): when
     // either read failed there is NO delta, never a zero that would read as

@@ -21,6 +21,7 @@ import {
   assertPositiveRecovery, BARRIER_ROLES, MonotonicBudget, validateFixtureSetup,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
   AppStdioSink, appStdioResult, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
+  InstrumentationClock,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import {
@@ -166,6 +167,35 @@ export function classifyNativeFailure(code) {
   return { verdict, exitCode };
 }
 
+// What the correctness ceiling compares (pass-22 audit F2-11 residual). The
+// quantity is the SCENARIO's own time: the raw wall clock from the trigger MINUS
+// the wall clock the measurements inside that window spent, which the runner
+// accumulates per read in an `InstrumentationClock` and reports per read on the
+// read's own evidence action. Nothing about the measurement moved - the reads still
+// sit inside the window at the same moments - so what changed is only what the
+// window is judged against. `exceeded` is the single decision the ceiling makes,
+// and the raw number is reported beside the adjusted one so a reader can always
+// see both. The exclusion cannot run away: each read is capped by the charge it was
+// given (`splitInventoryReadCapMs`), so the wall clock can exceed the ceiling by at
+// most the instrumentation the reads actually spent.
+export const ATTEMPT_CEILING_BASIS = 'scenario-own-time';
+
+export function attemptBudgetAccounting({ budget, instrumentation = null, triggerLabel = null } = {}) {
+  const attemptMs = budget.elapsedMs();
+  const instrumentationMs = instrumentation?.totalMs?.() ?? 0;
+  const scenarioMs = Math.max(0, attemptMs - instrumentationMs);
+  return {
+    triggerLabel,
+    attemptMs,
+    instrumentationMs,
+    scenarioMs,
+    ceilingMs: BUDGETS.attemptCeilingMs,
+    ceilingBasis: ATTEMPT_CEILING_BASIS,
+    exceeded: scenarioMs > BUDGETS.attemptCeilingMs,
+    samples: instrumentation?.samples ?? [],
+  };
+}
+
 async function runNativeScenario(ctx) {
   const plan = SCENARIO_PLANS[ctx.scenario];
   const { evidence, barrierHub } = ctx;
@@ -299,7 +329,13 @@ async function runNativeScenario(ctx) {
   if (plan.barriers.length > 0) evidence.action({ action: 'barriers.registered', barriers: [...plan.barriers] });
 
   // Monotonic budget tracker for the MEASURED attempt: it starts at the trigger.
+  // The instrumentation clock hands back the wall clock the measurements inside
+  // this window spend, so the window bounds the scenario's own time rather than the
+  // harness's own observability (pass-22 audit F2-11 residual). It is attached to
+  // the context, which is how the split step's reads reach it.
   const budget = new MonotonicBudget(BUDGETS.attemptCeilingMs);
+  const instrumentation = new InstrumentationClock({ budget });
+  ctx.instrumentation = instrumentation;
 
   let scenarioResult;
   let triggerLabel = 'split-menu-click';
@@ -345,16 +381,20 @@ async function runNativeScenario(ctx) {
       throw new HarnessError('INVALID_SCENARIO', `unhandled scenario ${ctx.scenario}`);
   }
 
-  const attemptMs = budget.elapsedMs();
-  if (budget.isExceeded()) {
-    throw new HarnessError('ASSERTION_FAILURE', `attempt ${attemptMs}ms (trigger: ${triggerLabel}) exceeds correctness ceiling ${BUDGETS.attemptCeilingMs}ms`);
+  const accounting = attemptBudgetAccounting({ budget, instrumentation, triggerLabel });
+  if (accounting.exceeded) {
+    throw new HarnessError('ASSERTION_FAILURE', `attempt ${accounting.scenarioMs}ms of the scenario's own time (trigger: ${triggerLabel}) exceeds correctness ceiling ${accounting.ceilingMs}ms; ${accounting.instrumentationMs}ms of instrumentation inside the window is excluded from the ${accounting.attemptMs}ms wall clock`);
   }
   evidence.action({
     action: 'attempt-budget',
     triggerLabel,
-    attemptMs,
-    ceilingMs: BUDGETS.attemptCeilingMs,
-    warmTargetMs: attemptMs <= BUDGETS.warmTargetMs ? 'met' : 'exceeded-reportable',
+    attemptMs: accounting.attemptMs,
+    instrumentationMs: accounting.instrumentationMs,
+    scenarioMs: accounting.scenarioMs,
+    ceilingMs: accounting.ceilingMs,
+    ceilingBasis: accounting.ceilingBasis,
+    instrumentation: accounting.samples,
+    warmTargetMs: accounting.scenarioMs <= BUDGETS.warmTargetMs ? 'met' : 'exceeded-reportable',
   });
 
   // Release any unreleased barriers
@@ -363,7 +403,9 @@ async function runNativeScenario(ctx) {
   }
 
   return {
-    attemptMs,
+    attemptMs: accounting.attemptMs,
+    instrumentationMs: accounting.instrumentationMs,
+    scenarioMs: accounting.scenarioMs,
     deadlineAt: budget.deadlineAt,
     triggerLabel,
     markerRecognition: scenarioResult?.markerRecognition ?? null,
@@ -532,6 +574,8 @@ export async function main(argv) {
         verdict: 'PASS',
         nativeEvidence: 'native-receipt',
         attemptMs: native.attemptMs,
+        instrumentationMs: native.instrumentationMs,
+        scenarioMs: native.scenarioMs,
         triggerLabel: native.triggerLabel,
         deadlineAt: native.deadlineAt,
         markerRecognition: native.markerRecognition,

@@ -20,11 +20,12 @@ import {
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
   AppStdioSink, appStdioResult, APP_STDIO_TRUNCATION_MARKER,
   appStdioBytes, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
+  InstrumentationClock,
   ATTEMPT_BUDGET_SPENT, INVENTORY_READ_REFUSED,
   BARRIER_ARCHIVE_SNAPSHOT_FILE, BARRIER_ARCHIVE_SNAPSHOT_MARKER,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
-import { assertInvariants, assertSinglePty, SCENARIO_PLANS, archiveRunBarrierHub } from './pane-liveness.mjs';
+import { assertInvariants, assertSinglePty, SCENARIO_PLANS, archiveRunBarrierHub, attemptBudgetAccounting, ATTEMPT_CEILING_BASIS } from './pane-liveness.mjs';
 import {
   MARKER_TEXT,
   performInspectionHandshake,
@@ -39,6 +40,7 @@ import {
   PRE_SPLIT_INVENTORY_ACTION,
   INVENTORY_READER_MISSING,
   SPLIT_INVENTORY_READ_FAILED,
+  SPLIT_INVENTORY_LAST_READING_ACTION,
 } from '../lib/qa-scenarios/split-scenarios.mjs';
 import {
   runRetainedHandoverScenario,
@@ -3179,5 +3181,138 @@ test('the barrier-hub archive receipt says which moment it is, and the runner se
     expect(seam.snapshot.appProcesses.stillRunning).toEqual([111]);
     const seamFails = archiveRunBarrierHub({ barrierHub: { get dir() { throw new Error('no dir'); } }, evidence: { runDir: join(root, 'evidence-seam') } });
     expect([seamFails.ok, seamFails.filesCopied, seamFails.reason.startsWith('ARCHIVE_SEAM_FAILED')]).toEqual([false, [], true]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Pass-22 audit residuals: the ceiling must bound the SCENARIO's own time rather
+// than the harness's instrumentation (F2-11), and no reader METHOD may escape into
+// `classifyNativeFailure` (R1).
+
+test('instrumentation time spent inside the measured window is excluded from the ceiling the scenario is judged against', async () => {
+  const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const actions = [];
+  const reads = [];
+  const budget = new MonotonicBudget(BUDGETS.attemptCeilingMs);
+  const instrumentation = new InstrumentationClock({ budget });
+  // A read that really costs wall clock. A timer never fires early, so the lower
+  // bounds asserted below cannot pass by luck.
+  const reader = createPaneInventoryReader({
+    runtimeDir: join(root, 'runtime'),
+    platform: 'darwin',
+    evidence: { action: action => actions.push(action) },
+    readInventory: async () => {
+      reads.push('read');
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return {
+        ok: true, code: null, detail: null, transport: 'unix-socket',
+        endpoint: { transport: 'unix-socket', socketPath: join(root, 'runtime', 'daemon.sock') },
+        sessions: ['fixture-1'], epoch: 1, elapsedMs: 25,
+      };
+    },
+  });
+  const driver = { focus: async () => {}, split: async () => {} };
+  const fakeHub = {
+    command: () => {},
+    awaitReceipt: async () => ({ cancelAckMs: 13, cleanupReceipt: { authoritative: true } }),
+  };
+  try {
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: reader,
+      instrumentation,
+    }, { cancel: { phase: 'while-creating' } }, budget);
+    // (1) the scenario settles, and both reads really ran and really cost wall clock.
+    expect(result.cancelReceipt.cancelAckMs).toBe(13);
+    expect(reads.length).toBe(2);
+    expect(instrumentation.totalMs()).toBeGreaterThanOrEqual(40);
+    // (2) the window the scenario is judged against did not lose that time: the
+    // deadline moved forward by exactly what the measurements spent, so neither a
+    // stage cap nor the ceiling is decided by instrumentation.
+    expect(budget.deadlineAt - budget.startAt).toBeGreaterThanOrEqual(BUDGETS.attemptCeilingMs + 40);
+    // (3) the accounting reports BOTH numbers, and the ceiling compares the adjusted
+    // one, with the per-read attribution that makes the subtraction auditable.
+    const accounting = attemptBudgetAccounting({ budget, instrumentation, triggerLabel: 'cancel-request' });
+    expect(accounting.instrumentationMs).toBe(instrumentation.totalMs());
+    expect(accounting.scenarioMs).toBe(Math.max(0, accounting.attemptMs - accounting.instrumentationMs));
+    expect(accounting.ceilingMs).toBe(BUDGETS.attemptCeilingMs);
+    expect(accounting.ceilingBasis).toBe(ATTEMPT_CEILING_BASIS);
+    expect(accounting.exceeded).toBe(false);
+    expect(accounting.samples.map(sample => sample.label)).toEqual([PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
+    // (4) the same arithmetic at the boundary, with the raw clock deliberately past
+    // the ceiling and instrumentation over the top of it: the ceiling is the
+    // scenario's own time, so this is NOT exceeded.
+    const overrun = {
+      totalMs: BUDGETS.attemptCeilingMs, startAt: 0, deadlineAt: BUDGETS.attemptCeilingMs,
+      elapsedMs: () => BUDGETS.attemptCeilingMs + 1_500, remainingMs: () => 0,
+      isExceeded: () => true, consume: () => 1,
+    };
+    const synthetic = { totalMs: () => 2_000, samples: [{ label: SPLIT_INVENTORY_ACTION, ms: 2_000 }] };
+    expect(attemptBudgetAccounting({ budget: overrun, instrumentation: synthetic, triggerLabel: 'split-menu-click' }))
+      .toMatchObject({
+        attemptMs: BUDGETS.attemptCeilingMs + 1_500,
+        instrumentationMs: 2_000,
+        scenarioMs: BUDGETS.attemptCeilingMs - 500,
+        ceilingMs: BUDGETS.attemptCeilingMs,
+        exceeded: false,
+      });
+    // (5) and it still fails closed: the same raw clock with NO instrumentation
+    // recorded is over the ceiling, so the exclusion cannot be used to excuse a
+    // slow scenario.
+    expect(attemptBudgetAccounting({ budget: overrun, instrumentation: new InstrumentationClock(), triggerLabel: 'split-menu-click' }).exceeded).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a reader whose lastReading throws is recorded as a typed action and the split scenario still settles', async () => {
+  const root = fixtureRoot();
+  const actions = [];
+  const budget = new MonotonicBudget();
+  // The reader METHOD that used to be called unguarded (pass-22 audit R1): it is the
+  // baseline accessor, not the read, and a reader whose implementation throws from it
+  // must not be able to reach `classifyNativeFailure` either.
+  const reader = {
+    snapshot: async label => {
+      actions.push({ action: label, ok: true, code: null, delta: null });
+      return {
+        ok: true, code: null, detail: null, transport: 'unix-socket', endpoint: null,
+        sessions: ['fixture-1'], epoch: 1, elapsedMs: 1,
+      };
+    },
+    lastReading: () => { throw new HarnessError('ASSERTION_FAILURE', 'lastReading exploded'); },
+  };
+  const driver = { focus: async () => {}, split: async () => {} };
+  const fakeHub = {
+    command: () => {},
+    awaitReceipt: async () => ({ cancelAckMs: 11, cleanupReceipt: { authoritative: true } }),
+  };
+  try {
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: reader,
+    }, { cancel: { phase: 'while-creating' } }, budget);
+    // (1) the scenario's own settlement is untouched - the mirror of the throwing
+    // `snapshot` case above.
+    expect(result.cancelReceipt.cancelAckMs).toBe(11);
+    // (2) the failure is typed on its own action, carrying the thrown error's code.
+    const typed = actions.find(action => action.action === SPLIT_INVENTORY_LAST_READING_ACTION);
+    expect([typed.ok, typed.code, typed.cause]).toEqual([false, SPLIT_INVENTORY_READ_FAILED, 'ASSERTION_FAILURE']);
+    expect(typed.detail).toContain('lastReading()');
+    expect([typed.sessionCount, typed.sessionIds, typed.delta]).toEqual([null, null, null]);
+    // (3) the arm continued with no baseline, so both reads still happened - the
+    // typed action first, then the pre-click baseline and the post-click read
+    // (`cancel-request` is the scenario's own action and is not an inventory one).
+    expect(actions.map(action => action.action).filter(name => name.startsWith('split-inventory') || name.startsWith('pane-inventory')))
+      .toEqual([SPLIT_INVENTORY_LAST_READING_ACTION, PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

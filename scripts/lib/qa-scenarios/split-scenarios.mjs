@@ -92,6 +92,11 @@ export const SPLIT_INVENTORY_ACTION = 'split-inventory-after';
 export const PRE_SPLIT_INVENTORY_ACTION = 'pane-inventory-pre-split';
 export const PANE_INVENTORY_AFTER_ACTION = 'pane-inventory-after';
 export const INVENTORY_READER_MISSING = 'INVENTORY_READER_MISSING';
+// `armSplitInventory` asks the reader for the reading it took last - the baseline
+// the post-click delta is measured against. That is a reader METHOD like
+// `snapshot`, so its failure is typed the same way instead of escaping into
+// `classifyNativeFailure` (pass-22 audit R1).
+export const SPLIT_INVENTORY_LAST_READING_ACTION = 'split-inventory-last-reading';
 // The measurement's typed failure identities live in the shared harness module
 // (the reader emits them too); re-exported here so a caller of these adapters
 // needs one import.
@@ -130,6 +135,8 @@ function appStdioByteSelfCheck(ctx, bytesBefore) {
 // documented not to throw, and if it does anyway the action says so, typed, and
 // the scenario carries on with nothing measured.
 async function readSplitInventory(ctx, reader, label, budget, { compareToPrevious = false, extra = null } = {}) {
+  const instrumentation = ctx?.instrumentation ?? null;
+  const startedAt = Date.now();
   try {
     return await reader.snapshot(label, {
       compareToPrevious,
@@ -137,7 +144,14 @@ async function readSplitInventory(ctx, reader, label, budget, { compareToPreviou
       charge: { budget, capMs: BUDGETS.splitInventoryReadCapMs },
     });
   } catch (error) {
-    const sampled = typeof extra === 'function' ? (extra() ?? {}) : {};
+    // The sampler beside the read is a measurement too: a sampler that throws here
+    // must not turn the typed action into a second throw (pass-22 audit R2).
+    let sampled = {};
+    try {
+      sampled = typeof extra === 'function' ? (extra() ?? {}) : {};
+    } catch (samplerError) {
+      sampled = { extraError: { code: APP_STDIO_BYTES_FAILED, message: String(samplerError?.message ?? samplerError) } };
+    }
     ctx?.evidence?.action?.({
       action: label,
       ...sampled,
@@ -145,6 +159,38 @@ async function readSplitInventory(ctx, reader, label, budget, { compareToPreviou
       code: SPLIT_INVENTORY_READ_FAILED,
       cause: error?.code ?? null,
       detail: `the inventory read threw instead of reporting a result: ${error?.message ?? error}`,
+      sessionCount: null,
+      sessionIds: null,
+      delta: null,
+      baselineLabel: null,
+      elapsedMs: null,
+    });
+    return null;
+  } finally {
+    // The wall clock THIS read spent inside the measured window is instrumentation,
+    // not the scenario's own cost, so it is handed back to the window it was charged
+    // to (pass-22 audit F2-11 residual). Bounded by the charge above: each read is
+    // capped at `splitInventoryReadCapMs`, so the total handed back is bounded too.
+    instrumentation?.note?.(label, Date.now() - startedAt);
+  }
+}
+
+// The reader's remembered baseline, read through the same guard as `snapshot`
+// (pass-22 audit R1): `lastReading` is a reader method, so a reader whose
+// implementation throws from it is recorded as a typed action and the arm
+// continues with no baseline - exactly the state a reader that never took a
+// usable reading produces, and never a throw into `classifyNativeFailure`.
+function readLastReading(ctx, reader) {
+  if (typeof reader?.lastReading !== 'function') return null;
+  try {
+    return reader.lastReading();
+  } catch (error) {
+    ctx?.evidence?.action?.({
+      action: SPLIT_INVENTORY_LAST_READING_ACTION,
+      ok: false,
+      code: SPLIT_INVENTORY_READ_FAILED,
+      cause: error?.code ?? null,
+      detail: `the inventory reader's lastReading() threw instead of reporting a reading: ${error?.message ?? error}`,
       sessionCount: null,
       sessionIds: null,
       delta: null,
@@ -177,7 +223,7 @@ export async function armSplitInventory(ctx, budget = null) {
   }
   const armed = { reader, budget, baselineLabel: null, appStdioBytesBefore, appStdioBytesBeforeError };
   if (reader === null) return armed;
-  const previous = typeof reader.lastReading === 'function' ? reader.lastReading() : null;
+  const previous = readLastReading(ctx, reader);
   if (previous?.label === PANE_INVENTORY_AFTER_ACTION && previous.result?.ok === true) {
     armed.baselineLabel = previous.label;
     return armed;
