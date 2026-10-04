@@ -269,7 +269,64 @@ export async function clickRetryDarwin(evidence, pid) {
 // and the real desktop rejected it in pass 5
 // (`UnexpectedCharactersAfterHereStringHeader`) before any click could run.
 
-// Windows: Click actual Retry button via UIA.
+// ---------------------------------------------------------------------------
+// Lazy accessibility activation (task-9 pass-8 root cause, measured).
+//
+// Chromium/WebView2 builds its accessibility tree ON DEMAND, triggered by the
+// first UIA client attaching, and the tree is NOT ready at the instant of that
+// attach. Measured on the Windows interactive desktop with `ui/dist` served
+// (`task-9/win-pass8/activation/activation-probe.json`): the FIRST enumeration of
+// the app's tree returned 16 elements / 2 named - all of them Chromium-internal
+// (`WRY_WEBVIEW`, `BrowserRootView`, `SidebarContentsSplitView`, ...) with no
+// `Document`/`RootWebArea` and no DOM at all - while the next enumeration,
+// seconds later, returned 93 elements / 56 named including `New Terminal`.
+//
+// A probe that issues exactly ONE enumeration therefore reads the pre-activation
+// tree and reports a typed not-found for an affordance that does exist. Every
+// probe that can be the FIRST UIA client of a run therefore
+//   1. attaches ONCE with a cheap `FindAll(Descendants, TrueCondition)` per
+//      searched window root (that call is what triggers the lazy build), and
+//   2. repeats its REAL query on a bounded interval until that query matches or
+//      the probe's own warm budget expires.
+// Only the OBSERVATION is retried: not-found (with the same bounded inventory),
+// not-unique and disabled are still decided from the last observation exactly as
+// before, so the warm-up can never turn a genuine absence into a match.
+//
+// Warmed: the pane-creation probe (`buildWindowsNewPaneScript`) and the split
+// affordance probe (`buildWindowsSplitRightScript`) - the only two UIA probes a
+// run can reach first. The Retry probe (`buildWindowsRetryScript`) is
+// deliberately NOT warmed: the only scenario that clicks Retry
+// (`split-attach-stall`) runs the pane step and then the split probe first, so it
+// can never be a run's first UIA client - and once any client has attached, the
+// app's tree stays built (pass 7 read the full tree from a probe that attached in
+// a different process).
+// ---------------------------------------------------------------------------
+export const UIA_WARM_BUDGET_MS = BUDGETS.uiaWarmBudgetMs;
+export const UIA_WARM_RETRY_INTERVAL_MS = BUDGETS.uiaWarmRetryIntervalMs;
+
+// The warm enumeration every warmed probe runs once, before its real query. One
+// `FindAll(Descendants, TrueCondition)` per window root is what attaches the UIA
+// client and triggers the tree build; the result is discarded except for the
+// measured element count, which is recorded so a later pass can tell the attach
+// really happened (16 elements at the attach, 93 after activation, in the pass-8
+// measurement).
+function uiaWarmLines(windowVar, warmBudgetMs, warmIntervalMs) {
+  return [
+    `$warmBudgetMs = ${warmBudgetMs};`,
+    `$warmIntervalMs = ${warmIntervalMs};`,
+    '$warmElements = 0;',
+    `foreach ($warmWindow in ${windowVar}) {`,
+    '  $warmRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$warmWindow.hwnd));',
+    '  if ($warmRoot -eq $null) { continue };',
+    '  $warmNodes = $warmRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition);',
+    '  $warmElements = $warmElements + $warmNodes.Count;',
+    '}',
+    '$diag.warmElements = $warmElements;',
+  ];
+}
+
+// Windows: Click actual Retry button via UIA. Deliberately NOT warmed - see the
+// lazy-activation note above: this probe is never a run's first UIA client.
 export function buildWindowsRetryScript(pid) {
   return [
     'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes;',
@@ -721,6 +778,8 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
   }
   const matchCap = Number.isFinite(options.inventoryMatchCap) ? options.inventoryMatchCap : WINDOW_INVENTORY_MATCH_CAP;
   const inspectCap = Number.isFinite(options.inventoryInspectCap) ? options.inventoryInspectCap : WINDOW_INVENTORY_INSPECT_CAP;
+  const warmBudgetMs = Number.isFinite(options.warmBudgetMs) ? options.warmBudgetMs : UIA_WARM_BUDGET_MS;
+  const warmIntervalMs = Number.isFinite(options.warmRetryIntervalMs) ? options.warmRetryIntervalMs : UIA_WARM_RETRY_INTERVAL_MS;
   const searchWindows = asArray(options.windows)
     .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
     .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
@@ -856,6 +915,10 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '$diag.windowsSearchedCount = $searched.Count;',
     '$diag.windowsSearched = @($searched | ForEach-Object { [ordered]@{ hwnd = $_.hwnd; title = $_.title; className = $_.className } });',
     "if ($searched.Count -eq 0) { Fail 'NO_OWNED_WINDOW' 'no visible top-level window owned by the process could be searched for the split affordance' }",
+    // Warm the accessibility tree before the FIRST UIA call of this probe (the
+    // focused-element read below): the attach is what builds the lazy tree, so
+    // the queries that follow it must not read the pre-activation snapshot.
+    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs),
     'try { [Microsoft.VisualBasic.Interaction]::AppActivate($targetPid) | Out-Null } catch { }',
     '$focused = [System.Windows.Automation.AutomationElement]::FocusedElement;',
     'if ($focused -ne $null -and $focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { $focused = $null }',
@@ -886,27 +949,42 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '$scope = $null;',
     '$scopeRect = $null;',
     '$depths = New-Object System.Collections.ArrayList;',
-    'foreach ($pass in @(1, 2)) {',
-    '  for ($i = 0; $i -lt $searched.Count -and $scope -eq $null; $i = $i + 1) {',
-    '    $containsFocus = [bool]($focused -ne $null -and (InRect $focused $searched[$i].rect));',
-    '    if ($pass -eq 1 -and -not $containsFocus) { continue };',
-    '    if ($pass -eq 2 -and $containsFocus) { continue };',
-    '    $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$searched[$i].hwnd));',
-    '    if ($root -eq $null) { continue };',
-    '    $node = $root;',
-    '    if ($containsFocus) { $node = $focused };',
-    '    $depth = 0;',
-    '    while ($node -ne $null) {',
-    '      $found = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
-    '      if ($found.Count -ge 1) { $scope = $node; $scopeRect = $searched[$i].rect; $diag.scopeDepth = $depth; $diag.matchedWindowHwnd = $searched[$i].hwnd; $diag.scopeIsWindowRoot = [bool]($node -eq $root); break };',
-    '      if ($node -eq $root) { break };',
-    '      $node = $walker.GetParent($node);',
-    '      $depth = $depth + 1;',
-    '      if ($depth -gt 64) { break };',
-    '    };',
-    '    $depths.Add([ordered]@{ hwnd = $searched[$i].hwnd; depth = $depth; containsFocus = $containsFocus }) | Out-Null;',
+    '$warmSw = [System.Diagnostics.Stopwatch]::StartNew();',
+    '$warmAttempts = 0;',
+    // Bounded re-query of the REAL observation, never a fixed sleep: the scope
+    // search repeats until it matches or this probe's own warm budget expires, so
+    // a tree that is still activating on the first pass is observed again instead
+    // of being read as an absence. The typed not-found below - and the bounded
+    // inventory it records - are unchanged and decided from the last observation.
+    'while ($scope -eq $null -and $warmSw.ElapsedMilliseconds -lt $warmBudgetMs) {',
+    '  $warmAttempts = $warmAttempts + 1;',
+    '  $depths.Clear();',
+    '  foreach ($pass in @(1, 2)) {',
+    '    for ($i = 0; $i -lt $searched.Count -and $scope -eq $null; $i = $i + 1) {',
+    '      $containsFocus = [bool]($focused -ne $null -and (InRect $focused $searched[$i].rect));',
+    '      if ($pass -eq 1 -and -not $containsFocus) { continue };',
+    '      if ($pass -eq 2 -and $containsFocus) { continue };',
+    '      $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$searched[$i].hwnd));',
+    '      if ($root -eq $null) { continue };',
+    '      $node = $root;',
+    '      if ($containsFocus) { $node = $focused };',
+    '      $depth = 0;',
+    '      while ($node -ne $null) {',
+    '        $found = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '        if ($found.Count -ge 1) { $scope = $node; $scopeRect = $searched[$i].rect; $diag.scopeDepth = $depth; $diag.matchedWindowHwnd = $searched[$i].hwnd; $diag.scopeIsWindowRoot = [bool]($node -eq $root); break };',
+    '        if ($node -eq $root) { break };',
+    '        $node = $walker.GetParent($node);',
+    '        $depth = $depth + 1;',
+    '        if ($depth -gt 64) { break };',
+    '      };',
+    '      $depths.Add([ordered]@{ hwnd = $searched[$i].hwnd; depth = $depth; containsFocus = $containsFocus }) | Out-Null;',
+    '    }',
     '  }',
+    '  if ($scope -ne $null) { break };',
+    '  Start-Sleep -Milliseconds $warmIntervalMs;',
     '}',
+    '$diag.warmAttempts = $warmAttempts;',
+    '$diag.warmElapsedMs = [int]$warmSw.ElapsedMilliseconds;',
     '$diag.windowSearchDepths = @($depths);',
     'if ($scope -eq $null) {',
     '  foreach ($entry in $depths) { if ($entry.containsFocus) { $diag.scopeDepth = $entry.depth; break } };',
@@ -978,6 +1056,12 @@ export function classifyWindowsSplitRight(probe) {
     windowsSearchedCount: probe?.windowsSearchedCount ?? windowsSearched.length,
     windowSearchDepths: asArray(probe?.windowSearchDepths),
     matchedWindowHwnd: probe?.matchedWindowHwnd ?? null,
+    // Warm-up telemetry (never part of a verdict): the element count the tree
+    // attach's own enumeration saw, and how many bounded re-queries the real
+    // observation needed (`1` = the tree was already warm when this probe ran).
+    warmElements: probe?.warmElements ?? null,
+    warmAttempts: probe?.warmAttempts ?? null,
+    warmElapsedMs: probe?.warmElapsedMs ?? null,
     focusedFound: probe?.focusedFound ?? null,
     focusSource: probe?.focusSource ?? null,
     scopeDepth: probe?.scopeDepth ?? null,
@@ -1057,6 +1141,9 @@ export async function windowsDriver(evidence, pid) {
     candidates: verdict.candidates,
     chosen: verdict.chosen,
     splitInventory: verdict.inventory,
+    warmElements: verdict.warmElements,
+    warmAttempts: verdict.warmAttempts,
+    warmElapsedMs: verdict.warmElapsedMs,
     detail: verdict.detail,
   });
   if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);
@@ -1087,6 +1174,8 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
   if (names.length + automationIds.length === 0) {
     throw new HarnessError('ASSERTION_FAILURE', 'the pane affordance probe needs at least one exact accessible name or automation id; refusing to search for nothing');
   }
+  const warmBudgetMs = Number.isFinite(options.warmBudgetMs) ? options.warmBudgetMs : UIA_WARM_BUDGET_MS;
+  const warmIntervalMs = Number.isFinite(options.warmRetryIntervalMs) ? options.warmRetryIntervalMs : UIA_WARM_RETRY_INTERVAL_MS;
   const searchWindows = asArray(options.windows)
     .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
     .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
@@ -1145,24 +1234,46 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
     '$diag.windowsSearchedCount = $searched.Count;',
     '$diag.windowsSearched = @($searched | ForEach-Object { [ordered]@{ hwnd = $_.hwnd; title = $_.title; className = $_.className; rootOffscreen = $_.rootOffscreen } });',
     "if ($searched.Count -eq 0) { Fail 'NO_OWNED_WINDOW' 'no owned top-level window could be addressed for the pane affordance' }",
+    // Warm the accessibility tree before the FIRST UIA call of this probe (the
+    // candidate enumeration below): this probe IS the attach in every split
+    // scenario, and pass 8 measured the attach's own enumeration reading 16
+    // Chromium-internal nodes with no DOM at all.
+    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs),
     '$candidates = New-Object System.Collections.ArrayList;',
     '$elements = New-Object System.Collections.ArrayList;',
-    'foreach ($window in $searched) {',
-    '  $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$window.hwnd));',
-    '  if ($root -eq $null) { continue };',
-    '  $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
-    '  for ($j = 0; $j -lt $items.Count; $j = $j + 1) {',
-    '    try {',
-    '      $item = $items.Item($j);',
-    '      $rect = $item.Current.BoundingRectangle;',
-    '      $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; name = $item.Current.Name; controlType = $item.Current.ControlType.ProgrammaticName; automationId = $item.Current.AutomationId; enabled = [bool]$item.Current.IsEnabled; offscreen = [bool]$item.Current.IsOffscreen; rectEmpty = [bool]$rect.IsEmpty; rect = ("{0},{1},{2},{3}" -f $rect.Left, $rect.Top, $rect.Width, $rect.Height) }) | Out-Null;',
-    '      $elements.Add($item) | Out-Null;',
-    '    } catch {',
-    '      $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; error = $_.Exception.Message }) | Out-Null;',
-    '      $elements.Add($null) | Out-Null;',
+    '$warmSw = [System.Diagnostics.Stopwatch]::StartNew();',
+    '$warmAttempts = 0;',
+    // Bounded re-query of the REAL observation, never a fixed sleep: the
+    // candidate enumeration repeats until the bound accessible name appears or
+    // this probe's own warm budget expires, so a tree that is still activating is
+    // observed again instead of being read as an absence. Every typed verdict
+    // below (not-found, not-unique, disabled) is decided exactly as before.
+    'while ($true) {',
+    '  $warmAttempts = $warmAttempts + 1;',
+    '  $candidates.Clear();',
+    '  $elements.Clear();',
+    '  foreach ($window in $searched) {',
+    '    $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$window.hwnd));',
+    '    if ($root -eq $null) { continue };',
+    '    $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '    for ($j = 0; $j -lt $items.Count; $j = $j + 1) {',
+    '      try {',
+    '        $item = $items.Item($j);',
+    '        $rect = $item.Current.BoundingRectangle;',
+    '        $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; name = $item.Current.Name; controlType = $item.Current.ControlType.ProgrammaticName; automationId = $item.Current.AutomationId; enabled = [bool]$item.Current.IsEnabled; offscreen = [bool]$item.Current.IsOffscreen; rectEmpty = [bool]$rect.IsEmpty; rect = ("{0},{1},{2},{3}" -f $rect.Left, $rect.Top, $rect.Width, $rect.Height) }) | Out-Null;',
+    '        $elements.Add($item) | Out-Null;',
+    '      } catch {',
+    '        $candidates.Add([ordered]@{ windowHwnd = $window.hwnd; error = $_.Exception.Message }) | Out-Null;',
+    '        $elements.Add($null) | Out-Null;',
+    '      }',
     '    }',
     '  }',
+    '  if ($candidates.Count -gt 0) { break };',
+    '  if ($warmSw.ElapsedMilliseconds -ge $warmBudgetMs) { break };',
+    '  Start-Sleep -Milliseconds $warmIntervalMs;',
     '}',
+    '$diag.warmAttempts = $warmAttempts;',
+    '$diag.warmElapsedMs = [int]$warmSw.ElapsedMilliseconds;',
     '$diag.candidates = $candidates;',
     '$diag.candidateCount = $candidates.Count;',
     '$actionableIndexes = New-Object System.Collections.ArrayList;',
@@ -1205,6 +1316,10 @@ export function classifyWindowsNewPane(probe) {
     actionableCount: probe?.actionableCount ?? null,
     candidates,
     chosen: probe?.chosen ?? null,
+    // Warm-up telemetry (never part of a verdict) - see classifyWindowsSplitRight.
+    warmElements: probe?.warmElements ?? null,
+    warmAttempts: probe?.warmAttempts ?? null,
+    warmElapsedMs: probe?.warmElapsedMs ?? null,
     psFailure: probe?.failure ?? null,
     psDetail: probe?.detail ?? null,
   };
@@ -1264,6 +1379,9 @@ export async function windowsNewPane(evidence, pid) {
     actionableCount: verdict.actionableCount,
     candidates: verdict.candidates,
     chosen: verdict.chosen,
+    warmElements: verdict.warmElements,
+    warmAttempts: verdict.warmAttempts,
+    warmElapsedMs: verdict.warmElapsedMs,
     detail: verdict.detail,
   });
   if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);

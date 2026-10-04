@@ -299,6 +299,19 @@ export const BUDGETS = Object.freeze({
   // pane session the app itself presents) gets its own bounded budget for the
   // same reason: it is setup, not the measured attempt.
   paneAffordanceWaitMs: 8_000,
+  // Chromium/WebView2 builds its accessibility tree LAZILY, triggered by the
+  // FIRST UIA client attaching, and the tree is not ready at the instant of that
+  // attach: task-9 pass 8 measured the first enumeration of the app's tree at
+  // 16 elements / 2 named (all Chromium-internal, no `Document`/`RootWebArea`)
+  // and the next enumeration at 93 elements / 56 named including
+  // `New Terminal` (`task-9/win-pass8/activation/activation-probe.json`). Every
+  // probe that can be a run's first UIA client therefore warms the tree with one
+  // cheap enumeration and repeats its real query on this bounded interval within
+  // this bounded budget before it decides. Both are charged to the pre-trigger
+  // `setupCeilingMs` (the pane step and the split probe's own warm-up), never to
+  // the frozen `attemptCeilingMs` correctness ceiling.
+  uiaWarmBudgetMs: 4_000,
+  uiaWarmRetryIntervalMs: 100,
   paneBindingReadyMs: 8_000,
   setupCeilingMs: 45_000,
 });

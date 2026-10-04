@@ -1460,6 +1460,10 @@ test('split-right PowerShell script keeps the here-string header and terminator 
   expect(lines).toContain('$diag.actionableCount = $actionable.Count;');
   expect(script).toContain("$diag.chosen = [ordered]@{ index = [int]$actionable[0].index;");
   expect(script).toContain("$diag.result = 'SPLIT_CLICKED';");
+  // The click itself: the invoke is its own statement inside the chosen branch's
+  // `try`, so it is emitted indented - asserted on the TRIMMED line, which a
+  // commented-out, nested, or otherwise altered invoke cannot satisfy.
+  expect(lines.map(line => line.trim())).toContain('$invoke.Invoke();');
   for (const code of ['NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED']) {
     expect(script).toContain(code);
   }
@@ -1546,6 +1550,9 @@ test('retry, focus, and marker PowerShell scripts keep one statement per line an
   expect(retry).toContain('  foreach ($btn in $allButtons) {');
   expect(retry).toContain('}');
   expect(retry).toContain('if ($items.Count -eq 0) { throw "RETRY_BUTTON_NOT_FOUND" }');
+  // The click itself. This builder emits the invoke unindented (top level, not
+  // inside a `try`), so the exact line is asserted directly.
+  expect(retry).toContain('$invoke.Invoke();');
   expect(retry[retry.length - 1]).toBe('"RETRY_CLICKED"');
 
   expect(powerShellScriptLines(buildWindowsFocusScript(4242))).toEqual([
@@ -2128,7 +2135,14 @@ test('the pane affordance is searched by its exact accessible name and only one 
   expect(lines).toContain('$windowHandles = @(19663500);');
   expect(lines).toContain("$windowTitles = @('F');");
   expect(lines).toContain('$condition = $conditionName0;');
-  expect(lines).toContain('$invoke.Invoke();');
+  // The click itself. The invoke is its own statement inside the chosen branch's
+  // `try`, so the builder emits it indented (`    $invoke.Invoke();`). Assert the
+  // statement as a WHOLE line with only its leading indentation normalized away:
+  // still exact - a commented-out, nested, or otherwise altered invoke cannot
+  // satisfy it - and no longer coupled to the try-block's indentation. The
+  // indentation is not the defect (pass 8 confirmed the invoke is present and
+  // correct in the emitted script), so the expectation moves, not the builder.
+  expect(lines.map(line => line.trim())).toContain('$invoke.Invoke();');
   // Exact property conditions only: no substring filter and no index pick.
   expect(script).not.toMatch(/Name -match|Name -like/);
   // No here-string and no P/Invoke, so the pass-5 defect class cannot recur.
