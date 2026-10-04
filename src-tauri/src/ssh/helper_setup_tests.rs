@@ -960,6 +960,42 @@ fn ssh_helper_setup_qualified_runtime_root_fits_unix_socket_limit() {
 }
 
 #[test]
+fn windows_upload_script_avoids_here_strings_on_stdin() {
+    // The script is piped to `<shell> -Command -`, and that stdin mode silently
+    // discards multi-line here-strings (exit 0, no output, no marker), so the
+    // payload has to be a single newline-free single-quoted literal.
+    let location = HelperLocation {
+        executable: "C:\\u\\.ferryx\\versions\\v\\bin\\ferryx-remote-helper.exe".into(),
+        root: "C:\\u\\.ferryx\\r\\v\\digest".into(),
+    };
+    let script = build_windows_upload_script(&location, b"payload-bytes");
+
+    assert!(
+        !script.contains("@'"),
+        "windows upload must not open a here-string: {script}"
+    );
+    assert!(
+        !script.contains("'@"),
+        "windows upload must not close a here-string: {script}"
+    );
+    let literal_start = script
+        .find("$b64 = '")
+        .expect("payload assignment present")
+        + "$b64 = '".len();
+    let literal_end = literal_start
+        + script[literal_start..]
+            .find('\'')
+            .expect("payload literal terminated");
+    let literal = &script[literal_start..literal_end];
+    assert!(
+        !literal.contains('\n'),
+        "the payload literal cannot span lines"
+    );
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    assert_eq!(literal, STANDARD.encode(b"payload-bytes"));
+}
+
+#[test]
 fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
     // Regression (live maho-win 2026-10-04): the Windows arm used to pass
     // "-Command -" through `RemoteExecutor::command`, which encodes it as an
