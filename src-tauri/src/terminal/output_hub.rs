@@ -864,6 +864,13 @@ impl TerminalOutputHub {
         if hub.raw_sender.receiver_count() > 0 {
             let _ = hub.raw_sender.send(chunk.bytes.to_vec());
         }
+        drop(hub);
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::terminal::qa_liveness::observe_published_output(
+            session_id,
+            chunk.sequence,
+            Arc::clone(&chunk.bytes),
+        );
 
         Some(chunk)
     }

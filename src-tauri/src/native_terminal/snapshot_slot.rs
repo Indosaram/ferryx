@@ -13,6 +13,11 @@ pub(crate) struct PublishedFrame {
     pub logical_bounds: LogicalBounds,
     pub input: SessionRenderInput,
     pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+    /// Last daemon sequence the session's grid had already applied when this
+    /// frame was built, i.e. the output the frame really covers. `None` until the
+    /// session has applied a sequence; the private QA frame-submission evidence is
+    /// written only for real, non-empty coverage.
+    pub covered_sequence: Option<u64>,
 }
 
 /// Receipt of a frame the GPU actually presented, tagged with the frame and attachment it
@@ -87,6 +92,7 @@ impl SnapshotSlot {
         logical_bounds: LogicalBounds,
         input: SessionRenderInput,
         attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+        covered_sequence: Option<u64>,
     ) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let attachment_epoch = self.current_epoch();
@@ -97,6 +103,7 @@ impl SnapshotSlot {
             logical_bounds,
             input,
             attach_tuple,
+            covered_sequence,
         });
         *self.ready.lock() = Some(frame);
         generation
@@ -204,7 +211,7 @@ mod tests {
             physical_bounds: PhysicalBounds { x: 0, y: 0, width: 800, height: 480 },
         };
         let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
-        let generation = slot.publish(layout, bounds, mock_input(), None);
+        let generation = slot.publish(layout, bounds, mock_input(), None, None);
         slot.consume().expect("submitted frame");
         assert!(presentations.borrow().is_none());
         let mut receipt = NativeTerminalSurfaceReceipt {
@@ -247,7 +254,7 @@ mod tests {
         assert_eq!(slot.generation(), 0);
         assert!(slot.consume().is_none());
 
-        let gen = slot.publish(layout, bounds, mock_input(), no_binding());
+        let gen = slot.publish(layout, bounds, mock_input(), no_binding(), None);
         assert_eq!(gen, 1);
         assert_eq!(slot.generation(), 1);
 
@@ -280,7 +287,7 @@ mod tests {
             physical_bounds: PhysicalBounds { x: 0, y: 0, width: 800, height: 480 },
         };
         let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
-        let generation = slot.publish(layout, bounds, mock_input(), Some(active.clone()));
+        let generation = slot.publish(layout, bounds, mock_input(), Some(active.clone()), None);
         let receipt = NativeTerminalSurfaceReceipt {
             presented: true, render_deferred: false, render_suspended: false,
             cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
@@ -334,7 +341,7 @@ mod tests {
             height: 480.0,
             scale_factor: 1.0,
         };
-        slot.publish(layout, bounds, mock_input(), no_binding());
+        slot.publish(layout, bounds, mock_input(), no_binding(), None);
 
         assert!(slot.is_attached_with_epoch(epoch1));
         assert!(slot.consume().is_some());
@@ -346,7 +353,7 @@ mod tests {
         // Prior frame had epoch1, so consume rejects it as stale until next publish
         assert!(slot.consume().is_none());
 
-        slot.publish(layout, bounds, mock_input(), no_binding());
+        slot.publish(layout, bounds, mock_input(), no_binding(), None);
         let frame2 = slot.consume().expect("frame available for epoch 2");
         assert_eq!(frame2.attachment_epoch, epoch2);
     }

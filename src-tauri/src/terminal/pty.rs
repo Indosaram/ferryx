@@ -552,6 +552,8 @@ impl PtyManager {
             .write()
             .insert(session_id.clone(), Arc::clone(&session));
         session.mark_running();
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        super::qa_liveness::record_owned_pty_creation(&session_id);
         self.start_lifecycle_watcher(session_id);
         Ok(rx)
     }

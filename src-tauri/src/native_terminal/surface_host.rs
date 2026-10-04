@@ -571,11 +571,15 @@ impl NativeTerminalSession {
     pub fn publish_frame(&self) {
         if let (Some(layout), Some(logical_bounds)) = (self.layout, self.logical_bounds) {
             if let Ok(input) = session_render_snapshot(self) {
+                // The frame covers exactly the output this session had already
+                // applied; that is the coverage the private QA frame evidence
+                // reports, so it is published with the frame.
                 self.snapshot_slot.publish(
                     layout,
                     logical_bounds,
                     input,
                     self.active_attach_tuple.clone(),
+                    self.last_sequence,
                 );
             }
         }
@@ -638,6 +642,159 @@ impl NativeTerminalSurfaceHostState {
     }
 }
 
+/// Cross-lane frame-submission evidence. The terminal layer owns the
+/// `marker-output` receipt and reads this sidecar (its own `FRAME_SUBMITTED_FILE`
+/// in `terminal/qa_liveness.rs`); the native lane is its only writer.
+#[cfg(feature = "local-split-qa")]
+const QA_FRAME_SUBMITTED_FILE: &str = "frame-submitted.jsonl";
+
+/// Receipt name the runner awaits when an older attempt is fenced off.
+#[cfg(feature = "local-split-qa")]
+pub const STALE_RECEIPT_REJECTED_BARRIER: &str = "stale-receipt-rejected";
+
+/// Receipt name the runner awaits when a legitimate reattach reuses the backend.
+#[cfg(feature = "local-split-qa")]
+pub const REATTACH_MARKER_BARRIER: &str = "reattach-marker";
+
+/// Runner->product control that asks for a stale attempt against the live binding
+/// (`barrierHub.command('trigger-stale-binding', ...)` in
+/// `scripts/lib/qa-scenarios/lifecycle-scenarios.mjs`). The command names the
+/// identity field the stale attempt must differ in.
+#[cfg(feature = "local-split-qa")]
+const TRIGGER_STALE_BINDING: &str = "trigger-stale-binding";
+
+/// Identity fields a stale attempt can really be rejected on by the REGISTRATION
+/// fence, i.e. exactly the fields `pane_liveness_registration_matches` compares.
+/// `incarnation`/`backendSessionId` are refused earlier by the detach guard (which
+/// settles nothing) and `daemonEpoch` is not compared by that fence at all, so a
+/// command naming one of those is reported instead of being simulated.
+#[cfg(feature = "local-split-qa")]
+const STALE_BINDING_MUTABLE_FIELDS: [&str; 4] = [
+    "attemptGeneration",
+    "frontendSessionId",
+    "paneIdentity",
+    "bindingKey",
+];
+
+/// Bounded wait for the released frame's real presentation. The settlement
+/// subscribes to the slot's presentation channel BEFORE the release-driven
+/// dispatch and then awaits that signal, so the receipt reports a presentation
+/// that really happened instead of racing one.
+#[cfg(feature = "local-split-qa")]
+const PRESENTATION_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// Missing-field list for an honestly partial liveness snapshot. Mirrors
+/// `QaBarrierChannel`'s own `evidence_missing_fields` (private to
+/// `ipc/qa_barrier.rs`): an `Unknown` verdict is reported with the exact fields
+/// this layer could not observe instead of a forced verdict.
+#[cfg(feature = "local-split-qa")]
+fn qa_missing_liveness_fields(
+    snapshot: &crate::ipc::debug::PaneLivenessSnapshot,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if snapshot.daemon_epoch.is_none() {
+        missing.push("daemonEpoch");
+    }
+    if snapshot.reader_paused.is_none() {
+        missing.push("readerPaused");
+    }
+    if snapshot.kernel_stopped.is_none() {
+        missing.push("kernelStopped");
+    }
+    if snapshot.suspended.is_none() {
+        missing.push("suspended");
+    }
+    if snapshot.presentation_receipt_received.is_none() {
+        missing.push("presentationReceiptReceived");
+    }
+    missing
+}
+
+/// The liveness snapshot the render coordinator can honestly attest: session
+/// identity plus the REAL pending state of its own coordinator. The daemon-owned
+/// suspension/reader observations are not reachable from here and stay `None`,
+/// which the classifier reports as `Unknown` with `evidenceMissing` instead of
+/// as a positive recovery.
+#[cfg(feature = "local-split-qa")]
+fn qa_coordinator_snapshot(
+    session_id: &str,
+    render_pending: bool,
+) -> crate::ipc::debug::PaneLivenessSnapshot {
+    crate::ipc::debug::PaneLivenessSnapshot {
+        telemetry_available: true,
+        session_id: Some(session_id.to_string()),
+        vt_session_id: Some(session_id.to_string()),
+        has_unpresented_frames: Some(render_pending),
+        ..Default::default()
+    }
+}
+
+/// Which field of the seven-field identity really diverged, so a rejection
+/// reason names the field that failed instead of a generic message.
+#[cfg(feature = "local-split-qa")]
+fn qa_tuple_mismatch_field(
+    stale: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    active: Option<&crate::daemon::protocol::PaneAttachTuple>,
+) -> &'static str {
+    let (Some(stale), Some(active)) = (stale, active) else {
+        return "attachTuple";
+    };
+    if stale.backend_session_id != active.backend_session_id {
+        return "backendSessionId";
+    }
+    if stale.incarnation != active.incarnation {
+        return "incarnation";
+    }
+    if stale.daemon_epoch != active.daemon_epoch {
+        return "daemonEpoch";
+    }
+    if stale.frontend_session_id != active.frontend_session_id {
+        return "frontendSessionId";
+    }
+    if stale.pane_identity != active.pane_identity {
+        return "paneIdentity";
+    }
+    if stale.binding_key != active.binding_key {
+        return "bindingKey";
+    }
+    if stale.attempt_generation != active.attempt_generation {
+        return "attemptGeneration";
+    }
+    "attachTuple"
+}
+
+/// The fields `pane_liveness_registration_matches` actually fences, so a
+/// registration rejection names the field that really failed it.
+#[cfg(feature = "local-split-qa")]
+fn qa_registration_mismatch_field(
+    active: &crate::daemon::protocol::PaneAttachTuple,
+    incoming: &crate::daemon::protocol::PaneAttachTuple,
+) -> &'static str {
+    if active.backend_session_id != incoming.backend_session_id {
+        return "backendSessionId";
+    }
+    if active.incarnation != incoming.incarnation {
+        return "incarnation";
+    }
+    if active.frontend_session_id != incoming.frontend_session_id {
+        return "frontendSessionId";
+    }
+    if active.pane_identity != incoming.pane_identity {
+        return "paneIdentity";
+    }
+    if active.binding_key != incoming.binding_key {
+        return "bindingKey";
+    }
+    "attemptGeneration"
+}
+
+/// `presentation` barrier, positive branch: the product's OWN
+/// `PanePresentationReceipt` is emitted verbatim.
+///
+/// The runner's `requireSevenTupleReceipt` reads the authoritative seven-field
+/// identity off `attachTuple`, so the real value the product already sends to
+/// the frontend is the only payload that can satisfy it; nothing here is
+/// synthesized, and a frame without an attach tuple emits nothing at all.
 #[cfg(feature = "local-split-qa")]
 fn emit_native_presentation_receipt_qa(
     channel: &std::sync::Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
@@ -645,37 +802,359 @@ fn emit_native_presentation_receipt_qa(
     frame_generation: u64,
     frame_epoch: u64,
     receipt: &NativeTerminalSurfaceReceipt,
+    presentation_receipt: &crate::daemon::protocol::PanePresentationReceipt,
 ) {
-    let operation_id = channel
+    // No correlation identity means no correlatable line: refuse to write one
+    // rather than invent an operation nonce the runner would reject.
+    let Some(operation_id) = channel
         .spec(crate::ipc::qa_barrier::PRESENTATION_BARRIER)
         .map(|s| s.operation_id)
         .or_else(|| channel.operation_id())
-        .unwrap_or_else(|| format!("op-pres-{}", frame_generation));
-
-    schedule_native_qa_receipt(channel,
+    else {
+        return;
+    };
+    let mut payload = serde_json::to_value(presentation_receipt).unwrap_or_default();
+    let Some(fields) = payload.as_object_mut() else {
+        return;
+    };
+    // `attachTuple` and `presented` are the real receipt's own values; the rest
+    // is the render observation that accompanied the accepted presentation.
+    fields.insert("sessionId".into(), serde_json::json!(session_id));
+    fields.insert(
+        "stage".into(),
+        serde_json::json!("native_presentation_settled"),
+    );
+    fields.insert(
+        "frameGeneration".into(),
+        serde_json::json!(frame_generation),
+    );
+    fields.insert("frameEpoch".into(), serde_json::json!(frame_epoch));
+    fields.insert("frameSubmitted".into(), serde_json::json!(true));
+    fields.insert("cols".into(), serde_json::json!(receipt.cols));
+    fields.insert("rows".into(), serde_json::json!(receipt.rows));
+    fields.insert("rebuiltRows".into(), serde_json::json!(receipt.rebuilt_rows));
+    fields.insert("reusedRows".into(), serde_json::json!(receipt.reused_rows));
+    fields.insert("cursorCol".into(), serde_json::json!(receipt.cursor_col));
+    fields.insert("cursorRow".into(), serde_json::json!(receipt.cursor_row));
+    fields.insert(
+        "cellWidthPx".into(),
+        serde_json::json!(receipt.cell_width_px),
+    );
+    fields.insert(
+        "cellHeightPx".into(),
+        serde_json::json!(receipt.cell_height_px),
+    );
+    fields.insert(
+        "effectiveScaleFactor".into(),
+        serde_json::json!(receipt.effective_scale_factor),
+    );
+    fields.insert(
+        "presentationEvidence".into(),
+        serde_json::json!("native-presented"),
+    );
+    fields.insert(
+        "producerComponent".into(),
+        serde_json::json!("surface-host-gpu-render"),
+    );
+    schedule_native_qa_receipt(
+        channel,
         crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+        &operation_id,
+        payload,
+    );
+}
+
+/// The stale attempt the runner asked for: the live binding with exactly the
+/// named identity field changed. `None` for a field the registration fence does
+/// not compare, or for a generation that cannot be made strictly older.
+#[cfg(feature = "local-split-qa")]
+fn mutate_attach_tuple_field(
+    active: &crate::daemon::protocol::PaneAttachTuple,
+    field: &str,
+) -> Option<crate::daemon::protocol::PaneAttachTuple> {
+    let mut stale = active.clone();
+    match field {
+        // The fence requires the incoming generation to continue the live one; an
+        // older generation is exactly the stale attempt the scenario means.
+        "attemptGeneration" => {
+            stale.attempt_generation = active.attempt_generation.checked_sub(1)?;
+        }
+        "frontendSessionId" => {
+            stale.frontend_session_id = format!("{}-stale", active.frontend_session_id);
+        }
+        "paneIdentity" => {
+            stale.pane_identity = format!("{}-stale", active.pane_identity);
+        }
+        "bindingKey" => {
+            stale.binding_key = format!("{}-stale", active.binding_key);
+        }
+        _ => return None,
+    }
+    Some(stale)
+}
+
+/// `presentation` barrier, released branch: the SAME owned frame was handed to
+/// the real coordinator path. Written only after that frame's real presentation
+/// was observed (the watch is subscribed before the dispatch), and it reports
+/// the coordinator's measured pending state, the frame's own presentation receipt
+/// and the daemon's reader/kernel facts that were really observed. Those daemon
+/// facts are what a positive recovery verdict rests on: a fact the daemon did not
+/// report stays unobserved, which keeps the verdict `Unknown` with
+/// `evidenceMissing` instead of turning a missing observation into a pass.
+#[cfg(feature = "local-split-qa")]
+fn emit_presentation_released_settlement_qa(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    operation_id: &str,
+    coordinator: &RenderScheduleCoordinator,
+    frame_presented: bool,
+    daemon_facts: Option<&crate::ipc::qa_barrier::QaDaemonLiveness>,
+) {
+    use crate::ipc::debug::{classify_pane_liveness, PaneLivenessVerdict};
+    use crate::ipc::qa_barrier::verdict_str;
+    let render_pending_after = coordinator.is_render_pending();
+    let mut snapshot = qa_coordinator_snapshot(session_id, render_pending_after);
+    // The presentation watch was subscribed BEFORE the release-driven dispatch, so
+    // whether THIS frame's own receipt arrived is a real observation too.
+    snapshot.presentation_receipt_received = Some(frame_presented);
+    if let Some(facts) = daemon_facts {
+        facts.apply(&mut snapshot);
+    }
+    let verdict = classify_pane_liveness(&snapshot);
+    let missing = qa_missing_liveness_fields(&snapshot);
+    channel.append_receipt(
+        crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+        operation_id,
+        serde_json::json!({
+            "sessionId": session_id,
+            "stage": "presentation_frame_settled",
+            "classifierVerdict": verdict_str(verdict),
+            "evidenceMissing": verdict == PaneLivenessVerdict::Unknown,
+            "evidenceMissingFields": missing,
+            "stageProgress": {
+                "frameConsumed": !render_pending_after,
+                "renderPendingAfter": render_pending_after,
+                "releaseOutcome": "released",
+            },
+            "framePresented": frame_presented,
+            "daemonFacts": daemon_facts
+                .map(|facts| serde_json::to_value(facts).unwrap_or(serde_json::Value::Null)),
+            "snapshot": serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
+            "coordinatorEvidence": "coordinator-consumed",
+            "presentationEvidence": "coordinator-consumed",
+            "producerComponent": NativeTerminalSurfaceHostState::PRESENTATION_PRODUCER_ID,
+        }),
+    );
+}
+
+/// `stale-receipt-rejected`: an older attempt's completion or install was
+/// refused by the binding fence. The reason names the real divergence.
+#[cfg(feature = "local-split-qa")]
+fn emit_stale_receipt_rejected_qa(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    reason: String,
+    mismatched_field: &'static str,
+    stale_tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    active_tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+) {
+    // A scenario that pre-arms no barrier still settles a correlatable line, so
+    // the operation nonce comes from the private env here; without one no line
+    // is written at all.
+    let Some(operation_id) = channel.operation_id() else {
+        return;
+    };
+    schedule_native_qa_receipt(
+        channel,
+        STALE_RECEIPT_REJECTED_BARRIER,
         &operation_id,
         serde_json::json!({
             "sessionId": session_id,
-            "backendSessionId": session_id,
-            "stage": "native_presentation_settled",
-            "attemptGeneration": frame_generation,
-            "frameEpoch": frame_epoch,
-            "frameSubmitted": true,
-            "presented": receipt.presented,
-            "cols": receipt.cols,
-            "rows": receipt.rows,
-            "rebuiltRows": receipt.rebuilt_rows,
-            "reusedRows": receipt.reused_rows,
-            "cursorCol": receipt.cursor_col,
-            "cursorRow": receipt.cursor_row,
-            "cellWidthPx": receipt.cell_width_px,
-            "cellHeightPx": receipt.cell_height_px,
-            "effectiveScaleFactor": receipt.effective_scale_factor,
-            "presentationEvidence": "native-presented",
-            "producerComponent": "surface-host-gpu-render",
+            "backendSessionId": stale_tuple
+                .or(active_tuple)
+                .map(|tuple| tuple.backend_session_id.clone()),
+            "stage": "stale_receipt_rejected",
+            "rejected": true,
+            "reason": reason,
+            "mismatchedField": mismatched_field,
+            "attemptGeneration": stale_tuple.map(|tuple| tuple.attempt_generation),
+            "staleAttachTuple": stale_tuple,
+            "activeAttachTuple": active_tuple,
+            "producerComponent": "surface-host-render-coordinator",
         }),
     );
+}
+
+/// `stale-receipt-rejected` for a delayed POSITIVE completion whose frame is no
+/// longer the current submission: the render-path half of the fence.
+#[cfg(feature = "local-split-qa")]
+fn emit_stale_completion_rejected_qa(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    current_generation: Option<u64>,
+    current_tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    frame_generation: u64,
+    stale_tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+) {
+    let (reason, field) = match current_generation {
+        None => (
+            "delayed positive receipt rejected: no live submission remains for the session"
+                .to_string(),
+            "frameGeneration",
+        ),
+        Some(generation) if generation != frame_generation => (
+            format!(
+                "delayed positive receipt rejected: frame generation {frame_generation} superseded by live generation {generation}"
+            ),
+            "frameGeneration",
+        ),
+        Some(_) => {
+            let field = qa_tuple_mismatch_field(stale_tuple, current_tuple);
+            (
+                format!("delayed positive receipt rejected by the binding fence: {field} mismatch"),
+                field,
+            )
+        }
+    };
+    emit_stale_receipt_rejected_qa(
+        channel,
+        session_id,
+        reason,
+        field,
+        stale_tuple,
+        current_tuple,
+    );
+}
+
+/// `stale-receipt-rejected` for an older ATTEMPT that cannot install itself over
+/// the live binding: the registration-path half of the fence.
+#[cfg(feature = "local-split-qa")]
+fn emit_stale_registration_rejected_qa(
+    session_id: &str,
+    active: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    incoming: &crate::daemon::protocol::PaneAttachTuple,
+) {
+    let Some(channel) = crate::ipc::qa_barrier::active_channel() else {
+        return;
+    };
+    let field = match active {
+        Some(active) => qa_registration_mismatch_field(active, incoming),
+        None => "attemptGeneration",
+    };
+    emit_stale_receipt_rejected_qa(
+        &channel,
+        session_id,
+        format!(
+            "registration rejected: attempt generation {} does not continue the live binding ({field} mismatch)",
+            incoming.attempt_generation
+        ),
+        field,
+        Some(incoming),
+        active,
+    );
+}
+
+/// `reattach-marker`: a legitimate reattach reinstalled the surface and stream
+/// for the SAME backend, and the live binding is reported verbatim.
+#[cfg(feature = "local-split-qa")]
+fn emit_reattach_marker_qa(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    tuple: &crate::daemon::protocol::PaneAttachTuple,
+    bounds_applied: bool,
+) {
+    let Some(operation_id) = channel.operation_id() else {
+        return;
+    };
+    schedule_native_qa_receipt(
+        channel,
+        REATTACH_MARKER_BARRIER,
+        &operation_id,
+        serde_json::json!({
+            "sessionId": session_id,
+            "backendSessionId": tuple.backend_session_id,
+            "incarnation": tuple.incarnation,
+            "daemonEpoch": tuple.daemon_epoch,
+            "frontendSessionId": tuple.frontend_session_id,
+            "paneIdentity": tuple.pane_identity,
+            "bindingKey": tuple.binding_key,
+            "attemptGeneration": tuple.attempt_generation,
+            "attachTuple": tuple,
+            "reattached": true,
+            // The native reattach reinstalls the surface and stream of an
+            // existing backend; this layer owns no PTY, so it created none.
+            "newPtyCreated": false,
+            "boundsApplied": bounds_applied,
+            "producerComponent": "surface-host-reattach",
+        }),
+    );
+}
+
+/// `marker-output`'s `frameSubmitted` half, in the cross-lane contract the
+/// terminal layer owns: one correlated JSON object per REAL frame submission,
+/// appended to `<barrier dir>/frame-submitted.jsonl`. Its observer only honors a
+/// record whose run/operation/session match and whose `coveredSequence` reaches
+/// the marker occurrence's own hub sequence, so this is evidence, never a flag.
+/// The native lane never writes the `marker-output` receipt itself: the terminal
+/// lane owns that file and its line indices.
+#[cfg(feature = "local-split-qa")]
+fn qa_frame_submission_record(
+    run_id: &str,
+    operation_id: &str,
+    session_id: &str,
+    covered_sequence: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "runId": run_id,
+        "operationId": operation_id,
+        "sessionId": session_id,
+        "coveredSequence": covered_sequence,
+        "producerComponent": "surface-host-gpu-render",
+    })
+}
+
+#[cfg(feature = "local-split-qa")]
+fn append_qa_frame_submission(dir: &std::path::Path, record: &serde_json::Value) -> bool {
+    let mut line = record.to_string();
+    line.push('\n');
+    use std::io::Write as _;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(QA_FRAME_SUBMITTED_FILE))
+    {
+        Ok(mut file) => file.write_all(line.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(feature = "local-split-qa")]
+fn schedule_native_frame_submitted_qa(
+    channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    covered_sequence: u64,
+) {
+    // Read from the env rather than from the channel: the channel deliberately
+    // exposes no path accessor, and this is the same value it was built from.
+    let Ok(dir) = std::env::var("FERRYX_QA_BARRIER_DIR") else {
+        return;
+    };
+    if dir.trim().is_empty() {
+        return;
+    }
+    let Some(operation_id) = channel.operation_id() else {
+        return;
+    };
+    let record = qa_frame_submission_record(
+        channel.run_id(),
+        &operation_id,
+        session_id,
+        covered_sequence,
+    );
+    let dir = std::path::PathBuf::from(dir);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = append_qa_frame_submission(&dir, &record);
+    });
 }
 
 #[cfg(feature = "local-split-qa")]
@@ -717,9 +1196,38 @@ fn dispatch_owned_render<R: Runtime>(
     #[cfg(feature = "local-split-qa")]
     if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
         if let Some(spec) = channel.spec(crate::ipc::qa_barrier::PRESENTATION_BARRIER) {
+            // The runner binds this barrier to the backend session it really
+            // created (`bindBackendSession` -> `<name>.bind.json`); no product
+            // observation can know that id in advance, so its bind file is the only
+            // honest source for the target. A bind that cannot be correlated, or
+            // that conflicts with a target the product already bound, is reported
+            // instead of being overwritten.
+            let mut target_backend_session_id = spec.target_backend_session_id.clone();
+            if target_backend_session_id.as_deref().map_or(true, str::is_empty) {
+                match channel.adopt_runner_bind(crate::ipc::qa_barrier::PRESENTATION_BARRIER) {
+                    Ok(bound) => target_backend_session_id = Some(bound),
+                    Err(reason) => {
+                        schedule_native_qa_receipt(
+                            &channel,
+                            crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                            &spec.operation_id,
+                            serde_json::json!({
+                                "sessionId": session_id,
+                                "backendSessionId": session_id,
+                                "stage": "presentation_binding_failed",
+                                "status": "failed",
+                                "error": format!("BINDING_FAILURE: missing required targetBackendSessionId on armed barrier ({reason})"),
+                                "actionable": false,
+                                "producerComponent": "surface-host-render-coordinator",
+                            }),
+                        );
+                        return;
+                    }
+                }
+            }
             // Target equality check: absent target must fail armed binding explicitly,
             // never matching all panes or silently being ignored.
-            let target = match spec.target_backend_session_id.as_deref() {
+            let target = match target_backend_session_id.as_deref() {
                 Some(target) if !target.is_empty() => target,
                 _ => {
                     schedule_native_qa_receipt(&channel,
@@ -760,12 +1268,26 @@ fn dispatch_owned_render<R: Runtime>(
             let coordinator_clone = Arc::clone(&coordinator);
             let gpu_worker_clone = Arc::clone(&gpu_worker);
             let channel_clone = Arc::clone(&channel);
+            // The released branch needs the same coordinator after the render
+            // dispatch, and the presentation watch must be subscribed before
+            // that dispatch to see THIS frame present.
+            let slot_settle = Arc::clone(&slot);
+            let coordinator_held = Arc::clone(&coordinator);
 
             tauri::async_runtime::spawn(async move {
                 let channel_held = Arc::clone(&channel_clone);
                 let spec_held = spec.clone();
                 let session_held = session_id_clone.clone();
+                let coordinator_for_held = Arc::clone(&coordinator_held);
                 let held_res = tokio::task::spawn_blocking(move || {
+                    // The held verdict is the REAL classifier over the measured
+                    // coordinator state: a frame that is no longer pending is
+                    // reported as what it is instead of as a literal.
+                    let render_pending = coordinator_for_held.is_render_pending();
+                    let held_snapshot = qa_coordinator_snapshot(&session_held, render_pending);
+                    let held_verdict = crate::ipc::qa_barrier::verdict_str(
+                        crate::ipc::debug::classify_pane_liveness(&held_snapshot),
+                    );
                     channel_held.write_held(
                         &spec_held,
                         &session_held,
@@ -773,8 +1295,8 @@ fn dispatch_owned_render<R: Runtime>(
                         serde_json::json!({
                             "sessionId": session_held,
                             "stage": "presentation_frame_pending",
-                            "classifierVerdict": "BlockedInPresentation",
-                            "hasUnpresentedFrames": true,
+                            "classifierVerdict": held_verdict,
+                            "hasUnpresentedFrames": render_pending,
                             "producerComponent": "surface-host-render-coordinator",
                         }),
                     );
@@ -784,12 +1306,11 @@ fn dispatch_owned_render<R: Runtime>(
                         serde_json::json!({
                             "sessionId": session_held,
                             "stage": "presentation_frame_pending",
-                            "classifierVerdict": "BlockedInPresentation",
-                            "hasUnpresentedFrames": true,
+                            "classifierVerdict": held_verdict,
+                            "hasUnpresentedFrames": render_pending,
                             "producerComponent": "surface-host-render-coordinator",
-                            "snapshot": {
-                                "hasUnpresentedFrames": true,
-                            },
+                            "snapshot": serde_json::to_value(&held_snapshot)
+                                .unwrap_or(serde_json::Value::Null),
                         }),
                     );
                 })
@@ -808,15 +1329,72 @@ fn dispatch_owned_render<R: Runtime>(
 
                 match outcome {
                     crate::ipc::qa_barrier::ReleaseOutcome::Released => {
+                        // Subscribe BEFORE the release-driven dispatch so the
+                        // settlement reports the presentation of THIS frame
+                        // instead of racing it.
+                        let mut presentations = slot_settle.subscribe_presentations();
+                        presentations.borrow_and_update();
                         dispatch_owned_render_inner(
                             window_clone,
                             hosts_clone,
                             slot_clone,
-                            session_id_clone,
-                            coordinator_clone,
+                            session_id_clone.clone(),
+                            Arc::clone(&coordinator_clone),
                             gpu_worker_clone,
                             dispatch_owner,
                         );
+                        let frame_presented = tokio::time::timeout(
+                            PRESENTATION_SETTLE_TIMEOUT,
+                            async {
+                                loop {
+                                    if presentations.changed().await.is_err() {
+                                        return false;
+                                    }
+                                    if presentations
+                                        .borrow_and_update()
+                                        .as_ref()
+                                        .is_some_and(|frame| frame.receipt.presented)
+                                    {
+                                        return true;
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        .unwrap_or(false);
+                        let channel_settle = Arc::clone(&channel_clone);
+                        let session_settle = session_id_clone.clone();
+                        let op_id_settle = spec.operation_id.clone();
+                        let coordinator_settle = Arc::clone(&coordinator_clone);
+                        // The daemon's own reader/kernel facts are what let this
+                        // settlement report a POSITIVE recovery. They are observed
+                        // from the daemon that owns the session; without a client in
+                        // hand (headless lane) they stay unobserved and the receipt
+                        // keeps its honest non-pass.
+                        let daemon_facts = match crate::ipc::qa_barrier::qa_daemon_client() {
+                            Some(client) => Some(
+                                crate::ipc::qa_barrier::observe_daemon_liveness(
+                                    &client,
+                                    &session_settle,
+                                )
+                                .await,
+                            ),
+                            None => None,
+                        };
+                        let settle_res = tokio::task::spawn_blocking(move || {
+                            emit_presentation_released_settlement_qa(
+                                &channel_settle,
+                                &session_settle,
+                                &op_id_settle,
+                                &coordinator_settle,
+                                frame_presented,
+                                daemon_facts.as_ref(),
+                            );
+                        })
+                        .await;
+                        if let Err(e) = settle_res {
+                            tracing::error!("Error writing presentation released settlement: {e}");
+                        }
                     }
                     crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded => {
                         coordinator_clone.consume_render();
@@ -957,6 +1535,14 @@ fn dispatch_owned_render_inner<R: Runtime>(
                 let completion_coordinator = Arc::clone(&coordinator);
                 let completion_gpu_worker = Arc::clone(&gpu_worker);
 
+                // `marker-output`'s `frameSubmitted` half: the sequence this
+                // frame really covers, written to the terminal layer's sidecar
+                // once the submission actually happened.
+                #[cfg(feature = "local-split-qa")]
+                let qa_frame_submission = crate::ipc::qa_barrier::active_channel().and_then(|channel| {
+                    let covered_sequence = slot.consume()?.covered_sequence?;
+                    Some((channel, session_id.clone(), covered_sequence))
+                });
                 let submission_coordinator = Arc::clone(&coordinator);
                 let worker_snapshot_slot = Arc::clone(&slot);
                 if !gpu_worker.enqueue(move |gpu| {
@@ -1021,12 +1607,30 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 )
                             }
                         };
-                        let tuple_is_current = completion_snapshot_slot
-                            .consume()
-                            .is_some_and(|current| {
-                                current.generation == frame_generation
-                                    && current.attach_tuple == frame_attach_tuple
-                            });
+                        let current_frame = completion_snapshot_slot.consume();
+                        let tuple_is_current = current_frame.as_ref().is_some_and(|current| {
+                            current.generation == frame_generation
+                                && current.attach_tuple == frame_attach_tuple
+                        });
+
+                        // `stale-receipt-rejected`: a positive completion whose
+                        // frame is no longer the current submission is fenced
+                        // off here, and the reason names the real divergence.
+                        #[cfg(feature = "local-split-qa")]
+                        if receipt.presented && !tuple_is_current {
+                            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                                emit_stale_completion_rejected_qa(
+                                    &channel,
+                                    &completion_session_id,
+                                    current_frame.as_ref().map(|frame| frame.generation),
+                                    current_frame
+                                        .as_ref()
+                                        .and_then(|frame| frame.attach_tuple.as_ref()),
+                                    frame_generation,
+                                    frame_attach_tuple.as_ref(),
+                                );
+                            }
+                        }
 
                         if receipt.presented && tuple_is_current {
                             let mut hosts_guard = completion_hosts.lock();
@@ -1045,27 +1649,31 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 if let Some(host) = hosts_guard.get_mut(&completion_session_id) {
                                     host.finish_presentation(&completion_host_window);
                                 }
+                                // The product's own receipt is the one value that
+                                // carries the authoritative seven-field tuple; the
+                                // frontend emit and the private QA settlement both
+                                // consume it unchanged.
                                 if let Some(presentation_receipt) =
-                                    pane_liveness_presentation_receipt(frame_attach_tuple, true)
+                                    pane_liveness_presentation_receipt(frame_attach_tuple.clone(), true)
                                 {
                                     if let Err(error) = completion_window_for_closure.emit(
                                         crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT,
-                                        presentation_receipt,
+                                        presentation_receipt.clone(),
                                     ) {
                                         tracing::debug!(%error, "Failed to emit pane presentation receipt");
                                     }
+                                    #[cfg(feature = "local-split-qa")]
+                                    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                                        emit_native_presentation_receipt_qa(
+                                            &channel,
+                                            &completion_session_id,
+                                            frame_generation,
+                                            frame_epoch,
+                                            &receipt,
+                                            &presentation_receipt,
+                                        );
+                                    }
                                 }
-                            }
-
-                            #[cfg(feature = "local-split-qa")]
-                            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
-                                emit_native_presentation_receipt_qa(
-                                    &channel,
-                                    &completion_session_id,
-                                    frame_generation,
-                                    frame_epoch,
-                                    &receipt,
-                                );
                             }
                         }
 
@@ -1091,6 +1699,16 @@ fn dispatch_owned_render_inner<R: Runtime>(
                 }) {
                     submission_coordinator.abandon_render(owner);
                     tracing::warn!("Native terminal GPU worker rejected frame submission");
+                } else {
+                    #[cfg(feature = "local-split-qa")]
+                    if let Some((channel, submission_session, covered_sequence)) = qa_frame_submission
+                    {
+                        schedule_native_frame_submitted_qa(
+                            &channel,
+                            &submission_session,
+                            covered_sequence,
+                        );
+                    }
                 }
             }
             #[cfg(test)]
@@ -2492,9 +3110,19 @@ impl NativeTerminalSurfaceHostState {
         if let Some(tuple) = tuple {
             if let Some(active) = &session.active_attach_tuple {
                 if !pane_liveness_registration_matches(active, tuple) {
+                    // The older attempt cannot install itself over the live
+                    // binding; the rejection is settled at the real fence.
+                    #[cfg(feature = "local-split-qa")]
+                    emit_stale_registration_rejected_qa(
+                        session_id,
+                        Some(active),
+                        tuple,
+                    );
                     return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
                 }
             } else if session.attempt_generation > tuple.attempt_generation {
+                #[cfg(feature = "local-split-qa")]
+                emit_stale_registration_rejected_qa(session_id, None, tuple);
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
             if tuple.daemon_epoch != session.daemon_epoch.to_string() {
@@ -2595,6 +3223,20 @@ impl NativeTerminalSurfaceHostState {
         drop(sessions);
         if let Some((cols, rows)) = resized_dimensions {
             self.notify_pty_resize(session_id, cols, rows);
+        }
+        // `reattach-marker`: a legitimate reattach reinstalled the surface and
+        // stream for the SAME backend; only a tuple-bearing reattach settles it,
+        // so a plain bounds update never occupies the runner's receipt index.
+        #[cfg(feature = "local-split-qa")]
+        if let Some(reattached_tuple) = tuple {
+            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                emit_reattach_marker_qa(
+                    &channel,
+                    session_id,
+                    reattached_tuple,
+                    resized_dimensions.is_some(),
+                );
+            }
         }
         Ok(true)
     }
@@ -3863,6 +4505,106 @@ impl NativeTerminalSurfaceHostState {
         sessions.get(session_id).and_then(|s| s.active_attach_tuple.clone())
     }
 
+    /// Drives the runner's `trigger-stale-binding` control against the LIVE
+    /// binding, through the product's real fences:
+    ///
+    /// 1. the authoritative seven-field binding is read from the attached session
+    ///    (nothing is invented);
+    /// 2. an older attempt that differs in exactly the field the command names is
+    ///    really offered while that newer binding is active - the existing
+    ///    registration fence rejects it, and the `stale-receipt-rejected` receipt
+    ///    is written by that fence from its own comparison;
+    /// 3. a legitimate reattach of the SAME live binding then proceeds through the
+    ///    same production path and settles `reattach-marker`.
+    ///
+    /// Returns `false` when the command cannot be serviced yet (no daemon session
+    /// with a live binding), so the caller keeps it pending instead of answering
+    /// with a fabricated outcome. A command that can never be serviced (an
+    /// unsupported mutate field) returns `true` after reporting itself.
+    #[cfg(feature = "local-split-qa")]
+    pub(crate) async fn drive_stale_binding_command(
+        &self,
+        channel: &Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+        daemon_client: Option<&Arc<crate::daemon::DaemonClient>>,
+    ) -> bool {
+        let Some(command) = channel.take_command(TRIGGER_STALE_BINDING) else {
+            return false;
+        };
+        let mutate_field = command
+            .get("mutateField")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("attemptGeneration");
+        if !STALE_BINDING_MUTABLE_FIELDS.contains(&mutate_field) {
+            eprintln!(
+                "FERRYX_QA_STALE_BINDING_UNSUPPORTED_FIELD: '{mutate_field}' is not compared by the registration fence (supported: {STALE_BINDING_MUTABLE_FIELDS:?}); no receipt was written"
+            );
+            return true;
+        }
+        let Some(session_id) = self.stale_binding_target(daemon_client).await else {
+            return false;
+        };
+        let Some(active) = self.session_attach_tuple(&session_id) else {
+            return false;
+        };
+        let Some(stale) = mutate_attach_tuple_field(&active, mutate_field) else {
+            eprintln!(
+                "FERRYX_QA_STALE_BINDING_UNSATISFIABLE: the live binding has attemptGeneration {} and cannot be made strictly older",
+                active.attempt_generation
+            );
+            return true;
+        };
+
+        // A REAL stale offer against the live binding: the ownership-token fence
+        // and the registration fence are the production ones, and the rejection
+        // receipt comes from the fence, never from this caller.
+        let token_refused = self
+            .begin_replay_request_with_tuple(&session_id, Some(stale.clone()))
+            .is_none();
+        let stale_attempt =
+            self.reattach_existing_session_with_bounds_and_tuple(&session_id, None, Some(&stale));
+        if stale_attempt.is_ok() {
+            eprintln!(
+                "FERRYX_QA_STALE_BINDING_NOT_REJECTED: the live binding did not reject the stale attempt on '{mutate_field}' (token_refused={token_refused}); no rejection was written"
+            );
+            return true;
+        }
+
+        // Only a fence-rejected attempt is followed by the legitimate reattach, so
+        // the two receipts keep the order the scenario awaits.
+        let reattach =
+            self.reattach_existing_session_with_bounds_and_tuple(&session_id, None, Some(&active));
+        if !matches!(reattach, Ok(true)) {
+            eprintln!(
+                "FERRYX_QA_STALE_BINDING_REATTACH_UNSETTLED: the legitimate reattach of the live binding did not install"
+            );
+        }
+        true
+    }
+
+    /// The session the stale-binding control must drive: one that really exists in
+    /// the owning daemon AND carries a live seven-field binding here. Nothing is
+    /// synthesized: without such a session the command stays unserviced.
+    #[cfg(feature = "local-split-qa")]
+    async fn stale_binding_target(
+        &self,
+        daemon_client: Option<&Arc<crate::daemon::DaemonClient>>,
+    ) -> Option<String> {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(client) = daemon_client {
+            if let Ok(sessions) = client.list_sessions().await {
+                candidates.extend(sessions);
+            }
+        }
+        if candidates.is_empty() {
+            let mut registered = self.registered_session_ids();
+            registered.sort();
+            candidates = registered;
+        }
+        candidates
+            .into_iter()
+            .find(|session_id| self.session_attach_tuple(session_id).is_some())
+    }
+
     pub fn bound_presentation_observation(
         &self,
         session_id: &str,
@@ -4460,6 +5202,7 @@ impl NativeTerminalSurfaceHostState {
                     logical_bounds,
                     render_input.clone(),
                     session.active_attach_tuple.clone(),
+                    session.last_sequence,
                 );
             (layout, logical_bounds, cell_metrics, render_input)
         };
@@ -9680,6 +10423,12 @@ mod liveness_tests {
         const RUN_ID: &str = "qa-run-presentation";
         const OPERATION_ID: &str = "qa-op-presentation";
 
+        /// The private channel is installed PROCESS-WIDE (`install`/
+        /// `active_channel`), so the tests that drive it run one at a time: a
+        /// parallel install would replace the channel another test's producer is
+        /// writing to, and the receipt would land in the wrong directory.
+        static GLOBAL_CHANNEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         struct ChannelGuard;
         impl Drop for ChannelGuard {
             fn drop(&mut self) {
@@ -9703,6 +10452,9 @@ mod liveness_tests {
                 .unwrap(),
             )
             .unwrap();
+            let _serial = GLOBAL_CHANNEL_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
             let channel = active_channel().expect("channel installed");
             let _guard = ChannelGuard;
@@ -9820,6 +10572,9 @@ mod liveness_tests {
                 .unwrap(),
             )
             .unwrap();
+            let _serial = GLOBAL_CHANNEL_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
             let channel = active_channel().expect("channel installed");
             let _guard = ChannelGuard;
@@ -9847,6 +10602,160 @@ mod liveness_tests {
                 !coordinator.is_render_pending(),
                 "cancellation must cancel the pending frame, not park the coordinator"
             );
+            state.teardown();
+        }
+
+        // The `trigger-stale-binding` consumer: the runner's command drives a REAL
+        // stale attempt against the live binding, the product's own registration
+        // fence rejects it, and a legitimate reattach of the same backend then
+        // settles. Both receipts come from the production fences.
+        #[tokio::test]
+        async fn stale_binding_command_drives_the_real_fence_and_the_reattach() {
+            let _serial = GLOBAL_CHANNEL_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{STALE_RECEIPT_REJECTED_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": STALE_RECEIPT_REJECTED_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 5_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            let (acked, rejected) = channel.scan_and_ack_arms();
+            assert_eq!(acked, vec![STALE_RECEIPT_REJECTED_BARRIER.to_string()]);
+            assert!(rejected.is_empty());
+            // Subscribers exist BEFORE the trigger: the waits below are event-driven.
+            let mut stale_rx = channel.subscribe_receipts();
+            let mut reattach_rx = channel.subscribe_receipts();
+
+            // A session that really carries a live seven-field binding plus live
+            // stream/pump tasks, i.e. exactly what the registration fence protects.
+            let state = NativeTerminalSurfaceHostState::default();
+            let active: crate::daemon::protocol::PaneAttachTuple =
+                serde_json::from_value(serde_json::json!({
+                    "backendSessionId": "backend-stale-1",
+                    "incarnation": "incarnation-stale-1",
+                    "daemonEpoch": "7",
+                    "frontendSessionId": "frontend-1",
+                    "paneIdentity": "pane-1",
+                    "bindingKey": "binding-1",
+                    "attemptGeneration": 3,
+                }))
+                .expect("valid seven-field tuple");
+            state
+                .attach_test_session_for_liveness(&active.backend_session_id, 7, Some(1))
+                .expect("attach test session");
+            let token = state
+                .begin_replay_request_with_tuple(&active.backend_session_id, Some(active.clone()))
+                .expect("live binding token");
+            let (output, messages) = tokio::sync::mpsc::channel(1);
+            let _keep_output = output;
+            let attachment = crate::daemon::DaemonAttachment {
+                session_id: active.backend_session_id.clone(),
+                epoch: 7,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: bytes::Bytes::new(),
+                history_segments: Vec::new(),
+                pty_cols: Some(80),
+                pty_rows: Some(24),
+                remote_generation: None,
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            };
+            state
+                .attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+                    &active.backend_session_id,
+                    attachment,
+                    None,
+                    None,
+                    Some(token),
+                )
+                .expect("attach live stream");
+            assert_eq!(
+                state.session_attach_tuple(&active.backend_session_id),
+                Some(active.clone())
+            );
+
+            std::fs::write(
+                dir.join(format!("{TRIGGER_STALE_BINDING}.request.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": TRIGGER_STALE_BINDING,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "issuedAt": "2026-10-04T00:00:00.000Z",
+                    "mutateField": "attemptGeneration",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            assert!(
+                state.drive_stale_binding_command(&channel, None).await,
+                "the correlated command must be serviced"
+            );
+
+            let rejected = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                QaBarrierChannel::await_receipt_event(
+                    &mut stale_rx,
+                    STALE_RECEIPT_REJECTED_BARRIER,
+                    1,
+                ),
+            )
+            .await
+            .expect("the registration fence must settle the stale rejection");
+            assert_eq!(rejected["rejected"], serde_json::json!(true));
+            assert_eq!(
+                rejected["mismatchedField"],
+                serde_json::json!("attemptGeneration")
+            );
+            assert_eq!(rejected["attemptGeneration"], serde_json::json!(2));
+            assert_eq!(
+                rejected["activeAttachTuple"]["attemptGeneration"],
+                serde_json::json!(3)
+            );
+            assert_eq!(
+                rejected["backendSessionId"],
+                serde_json::json!("backend-stale-1")
+            );
+            let reason = rejected["reason"].as_str().expect("non-empty reason");
+            assert!(reason.contains("attemptGeneration"), "{reason}");
+
+            let reattached = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                QaBarrierChannel::await_receipt_event(&mut reattach_rx, REATTACH_MARKER_BARRIER, 1),
+            )
+            .await
+            .expect("the legitimate reattach must settle");
+            assert_eq!(
+                reattached["backendSessionId"],
+                serde_json::json!("backend-stale-1")
+            );
+            assert_eq!(reattached["reattached"], serde_json::json!(true));
+            assert_eq!(reattached["newPtyCreated"], serde_json::json!(false));
+
+            // The stale attempt never installed itself: the live binding is intact.
+            assert_eq!(
+                state.session_attach_tuple(&active.backend_session_id),
+                Some(active.clone())
+            );
+            assert_eq!(
+                state.session_attempt_generation(&active.backend_session_id),
+                Some(3)
+            );
+
             state.teardown();
         }
     }
@@ -9898,6 +10807,559 @@ mod liveness_tests {
         assert_eq!(
             classify_pane_liveness(&idle_candidate),
             PaneLivenessVerdict::Idle
+        );
+    }
+}
+
+/// The private QA producers this module owns, exercised through the real
+/// channel: every assertion reads a receipt the emitter really wrote, and every
+/// event wait subscribes BEFORE the emission it expects.
+#[cfg(all(test, feature = "local-split-qa"))]
+mod qa_native_producer_tests {
+    use super::*;
+    use crate::ipc::qa_barrier::{QaBarrierChannel, PRODUCER_ID};
+    use serde_json::Value;
+
+    const RUN_ID: &str = "qa-run-native-producer";
+    const OPERATION_ID: &str = "qa-op-native-producer";
+
+    fn armed_channel(dir: &std::path::Path, barrier: &str) -> QaBarrierChannel {
+        std::fs::write(
+            dir.join(format!("{barrier}.arm.json")),
+            serde_json::to_string(&serde_json::json!({
+                "name": barrier,
+                "runId": RUN_ID,
+                "operationId": OPERATION_ID,
+                "deadlineMs": 5_000,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let channel = QaBarrierChannel::new(dir.to_path_buf(), RUN_ID.to_string());
+        let (acked, rejected) = channel.scan_and_ack_arms();
+        assert_eq!(acked, vec![barrier.to_string()]);
+        assert!(rejected.is_empty());
+        channel
+    }
+
+    fn receipt_lines(dir: &std::path::Path, name: &str) -> Vec<Value> {
+        std::fs::read_to_string(dir.join(format!("{name}.receipt.jsonl")))
+            .map(|text| {
+                text.lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn full_tuple() -> crate::daemon::protocol::PaneAttachTuple {
+        serde_json::from_value(serde_json::json!({
+            "backendSessionId": "backend-native-1",
+            "incarnation": "incarnation-native-1",
+            "daemonEpoch": "7",
+            "frontendSessionId": "frontend-1",
+            "paneIdentity": "pane-1",
+            "bindingKey": "binding-1",
+            "attemptGeneration": 3,
+        }))
+        .expect("valid seven-field tuple")
+    }
+
+    fn render_receipt() -> NativeTerminalSurfaceReceipt {
+        NativeTerminalSurfaceReceipt {
+            presented: true,
+            render_deferred: false,
+            render_suspended: false,
+            cols: 80,
+            rows: 24,
+            rebuilt_rows: 24,
+            reused_rows: 0,
+            cursor_col: 1,
+            cursor_row: 2,
+            cell_width_px: 9,
+            cell_height_px: 18,
+            effective_scale_factor: Some(2.0),
+        }
+    }
+
+    fn grid_snapshot(rows: &[&str]) -> RenderSnapshot {
+        let cols = 40u16;
+        let mut grid = vec![vec![CellSnapshot::default(); cols as usize]; rows.len()];
+        for (row, text) in rows.iter().enumerate() {
+            for (col, character) in text.chars().enumerate() {
+                if col >= cols as usize {
+                    break;
+                }
+                grid[row][col].text = character.to_string();
+            }
+        }
+        RenderSnapshot {
+            images: Vec::new(),
+            cols,
+            rows: rows.len() as u16,
+            cursor: crate::native_terminal::cursor::CursorSnapshot {
+                x: 0,
+                y: 0,
+                visible: true,
+                blinking: false,
+                wide_tail: false,
+                visual_style: crate::native_terminal::cursor::CursorVisualStyle::Block,
+            },
+            grid,
+        }
+    }
+
+    // Producer 1: the `presentation` settlement carries the product's OWN
+    // receipt, so every field `requireSevenTupleReceipt` reads is real.
+    #[tokio::test]
+    async fn presentation_settlement_carries_the_product_seven_field_tuple() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = Arc::new(armed_channel(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER));
+        let mut receipts = channel.subscribe_receipts();
+
+        let tuple = full_tuple();
+        let product_receipt = crate::daemon::protocol::PanePresentationReceipt {
+            attach_tuple: tuple.clone(),
+            presented: true,
+            presentation_time_unix_ms: Some(1_700_000_000_000),
+        };
+        emit_native_presentation_receipt_qa(
+            &channel,
+            &tuple.backend_session_id,
+            4,
+            7,
+            &render_receipt(),
+            &product_receipt,
+        );
+
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            QaBarrierChannel::await_receipt_event(
+                &mut receipts,
+                crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                1,
+            ),
+        )
+        .await
+        .expect("the presentation settlement must be written");
+
+        assert_eq!(settled["runId"], serde_json::json!(RUN_ID));
+        assert_eq!(settled["operationId"], serde_json::json!(OPERATION_ID));
+        assert_eq!(settled["producer"], serde_json::json!(PRODUCER_ID));
+        assert_eq!(settled["presented"], serde_json::json!(true));
+        for (field, expected) in [
+            ("backendSessionId", serde_json::json!("backend-native-1")),
+            ("incarnation", serde_json::json!("incarnation-native-1")),
+            ("daemonEpoch", serde_json::json!("7")),
+            ("frontendSessionId", serde_json::json!("frontend-1")),
+            ("paneIdentity", serde_json::json!("pane-1")),
+            ("bindingKey", serde_json::json!("binding-1")),
+            ("attemptGeneration", serde_json::json!(3)),
+        ] {
+            assert_eq!(settled["attachTuple"][field], expected, "{field}");
+        }
+    }
+
+    // Producer 2: the released branch settles the coordinator-consumed shape
+    // from the coordinator's measured state.
+    #[test]
+    fn presentation_released_settlement_reports_released_stage_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = Arc::new(armed_channel(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER));
+
+        // A released frame really completed: the coordinator is idle again.
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().expect("owned render");
+        coordinator.finish_owned_render(owner, false);
+        assert!(!coordinator.is_render_pending());
+
+        emit_presentation_released_settlement_qa(
+            &channel,
+            "backend-native-1",
+            OPERATION_ID,
+            &coordinator,
+            true,
+            None,
+        );
+
+        let lines = receipt_lines(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!(
+            line["stage"],
+            serde_json::json!("presentation_frame_settled")
+        );
+        assert_eq!(
+            line["stageProgress"]["releaseOutcome"],
+            serde_json::json!("released")
+        );
+        assert_eq!(line["stageProgress"]["frameConsumed"], serde_json::json!(true));
+        assert_eq!(
+            line["stageProgress"]["renderPendingAfter"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            line["presentationEvidence"],
+            serde_json::json!("coordinator-consumed")
+        );
+        assert_eq!(line["framePresented"], serde_json::json!(true));
+        // The verdict is whatever the real classifier returns over the fields
+        // this layer can attest; a positive recovery is never forced.
+        let verdict = line["classifierVerdict"].as_str().expect("verdict");
+        assert!(matches!(verdict, "Idle" | "Unknown"), "{verdict}");
+        assert_eq!(
+            line["evidenceMissing"],
+            serde_json::json!(verdict == "Unknown")
+        );
+    }
+
+    // Producer 2b: the settlement reports a POSITIVE recovery only from the daemon
+    // facts it really observed; an unobserved fact keeps the honest non-pass.
+    #[test]
+    fn presentation_released_settlement_reports_positive_recovery_only_from_observed_daemon_facts() {
+        use crate::ipc::qa_barrier::QaDaemonLiveness;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = Arc::new(armed_channel(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER));
+
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().expect("owned render");
+        coordinator.finish_owned_render(owner, false);
+        assert!(!coordinator.is_render_pending());
+
+        // The daemon's own answer for a live, unpaused, running session.
+        let observed = QaDaemonLiveness {
+            observed: true,
+            reader_paused: Some(false),
+            kernel_stopped: Some(false),
+            suspended: Some(false),
+            daemon_epoch: Some("7".to_string()),
+            failure: None,
+        };
+        emit_presentation_released_settlement_qa(
+            &channel,
+            "backend-native-1",
+            OPERATION_ID,
+            &coordinator,
+            true,
+            Some(&observed),
+        );
+
+        let lines = receipt_lines(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!(line["classifierVerdict"], serde_json::json!("Idle"));
+        assert_eq!(line["evidenceMissing"], serde_json::json!(false));
+        assert_eq!(line["daemonFacts"]["observed"], serde_json::json!(true));
+        assert_eq!(line["daemonFacts"]["readerPaused"], serde_json::json!(false));
+        assert_eq!(line["daemonFacts"]["kernelStopped"], serde_json::json!(false));
+        assert_eq!(line["snapshot"]["readerPaused"], serde_json::json!(false));
+        assert_eq!(line["snapshot"]["kernelStopped"], serde_json::json!(false));
+        assert_eq!(line["snapshot"]["suspended"], serde_json::json!(false));
+        assert_eq!(
+            line["snapshot"]["presentationReceiptReceived"],
+            serde_json::json!(true)
+        );
+
+        // A daemon that did not report those facts cannot produce a pass: the same
+        // settlement stays `Unknown` with the missing fields named.
+        let unobserved = QaDaemonLiveness {
+            observed: false,
+            failure: Some("daemon describe unavailable".to_string()),
+            ..Default::default()
+        };
+        emit_presentation_released_settlement_qa(
+            &channel,
+            "backend-native-1",
+            OPERATION_ID,
+            &coordinator,
+            true,
+            Some(&unobserved),
+        );
+        let lines = receipt_lines(&dir, crate::ipc::qa_barrier::PRESENTATION_BARRIER);
+        assert_eq!(lines.len(), 2);
+        let line = &lines[1];
+        assert_eq!(line["classifierVerdict"], serde_json::json!("Unknown"));
+        assert_eq!(line["evidenceMissing"], serde_json::json!(true));
+        assert_eq!(line["daemonFacts"]["observed"], serde_json::json!(false));
+        assert_eq!(
+            line["daemonFacts"]["failure"],
+            serde_json::json!("daemon describe unavailable")
+        );
+        let missing = line["evidenceMissingFields"].as_array().unwrap();
+        for field in ["readerPaused", "kernelStopped", "suspended"] {
+            assert!(
+                missing.iter().any(|entry| entry == field),
+                "{field} must be reported as missing"
+            );
+        }
+    }
+
+    // Only the identity fields the registration fence really compares can carry a
+    // stale attempt; a generation of 0 has no strictly older value.
+    #[test]
+    fn stale_attempt_mutation_covers_exactly_the_fenced_fields() {
+        let active: crate::daemon::protocol::PaneAttachTuple =
+            serde_json::from_value(serde_json::json!({
+                "backendSessionId": "backend-1",
+                "incarnation": "incarnation-1",
+                "daemonEpoch": "7",
+                "frontendSessionId": "frontend-1",
+                "paneIdentity": "pane-1",
+                "bindingKey": "binding-1",
+                "attemptGeneration": 3,
+            }))
+            .unwrap();
+        for field in ["frontendSessionId", "paneIdentity", "bindingKey"] {
+            let stale = mutate_attach_tuple_field(&active, field).expect("fenced field mutates");
+            assert!(!pane_liveness_registration_matches(&active, &stale), "{field}");
+            assert_eq!(stale.backend_session_id, active.backend_session_id);
+            assert_eq!(stale.attempt_generation, active.attempt_generation);
+        }
+        let stale = mutate_attach_tuple_field(&active, "attemptGeneration").unwrap();
+        assert_eq!(stale.attempt_generation, 2);
+        assert!(!pane_liveness_registration_matches(&active, &stale));
+        // A field the fence does not compare is never mutated into a stale attempt
+        // the fence could not reject.
+        for field in ["incarnation", "backendSessionId", "daemonEpoch", "anything"] {
+            assert!(mutate_attach_tuple_field(&active, field).is_none(), "{field}");
+        }
+        let mut zero = active.clone();
+        zero.attempt_generation = 0;
+        assert!(mutate_attach_tuple_field(&zero, "attemptGeneration").is_none());
+    }
+
+    // Producer 5: the `frameSubmitted` half is the terminal layer's sidecar
+    // contract, and every real submission is recorded with the coverage it
+    // really has.
+    #[test]
+    fn frame_submission_sidecar_carries_the_correlation_and_real_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let record = qa_frame_submission_record(RUN_ID, OPERATION_ID, "backend-native-1", 42);
+        let mut keys: Vec<&str> = record
+            .as_object()
+            .expect("object record")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "coveredSequence",
+                "operationId",
+                "producerComponent",
+                "runId",
+                "sessionId"
+            ]
+        );
+
+        assert!(append_qa_frame_submission(&dir, &record));
+        assert!(append_qa_frame_submission(&dir, &record));
+        let text = std::fs::read_to_string(dir.join("frame-submitted.jsonl")).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per real frame submission");
+        for line in &lines {
+            assert_eq!(line["runId"], serde_json::json!(RUN_ID));
+            assert_eq!(line["operationId"], serde_json::json!(OPERATION_ID));
+            assert_eq!(line["sessionId"], serde_json::json!("backend-native-1"));
+            assert_eq!(line["coveredSequence"], serde_json::json!(42));
+        }
+    }
+
+    // The frame evidence is only as good as the coverage it reports, so a
+    // published frame carries the sequence its session had really applied.
+    #[test]
+    fn published_frame_reports_the_sequence_it_covers() {
+        let slot = SnapshotSlot::new();
+        slot.set_attached(true);
+        let layout = SurfaceCompositionLayout {
+            cols: 80,
+            rows: 24,
+            physical_bounds: PhysicalBounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 480,
+            },
+        };
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+        let input = SessionRenderInput {
+            snapshot: grid_snapshot(&["$ echo"]),
+            selection: None,
+            scrollbar_overlay: None,
+            attention_frame: false,
+            synchronized_output: false,
+        };
+        let generation = slot.publish(layout, bounds, input, None, Some(42));
+        let frame = slot.consume().expect("published frame");
+        assert_eq!(frame.generation, generation);
+        assert_eq!(frame.covered_sequence, Some(42));
+    }
+
+    // Producer 3: a delayed positive completion is fenced off with the field
+    // that really diverged.
+    #[tokio::test]
+    async fn stale_completion_rejection_names_the_mismatched_identity_field() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = Arc::new(armed_channel(
+            &dir,
+            STALE_RECEIPT_REJECTED_BARRIER,
+        ));
+        let mut receipts = channel.subscribe_receipts();
+
+        let active = full_tuple();
+        let mut stale = active.clone();
+        stale.attempt_generation += 1;
+        emit_stale_completion_rejected_qa(
+            &channel,
+            &stale.backend_session_id,
+            Some(3),
+            Some(&active),
+            3,
+            Some(&stale),
+        );
+
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            QaBarrierChannel::await_receipt_event(
+                &mut receipts,
+                STALE_RECEIPT_REJECTED_BARRIER,
+                1,
+            ),
+        )
+        .await
+        .expect("the stale rejection must be settled");
+
+        assert_eq!(settled["rejected"], serde_json::json!(true));
+        assert_eq!(
+            settled["mismatchedField"],
+            serde_json::json!("attemptGeneration")
+        );
+        assert_eq!(
+            settled["backendSessionId"],
+            serde_json::json!("backend-native-1")
+        );
+        assert_eq!(settled["attemptGeneration"], serde_json::json!(4));
+        let reason = settled["reason"].as_str().expect("non-empty reason");
+        assert!(reason.contains("attemptGeneration"), "{reason}");
+
+        // A superseded frame generation reports the frame fence, not an
+        // identity field.
+        emit_stale_completion_rejected_qa(
+            &channel,
+            &active.backend_session_id,
+            Some(9),
+            Some(&active),
+            3,
+            Some(&active),
+        );
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            QaBarrierChannel::await_receipt_event(
+                &mut receipts,
+                STALE_RECEIPT_REJECTED_BARRIER,
+                2,
+            ),
+        )
+        .await
+        .expect("the superseded completion must be settled");
+        assert_eq!(
+            settled["mismatchedField"],
+            serde_json::json!("frameGeneration")
+        );
+        let reason = settled["reason"].as_str().expect("non-empty reason");
+        assert!(reason.contains("superseded"), "{reason}");
+    }
+
+    // Producer 4: the legitimate reattach reports the live binding and states
+    // that this layer created no PTY for it.
+    #[tokio::test]
+    async fn reattach_marker_reports_the_live_binding_without_a_new_pty() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = Arc::new(armed_channel(&dir, REATTACH_MARKER_BARRIER));
+        let mut receipts = channel.subscribe_receipts();
+
+        let tuple = full_tuple();
+        emit_reattach_marker_qa(&channel, &tuple.backend_session_id, &tuple, true);
+
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            QaBarrierChannel::await_receipt_event(
+                &mut receipts,
+                REATTACH_MARKER_BARRIER,
+                1,
+            ),
+        )
+        .await
+        .expect("the reattach marker must be settled");
+
+        assert_eq!(
+            settled["backendSessionId"],
+            serde_json::json!("backend-native-1")
+        );
+        assert_eq!(settled["attemptGeneration"], serde_json::json!(3));
+        assert_eq!(settled["reattached"], serde_json::json!(true));
+        assert_eq!(settled["newPtyCreated"], serde_json::json!(false));
+        assert_eq!(settled["boundsApplied"], serde_json::json!(true));
+        assert_eq!(
+            settled["attachTuple"]["bindingKey"],
+            serde_json::json!("binding-1")
+        );
+    }
+
+    // The rejection helpers name the field the fence really compared.
+    #[test]
+    fn identity_mismatch_helpers_name_the_field_that_really_diverged() {
+        let active = full_tuple();
+
+        let mut other_epoch = active.clone();
+        other_epoch.daemon_epoch = "8".into();
+        assert_eq!(
+            qa_tuple_mismatch_field(Some(&other_epoch), Some(&active)),
+            "daemonEpoch"
+        );
+        assert_eq!(qa_tuple_mismatch_field(None, Some(&active)), "attachTuple");
+        assert_eq!(qa_tuple_mismatch_field(Some(&other_epoch), None), "attachTuple");
+
+        let mut other_pane = active.clone();
+        other_pane.pane_identity = "pane-2".into();
+        assert_eq!(
+            qa_registration_mismatch_field(&active, &other_pane),
+            "paneIdentity"
+        );
+
+        let mut newer_attempt = active.clone();
+        newer_attempt.attempt_generation = active.attempt_generation + 1;
+        assert_eq!(
+            qa_registration_mismatch_field(&active, &newer_attempt),
+            "attemptGeneration"
         );
     }
 }

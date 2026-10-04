@@ -192,6 +192,100 @@ pub(crate) fn deactivate() {
     }
 }
 
+/// The GUI lane's own daemon client, installed by the QA boot path.
+///
+/// The native render path holds no daemon client of its own, yet a positive
+/// recovery verdict needs the daemon's OWN reader/kernel facts. This handle is
+/// that client: the settlements observe the session through it instead of
+/// inventing values. `None` in every normal launch and in the headless lane,
+/// which runs without a daemon.
+static QA_DAEMON_CLIENT: RwLock<Option<Arc<crate::daemon::DaemonClient>>> = RwLock::new(None);
+
+pub fn install_daemon_client(client: Arc<crate::daemon::DaemonClient>) {
+    if let Ok(mut guard) = QA_DAEMON_CLIENT.write() {
+        *guard = Some(client);
+    }
+}
+
+pub fn qa_daemon_client() -> Option<Arc<crate::daemon::DaemonClient>> {
+    QA_DAEMON_CLIENT.read().ok().and_then(|guard| guard.clone())
+}
+
+/// The daemon's own liveness facts for one session, as THIS process observed
+/// them. Every field stays `None` unless the daemon really reported it: the
+/// classifier reads `false` as "verified not blocked", so an unobserved fact must
+/// never be defaulted to `false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QaDaemonLiveness {
+    /// True only when the daemon answered a real describe for the session.
+    pub observed: bool,
+    pub reader_paused: Option<bool>,
+    pub kernel_stopped: Option<bool>,
+    pub suspended: Option<bool>,
+    pub daemon_epoch: Option<String>,
+    /// Why the facts could not be observed, when they could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+impl QaDaemonLiveness {
+    /// Applies the observed facts to a snapshot. Unobserved fields are left
+    /// exactly as they were (`None`), so the classifier keeps answering `Unknown`
+    /// with `evidenceMissing` instead of a fabricated recovery.
+    pub fn apply(&self, snapshot: &mut PaneLivenessSnapshot) {
+        if let Some(value) = self.reader_paused {
+            snapshot.reader_paused = Some(value);
+        }
+        if let Some(value) = self.kernel_stopped {
+            snapshot.kernel_stopped = Some(value);
+        }
+        if let Some(value) = self.suspended {
+            snapshot.suspended = Some(value);
+        }
+        if let Some(ref epoch) = self.daemon_epoch {
+            snapshot.daemon_epoch = Some(epoch.clone());
+        }
+    }
+}
+
+/// Pure mapping of one real describe reply. `DaemonSessionDetails::suspended` is
+/// a plain `bool` the daemon always answers, so it is a real observation;
+/// `reader_paused`/`kernel_stopped` stay `None` on a daemon that does not report
+/// them (they are `Option` on the wire for exactly that reason), which keeps the
+/// verdict honest on older daemons instead of turning a missing observation into
+/// a positive recovery.
+pub fn daemon_liveness_from_details(
+    details: &crate::daemon::protocol::DaemonSessionDetails,
+    daemon_epoch: Option<u64>,
+) -> QaDaemonLiveness {
+    QaDaemonLiveness {
+        observed: true,
+        reader_paused: details.reader_paused,
+        kernel_stopped: details.kernel_stopped,
+        suspended: Some(details.suspended),
+        daemon_epoch: daemon_epoch.map(|epoch| epoch.to_string()),
+        failure: None,
+    }
+}
+
+/// Asks the daemon that really owns the session. A refused or failed request
+/// yields `observed: false` with the reason and every fact `None` - never a
+/// defaulted value.
+pub async fn observe_daemon_liveness(
+    client: &crate::daemon::DaemonClient,
+    session_id: &str,
+) -> QaDaemonLiveness {
+    match client.describe_session(session_id).await {
+        Ok(details) => daemon_liveness_from_details(&details, client.epoch()),
+        Err(error) => QaDaemonLiveness {
+            observed: false,
+            failure: Some(format!("{error:?}")),
+            ..Default::default()
+        },
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -262,6 +356,69 @@ impl QaBarrierChannel {
 
     pub fn producer_pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The private control directory this channel was built from. Producers used
+    /// to re-read `FERRYX_QA_BARRIER_DIR` because the channel exposed no path
+    /// accessor; this is the same value the channel itself reads and writes.
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Reads one runner->product command (`<name>.request.json`) for THIS run.
+    ///
+    /// The runner writes commands after launch, so no producer can read them at
+    /// boot. A control that does not echo this channel's run AND operation nonces
+    /// is never returned - exactly like a mismatched release control - so a stale
+    /// or replayed command from another run cannot drive the product. The file is
+    /// left untouched: the caller decides when a command was really serviced.
+    pub fn take_command(&self, name: &str) -> Option<Value> {
+        self.correlated_control(name, "request.json")
+    }
+
+    /// The runner's live-arm binding for one barrier (`<name>.bind.json`), read
+    /// through the same nonce check as every other control. The runner binds a
+    /// barrier to the session it really created (`bindBackendSession`), which no
+    /// product observation can know in advance.
+    pub fn take_bind(&self, name: &str) -> Option<Value> {
+        self.correlated_control(name, "bind.json")
+    }
+
+    /// One control file, accepted only when it echoes this run's nonces.
+    fn correlated_control(&self, name: &str, suffix: &str) -> Option<Value> {
+        let text = std::fs::read_to_string(self.dir.join(format!("{name}.{suffix}"))).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        if value.get("runId").and_then(Value::as_str) != Some(self.run_id.as_str()) {
+            return None;
+        }
+        let expected = self.operation_id()?;
+        if value.get("operationId").and_then(Value::as_str) != Some(expected.as_str()) {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// Adopts the runner's live-arm binding for one barrier through the channel's
+    /// own checked binding rule (concrete non-wildcard session, no conflict with an
+    /// already bound target) and returns the bound session id.
+    ///
+    /// The installed target is never overwritten: a bind that conflicts with a
+    /// target the product already bound is refused and reported, so a control file
+    /// cannot redirect a barrier away from the session the product really owns.
+    pub fn adopt_runner_bind(&self, name: &str) -> Result<String, String> {
+        let bind = self
+            .take_bind(name)
+            .ok_or_else(|| format!("no correlated {name}.bind.json for this run"))?;
+        let target = bind
+            .get("targetBackendSessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let operation_id = self
+            .operation_id()
+            .ok_or_else(|| "no operation nonce for the runner bind".to_string())?;
+        self.bind_target_session(name, &operation_id, &target)?;
+        Ok(target)
     }
 
     /// Checks if an armed barrier targets a specific backend session ID.
@@ -715,6 +872,12 @@ pub fn install_for_gui_boot() -> Option<GuiBarrierBoot> {
 pub struct QaFixtureSession {
     pub backend_session_id: String,
     pub kind: String,
+    /// The kernel probe the `externally-stopped` kind was classified from, and
+    /// only then: the runner's fixture validator requires `stopped` evidence on
+    /// that kind, so an idle/source session must not carry a probe state it does
+    /// not have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_probe_state: Option<String>,
     pub ownership_receipt: Value,
 }
 
@@ -722,12 +885,14 @@ pub struct QaFixtureSession {
 ///
 /// The runner awaits `fixture-setup` line 0 immediately after launch, before
 /// any trigger, so the GUI boot path reports the private fixture sessions that
-/// really exist in the isolated profile. Only what the product can attest is
-/// reported: `idle` when the surface host's real collector snapshot shows no
-/// pending stage and no unpresented frame, `source` otherwise. The Task 3
-/// snapshot kinds that require a fixture producer
-/// (`created`/`adopted`/`externally-stopped`) are never claimed here - a
-/// receipt that fabricated them would be simulated evidence.
+/// really exist in the isolated profile. A kind is claimed only from the daemon's
+/// own reply about that session: `idle` when its real collector snapshot (with
+/// the daemon's reader/kernel facts applied) classifies as `Idle`,
+/// `externally-stopped` when the kernel reports the process stopped and the
+/// daemon's own lifecycle registry does not own that stop, and `source`
+/// otherwise. The ownership kinds that need a lifecycle record this lane cannot
+/// read (`created`, `adopted`) are still never claimed here - a receipt that
+/// fabricated them would be simulated evidence.
 pub async fn collect_gui_fixture_sessions(
     daemon_client: &crate::daemon::DaemonClient,
     surface_host: &NativeTerminalSurfaceHostState,
@@ -741,20 +906,21 @@ pub async fn collect_gui_fixture_sessions(
         let Ok(details) = daemon_client.describe_session(&session_id).await else {
             continue;
         };
-        let idle = surface_host
+        // The daemon's OWN reader/kernel/suspension facts are what let the
+        // classifier call this session idle; without them the snapshot stays
+        // `Unknown` and the session is never claimed as `idle`.
+        let mut snapshot = surface_host
             .session_liveness_observation(&session_id)
-            .is_some_and(|snapshot| {
-                snapshot.stage.is_none()
-                    && snapshot.has_unpresented_frames == Some(false)
-                    && classify_pane_liveness(&snapshot) == PaneLivenessVerdict::Idle
-            });
+            .unwrap_or_default();
+        daemon_liveness_from_details(&details, daemon_epoch).apply(&mut snapshot);
+        let idle = snapshot.stage.is_none()
+            && snapshot.has_unpresented_frames == Some(false)
+            && classify_pane_liveness(&snapshot) == PaneLivenessVerdict::Idle;
+        let (kind, stop_probe_state) = gui_fixture_kind(&details, idle);
         sessions.push(QaFixtureSession {
             backend_session_id: session_id.clone(),
-            kind: if idle {
-                "idle".to_string()
-            } else {
-                "source".to_string()
-            },
+            kind: kind.to_string(),
+            stop_probe_state: stop_probe_state.map(str::to_string),
             ownership_receipt: json!({
                 "backendSessionId": session_id,
                 "incarnation": details.incarnation,
@@ -762,10 +928,41 @@ pub async fn collect_gui_fixture_sessions(
                 "running": details.running,
                 "workspaceId": details.workspace_id,
                 "cwd": details.cwd,
+                // The real probe the kind classification was made from.
+                "readerPaused": details.reader_paused,
+                "kernelStopped": details.kernel_stopped,
+                "suspended": details.suspended,
+                "registrySuspended": details.registry_suspended,
+                "suspensionSource": details.suspension_source,
             }),
         });
     }
     sessions
+}
+
+/// Classifies one session from the daemon's own reply about it.
+///
+/// `externally-stopped` is an OBSERVATION, never a guess: the kernel must report
+/// the process stopped (`kernelStopped`) AND the daemon must report that its own
+/// lifecycle registry does not own the stop (`registrySuspended == Some(false)`,
+/// or the explicit `external-kernel` attribution). A stopped session whose
+/// ownership the daemon does not report at all stays `source`: this lane cannot
+/// tell an external stop from a Ferryx-owned one, and claiming the kind would be
+/// a fabricated fixture.
+fn gui_fixture_kind(
+    details: &crate::daemon::protocol::DaemonSessionDetails,
+    idle: bool,
+) -> (&'static str, Option<&'static str>) {
+    let externally_stopped = details.kernel_stopped == Some(true)
+        && (details.registry_suspended == Some(false)
+            || details.suspension_source.as_deref() == Some("external-kernel"));
+    if externally_stopped {
+        return ("externally-stopped", Some("stopped"));
+    }
+    if idle {
+        return ("idle", None);
+    }
+    ("source", None)
 }
 
 /// Outcome of the GUI-lane `fixture-setup` settlement.
@@ -792,15 +989,85 @@ pub fn start_gui_boot_channel<R: tauri::Runtime>(
             boot.rejected
         );
     }
-    tauri::async_runtime::spawn(async move {
-        let outcome = emit_gui_fixture_setup(&boot.channel, &daemon_client, &app).await;
-        if !outcome.emitted {
-            eprintln!(
-                "FERRYX_QA_FIXTURE_SETUP_UNSETTLED: {} real session(s) observed but no operation nonce was supplied",
-                outcome.sessions.len()
-            );
+    // The GUI lane's own daemon client, kept for the settlements that must report
+    // the daemon's reader/kernel facts instead of inventing them.
+    install_daemon_client(Arc::clone(&daemon_client));
+    let channel = Arc::clone(&boot.channel);
+    {
+        let fixture_channel = Arc::clone(&channel);
+        let fixture_client = Arc::clone(&daemon_client);
+        let fixture_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let outcome =
+                emit_gui_fixture_setup(&fixture_channel, &fixture_client, &fixture_app).await;
+            if !outcome.emitted {
+                eprintln!(
+                    "FERRYX_QA_FIXTURE_SETUP_UNSETTLED: {} real session(s) observed but no operation nonce was supplied",
+                    outcome.sessions.len()
+                );
+            }
+        });
+    }
+    tauri::async_runtime::spawn(run_stale_binding_watcher(channel, daemon_client, app));
+}
+
+/// Runner->product control that asks the product to offer a stale attempt against
+/// the live binding (`barrierHub.command('trigger-stale-binding', ...)`).
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+const STALE_BINDING_COMMAND: &str = "trigger-stale-binding";
+/// Bound on the private control watch. The runner triggers this right after
+/// `fixture-setup`, so the window only stops a stray watcher from living forever.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+const STALE_BINDING_WATCH_MS: u64 = 60_000;
+/// Matches `RELEASE_POLL_MS`: the private channel's own control-watch cadence.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+const STALE_BINDING_TICK_MS: u64 = 25;
+
+/// Bounded watch for the runner's `trigger-stale-binding` control.
+///
+/// The scenario pre-arms no barrier, so this command file is the only channel
+/// between the runner and the product. The watch reads through the channel's own
+/// nonce check, services each command at most once, and leaves a command it
+/// cannot service yet pending for the next tick instead of answering it with an
+/// invented outcome. Nothing here writes a receipt: the rejection and reattach
+/// receipts come from the product's real fences, which the driver below drives.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+async fn run_stale_binding_watcher<R: tauri::Runtime>(
+    channel: Arc<QaBarrierChannel>,
+    daemon_client: Arc<crate::daemon::DaemonClient>,
+    app: tauri::AppHandle<R>,
+) {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(STALE_BINDING_WATCH_MS);
+    let mut handled: Option<String> = None;
+    let mut unserviced_reported = false;
+    loop {
+        if let Some(command) = channel.take_command(STALE_BINDING_COMMAND) {
+            let issued_at = command
+                .get("issuedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if handled.as_deref() != Some(issued_at.as_str()) {
+                let state = app.state::<NativeTerminalSurfaceHostState>();
+                if state
+                    .drive_stale_binding_command(&channel, Some(&daemon_client))
+                    .await
+                {
+                    handled = Some(issued_at);
+                } else if !unserviced_reported {
+                    unserviced_reported = true;
+                    eprintln!(
+                        "FERRYX_QA_STALE_BINDING_UNSERVICED: no daemon session with a live seven-field binding yet; the command stays pending"
+                    );
+                }
+            }
         }
-    });
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(STALE_BINDING_TICK_MS)).await;
+    }
 }
 
 /// Bounded GUI-lane `fixture-setup`: the app's daemon attaches during startup,
@@ -923,6 +1190,12 @@ pub(crate) async fn hold_backend_write_barrier(
 /// evidence; the verdict is whatever the real classifier returns from that
 /// snapshot. `Idle` is never forced - an `Unknown` verdict is reported with
 /// `evidenceMissing: true` and the exact missing-field list.
+///
+/// The classifier's positive verdict also needs the daemon's own reader/kernel
+/// facts, which this layer does not own. When a QA daemon client is installed
+/// (the GUI lane) they are observed for real before the receipt is written;
+/// without one (the headless lane) the settlement is written exactly as before
+/// and `daemonFacts` is `null`.
 pub(crate) fn settle_backend_write_barrier(
     channel: &QaBarrierChannel,
     state: &NativeTerminalSurfaceHostState,
@@ -941,8 +1214,53 @@ pub(crate) fn settle_backend_write_barrier(
     if operation_id != spec.operation_id {
         return;
     }
-    let fresh_snapshot =
+    let mut fresh_snapshot =
         write_stage_snapshot(state, session_id, operation_id, None, None, Some(success));
+    if let Some(client) = qa_daemon_client() {
+        let session_id = session_id.to_string();
+        let operation_id = operation_id.to_string();
+        let channel = Arc::clone(channel);
+        tauri::async_runtime::spawn(async move {
+            let facts = observe_daemon_liveness(&client, &session_id).await;
+            facts.apply(&mut fresh_snapshot);
+            append_backend_write_settlement(
+                &channel,
+                &operation_id,
+                &session_id,
+                fresh_snapshot,
+                success,
+                duration_ms,
+                outcome,
+                Some(facts),
+            );
+        });
+        return;
+    }
+    append_backend_write_settlement(
+        channel,
+        operation_id,
+        session_id,
+        fresh_snapshot,
+        success,
+        duration_ms,
+        outcome,
+        None,
+    );
+}
+
+/// One `backend-write` settlement line: the fresh collector snapshot, the real
+/// classifier verdict over it, and the daemon facts that were really observed
+/// (`null` when this process holds no daemon client, e.g. the headless lane).
+fn append_backend_write_settlement(
+    channel: &QaBarrierChannel,
+    operation_id: &str,
+    session_id: &str,
+    fresh_snapshot: PaneLivenessSnapshot,
+    success: bool,
+    duration_ms: f64,
+    outcome: Option<ReleaseOutcome>,
+    daemon_facts: Option<QaDaemonLiveness>,
+) {
     let verdict = classify_pane_liveness(&fresh_snapshot);
     let missing = QaBarrierChannel::evidence_missing_fields(&fresh_snapshot);
     channel.append_receipt(
@@ -960,6 +1278,8 @@ pub(crate) fn settle_backend_write_barrier(
                 "durationMs": duration_ms,
                 "releaseOutcome": outcome.map(ReleaseOutcome::as_str),
             },
+            "daemonFacts": daemon_facts
+                .map(|facts| serde_json::to_value(facts).unwrap_or(Value::Null)),
             "snapshot": QaBarrierChannel::snapshot_json(&fresh_snapshot),
         }),
     );
@@ -1353,12 +1673,24 @@ mod tests {
             QaFixtureSession {
                 backend_session_id: "pty-real-1".to_string(),
                 kind: "idle".to_string(),
+                stop_probe_state: None,
                 ownership_receipt: json!({"backendSessionId": "pty-real-1", "daemonEpoch": "42"}),
             },
             QaFixtureSession {
                 backend_session_id: "pty-real-2".to_string(),
                 kind: "source".to_string(),
+                stop_probe_state: None,
                 ownership_receipt: json!({"backendSessionId": "pty-real-2", "incarnation": "inc-2"}),
+            },
+            QaFixtureSession {
+                backend_session_id: "pty-real-3".to_string(),
+                kind: "externally-stopped".to_string(),
+                stop_probe_state: Some("stopped".to_string()),
+                ownership_receipt: json!({
+                    "backendSessionId": "pty-real-3",
+                    "kernelStopped": true,
+                    "registrySuspended": false,
+                }),
             },
         ];
         assert!(channel.emit_fixture_setup_from_sessions(&observed));
@@ -1369,12 +1701,19 @@ mod tests {
         assert_eq!(lines[1]["sessions"][0]["backendSessionId"], json!("pty-real-1"));
         assert_eq!(lines[1]["sessions"][0]["kind"], json!("idle"));
         assert_eq!(lines[1]["sessions"][1]["ownershipReceipt"]["incarnation"], json!("inc-2"));
+        assert_eq!(lines[1]["sessions"][2]["kind"], json!("externally-stopped"));
+        assert_eq!(lines[1]["sessions"][2]["stopProbeState"], json!("stopped"));
+        // Only the externally-stopped session carries a stop probe, so the
+        // runner's externally-stopped validator can never be satisfied by an
+        // idle/source session.
+        assert!(lines[1]["sessions"][0].get("stopProbeState").is_none());
+        assert!(lines[1]["sessions"][1].get("stopProbeState").is_none());
         // The kinds the product cannot attest are never claimed.
         for line in &lines {
             for session in line["sessions"].as_array().unwrap() {
                 let kind = session["kind"].as_str().unwrap();
                 assert!(
-                    kind == "idle" || kind == "source",
+                    matches!(kind, "idle" | "source" | "externally-stopped"),
                     "GUI inventory must not fabricate fixture kinds: {kind}"
                 );
             }
@@ -1385,5 +1724,314 @@ mod tests {
         let uncorrelated = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
         assert!(!uncorrelated.emit_fixture_setup_from_sessions(&observed));
         assert_eq!(read_lines(&dir, "fixture-setup").len(), 2);
+    }
+
+    // The command consumer: only a control that echoes THIS run's nonces is
+    // returned, so a stale or replayed command from another run cannot drive the
+    // product - the same rule the release controls already enforce.
+    #[test]
+    fn take_command_honors_the_run_and_operation_nonces() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = QaBarrierChannel::from_env_values(
+            dir.to_str().unwrap(),
+            TEST_RUN_ID,
+            Some(TEST_OPERATION_ID),
+        )
+        .unwrap();
+        assert_eq!(channel.dir(), dir.as_path());
+
+        let name = "trigger-stale-binding";
+        let command = |run_id: &str, operation_id: &str| {
+            json!({
+                "name": name,
+                "runId": run_id,
+                "operationId": operation_id,
+                "issuedAt": "2026-10-04T00:00:00.000Z",
+                "mutateField": "attemptGeneration",
+            })
+        };
+
+        assert!(channel.take_command(name).is_none(), "no command file yet");
+        std::fs::write(
+            dir.join(format!("{name}.request.json")),
+            serde_json::to_string(&command("qa-run-OTHER", TEST_OPERATION_ID)).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            channel.take_command(name).is_none(),
+            "another run's command is refused"
+        );
+        std::fs::write(
+            dir.join(format!("{name}.request.json")),
+            serde_json::to_string(&command(TEST_RUN_ID, "qa-op-OTHER")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            channel.take_command(name).is_none(),
+            "another operation's command is refused"
+        );
+        std::fs::write(
+            dir.join(format!("{name}.request.json")),
+            serde_json::to_string(&command(TEST_RUN_ID, TEST_OPERATION_ID)).unwrap(),
+        )
+        .unwrap();
+        let taken = channel.take_command(name).expect("correlated command");
+        assert_eq!(taken["mutateField"], json!("attemptGeneration"));
+        assert_eq!(taken["issuedAt"], json!("2026-10-04T00:00:00.000Z"));
+        // Reading is not consuming: the caller decides when a command is served.
+        assert!(channel.take_command(name).is_some());
+        assert!(dir.join(format!("{name}.request.json")).exists());
+    }
+
+    // The runner's live-arm binding: adopted only when it is correlated, concrete
+    // and does not conflict with a target the product already bound.
+    #[test]
+    fn runner_bind_is_adopted_only_when_correlated_and_unconflicted() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        arm(&dir, PRESENTATION_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
+        let channel = QaBarrierChannel::from_env_values(
+            dir.to_str().unwrap(),
+            TEST_RUN_ID,
+            Some(TEST_OPERATION_ID),
+        )
+        .unwrap();
+        channel.scan_and_ack_arms();
+
+        let bind = |run_id: &str, operation_id: &str, target: &str| {
+            json!({
+                "name": PRESENTATION_BARRIER,
+                "runId": run_id,
+                "operationId": operation_id,
+                "targetBackendSessionId": target,
+                "clientRequestId": null,
+                "boundAt": "2026-10-04T00:00:00.000Z",
+            })
+        };
+        let write_bind = |value: &Value| {
+            std::fs::write(
+                dir.join(format!("{PRESENTATION_BARRIER}.bind.json")),
+                serde_json::to_string(value).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // No bind file: the barrier stays unbound and the caller reports it.
+        assert!(channel.adopt_runner_bind(PRESENTATION_BARRIER).is_err());
+        assert!(channel
+            .target_backend_session_id_for(PRESENTATION_BARRIER)
+            .is_none());
+
+        // A bind from another run is refused.
+        write_bind(&bind("qa-run-OTHER", TEST_OPERATION_ID, "backend-real-1"));
+        assert!(channel.adopt_runner_bind(PRESENTATION_BARRIER).is_err());
+        // A wildcard target is refused by the channel's own binding rule.
+        write_bind(&bind(TEST_RUN_ID, TEST_OPERATION_ID, "*"));
+        assert!(channel.adopt_runner_bind(PRESENTATION_BARRIER).is_err());
+        assert!(channel
+            .target_backend_session_id_for(PRESENTATION_BARRIER)
+            .is_none());
+
+        // The correlated concrete bind is installed and acknowledged.
+        write_bind(&bind(TEST_RUN_ID, TEST_OPERATION_ID, "backend-real-1"));
+        assert_eq!(
+            channel.adopt_runner_bind(PRESENTATION_BARRIER).unwrap(),
+            "backend-real-1"
+        );
+        assert_eq!(
+            channel
+                .target_backend_session_id_for(PRESENTATION_BARRIER)
+                .as_deref(),
+            Some("backend-real-1")
+        );
+        let ack: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(format!("{PRESENTATION_BARRIER}.bound-ack.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["targetBackendSessionId"], json!("backend-real-1"));
+        assert_eq!(ack["runId"], json!(TEST_RUN_ID));
+
+        // A later conflicting bind is refused: an installed target is never
+        // redirected by a control file.
+        write_bind(&bind(TEST_RUN_ID, TEST_OPERATION_ID, "backend-other"));
+        assert!(channel.adopt_runner_bind(PRESENTATION_BARRIER).is_err());
+        assert_eq!(
+            channel
+                .target_backend_session_id_for(PRESENTATION_BARRIER)
+                .as_deref(),
+            Some("backend-real-1")
+        );
+    }
+
+    // The daemon facts: an unobserved field must stay unobserved (the classifier
+    // reads `false` as "verified not blocked"), and only a real observation may
+    // turn the verdict positive.
+    #[test]
+    fn daemon_facts_are_only_reported_when_observed() {
+        let older_daemon = crate::daemon::protocol::DaemonSessionDetails::new(
+            "backend-1".into(),
+            None,
+            None,
+            None,
+            80,
+            24,
+            true,
+            None,
+            None,
+            None,
+            false,
+        );
+        let unobserved = daemon_liveness_from_details(&older_daemon, None);
+        assert!(unobserved.observed);
+        assert_eq!(unobserved.reader_paused, None);
+        assert_eq!(unobserved.kernel_stopped, None);
+        assert_eq!(unobserved.suspended, Some(false));
+
+        let mut snapshot = PaneLivenessSnapshot {
+            telemetry_available: true,
+            session_id: Some("backend-1".into()),
+            vt_session_id: Some("backend-1".into()),
+            has_unpresented_frames: Some(false),
+            ..Default::default()
+        };
+        unobserved.apply(&mut snapshot);
+        assert_eq!(snapshot.reader_paused, None);
+        assert_eq!(snapshot.kernel_stopped, None);
+        // A daemon that does not report the reader/kernel facts cannot produce a
+        // positive verdict, and the missing fields are named.
+        assert_eq!(
+            classify_pane_liveness(&snapshot),
+            PaneLivenessVerdict::Unknown
+        );
+        let missing = QaBarrierChannel::evidence_missing_fields(&snapshot);
+        assert!(missing.contains(&"readerPaused"));
+        assert!(missing.contains(&"kernelStopped"));
+
+        // The same snapshot carrying the daemon's real answer is idle.
+        let mut answered_daemon = older_daemon.clone();
+        answered_daemon.reader_paused = Some(false);
+        answered_daemon.kernel_stopped = Some(false);
+        daemon_liveness_from_details(&answered_daemon, Some(7)).apply(&mut snapshot);
+        assert_eq!(snapshot.daemon_epoch.as_deref(), Some("7"));
+        assert_eq!(classify_pane_liveness(&snapshot), PaneLivenessVerdict::Idle);
+    }
+
+    // The fixture kind: `externally-stopped` is claimed only from the daemon's own
+    // report that the kernel stopped the process and its lifecycle registry does
+    // not own that stop.
+    #[test]
+    fn gui_fixture_kind_claims_external_stop_only_from_the_daemons_own_report() {
+        let base = || {
+            crate::daemon::protocol::DaemonSessionDetails::new(
+                "backend-1".into(),
+                None,
+                None,
+                None,
+                80,
+                24,
+                true,
+                None,
+                None,
+                None,
+                false,
+            )
+        };
+
+        let stopped_and_unowned = crate::daemon::protocol::DaemonSessionDetails {
+            kernel_stopped: Some(true),
+            registry_suspended: Some(false),
+            ..base()
+        };
+        assert_eq!(
+            gui_fixture_kind(&stopped_and_unowned, false),
+            ("externally-stopped", Some("stopped"))
+        );
+
+        let stopped_and_owned = crate::daemon::protocol::DaemonSessionDetails {
+            kernel_stopped: Some(true),
+            registry_suspended: Some(true),
+            ..base()
+        };
+        assert_eq!(gui_fixture_kind(&stopped_and_owned, false), ("source", None));
+
+        // Ownership unobserved: this lane cannot tell an external stop from an
+        // owned one, so it claims no kind for it.
+        let stopped_unattributed = crate::daemon::protocol::DaemonSessionDetails {
+            kernel_stopped: Some(true),
+            ..base()
+        };
+        assert_eq!(
+            gui_fixture_kind(&stopped_unattributed, false),
+            ("source", None)
+        );
+
+        let explicitly_external = crate::daemon::protocol::DaemonSessionDetails {
+            kernel_stopped: Some(true),
+            suspension_source: Some("external-kernel".into()),
+            ..base()
+        };
+        assert_eq!(
+            gui_fixture_kind(&explicitly_external, false),
+            ("externally-stopped", Some("stopped"))
+        );
+
+        let running = crate::daemon::protocol::DaemonSessionDetails {
+            kernel_stopped: Some(false),
+            ..base()
+        };
+        assert_eq!(gui_fixture_kind(&running, true), ("idle", None));
+        assert_eq!(gui_fixture_kind(&running, false), ("source", None));
+        // A stopped session is never reported as idle.
+        assert_eq!(
+            gui_fixture_kind(&stopped_and_unowned, true),
+            ("externally-stopped", Some("stopped"))
+        );
+    }
+
+    // Without a daemon client (the headless lane) the write settlement reports no
+    // daemon facts at all instead of defaulted ones, and keeps the honest
+    // non-pass.
+    #[test]
+    fn backend_write_settlement_reports_no_unobserved_daemon_facts() {
+        assert!(
+            qa_daemon_client().is_none(),
+            "this test asserts the no-client path; no test may install a client first"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
+        let channel = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
+        channel.scan_and_ack_arms();
+        let state = NativeTerminalSurfaceHostState::default();
+
+        settle_backend_write_barrier(
+            &channel,
+            &state,
+            "qa-headless-write",
+            Some(TEST_OPERATION_ID),
+            Some(ReleaseOutcome::Released),
+            true,
+            12.5,
+        );
+
+        let lines = read_lines(&dir, WRITE_BARRIER);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["stage"], json!("backend_write_settled"));
+        assert_eq!(lines[0]["daemonFacts"], Value::Null);
+        assert_eq!(lines[0]["stageProgress"]["backendWriteCompleted"], json!(true));
+        assert_eq!(lines[0]["classifierVerdict"], json!("Unknown"));
+        assert_eq!(lines[0]["evidenceMissing"], json!(true));
+        let missing = lines[0]["evidenceMissingFields"].as_array().unwrap();
+        for field in ["readerPaused", "kernelStopped", "suspended"] {
+            assert!(
+                missing.iter().any(|entry| entry == field),
+                "{field} must be reported as missing"
+            );
+        }
     }
 }

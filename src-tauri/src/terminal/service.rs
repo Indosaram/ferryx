@@ -53,13 +53,19 @@ impl Default for TerminalService {
 impl TerminalService {
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
         pty_manager.set_output_hub(output_hub.clone());
-        Self {
+        let service = Self {
             remote: Arc::new(super::remote::RemoteRuntime::new(output_hub.clone())),
             paired: Arc::new(super::paired_runtime::Runtime::default()),
             pty_manager,
             output_hub,
             lifecycle: Arc::new(Mutex::new(SessionLifecycleRegistry::default())),
-        }
+        };
+        // The daemon owns the PTYs and their output hub, so the private QA
+        // channel is installed here as well; without the runner env this is a
+        // no-op and the daemon keeps no QA surface.
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        super::qa_liveness::start(service.clone());
+        service
     }
 
     pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> {
@@ -629,7 +635,7 @@ fn actuate_suspension(
     Ok(receipt)
 }
 
-fn auto_resume_suspension(
+pub(crate) fn auto_resume_suspension(
     target: &super::SuspensionTarget,
     classify: impl FnOnce(&super::SuspensionTarget) -> Result<super::SuspensionSource, super::SuspensionError>,
     resume: impl FnOnce(&super::SuspensionTarget) -> Result<(), super::SuspensionError>,

@@ -1792,6 +1792,2100 @@ fn split_wire_epoch(operation: crate::daemon::protocol::SplitOperationResult)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pane-liveness QA producers behind `local-split-qa` + `native-terminal`.
+//
+// The GUI half of the private barrier channel (`crate::ipc::qa_barrier`): the
+// create stage's authoritative identity, the held attach handshake, the cancel
+// acknowledgement with its authoritative cleanup record, and the two runner
+// controls this lane consumes - `retry` (the same-ID retry with an advanced
+// attempt generation) and `split-concurrent-batch` (the bounded concurrent split
+// load with duplicate and fingerprint-conflict pairs). The daemon half
+// (handover transfer/rollback, held remote RPC) is `crate::daemon::qa_producers`.
+//
+// Each emitter fires from the real stage it names - the returned create result,
+// the attach that is about to install its pump, the daemon's own cancel reply -
+// and every field is a value this process observed. A stage that cannot be
+// established from real observations settles truthfully instead of being
+// upgraded into a pass.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+mod qa_split_producers {
+    use super::*;
+    use crate::daemon::protocol::{
+        clip_stage_budget, DaemonSessionDetails, PaneAttachTuple, PreparedLocalSplit,
+        SplitAttachAttempt, SplitIdentity, SplitOperationResult, STAGE_ATTACH_OR_LISTENER_MAX_MS,
+        STAGE_CREATE_OR_STATUS_MAX_MS,
+    };
+    use crate::ipc::qa_barrier::{self, QaBarrierChannel, ReleaseOutcome};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    pub const SPLIT_CREATE: &str = "split-create";
+    pub const ATTACH_HANDSHAKE: &str = "attach-handshake";
+    pub const CANCEL_ACK: &str = "cancel-ack";
+    const TRIGGER_HANDOVER: &str = "trigger-handover";
+    const TRIGGER_HANDOVER_ABORT: &str = "trigger-handover-abort";
+    const SPLIT_CANCEL: &str = "split-cancel";
+    const WATCH_TICK_MS: u64 = 25;
+    const CHANNEL_BOOT_WAIT_MS: u64 = 2_000;
+    const CANCEL_IDENTITY_WAIT_MS: u64 = 1_000;
+    const DAEMON_CANCEL_BUDGET_MS: u64 = 2_500;
+    const LIVENESS_PROBE_MS: u64 = 500;
+    /// Runner control: perform the same-ID retry the stalled attach asked for
+    /// (`barrierHub.command('retry', ...)` in split-attach-stall).
+    const RETRY: &str = "retry";
+    /// Runner control: drive the bounded concurrent split batch
+    /// (`barrierHub.command('split-concurrent-batch', ...)` in split-concurrent).
+    const SPLIT_CONCURRENT_BATCH: &str = "split-concurrent-batch";
+    /// Bounded wait for the operation identity a retry must reuse. The scenario
+    /// retries a creation that already happened, so the wait only stops a
+    /// control from being serviced against an absent record.
+    const RETRY_IDENTITY_WAIT_MS: u64 = 2_000;
+    /// A retry re-attaches the existing backend: it gets the attach/listener
+    /// stage cap, never a create budget.
+    const RETRY_ATTACH_BUDGET_MS: u64 = STAGE_ATTACH_OR_LISTENER_MAX_MS;
+    /// One batch request gets the same bounded create/status stage budget the
+    /// product gives a single user-visible attempt, so no QA request can drive an
+    /// unbounded wait against the daemon.
+    const BATCH_REQUEST_BUDGET_MS: u64 = STAGE_CREATE_OR_STATUS_MAX_MS;
+    /// Hard cap on the batch the product will drive, whatever the control asks
+    /// for: the concurrent load stays bounded by construction.
+    const BATCH_REQUEST_CAP: u64 = 16;
+    /// Durable-request namespace of the batch, so a QA batch can never collide
+    /// with a real UI request identity.
+    const BATCH_REQUEST_PREFIX: &str = "qa-split-concurrent";
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    pub fn channel() -> Option<Arc<QaBarrierChannel>> {
+        qa_barrier::active_channel()
+    }
+
+    fn barrier_dir() -> Option<PathBuf> {
+        std::env::var("FERRYX_QA_BARRIER_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+    }
+
+    /// A control that does not echo this run's nonces is never honored.
+    fn read_control(dir: &Path, name: &str, channel: &QaBarrierChannel) -> Option<Value> {
+        let text = std::fs::read_to_string(dir.join(format!("{name}.request.json"))).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        if value.get("runId").and_then(Value::as_str) != Some(channel.run_id()) {
+            return None;
+        }
+        let expected = channel.operation_id()?;
+        if value.get("operationId").and_then(Value::as_str) != Some(expected.as_str()) {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// `Date.prototype.toISOString()` shape (`YYYY-MM-DDTHH:MM:SS.sssZ`), parsed
+    /// by hand so the reported dispatch latency never depends on an optional
+    /// date-formatting feature being compiled in.
+    fn parse_rfc3339_ms(value: &str) -> Option<u64> {
+        let bytes = value.as_bytes();
+        if bytes.len() < 24
+            || bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b'T'
+            || bytes[13] != b':'
+            || bytes[16] != b':'
+            || bytes[19] != b'.'
+        {
+            return None;
+        }
+        let number = |range: std::ops::Range<usize>| value.get(range)?.parse::<i64>().ok();
+        let year = number(0..4)?;
+        let month = number(5..7)?;
+        let day = number(8..10)?;
+        let hour = number(11..13)?;
+        let minute = number(14..16)?;
+        let second = number(17..19)?;
+        let millis = number(20..23)?;
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || !(0..=23).contains(&hour)
+            || !(0..=59).contains(&minute)
+            || !(0..=60).contains(&second)
+        {
+            return None;
+        }
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (month + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+        u64::try_from(seconds * 1_000 + millis).ok()
+    }
+
+    fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+        match state {
+            SplitOperationResult::Absent { .. } => "absent",
+            SplitOperationResult::Pending { .. } => "pending",
+            SplitOperationResult::Created { .. } => "created",
+            SplitOperationResult::Cancelled => "cancelled",
+            SplitOperationResult::Exited => "exited",
+            SplitOperationResult::Failed { .. } => "failed",
+            SplitOperationResult::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// The split operation this process really prepared and (when it got that
+    /// far) really created. The cancel watcher needs it because the runner's
+    /// cancel control carries no identity of its own, and because a
+    /// cancel-before-create must not require the created id.
+    #[derive(Debug, Clone)]
+    struct RecordedSplit {
+        identity: SplitIdentity,
+        workspace_id: String,
+        source_backend_session_id: Option<String>,
+        prepared_at_ms: u64,
+        owned_session_id: Option<String>,
+        created_at_ms: Option<u64>,
+    }
+
+    static RECORDED_SPLIT: std::sync::Mutex<Option<RecordedSplit>> = std::sync::Mutex::new(None);
+
+    fn lock_recorded() -> std::sync::MutexGuard<'static, Option<RecordedSplit>> {
+        RECORDED_SPLIT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The attempt the product really bound. The seven-field binding the attach
+    /// stage was about to install names its own incarnation and attempt
+    /// generation, and those are exactly the two values a same-ID retry must
+    /// retain and advance - so they are read from the real binding instead of
+    /// being assumed.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedAttempt {
+        incarnation: Option<String>,
+        attempt_generation: u64,
+    }
+
+    static RECORDED_ATTEMPT: std::sync::Mutex<Option<RecordedAttempt>> =
+        std::sync::Mutex::new(None);
+
+    fn lock_recorded_attempt() -> std::sync::MutexGuard<'static, Option<RecordedAttempt>> {
+        RECORDED_ATTEMPT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records the binding the split attach really offered, for the SAME backend
+    /// this process created. A binding for another session never overwrites the
+    /// recorded attempt.
+    fn record_bound_attempt(binding: &PaneAttachTuple) {
+        let mut guard = lock_recorded_attempt();
+        let owns_binding = match lock_recorded().as_ref().and_then(|record| record.owned_session_id.as_deref()) {
+            Some(owned) => owned == binding.backend_session_id,
+            None => true,
+        };
+        if !owns_binding {
+            return;
+        }
+        let previous = guard.as_ref().map(|attempt| attempt.attempt_generation);
+        *guard = Some(RecordedAttempt {
+            incarnation: binding.incarnation.clone(),
+            attempt_generation: previous.map_or(binding.attempt_generation, |previous| {
+                previous.max(binding.attempt_generation)
+            }),
+        });
+    }
+
+    pub fn record_prepared(identity: &SplitIdentity, request: &SpawnTerminalRequest) {
+        *lock_recorded_attempt() = None;
+        let mut guard = lock_recorded();
+        *guard = Some(RecordedSplit {
+            identity: identity.clone(),
+            workspace_id: request.workspace_id.clone(),
+            source_backend_session_id: request.inherit_from_session_id.clone(),
+            prepared_at_ms: now_ms(),
+            owned_session_id: None,
+            created_at_ms: None,
+        });
+    }
+
+    fn record_created(identity: &SplitIdentity, session_id: &str) {
+        let mut guard = lock_recorded();
+        match guard.as_mut() {
+            Some(record) if record.identity.request_id == identity.request_id => {
+                record.owned_session_id = Some(session_id.to_string());
+                record.created_at_ms = Some(now_ms());
+            }
+            _ => {
+                *guard = Some(RecordedSplit {
+                    identity: identity.clone(),
+                    workspace_id: String::new(),
+                    source_backend_session_id: None,
+                    prepared_at_ms: now_ms(),
+                    owned_session_id: Some(session_id.to_string()),
+                    created_at_ms: Some(now_ms()),
+                });
+            }
+        }
+    }
+
+    pub fn split_create_payload(
+        prepared: &PreparedLocalSplit,
+        session_id: &str,
+        daemon_epoch: u64,
+        session: &DaemonSessionDetails,
+        recorded: Option<&RecordedSplit>,
+    ) -> Value {
+        json!({
+            "stage": SPLIT_CREATE,
+            "backendSessionId": session_id,
+            "incarnation": session.incarnation,
+            "daemonEpoch": daemon_epoch.to_string(),
+            "running": session.running,
+            "workspaceId": session.workspace_id,
+            "worktree": session.worktree,
+            "cwd": session.cwd,
+            "requestId": prepared.identity.request_id,
+            "clientRequestId": prepared.identity.request_id,
+            "originEpoch": prepared.identity.origin_epoch,
+            "expiresAtUnixMs": prepared.identity.expires_at_unix_ms,
+            "sourceBackendSessionId": recorded.and_then(|r| r.source_backend_session_id.clone()),
+            "preparedAtMs": recorded.map(|r| r.prepared_at_ms),
+            "createdAtMs": now_ms(),
+            "producerStage": "create-local-split",
+        })
+    }
+
+    /// The create stage's authoritative result: the identity the runner
+    /// correlates plus the created backend session, its incarnation and epoch,
+    /// exactly as the journal-confirmed create returned them.
+    pub fn record_and_emit_split_create(
+        prepared: &PreparedLocalSplit,
+        session_id: &str,
+        daemon_epoch: u64,
+        session: &DaemonSessionDetails,
+    ) {
+        record_created(&prepared.identity, session_id);
+        let Some(channel) = channel() else {
+            return;
+        };
+        let Some(operation_id) = channel.operation_id() else {
+            return;
+        };
+        let recorded = lock_recorded().clone();
+        let payload = split_create_payload(
+            prepared,
+            session_id,
+            daemon_epoch,
+            session,
+            recorded.as_ref(),
+        );
+        channel.append_receipt(SPLIT_CREATE, &operation_id, payload);
+    }
+
+    pub enum AttachHold {
+        NotApplicable,
+        Released,
+        Failed(IpcError),
+    }
+
+    fn attach_hold_payload(
+        session_id: &str,
+        binding: &PaneAttachTuple,
+        attempt: &SplitAttachAttempt,
+        budget_ms: u64,
+        actionable: bool,
+        release_outcome: &str,
+        session_still_alive: Option<bool>,
+    ) -> Value {
+        json!({
+            "stage": ATTACH_HANDSHAKE,
+            "actionable": actionable,
+            "retryMustReuseId": actionable,
+            "releaseOutcome": release_outcome,
+            "backendSessionId": session_id,
+            "incarnation": binding.incarnation,
+            "daemonEpoch": binding.daemon_epoch,
+            "frontendSessionId": attempt.frontend_session_id,
+            "attemptGeneration": attempt.generation,
+            "bindingKey": binding.binding_key,
+            "requestId": attempt.identity.request_id,
+            "originEpoch": attempt.identity.origin_epoch,
+            "attemptBudgetMs": budget_ms,
+            "backendSessionStillAlive": session_still_alive,
+            "failureClass": if actionable { Some("attach-stall") } else { None },
+            "settledAtMs": now_ms(),
+        })
+    }
+
+    /// Holds the REAL attach stage: called from the split-attach branch of
+    /// `cmd_terminal_attach` after the binding is validated and before the pump
+    /// is reserved, so a held attempt never installs anything. The hold is
+    /// bounded by the attach stage budget, and its settlement is the actionable
+    /// same-ID retry failure the runner awaits.
+    pub async fn hold_attach_handshake(
+        daemon_client: &Arc<DaemonClient>,
+        session_id: &str,
+        binding: &PaneAttachTuple,
+        attempt: &SplitAttachAttempt,
+    ) -> AttachHold {
+        // Recorded before any barrier decision: the runner's later `retry` control
+        // must be fenced against the attempt this process really bound, whether or
+        // not the attach-handshake barrier was armed for this run.
+        record_bound_attempt(binding);
+        let Some(channel) = channel() else {
+            return AttachHold::NotApplicable;
+        };
+        let Some(spec) = channel.spec(ATTACH_HANDSHAKE) else {
+            return AttachHold::NotApplicable;
+        };
+        let Some(operation_id) = channel.operation_id() else {
+            return AttachHold::NotApplicable;
+        };
+        if spec.operation_id != operation_id {
+            return AttachHold::NotApplicable;
+        }
+        if channel
+            .target_backend_session_id_for(ATTACH_HANDSHAKE)
+            .is_none()
+        {
+            if channel
+                .bind_target_session(ATTACH_HANDSHAKE, &operation_id, session_id)
+                .is_err()
+            {
+                return AttachHold::NotApplicable;
+            }
+        } else if !channel.matches_target_session(ATTACH_HANDSHAKE, session_id) {
+            return AttachHold::NotApplicable;
+        }
+
+        let budget_ms = clip_stage_budget(attempt.remaining_ms, STAGE_ATTACH_OR_LISTENER_MAX_MS).max(1);
+        channel.write_held(
+            &spec,
+            session_id,
+            ATTACH_HANDSHAKE,
+            attach_hold_payload(session_id, binding, attempt, budget_ms, false, "held", None),
+        );
+
+        let mut bounded = spec.clone();
+        bounded.deadline_ms = budget_ms.min(spec.deadline_ms);
+        match channel.wait_for_release(&bounded).await {
+            ReleaseOutcome::Released => {
+                channel.append_receipt(
+                    ATTACH_HANDSHAKE,
+                    &operation_id,
+                    attach_hold_payload(
+                        session_id,
+                        binding,
+                        attempt,
+                        budget_ms,
+                        false,
+                        ReleaseOutcome::Released.as_str(),
+                        None,
+                    ),
+                );
+                AttachHold::Released
+            }
+            ReleaseOutcome::DeadlineExceeded => {
+                let probe_deadline = tokio::time::Instant::now()
+                    + Duration::from_millis(LIVENESS_PROBE_MS.min(budget_ms));
+                let alive = daemon_client
+                    .describe_session_bounded_until(session_id, probe_deadline)
+                    .await
+                    .is_ok();
+                channel.append_receipt(
+                    ATTACH_HANDSHAKE,
+                    &operation_id,
+                    attach_hold_payload(
+                        session_id,
+                        binding,
+                        attempt,
+                        budget_ms,
+                        true,
+                        ReleaseOutcome::DeadlineExceeded.as_str(),
+                        Some(alive),
+                    ),
+                );
+                AttachHold::Failed(
+                    IpcError::new(
+                        IpcErrorCode::SpawnAttemptTimeout,
+                        "Attach did not complete within the attempt budget. Retry to reuse the same shell.",
+                    )
+                    .with_details(json!({
+                        "stage": "attach",
+                        "backendSessionId": session_id,
+                        "incarnation": binding.incarnation,
+                        "attemptGeneration": attempt.generation,
+                        "retryMustReuseId": true,
+                        "backendSessionStillAlive": alive,
+                        "delivery": "notSent",
+                    })),
+                )
+            }
+        }
+    }
+
+    pub fn cleanup_is_authoritative(
+        cancelled: bool,
+        owned_creation_removed: Option<bool>,
+        source_still_present: Option<bool>,
+    ) -> bool {
+        cancelled
+            && owned_creation_removed != Some(false)
+            && source_still_present != Some(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn cancel_ack_payload(
+        record: &RecordedSplit,
+        phase: &str,
+        duplicate: bool,
+        cancel_ack_ms: u64,
+        timer_dispatch_latency_ms: Option<u64>,
+        operation_state: &str,
+        status_state: Option<&str>,
+        owned_creation_removed: Option<bool>,
+        source_still_present: Option<bool>,
+    ) -> Value {
+        let cancelled = operation_state == "cancelled" || status_state == Some("cancelled");
+        json!({
+            "stage": CANCEL_ACK,
+            "phase": phase,
+            "duplicateCancel": duplicate,
+            "cancelAckMs": cancel_ack_ms,
+            "timerDispatchLatencyMs": timer_dispatch_latency_ms,
+            // The daemon's cancel path tombstones the request identity; it never
+            // needs the created session id, which is why a cancel-before-create
+            // is acknowledged at all.
+            "createdIdRequired": false,
+            "requestId": record.identity.request_id,
+            "originEpoch": record.identity.origin_epoch,
+            "workspaceId": record.workspace_id,
+            "ownedSessionId": record.owned_session_id,
+            "createdAtMs": record.created_at_ms,
+            "operationState": operation_state,
+            "cleanupReceipt": {
+                "authoritative": cleanup_is_authoritative(
+                    cancelled,
+                    owned_creation_removed,
+                    source_still_present,
+                ),
+                "operationStateAfterCancel": status_state,
+                "ownedCreationRemoved": owned_creation_removed,
+                "sourceBackendSessionId": record.source_backend_session_id,
+                "sourceStillPresent": source_still_present,
+                "duplicateCancel": duplicate,
+                "verifiedAtMs": now_ms(),
+            },
+        })
+    }
+
+    /// The runner's `retry` control, field for field
+    /// (`scripts/lib/qa-scenarios/split-scenarios.mjs`): the durable request and
+    /// backend identity the retry must reuse, plus the attempt generation it must
+    /// advance to.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RetryCommand {
+        backend_session_id: String,
+        incarnation: Option<String>,
+        daemon_epoch: Option<String>,
+        attempt_generation: u64,
+        client_request_id: Option<String>,
+    }
+
+    fn optional_control_string(command: &Value, field: &str) -> Option<String> {
+        command
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    impl RetryCommand {
+        /// A control that cannot name a concrete backend session and a concrete
+        /// generation is refused, never guessed: a wildcard or anonymous retry
+        /// would not be the same-ID retry the contract requires.
+        fn parse(command: &Value) -> Result<Self, String> {
+            let backend_session_id = optional_control_string(command, "backendSessionId")
+                .filter(|value| value != "*")
+                .ok_or_else(|| "retry requires a concrete backendSessionId".to_string())?;
+            let attempt_generation = command
+                .get("attemptGeneration")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "retry requires a numeric attemptGeneration".to_string())?;
+            Ok(Self {
+                backend_session_id,
+                incarnation: optional_control_string(command, "incarnation"),
+                daemon_epoch: optional_control_string(command, "daemonEpoch"),
+                attempt_generation,
+                client_request_id: optional_control_string(command, "clientRequestId"),
+            })
+        }
+    }
+
+    /// Same-ID retry contract, checked against the operation this process really
+    /// recorded: request and backend identity are retained and only the attempt
+    /// generation advances. Every refusal names the divergence instead of
+    /// retrying under an identity the durable journal does not own.
+    fn retry_fence(
+        command: &RetryCommand,
+        record: &RecordedSplit,
+        previous: Option<&RecordedAttempt>,
+    ) -> Result<(), String> {
+        if let Some(carried) = &command.client_request_id {
+            if carried != &record.identity.request_id {
+                return Err(format!(
+                    "retry must reuse the durable request identity '{}', got '{carried}'",
+                    record.identity.request_id
+                ));
+            }
+        }
+        if let Some(owned) = &record.owned_session_id {
+            if owned != &command.backend_session_id {
+                return Err(format!(
+                    "retry must reuse the created backend session '{owned}', got '{}'",
+                    command.backend_session_id
+                ));
+            }
+        }
+        if let Some(previous) = previous {
+            if let (Some(carried), Some(recorded)) = (&command.incarnation, &previous.incarnation) {
+                if carried != recorded {
+                    return Err(format!(
+                        "retry must reuse the recorded incarnation '{recorded}', got '{carried}'"
+                    ));
+                }
+            }
+            if command.attempt_generation <= previous.attempt_generation {
+                return Err(format!(
+                    "retry must advance attemptGeneration beyond the bound {}, got {}",
+                    previous.attempt_generation, command.attempt_generation
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The retry's settlement, from the values this process really observed: the
+    /// operation state the journal answered with, the incarnation the daemon
+    /// reports for the session, and the epoch of the attachment the retry really
+    /// installed. `outcome` is `reattached` only for a real attachment;
+    /// `refused` carries the contract fence that rejected the command and
+    /// `attach-failed` the real attach error - never a fabricated success.
+    #[allow(clippy::too_many_arguments)]
+    fn retry_payload(
+        command: &RetryCommand,
+        record: &RecordedSplit,
+        previous: Option<&RecordedAttempt>,
+        outcome: &str,
+        refusal_reason: Option<&str>,
+        status_state: Option<&str>,
+        session: Option<&DaemonSessionDetails>,
+        attach_epoch: Option<u64>,
+        history: Option<(Option<u64>, Option<u64>)>,
+    ) -> Value {
+        json!({
+            "stage": RETRY,
+            "outcome": outcome,
+            "refusalReason": refusal_reason,
+            // The runner's contract wording: a retry may never mint a new id.
+            "retryMustReuseId": true,
+            "backendSessionId": command.backend_session_id,
+            "incarnation": session
+                .and_then(|details| details.incarnation.clone())
+                .or_else(|| command.incarnation.clone()),
+            "daemonEpoch": command.daemon_epoch,
+            "attachEpoch": attach_epoch.map(|epoch| epoch.to_string()),
+            "attemptGeneration": command.attempt_generation,
+            "previousAttemptGeneration": previous.map(|attempt| attempt.attempt_generation),
+            "requestId": record.identity.request_id,
+            "clientRequestId": command.client_request_id,
+            "originEpoch": record.identity.origin_epoch,
+            "statusOperationState": status_state,
+            "workspaceId": session
+                .and_then(|details| details.workspace_id.clone())
+                .or_else(|| Some(record.workspace_id.clone())),
+            "historyStartSequence": history
+                .and_then(|(start, _)| start.map(|value| value.to_string())),
+            "historyEndSequence": history
+                .and_then(|(_, end)| end.map(|value| value.to_string())),
+            "settledAtMs": now_ms(),
+        })
+    }
+
+    /// Performs the REAL same-ID retry through the product's own client path:
+    /// the durable journal is asked first (status before any action), and the
+    /// retry then re-attaches the SAME backend session. The attachment is
+    /// disposed at once because the frontend owns the pane's pump; this proves
+    /// the retry landed on the same backend incarnation without minting an id.
+    async fn handle_retry(
+        daemon_client: &Arc<DaemonClient>,
+        channel: &Arc<QaBarrierChannel>,
+        command: &RetryCommand,
+    ) -> Result<(), String> {
+        let operation_id = channel
+            .operation_id()
+            .ok_or_else(|| "no QA operation nonce".to_string())?;
+        let record = wait_for_recorded_split_within(RETRY_IDENTITY_WAIT_MS)
+            .await
+            .ok_or_else(|| "no split operation identity was recorded in this process".to_string())?;
+        let previous = lock_recorded_attempt().clone();
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(RETRY_ATTACH_BUDGET_MS);
+        let settle = |outcome: &str,
+                      refusal: Option<&str>,
+                      state: Option<&str>,
+                      session: Option<&DaemonSessionDetails>,
+                      epoch: Option<u64>,
+                      history: Option<(Option<u64>, Option<u64>)>| {
+            channel.append_receipt(
+                RETRY,
+                &operation_id,
+                retry_payload(
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    outcome,
+                    refusal,
+                    state,
+                    session,
+                    epoch,
+                    history,
+                ),
+            );
+        };
+
+        if let Err(reason) = retry_fence(command, &record, previous.as_ref()) {
+            settle("refused", Some(reason.as_str()), None, None, None, None);
+            eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
+            return Ok(());
+        }
+
+        // Status first, exactly like the product's own retry: the durable journal
+        // is the only authority on whether this request really owns the session.
+        let (status_state, session) = match daemon_client
+            .local_split_status_until(&record.identity, deadline)
+            .await
+        {
+            Ok(SplitOperationResult::Created {
+                session_id,
+                session,
+                ..
+            }) if session_id == command.backend_session_id => ("created", Some(session)),
+            Ok(operation) => {
+                let state = operation_state(&operation).to_string();
+                let reason = format!(
+                    "retry requires a journal-confirmed creation of '{}'; the durable status is {state}",
+                    command.backend_session_id
+                );
+                settle("refused", Some(reason.as_str()), Some(state.as_str()), None, None, None);
+                eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
+                return Ok(());
+            }
+            Err(error) => {
+                let reason = format!(
+                    "retry status reconciliation failed: {} ({:?})",
+                    error.message, error.code
+                );
+                settle("refused", Some(reason.as_str()), None, None, None, None);
+                eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
+                return Ok(());
+            }
+        };
+
+        // The incarnation the daemon reports for the session is authoritative; a
+        // retry that names a different owner is a stale binding, not a retry.
+        if let (Some(carried), Some(live)) = (
+            &command.incarnation,
+            session.as_ref().and_then(|details| details.incarnation.as_ref()),
+        ) {
+            if carried != live {
+                let reason = format!(
+                    "retry incarnation '{carried}' differs from the authoritative owner '{live}'"
+                );
+                settle("refused", Some(reason.as_str()), Some(status_state), session.as_ref(), None, None);
+                eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
+                return Ok(());
+            }
+        }
+
+        match daemon_client
+            .attach_until(&command.backend_session_id, None, deadline)
+            .await
+        {
+            Ok(attachment) => {
+                let epoch = attachment.epoch;
+                let history = (attachment.start_sequence, attachment.end_sequence);
+                attachment.stream_task.abort();
+                settle(
+                    "reattached",
+                    None,
+                    Some(status_state),
+                    session.as_ref(),
+                    Some(epoch),
+                    Some(history),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let reason = format!(
+                    "same-ID retry attach failed: {} ({:?})",
+                    error.message, error.code
+                );
+                settle(
+                    "attach-failed",
+                    Some(reason.as_str()),
+                    Some(status_state),
+                    session.as_ref(),
+                    None,
+                    None,
+                );
+                eprintln!("FERRYX_QA_RETRY_UNSETTLED: {reason}");
+                Ok(())
+            }
+        }
+    }
+
+    /// Bounded watch for the runner's `retry` control. The scenario pre-arms no
+    /// retry barrier, so this control file is the only channel between the runner
+    /// and the product; it is read through the channel's own nonce check, serviced
+    /// at most once, and left pending (never answered with an invented outcome)
+    /// while the operation identity it must reuse is not recorded yet.
+    async fn run_retry_watcher(daemon_client: Arc<DaemonClient>) {
+        let Some(channel) = wait_for_channel().await else {
+            return;
+        };
+        let Some(dir) = barrier_dir() else {
+            return;
+        };
+        let mut handled: Vec<String> = Vec::new();
+        let mut unserviced_reported = false;
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+            let Some(request) = read_control(&dir, RETRY, &channel) else {
+                continue;
+            };
+            let issued_at = request
+                .get("issuedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if handled.iter().any(|seen| seen == &issued_at) {
+                continue;
+            }
+            let command = match RetryCommand::parse(&request) {
+                Ok(command) => command,
+                Err(reason) => {
+                    handled.push(issued_at);
+                    eprintln!("FERRYX_QA_RETRY_UNSERVICEABLE: {reason}");
+                    continue;
+                }
+            };
+            match handle_retry(&daemon_client, &channel, &command).await {
+                Ok(()) => handled.push(issued_at),
+                Err(error) => {
+                    if !unserviced_reported {
+                        unserviced_reported = true;
+                        eprintln!(
+                            "FERRYX_QA_RETRY_UNSERVICED: {error}; the command stays pending"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum BatchRequestKind {
+        /// Same durable identity and same fingerprint: must be answered from the
+        /// record, never by minting a second session.
+        Duplicate,
+        /// Same durable identity, different fingerprint: must be rejected by the
+        /// journal's real fingerprint check.
+        Conflict,
+    }
+
+    impl BatchRequestKind {
+        fn as_str(self) -> &'static str {
+            match self {
+                BatchRequestKind::Duplicate => "duplicate",
+                BatchRequestKind::Conflict => "conflict",
+            }
+        }
+    }
+
+    /// One bounded wave of the batch: `requests` identical real split requests
+    /// driven together. Waves run in order, so each wave sees exactly the durable
+    /// record the previous waves left behind.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct BatchWave {
+        request_id: String,
+        kind: BatchRequestKind,
+        cols: u16,
+        rows: u16,
+        requests: u64,
+    }
+
+    /// The bounded batch the runner asked for. `count` real split requests over
+    /// two durable identities, in four ordered waves: two waves of exact
+    /// duplicates of one request (the first may create, the second must be
+    /// answered from the record the first left behind), then a wave that
+    /// establishes the second identity's base fingerprint, and finally a wave of
+    /// that same identity carrying a conflicting fingerprint - which the journal's
+    /// own pre-check rejects, deterministically. The count is capped so the
+    /// concurrent load stays bounded whatever the control asks for.
+    fn batch_plan(
+        count: u64,
+        test_conflicts: bool,
+        base_cols: u16,
+        base_rows: u16,
+    ) -> Vec<BatchWave> {
+        let total = count.clamp(1, BATCH_REQUEST_CAP);
+        let duplicate_id = format!("{BATCH_REQUEST_PREFIX}-duplicate");
+        let conflict_id = format!("{BATCH_REQUEST_PREFIX}-conflict");
+        let conflicting_cols = if base_cols == u16::MAX {
+            base_cols - 1
+        } else {
+            base_cols + 1
+        };
+        let wave = |request_id: &str, kind: BatchRequestKind, cols: u16, requests: u64| {
+            BatchWave {
+                request_id: request_id.to_string(),
+                kind,
+                cols,
+                rows: base_rows,
+                requests,
+            }
+        };
+        if !test_conflicts {
+            // Two waves on one identity: the second can only be answered from the
+            // record the first left behind.
+            let first = (total + 1) / 2;
+            let second = total - first;
+            let mut waves = vec![wave(
+                &duplicate_id,
+                BatchRequestKind::Duplicate,
+                base_cols,
+                first,
+            )];
+            if second > 0 {
+                waves.push(wave(
+                    &duplicate_id,
+                    BatchRequestKind::Duplicate,
+                    base_cols,
+                    second,
+                ));
+            }
+            return waves;
+        }
+        // Quarter split with the remainder pushed into the later waves, so the
+        // conflicting wave is never empty when the control asked for conflicts.
+        let mut sizes = [total / 4, total / 4, total / 4, total / 4];
+        for index in 0..(total % 4) as usize {
+            sizes[3 - index] += 1;
+        }
+        let mut waves = Vec::with_capacity(sizes.len());
+        for (index, requests) in sizes.into_iter().enumerate() {
+            if requests == 0 {
+                continue;
+            }
+            waves.push(match index {
+                0 | 1 => wave(&duplicate_id, BatchRequestKind::Duplicate, base_cols, requests),
+                2 => wave(&conflict_id, BatchRequestKind::Conflict, base_cols, requests),
+                _ => wave(
+                    &conflict_id,
+                    BatchRequestKind::Conflict,
+                    conflicting_cols,
+                    requests,
+                ),
+            });
+        }
+        waves
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct BatchOutcome {
+        request_id: String,
+        kind: BatchRequestKind,
+        outcome: &'static str,
+        session_id: Option<String>,
+        error_code: Option<String>,
+        error_message: Option<String>,
+    }
+
+    impl BatchOutcome {
+        fn json(&self) -> Value {
+            json!({
+                "requestId": self.request_id,
+                "kind": self.kind.as_str(),
+                "outcome": self.outcome,
+                "sessionId": self.session_id,
+                "errorCode": self.error_code,
+                "errorMessage": self.error_message,
+            })
+        }
+    }
+
+    /// The batch's settlement. The idempotency claim is derived from evidence -
+    /// more than one duplicate request answered by ONE session id - and a batch
+    /// that produced two distinct sessions reports that instead of hiding it.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_payload(
+        requested_count: u64,
+        test_conflicts: bool,
+        workspace_id: &str,
+        request_ids: &[String],
+        plan: &[BatchWave],
+        outcomes: &[BatchOutcome],
+        created_session_ids: &[String],
+        closed_session_ids: &[String],
+        cleanup_verified: Option<bool>,
+        unsettled_reason: Option<&str>,
+    ) -> Value {
+        let group = |kind: BatchRequestKind| -> Vec<&BatchOutcome> {
+            outcomes.iter().filter(|outcome| outcome.kind == kind).collect()
+        };
+        let session_ids = |list: &[&BatchOutcome]| -> Vec<String> {
+            let mut ids: Vec<String> = list
+                .iter()
+                .filter_map(|outcome| outcome.session_id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let duplicates = group(BatchRequestKind::Duplicate);
+        let conflicts = group(BatchRequestKind::Conflict);
+        let duplicate_ids = session_ids(&duplicates);
+        let duplicate_answers = duplicates
+            .iter()
+            .filter(|outcome| outcome.session_id.is_some())
+            .count();
+        let mut conflict_codes: Vec<String> = conflicts
+            .iter()
+            .filter(|outcome| outcome.outcome == "rejected")
+            .filter_map(|outcome| outcome.error_code.clone())
+            .collect();
+        conflict_codes.sort();
+        conflict_codes.dedup();
+        json!({
+            "stage": SPLIT_CONCURRENT_BATCH,
+            "requestedCount": requested_count,
+            "requestCount": outcomes.len(),
+            "plannedRequests": plan.iter().map(|wave| wave.requests).sum::<u64>(),
+            "testConflicts": test_conflicts,
+            "boundedRequestCap": BATCH_REQUEST_CAP,
+            // The load the product accepted is bounded by the runner's cap and by
+            // the widest wave, never by the requested number alone.
+            "waveCount": plan.len(),
+            "boundedConcurrency": plan.iter().map(|wave| wave.requests).max().unwrap_or(0),
+            "workspaceId": workspace_id,
+            "requestIds": request_ids,
+            "duplicateRequests": duplicates.len(),
+            "conflictRequests": conflicts.len(),
+            // One durable identity per group: many requests, one record, one PTY.
+            "duplicateDistinctSessionIds": duplicate_ids,
+            "conflictDistinctSessionIds": session_ids(&conflicts),
+            "duplicateAnsweredFromRecord": duplicate_answers > 1 && duplicate_ids.len() == 1,
+            "conflictRejected": conflicts
+                .iter()
+                .filter(|outcome| outcome.outcome == "rejected")
+                .count(),
+            "conflictRejectionCodes": conflict_codes,
+            "createdSessionIds": created_session_ids,
+            "closedSessionIds": closed_session_ids,
+            "cleanupVerified": cleanup_verified,
+            "outcomes": outcomes
+                .iter()
+                .map(BatchOutcome::json)
+                .collect::<Vec<Value>>(),
+            "unsettledReason": unsettled_reason,
+            "settledAtMs": now_ms(),
+        })
+    }
+
+    /// The real template the batch drives: workspace, cwd, worktree and geometry
+    /// read from a live daemon session. Nothing is invented, and a daemon with no
+    /// such session leaves the control pending instead of answering it.
+    struct BatchTemplate {
+        workspace_id: String,
+        worktree: Option<crate::worktree::WorktreeIdentity>,
+        cwd: String,
+        cols: u16,
+        rows: u16,
+    }
+
+    impl BatchTemplate {
+        fn with_identity(&self, identity: SplitIdentity) -> PreparedLocalSplit {
+            PreparedLocalSplit {
+                identity,
+                workspace_id: self.workspace_id.clone(),
+                worktree: self.worktree.clone(),
+                cwd: self.cwd.clone(),
+                shell: None,
+                cols: self.cols,
+                rows: self.rows,
+            }
+        }
+    }
+
+    async fn batch_template(daemon_client: &Arc<DaemonClient>) -> Option<BatchTemplate> {
+        let mut sessions = daemon_client.list_sessions().await.ok()?;
+        sessions.sort();
+        for session_id in sessions {
+            let Ok(details) = daemon_client.describe_session(&session_id).await else {
+                continue;
+            };
+            let (Some(workspace_id), Some(cwd)) =
+                (details.workspace_id.clone(), details.cwd.clone())
+            else {
+                continue;
+            };
+            if workspace_id.trim().is_empty() || cwd.trim().is_empty() {
+                continue;
+            }
+            return Some(BatchTemplate {
+                workspace_id,
+                worktree: details.worktree.clone(),
+                cwd,
+                cols: details.cols,
+                rows: details.rows,
+            });
+        }
+        None
+    }
+
+    /// Drives one wave of the batch: `wave.requests` identical requests in flight
+    /// together - that is the duplicate/conflict race the scenario needs - so the
+    /// in-flight count is the wave size and the load stays bounded by
+    /// construction. `create_local_split_until` is the product's own create path,
+    /// so a duplicate really re-reads the durable record and a conflicting
+    /// fingerprint is really rejected by the journal.
+    async fn drive_batch_wave(
+        daemon_client: &Arc<DaemonClient>,
+        prepared: &PreparedLocalSplit,
+        wave: &BatchWave,
+    ) -> Vec<BatchOutcome> {
+        let mut futures = Vec::with_capacity(wave.requests as usize);
+        for _ in 0..wave.requests {
+            let variant = prepared.clone();
+            let request_id = wave.request_id.clone();
+            let kind = wave.kind;
+            futures.push(async move {
+                let deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(BATCH_REQUEST_BUDGET_MS);
+                match daemon_client.create_local_split_until(&variant, deadline).await {
+                    Ok(result) => BatchOutcome {
+                        request_id,
+                        kind,
+                        outcome: "settled",
+                        session_id: Some(result.session_id),
+                        error_code: None,
+                        error_message: None,
+                    },
+                    Err(error) => {
+                        let rejected = error.code == IpcErrorCode::SpawnRequestConflict;
+                        BatchOutcome {
+                            request_id,
+                            kind,
+                            outcome: if rejected { "rejected" } else { "unsettled" },
+                            session_id: None,
+                            error_code: Some(format!("{:?}", error.code)),
+                            error_message: Some(error.message),
+                        }
+                    }
+                }
+            });
+        }
+        futures_util::future::join_all(futures).await
+    }
+
+    /// Drives the runner's `split-concurrent-batch` control through the real
+    /// client path, then cleans up the sessions it really created and verifies
+    /// the cleanup against the daemon's own inventory.
+    async fn handle_concurrent_batch(
+        daemon_client: &Arc<DaemonClient>,
+        channel: &Arc<QaBarrierChannel>,
+        count: u64,
+        test_conflicts: bool,
+    ) -> Result<(), String> {
+        let operation_id = channel
+            .operation_id()
+            .ok_or_else(|| "no QA operation nonce".to_string())?;
+        let Some(template) = batch_template(daemon_client).await else {
+            return Err(
+                "no live daemon session with a workspace and cwd is available for the concurrent batch"
+                    .to_string(),
+            );
+        };
+        let plan = batch_plan(count, test_conflicts, template.cols, template.rows);
+        let mut request_ids: Vec<String> = Vec::new();
+        for wave in &plan {
+            if !request_ids.contains(&wave.request_id) {
+                request_ids.push(wave.request_id.clone());
+            }
+        }
+        let mut outcomes: Vec<BatchOutcome> = Vec::new();
+        // One real admission per durable identity, before any of its requests.
+        let mut identities: Vec<(String, SplitIdentity)> = Vec::new();
+        for request_id in &request_ids {
+            let admission_deadline =
+                tokio::time::Instant::now() + Duration::from_millis(BATCH_REQUEST_BUDGET_MS);
+            match daemon_client
+                .prepare_local_split_until(request_id, admission_deadline)
+                .await
+            {
+                Ok(identity) => identities.push((request_id.clone(), identity)),
+                Err(error) => {
+                    let reason = format!(
+                        "batch admission for '{request_id}' failed: {} ({:?})",
+                        error.message, error.code
+                    );
+                    channel.append_receipt(
+                        SPLIT_CONCURRENT_BATCH,
+                        &operation_id,
+                        batch_payload(
+                            count,
+                            test_conflicts,
+                            &template.workspace_id,
+                            &request_ids,
+                            &plan,
+                            &outcomes,
+                            &[],
+                            &[],
+                            None,
+                            Some(reason.as_str()),
+                        ),
+                    );
+                    return Err(reason);
+                }
+            }
+        }
+        // Waves run in plan order, so a duplicate wave really meets the record an
+        // earlier wave left behind and the conflicting wave really meets the base
+        // fingerprint its identity already published.
+        for (request_id, identity) in &identities {
+            for wave in plan.iter().filter(|wave| &wave.request_id == request_id) {
+                let prepared = template.with_identity(identity.clone());
+                outcomes.extend(drive_batch_wave(daemon_client, &prepared, wave).await);
+            }
+        }
+
+        // Real cleanup: every session the batch really created is closed again and
+        // the close is verified against the daemon's own inventory.
+        let mut created: Vec<String> = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.session_id.clone())
+            .collect();
+        created.sort();
+        created.dedup();
+        let mut closed: Vec<String> = Vec::new();
+        for session_id in &created {
+            match daemon_client.close_terminal(session_id).await {
+                Ok(()) => closed.push(session_id.clone()),
+                Err(error) => eprintln!(
+                    "FERRYX_QA_BATCH_CLOSE_FAILED: {session_id}: {}",
+                    error.message
+                ),
+            }
+        }
+        let inventory = daemon_client.list_sessions().await.unwrap_or_default();
+        let cleanup_verified = created
+            .iter()
+            .all(|session_id| !inventory.contains(session_id));
+        channel.append_receipt(
+            SPLIT_CONCURRENT_BATCH,
+            &operation_id,
+            batch_payload(
+                count,
+                test_conflicts,
+                &template.workspace_id,
+                &request_ids,
+                &plan,
+                &outcomes,
+                &created,
+                &closed,
+                Some(cleanup_verified),
+                None,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Bounded watch for the runner's `split-concurrent-batch` control. The
+    /// command stays pending (reported once) while no live session can supply the
+    /// real workspace the batch must drive, and is serviced at most once.
+    async fn run_concurrent_batch_watcher(daemon_client: Arc<DaemonClient>) {
+        let Some(channel) = wait_for_channel().await else {
+            return;
+        };
+        let Some(dir) = barrier_dir() else {
+            return;
+        };
+        let mut handled: Vec<String> = Vec::new();
+        let mut unserviced_reported = false;
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+            let Some(request) = read_control(&dir, SPLIT_CONCURRENT_BATCH, &channel) else {
+                continue;
+            };
+            let issued_at = request
+                .get("issuedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if handled.iter().any(|seen| seen == &issued_at) {
+                continue;
+            }
+            let count = request.get("count").and_then(Value::as_u64).unwrap_or(0);
+            if count == 0 {
+                handled.push(issued_at);
+                eprintln!(
+                    "FERRYX_QA_BATCH_UNSERVICEABLE: split-concurrent-batch requires a positive count"
+                );
+                continue;
+            }
+            let test_conflicts = request
+                .get("testConflicts")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match handle_concurrent_batch(&daemon_client, &channel, count, test_conflicts).await {
+                Ok(()) => handled.push(issued_at),
+                Err(error) => {
+                    if !unserviced_reported {
+                        unserviced_reported = true;
+                        eprintln!(
+                            "FERRYX_QA_BATCH_UNSERVICED: {error}; the command stays pending"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_for_channel() -> Option<Arc<QaBarrierChannel>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(CHANNEL_BOOT_WAIT_MS);
+        loop {
+            if let Some(channel) = channel() {
+                return Some(channel);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+        }
+    }
+
+    /// Starts the GUI-lane watchers. Called from the same boot path that installs
+    /// the channel, so a launch without the runner env returns immediately.
+    pub fn start_watchers(daemon_client: Arc<DaemonClient>) {
+        let cancel_client = Arc::clone(&daemon_client);
+        tauri::async_runtime::spawn(async move { run_cancel_watcher(cancel_client).await });
+        let retry_client = Arc::clone(&daemon_client);
+        tauri::async_runtime::spawn(async move { run_retry_watcher(retry_client).await });
+        let batch_client = Arc::clone(&daemon_client);
+        tauri::async_runtime::spawn(async move { run_concurrent_batch_watcher(batch_client).await });
+        tauri::async_runtime::spawn(async move { run_handover_watcher(daemon_client).await });
+    }
+
+    async fn run_cancel_watcher(daemon_client: Arc<DaemonClient>) {
+        let Some(channel) = wait_for_channel().await else {
+            return;
+        };
+        let Some(dir) = barrier_dir() else {
+            return;
+        };
+        let mut handled: Vec<String> = Vec::new();
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+            let Some(request) = read_control(&dir, SPLIT_CANCEL, &channel) else {
+                continue;
+            };
+            let issued_at = request
+                .get("issuedAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let phase = request
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("while-creating")
+                .to_string();
+            let key = format!("{phase}|{issued_at}");
+            if handled.iter().any(|seen| seen == &key) {
+                continue;
+            }
+            handled.push(key);
+            let duplicate = handled.len() > 1;
+            if let Err(error) = handle_cancel(&daemon_client, &channel, &phase, &issued_at, duplicate).await
+            {
+                eprintln!("FERRYX_QA_CANCEL_UNSETTLED: {error}");
+            }
+        }
+    }
+
+    async fn wait_for_recorded_split() -> Option<RecordedSplit> {
+        wait_for_recorded_split_within(CANCEL_IDENTITY_WAIT_MS).await
+    }
+
+    /// Bounded wait for the operation identity a control must reuse. A control
+    /// that finds no recorded operation stays pending instead of being answered
+    /// against an identity this process never established.
+    async fn wait_for_recorded_split_within(wait_ms: u64) -> Option<RecordedSplit> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            if let Some(record) = lock_recorded().clone() {
+                return Some(record);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+        }
+    }
+
+    async fn handle_cancel(
+        daemon_client: &Arc<DaemonClient>,
+        channel: &Arc<QaBarrierChannel>,
+        phase: &str,
+        issued_at: &str,
+        duplicate: bool,
+    ) -> Result<(), String> {
+        let observed_at_ms = now_ms();
+        let dispatch_ms = parse_rfc3339_ms(issued_at).map(|issued| observed_at_ms.saturating_sub(issued));
+        let record = wait_for_recorded_split()
+            .await
+            .ok_or_else(|| "no split operation identity was recorded in this process".to_string())?;
+        let operation_id = channel
+            .operation_id()
+            .ok_or_else(|| "no QA operation nonce".to_string())?;
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(DAEMON_CANCEL_BUDGET_MS);
+        let operation = daemon_client
+            .cancel_local_split_until(&record.identity, deadline)
+            .await
+            .map_err(|error| error.message)?;
+        let cancel_ack_ms = now_ms().saturating_sub(observed_at_ms);
+        let status = daemon_client
+            .local_split_status_until(
+                &record.identity,
+                tokio::time::Instant::now() + Duration::from_millis(DAEMON_CANCEL_BUDGET_MS),
+            )
+            .await
+            .ok();
+        let sessions = daemon_client.list_sessions().await.unwrap_or_default();
+        let owned_creation_removed = record
+            .owned_session_id
+            .as_ref()
+            .map(|id| !sessions.contains(id));
+        let source_still_present = record
+            .source_backend_session_id
+            .as_ref()
+            .map(|id| sessions.contains(id));
+        channel.append_receipt(
+            CANCEL_ACK,
+            &operation_id,
+            cancel_ack_payload(
+                &record,
+                phase,
+                duplicate,
+                cancel_ack_ms,
+                dispatch_ms,
+                operation_state(&operation),
+                status.as_ref().map(operation_state),
+                owned_creation_removed,
+                source_still_present,
+            ),
+        );
+        Ok(())
+    }
+
+    /// The runner's handover controls are executed through the REAL product
+    /// path: the GUI asks the running daemon to upgrade, which is what performs
+    /// the session-ownership handover (or, for the abort scenario the runner
+    /// armed, its rollback).
+    async fn run_handover_watcher(daemon_client: Arc<DaemonClient>) {
+        let Some(channel) = wait_for_channel().await else {
+            return;
+        };
+        let Some(dir) = barrier_dir() else {
+            return;
+        };
+        let mut triggered = false;
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+            if triggered {
+                continue;
+            }
+            if read_control(&dir, TRIGGER_HANDOVER, &channel).is_none()
+                && read_control(&dir, TRIGGER_HANDOVER_ABORT, &channel).is_none()
+            {
+                continue;
+            }
+            triggered = true;
+            if let Err(error) = daemon_client.upgrade_binary().await {
+                eprintln!("FERRYX_QA_HANDOVER_TRIGGER_FAILED: {}", error.message);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::daemon::protocol::{
+            DaemonSessionDetails, SplitAttachAttempt, SplitIdentity, STAGE_ATTACH_OR_LISTENER_MAX_MS,
+        };
+
+        fn identity() -> SplitIdentity {
+            SplitIdentity {
+                request_id: "req-1".into(),
+                origin_epoch: "4".into(),
+                expires_at_unix_ms: 1_700_000_000_000,
+            }
+        }
+
+        fn prepared() -> PreparedLocalSplit {
+            PreparedLocalSplit {
+                identity: identity(),
+                workspace_id: "ws-1".into(),
+                worktree: None,
+                cwd: "/repo".into(),
+                shell: None,
+                cols: 80,
+                rows: 24,
+            }
+        }
+
+        fn session_details() -> DaemonSessionDetails {
+            let mut details = DaemonSessionDetails::new(
+                "session-1".into(),
+                Some("ws-1".into()),
+                None,
+                Some("/repo".into()),
+                80,
+                24,
+                true,
+                None,
+                None,
+                None,
+                false,
+            );
+            details.incarnation = Some("inc-1".into());
+            details
+        }
+
+        fn binding() -> PaneAttachTuple {
+            PaneAttachTuple {
+                backend_session_id: "session-1".into(),
+                incarnation: Some("inc-1".into()),
+                daemon_epoch: "7".into(),
+                frontend_session_id: "front-1".into(),
+                pane_identity: "pane-1".into(),
+                binding_key: "session-1:7:0:".into(),
+                attempt_generation: 2,
+            }
+        }
+
+        fn attempt() -> SplitAttachAttempt {
+            SplitAttachAttempt {
+                identity: identity(),
+                frontend_session_id: "front-1".into(),
+                generation: 2,
+                remaining_ms: 3_500,
+            }
+        }
+
+        #[test]
+        fn split_create_payload_carries_the_authoritative_identity() {
+            let recorded = RecordedSplit {
+                identity: identity(),
+                workspace_id: "ws-1".into(),
+                source_backend_session_id: Some("session-source".into()),
+                prepared_at_ms: 1_700_000_000_100,
+                owned_session_id: Some("session-1".into()),
+                created_at_ms: Some(1_700_000_000_200),
+            };
+            let payload = split_create_payload(
+                &prepared(),
+                "session-1",
+                7,
+                &session_details(),
+                Some(&recorded),
+            );
+            assert_eq!(payload["stage"], json!(SPLIT_CREATE));
+            assert_eq!(payload["backendSessionId"], json!("session-1"));
+            assert_eq!(payload["incarnation"], json!("inc-1"));
+            assert_eq!(payload["daemonEpoch"], json!("7"));
+            assert_eq!(payload["requestId"], json!("req-1"));
+            assert_eq!(payload["originEpoch"], json!("4"));
+            assert_eq!(payload["sourceBackendSessionId"], json!("session-source"));
+        }
+
+        #[test]
+        fn attach_hold_failure_is_actionable_and_keeps_the_same_id() {
+            let payload = attach_hold_payload(
+                "session-1",
+                &binding(),
+                &attempt(),
+                STAGE_ATTACH_OR_LISTENER_MAX_MS,
+                true,
+                ReleaseOutcome::DeadlineExceeded.as_str(),
+                Some(true),
+            );
+            assert_eq!(payload["actionable"], json!(true));
+            assert_eq!(payload["retryMustReuseId"], json!(true));
+            assert_eq!(payload["backendSessionId"], json!("session-1"));
+            assert_eq!(payload["incarnation"], json!("inc-1"));
+            assert_eq!(payload["attemptGeneration"], json!(2));
+            assert_eq!(payload["releaseOutcome"], json!("deadline-exceeded"));
+            assert_eq!(payload["backendSessionStillAlive"], json!(true));
+        }
+
+        #[test]
+        fn attach_hold_release_is_not_reported_as_a_failure() {
+            let payload = attach_hold_payload(
+                "session-1",
+                &binding(),
+                &attempt(),
+                STAGE_ATTACH_OR_LISTENER_MAX_MS,
+                false,
+                ReleaseOutcome::Released.as_str(),
+                None,
+            );
+            assert_eq!(payload["actionable"], json!(false));
+            assert_eq!(payload["releaseOutcome"], json!("released"));
+        }
+
+        #[test]
+        fn cancel_cleanup_is_authoritative_only_on_real_evidence() {
+            assert!(cleanup_is_authoritative(true, Some(true), Some(true)));
+            assert!(cleanup_is_authoritative(true, None, Some(true)));
+            assert!(cleanup_is_authoritative(true, Some(true), None));
+            assert!(!cleanup_is_authoritative(false, Some(true), Some(true)));
+            assert!(!cleanup_is_authoritative(true, Some(false), Some(true)));
+            assert!(!cleanup_is_authoritative(true, Some(true), Some(false)));
+        }
+
+        #[test]
+        fn cancel_ack_payload_reports_the_runner_contract_fields() {
+            let record = RecordedSplit {
+                identity: identity(),
+                workspace_id: "ws-1".into(),
+                source_backend_session_id: Some("session-source".into()),
+                prepared_at_ms: 1_700_000_000_100,
+                owned_session_id: Some("session-1".into()),
+                created_at_ms: Some(1_700_000_000_200),
+            };
+            let payload = cancel_ack_payload(
+                &record,
+                "while-creating",
+                false,
+                120,
+                Some(8),
+                "cancelled",
+                Some("cancelled"),
+                Some(true),
+                Some(true),
+            );
+            assert!(payload["cancelAckMs"].as_u64().is_some());
+            assert_eq!(payload["timerDispatchLatencyMs"], json!(8));
+            assert_eq!(payload["cleanupReceipt"]["authoritative"], json!(true));
+            assert_eq!(payload["createdIdRequired"], json!(false));
+            assert_eq!(payload["cleanupReceipt"]["ownedCreationRemoved"], json!(true));
+            assert_eq!(payload["cleanupReceipt"]["sourceStillPresent"], json!(true));
+        }
+
+        #[test]
+        fn cancel_ack_refuses_authority_without_a_cancelled_operation() {
+            let record = RecordedSplit {
+                identity: identity(),
+                workspace_id: "ws-1".into(),
+                source_backend_session_id: None,
+                prepared_at_ms: 0,
+                owned_session_id: None,
+                created_at_ms: None,
+            };
+            let payload = cancel_ack_payload(
+                &record,
+                "before-create",
+                false,
+                90,
+                None,
+                "created",
+                Some("created"),
+                None,
+                None,
+            );
+            assert_eq!(payload["cleanupReceipt"]["authoritative"], json!(false));
+            assert_eq!(payload["createdIdRequired"], json!(false));
+        }
+
+        #[test]
+        fn rfc3339_controls_are_parsed_to_milliseconds() {
+            assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00.000Z"), Some(0));
+            assert_eq!(parse_rfc3339_ms("2000-01-01T00:00:00.000Z"), Some(946_684_800_000));
+            let earlier = parse_rfc3339_ms("2026-10-03T00:00:00.000Z").unwrap();
+            let later = parse_rfc3339_ms("2026-10-03T00:00:01.000Z").unwrap();
+            assert_eq!(later - earlier, 1_000);
+            assert_eq!(parse_rfc3339_ms("not-a-timestamp"), None);
+            assert_eq!(parse_rfc3339_ms("2026-13-03T00:00:00.000Z"), None);
+        }
+
+        #[test]
+        fn control_files_are_read_only_for_this_run() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{SPLIT_CANCEL}.arm.json")),
+                serde_json::to_vec(&json!({
+                    "name": SPLIT_CANCEL,
+                    "runId": "qa-run-gui",
+                    "operationId": "op-1",
+                    "deadlineMs": 2_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let channel = QaBarrierChannel::new(dir.clone(), "qa-run-gui".into());
+            channel.scan_and_ack_arms();
+            std::fs::write(
+                dir.join(format!("{SPLIT_CANCEL}.request.json")),
+                serde_json::to_vec(&json!({
+                    "name": SPLIT_CANCEL,
+                    "runId": "qa-run-OTHER",
+                    "operationId": "op-1",
+                    "phase": "while-creating",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
+            std::fs::write(
+                dir.join(format!("{SPLIT_CANCEL}.request.json")),
+                serde_json::to_vec(&json!({
+                    "name": SPLIT_CANCEL,
+                    "runId": "qa-run-gui",
+                    "operationId": "op-OTHER",
+                    "phase": "while-creating",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
+            std::fs::write(
+                dir.join(format!("{SPLIT_CANCEL}.request.json")),
+                serde_json::to_vec(&json!({
+                    "name": SPLIT_CANCEL,
+                    "runId": "qa-run-gui",
+                    "operationId": "op-1",
+                    "phase": "while-creating",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_some());
+        }
+
+        fn retry_control() -> Value {
+            // Verbatim shape of the runner's `retry` control
+            // (`runSplitAttachStallScenario`, split-scenarios.mjs:150-160).
+            json!({
+                "name": RETRY,
+                "runId": "qa-run-gui",
+                "operationId": "op-1",
+                "issuedAt": "2026-10-04T00:00:00.000Z",
+                "backendSessionId": "session-1",
+                "incarnation": "inc-1",
+                "daemonEpoch": "7",
+                "attemptGeneration": 2,
+                "clientRequestId": "req-1",
+            })
+        }
+
+        fn recorded_split() -> RecordedSplit {
+            RecordedSplit {
+                identity: identity(),
+                workspace_id: "ws-1".into(),
+                source_backend_session_id: Some("session-source".into()),
+                prepared_at_ms: 1_700_000_000_100,
+                owned_session_id: Some("session-1".into()),
+                created_at_ms: Some(1_700_000_000_200),
+            }
+        }
+
+        fn recorded_attempt() -> RecordedAttempt {
+            RecordedAttempt {
+                incarnation: Some("inc-1".into()),
+                attempt_generation: 1,
+            }
+        }
+
+        #[test]
+        fn retry_command_parses_the_runner_field_names() {
+            let command = RetryCommand::parse(&retry_control()).expect("runner control parses");
+            assert_eq!(command.backend_session_id, "session-1");
+            assert_eq!(command.incarnation.as_deref(), Some("inc-1"));
+            assert_eq!(command.daemon_epoch.as_deref(), Some("7"));
+            assert_eq!(command.attempt_generation, 2);
+            assert_eq!(command.client_request_id.as_deref(), Some("req-1"));
+
+            // The runner sends `null` for the optional identity fields; a null is
+            // absent, never an empty string that could match something.
+            let mut nulls = retry_control();
+            nulls["incarnation"] = Value::Null;
+            nulls["daemonEpoch"] = Value::Null;
+            nulls["clientRequestId"] = Value::Null;
+            let command = RetryCommand::parse(&nulls).expect("nulls are absent fields");
+            assert_eq!(command.incarnation, None);
+            assert_eq!(command.daemon_epoch, None);
+            assert_eq!(command.client_request_id, None);
+        }
+
+        #[test]
+        fn retry_command_refuses_identity_it_cannot_name() {
+            let mut wildcard = retry_control();
+            wildcard["backendSessionId"] = json!("*");
+            assert!(RetryCommand::parse(&wildcard).is_err());
+            let mut missing = retry_control();
+            missing["backendSessionId"] = json!("   ");
+            assert!(RetryCommand::parse(&missing).is_err());
+            let mut unnumbered = retry_control();
+            unnumbered["attemptGeneration"] = json!("2");
+            assert!(RetryCommand::parse(&unnumbered).is_err());
+        }
+
+        #[test]
+        fn retry_fence_retains_identity_and_advances_only_the_generation() {
+            let record = recorded_split();
+            let attempt = recorded_attempt();
+            let command = RetryCommand::parse(&retry_control()).unwrap();
+            assert!(retry_fence(&command, &record, Some(&attempt)).is_ok());
+
+            // A retry that re-uses the generation the product already bound is not
+            // a new attempt.
+            let mut stale = command.clone();
+            stale.attempt_generation = 1;
+            assert!(retry_fence(&stale, &record, Some(&attempt)).is_err());
+
+            // Neither the request identity, the backend session, nor the
+            // incarnation may change under the same retry.
+            let mut other_request = command.clone();
+            other_request.client_request_id = Some("req-2".into());
+            assert!(retry_fence(&other_request, &record, Some(&attempt)).is_err());
+            let mut other_backend = command.clone();
+            other_backend.backend_session_id = "session-2".into();
+            assert!(retry_fence(&other_backend, &record, Some(&attempt)).is_err());
+            let mut other_incarnation = command.clone();
+            other_incarnation.incarnation = Some("inc-2".into());
+            assert!(retry_fence(&other_incarnation, &record, Some(&attempt)).is_err());
+
+            // With no recorded attempt yet, the fence cannot invent a previous
+            // generation and must not refuse the retry.
+            assert!(retry_fence(&command, &record, None).is_ok());
+        }
+
+        #[test]
+        fn retry_payload_reports_the_real_retry_settlement() {
+            let command = RetryCommand::parse(&retry_control()).unwrap();
+            let record = recorded_split();
+            let attempt = recorded_attempt();
+            let details = session_details();
+            let payload = retry_payload(
+                &command,
+                &record,
+                Some(&attempt),
+                "reattached",
+                None,
+                Some("created"),
+                Some(&details),
+                Some(9),
+                Some((Some(1), Some(4))),
+            );
+            assert_eq!(payload["stage"], json!(RETRY));
+            assert_eq!(payload["outcome"], json!("reattached"));
+            assert_eq!(payload["retryMustReuseId"], json!(true));
+            assert_eq!(payload["backendSessionId"], json!("session-1"));
+            assert_eq!(payload["incarnation"], json!("inc-1"));
+            assert_eq!(payload["daemonEpoch"], json!("7"));
+            assert_eq!(payload["attemptGeneration"], json!(2));
+            assert_eq!(payload["previousAttemptGeneration"], json!(1));
+            assert_eq!(payload["requestId"], json!("req-1"));
+            assert_eq!(payload["clientRequestId"], json!("req-1"));
+            assert_eq!(payload["originEpoch"], json!("4"));
+            assert_eq!(payload["statusOperationState"], json!("created"));
+            assert_eq!(payload["attachEpoch"], json!("9"));
+            assert_eq!(payload["historyStartSequence"], json!("1"));
+            assert_eq!(payload["historyEndSequence"], json!("4"));
+            assert_eq!(payload["refusalReason"], Value::Null);
+
+            // A refusal carries the reason and none of the values it cannot prove.
+            let refused = retry_payload(
+                &command,
+                &record,
+                Some(&attempt),
+                "refused",
+                Some("retry must advance attemptGeneration beyond the bound 1, got 1"),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(refused["outcome"], json!("refused"));
+            assert_eq!(
+                refused["refusalReason"],
+                json!("retry must advance attemptGeneration beyond the bound 1, got 1")
+            );
+            assert_eq!(refused["attachEpoch"], Value::Null);
+            assert_eq!(refused["historyEndSequence"], Value::Null);
+            assert_eq!(refused["statusOperationState"], Value::Null);
+        }
+
+        #[test]
+        fn concurrent_batch_plan_is_bounded_and_pairs_duplicates_with_conflicts() {
+            let plan = batch_plan(16, true, 80, 24);
+            // Four ordered waves: two duplicate waves on one identity, then the
+            // conflicting identity's base fingerprint, then its conflicting one.
+            let sizes: Vec<u64> = plan.iter().map(|wave| wave.requests).collect();
+            assert_eq!(sizes, vec![4, 4, 4, 4]);
+            assert_eq!(plan.iter().map(|wave| wave.requests).sum::<u64>(), 16);
+            let duplicate_waves: Vec<&BatchWave> = plan
+                .iter()
+                .filter(|wave| wave.kind == BatchRequestKind::Duplicate)
+                .collect();
+            let conflict_waves: Vec<&BatchWave> = plan
+                .iter()
+                .filter(|wave| wave.kind == BatchRequestKind::Conflict)
+                .collect();
+            assert_eq!(duplicate_waves.len(), 2);
+            assert_eq!(conflict_waves.len(), 2);
+            // One durable identity per kind: the duplicates share the request the
+            // record already owns, the conflicts share the other one.
+            assert!(duplicate_waves
+                .iter()
+                .all(|wave| wave.request_id == duplicate_waves[0].request_id));
+            assert!(conflict_waves
+                .iter()
+                .all(|wave| wave.request_id == conflict_waves[0].request_id));
+            assert_ne!(duplicate_waves[0].request_id, conflict_waves[0].request_id);
+            assert!(duplicate_waves[0].request_id.starts_with(BATCH_REQUEST_PREFIX));
+            assert!(conflict_waves[0].request_id.starts_with(BATCH_REQUEST_PREFIX));
+            // The conflicting wave really carries a different fingerprint, and it
+            // runs AFTER the base fingerprint of its own identity is durable.
+            assert_eq!(conflict_waves[0].cols, 80);
+            assert_eq!(conflict_waves[1].cols, 81);
+            let base_index = plan
+                .iter()
+                .position(|wave| {
+                    wave.kind == BatchRequestKind::Conflict && wave.cols == 80
+                })
+                .expect("the base conflict wave exists");
+            let conflicting_index = plan
+                .iter()
+                .position(|wave| {
+                    wave.kind == BatchRequestKind::Conflict && wave.cols == 81
+                })
+                .expect("the conflicting wave exists");
+            assert!(
+                base_index < conflicting_index,
+                "the conflicting fingerprint must be offered after the base one"
+            );
+            // The control's count is capped, and the widest wave bounds the load.
+            let capped = batch_plan(4_000, true, 80, 24);
+            assert_eq!(
+                capped.iter().map(|wave| wave.requests).sum::<u64>(),
+                BATCH_REQUEST_CAP
+            );
+            assert!(capped.iter().all(|wave| wave.requests <= BATCH_REQUEST_CAP));
+            assert_eq!(
+                batch_plan(0, true, 80, 24)
+                    .iter()
+                    .map(|wave| wave.requests)
+                    .sum::<u64>(),
+                1
+            );
+            // A count with no conflict pairs stays duplicate-only, and its second
+            // wave can only be answered from the first wave's record.
+            let duplicates_only = batch_plan(3, false, 80, 24);
+            assert!(duplicates_only
+                .iter()
+                .all(|wave| wave.kind == BatchRequestKind::Duplicate));
+            assert_eq!(
+                duplicates_only
+                    .iter()
+                    .map(|wave| wave.requests)
+                    .sum::<u64>(),
+                3
+            );
+            assert!(duplicates_only.len() >= 2);
+            // Geometry at the type's edge never overflows into a panic.
+            let edge = batch_plan(4, true, u16::MAX, 24);
+            assert!(edge
+                .iter()
+                .all(|wave| wave.cols == u16::MAX || wave.cols == u16::MAX - 1));
+        }
+
+        #[test]
+        fn concurrent_batch_payload_claims_only_evidence_backed_idempotency() {
+            let settled = |request_id: &str, kind: BatchRequestKind, session_id: Option<&str>| BatchOutcome {
+                request_id: request_id.into(),
+                kind,
+                outcome: "settled",
+                session_id: session_id.map(str::to_string),
+                error_code: None,
+                error_message: None,
+            };
+            let duplicate_id = format!("{BATCH_REQUEST_PREFIX}-duplicate");
+            let conflict_id = format!("{BATCH_REQUEST_PREFIX}-conflict");
+            let request_ids = vec![duplicate_id.clone(), conflict_id.clone()];
+            let plan = batch_plan(16, true, 80, 24);
+
+            // A single request can never prove that a duplicate was answered from
+            // an existing record.
+            let single = vec![settled(&duplicate_id, BatchRequestKind::Duplicate, Some("session-1"))];
+            let payload = batch_payload(
+                16,
+                true,
+                "ws-1",
+                &request_ids,
+                &plan,
+                &single,
+                &["session-1".into()],
+                &[],
+                Some(true),
+                None,
+            );
+            assert_eq!(payload["stage"], json!(SPLIT_CONCURRENT_BATCH));
+            assert_eq!(payload["requestedCount"], json!(16));
+            assert_eq!(payload["plannedRequests"], json!(16));
+            assert_eq!(payload["boundedRequestCap"], json!(BATCH_REQUEST_CAP));
+            assert_eq!(payload["waveCount"], json!(4));
+            assert_eq!(payload["boundedConcurrency"], json!(4));
+            assert_eq!(payload["duplicateAnsweredFromRecord"], json!(false));
+            assert_eq!(payload["conflictRejected"], json!(0));
+            assert_eq!(payload["cleanupVerified"], json!(true));
+
+            // Two duplicate requests answered by ONE session id is the evidence.
+            let mut outcomes = vec![
+                settled(&duplicate_id, BatchRequestKind::Duplicate, Some("session-1")),
+                settled(&duplicate_id, BatchRequestKind::Duplicate, Some("session-1")),
+                BatchOutcome {
+                    request_id: conflict_id.clone(),
+                    kind: BatchRequestKind::Conflict,
+                    outcome: "rejected",
+                    session_id: None,
+                    error_code: Some("SpawnRequestConflict".into()),
+                    error_message: Some(
+                        "Split request identity was reused with different parameters".into(),
+                    ),
+                },
+            ];
+            let payload = batch_payload(
+                16,
+                true,
+                "ws-1",
+                &request_ids,
+                &plan,
+                &outcomes,
+                &["session-1".into()],
+                &["session-1".into()],
+                Some(true),
+                None,
+            );
+            assert_eq!(payload["duplicateAnsweredFromRecord"], json!(true));
+            assert_eq!(payload["duplicateDistinctSessionIds"], json!(["session-1"]));
+            assert_eq!(payload["conflictDistinctSessionIds"], json!([]));
+            assert_eq!(payload["conflictRejected"], json!(1));
+            assert_eq!(payload["conflictRejectionCodes"], json!(["SpawnRequestConflict"]));
+            assert_eq!(payload["closedSessionIds"], json!(["session-1"]));
+            assert_eq!(payload["outcomes"][2]["kind"], json!("conflict"));
+            assert_eq!(payload["outcomes"][2]["outcome"], json!("rejected"));
+            assert_eq!(payload["outcomes"][2]["errorCode"], json!("SpawnRequestConflict"));
+            assert_eq!(payload["outcomes"][2]["sessionId"], Value::Null);
+
+            // A second distinct session is a duplicate creation: the payload must
+            // report it instead of claiming idempotency.
+            outcomes.push(settled(&duplicate_id, BatchRequestKind::Duplicate, Some("session-2")));
+            let payload = batch_payload(
+                16,
+                true,
+                "ws-1",
+                &request_ids,
+                &plan,
+                &outcomes,
+                &["session-1".into(), "session-2".into()],
+                &[],
+                None,
+                Some("batch cleanup was not verified"),
+            );
+            assert_eq!(
+                payload["duplicateDistinctSessionIds"],
+                json!(["session-1", "session-2"])
+            );
+            assert_eq!(payload["duplicateAnsweredFromRecord"], json!(false));
+            assert_eq!(payload["cleanupVerified"], Value::Null);
+            assert_eq!(
+                payload["unsettledReason"],
+                json!("batch cleanup was not verified")
+            );
+        }
+
+        #[test]
+        fn retry_and_batch_controls_are_read_only_for_this_run() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            let channel = QaBarrierChannel::new(dir.clone(), "qa-run-gui".into());
+            for name in [RETRY, SPLIT_CONCURRENT_BATCH] {
+                std::fs::write(
+                    dir.join(format!("{name}.request.json")),
+                    serde_json::to_vec(&json!({
+                        "name": name,
+                        "runId": "qa-run-OTHER",
+                        "operationId": "op-1",
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(read_control(&dir, name, &channel).is_none());
+                std::fs::write(
+                    dir.join(format!("{name}.request.json")),
+                    serde_json::to_vec(&json!({
+                        "name": name,
+                        "runId": "qa-run-gui",
+                        "operationId": "op-1",
+                        "count": 16,
+                        "testConflicts": true,
+                        "backendSessionId": "session-1",
+                        "attemptGeneration": 2,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(read_control(&dir, name, &channel).is_some());
+            }
+        }
+    }
+}
+
+/// Boot entry for the GUI-lane QA watchers (cancel acknowledgement and the real
+/// handover trigger). Does nothing without the runner's private barrier env.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub fn start_qa_split_watchers(daemon_client: std::sync::Arc<DaemonClient>) {
+    qa_split_producers::start_watchers(daemon_client);
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_spawn_operation(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -1809,6 +3903,8 @@ pub async fn cmd_terminal_spawn_operation(
             }
             let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
             let identity = daemon_client.prepare_local_split_until(&request_id, deadline).await?;
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            qa_split_producers::record_prepared(&identity, &request);
             let inherited = match (&request.cwd, &request.inherit_from_session_id) {
                 (None, Some(parent)) => {
                     let probe_deadline = deadline.min(tokio::time::Instant::now()
@@ -1867,6 +3963,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let deadline = split_stage_deadline(request.remaining_ms.unwrap_or(0),
             crate::daemon::protocol::STAGE_CREATE_OR_STATUS_MAX_MS)?;
         let result = daemon_client.create_local_split_until(prepared, deadline).await?;
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        qa_split_producers::record_and_emit_split_create(
+            prepared,
+            &result.session_id,
+            result.epoch,
+            &result.session,
+        );
         return Ok(SpawnTerminalResponse { session_id: result.session_id,
             daemon_epoch: result.epoch.to_string(), session: result.session });
     }
@@ -2685,6 +4788,23 @@ pub async fn cmd_terminal_attach<R: Runtime>(
         let remaining = split_attempt.as_ref().map(|attempt| attempt.remaining_ms)
             .unwrap_or(crate::daemon::protocol::STAGE_ATTACH_OR_LISTENER_MAX_MS);
         let deadline = split_stage_deadline(remaining, crate::daemon::protocol::STAGE_ATTACH_OR_LISTENER_MAX_MS)?;
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        {
+            if let Some(attempt) = split_attempt.as_ref() {
+                match qa_split_producers::hold_attach_handshake(
+                    &daemon_client,
+                    &session_id,
+                    &binding,
+                    attempt,
+                )
+                .await
+                {
+                    qa_split_producers::AttachHold::Failed(error) => return Err(error),
+                    qa_split_producers::AttachHold::NotApplicable
+                    | qa_split_producers::AttachHold::Released => {}
+                }
+            }
+        }
         let token = reserve_managed_pump(&session_id);
         let description = if let Some(attempt) = &split_attempt {
             if attempt.frontend_session_id != binding.frontend_session_id

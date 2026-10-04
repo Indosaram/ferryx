@@ -2593,6 +2593,8 @@ impl DaemonSessionService {
                     end_sequence,
                     last_output_age_ms: None,
                     suspended: false,
+                    // Remote-owned session: its reader/kernel state is not observable from this
+                    // daemon, so these stay unobserved rather than guessed false.
                     reader_paused: None,
                     kernel_stopped: None,
                     registry_suspended: None,
@@ -2631,6 +2633,7 @@ impl DaemonSessionService {
                         end_sequence,
                         last_output_age_ms: None,
                         suspended: false,
+                        // Remote-owned session: not observable from this daemon (see the paired arm).
                         reader_paused: None,
                         kernel_stopped: None,
                         registry_suspended: None,
@@ -2694,8 +2697,10 @@ impl DaemonSessionService {
                     || (cfg!(windows)
                         && self.terminal_service.process_state(session_id)
                             == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended)),
-                reader_paused: None,
-                kernel_stopped: None,
+                // Observed from the live PTY session. The presentation-recovery verdict needs
+                // real reader/kernel facts, and this arm has the session in hand.
+                reader_paused: Some(pty_session.is_reader_paused()),
+                kernel_stopped: Some(pty_session.process_stopped()),
                 registry_suspended: None,
                 suspension_source: None,
                 incarnation: pty_session.incarnation().map(str::to_owned),

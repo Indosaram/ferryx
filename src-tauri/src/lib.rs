@@ -1352,10 +1352,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             // the GUI boot path and settle `fixture-setup` from the real
             // isolated-profile session inventory. No-op without the runner env.
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-            crate::ipc::qa_barrier::start_gui_boot_channel(
-                app.handle().clone(),
-                qa_boot_daemon_client,
-            );
+            {
+                // Started first: the watchers wait (bounded) for the channel the
+                // call below installs, so no boot ordering can leave them without it.
+                crate::ipc::terminal::start_qa_split_watchers(Arc::clone(&qa_boot_daemon_client));
+                crate::ipc::qa_barrier::start_gui_boot_channel(
+                    app.handle().clone(),
+                    qa_boot_daemon_client,
+                );
+            }
             install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
             crate::worktree::spawn_worktree_rescan_task(
                 app.handle().clone(),

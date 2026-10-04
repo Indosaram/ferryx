@@ -35,6 +35,8 @@ pub mod paired_daemon;
 pub mod paired_runtime;
 pub mod preferences;
 pub mod pty;
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub(crate) mod qa_liveness;
 pub mod remote;
 #[cfg(test)]
 mod remote_runtime_tests;

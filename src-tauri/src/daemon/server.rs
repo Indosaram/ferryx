@@ -2693,6 +2693,9 @@ impl DaemonServer {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
 
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::daemon::qa_producers::install_and_start(&self);
+
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
 
@@ -2736,6 +2739,9 @@ impl DaemonServer {
                     }
                 }
                 let mut adopted_sessions = Vec::new();
+                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                let mut adopted_records: Vec<crate::daemon::qa_producers::HandoverSessionRecord> =
+                    Vec::new();
                 let mut commit_started = false;
                 let handover_socket_path =
                     crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
@@ -2761,7 +2767,7 @@ impl DaemonServer {
                     Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
                 });
 
-                let transfer_outcome: Result<usize, String> = async {
+                let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
                     let transfer_resp = legacy_peer
                         .send_request(&DaemonRequest::TransferSessions {
                             handover_socket_path: handover_socket_path
@@ -2906,6 +2912,29 @@ impl DaemonServer {
                             }
                         };
                         adopted_sessions.push(session_id.clone());
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        {
+                            let mut record =
+                                crate::daemon::qa_producers::HandoverSessionRecord::new(
+                                    session_id.clone(),
+                                    expected.incarnation.clone(),
+                                );
+                            record.adopted_incarnation =
+                                crate::daemon::qa_producers::describe_incarnation(self, &session_id);
+                            record.adopted_readers_installed = 1;
+                            record.adopted_reader_live =
+                                crate::daemon::qa_producers::adopted_reader_live(
+                                    &self.terminal_service,
+                                    &session_id,
+                                );
+                            adopted_records.push(record);
+                            if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                crate::daemon::qa_producers::note_successor_adopt(
+                                    &channel,
+                                    &session_id,
+                                );
+                            }
+                        }
                         // The receiver must be held and pumped for as long as the adopted child runs.
                         // Dropping it here marks the session's output channel closed, and the lifecycle
                         // watcher would then close the session -- terminating the very child this
@@ -2913,7 +2942,18 @@ impl DaemonServer {
                         self.terminal_service.pump_adopted_output(session_id, output_rx);
                     }
 
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    {
+                        if crate::daemon::qa_producers::abort_after_adopt_requested() {
+                            // The runner's partial-adopt abort variant: the sessions really
+                            // arrived and were really adopted, so the rollback below is the
+                            // production relinquish-then-resume path, not a simulated one.
+                            return Err("QA-injected abort after adopt".to_string());
+                        }
+                    }
+
                     commit_started = true;
+                    let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
                         .send_request(&DaemonRequest::CommitHandover {
                             legacy_socket_path: None,
@@ -2923,16 +2963,47 @@ impl DaemonServer {
                     if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                         return Err(format!("CommitHandover failed: {commit_resp:?}"));
                     }
-                    Ok::<usize, String>(accepted)
+                    let commit_latency_ms = commit_started_at.elapsed().as_millis() as u64;
+                    Ok::<(usize, usize, usize, u64), String>((
+                        offered,
+                        accepted,
+                        restorable,
+                        commit_latency_ms,
+                    ))
                 }
                 .await;
 
                 match transfer_outcome {
-                    Ok(accepted) => {
+                    Ok((offered, accepted, restorable, commit_latency_ms)) => {
                         tracing::info!(
                             accepted,
+                            offered,
+                            restorable,
+                            commit_latency_ms,
                             "Handover committed after adopting the transferred sessions"
                         );
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        {
+                            if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                crate::daemon::qa_producers::observe_reader_state(
+                                    &self.terminal_service,
+                                    &mut adopted_records,
+                                );
+                                crate::daemon::qa_producers::emit_handover_transfer(
+                                    &channel,
+                                    &transfer_id,
+                                    &legacy_path,
+                                    self.epoch(),
+                                    crate::daemon::qa_producers::HandoverAccounting {
+                                        offered,
+                                        accepted,
+                                        restorable,
+                                    },
+                                    commit_latency_ms,
+                                    &adopted_records,
+                                );
+                            }
+                        }
                         if let Err(error) = self
                             .restore_remote_sessions_at(self.remote_sessions_path.clone())
                             .await
@@ -2953,6 +3024,24 @@ impl DaemonServer {
                                     self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
                                         .await.map_err(|error| error.to_string())?;
                                     release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
+                                }
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                        crate::daemon::qa_producers::observe_reader_state(
+                                            &self.terminal_service,
+                                            &mut adopted_records,
+                                        );
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment(
+                                            &channel,
+                                            &transfer_id,
+                                            &legacy_path,
+                                            self.epoch(),
+                                            &adopted_records,
+                                            false,
+                                            &reason,
+                                        );
+                                    }
                                 }
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
                             }
@@ -2977,6 +3066,24 @@ impl DaemonServer {
                                     %reason,
                                     "Handover transfer aborted; predecessor confirmed AbortHandover and resumed serving sessions"
                                 );
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                        crate::daemon::qa_producers::observe_reader_state(
+                                            &self.terminal_service,
+                                            &mut adopted_records,
+                                        );
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment(
+                                            &channel,
+                                            &transfer_id,
+                                            &legacy_path,
+                                            self.epoch(),
+                                            &adopted_records,
+                                            true,
+                                            &reason,
+                                        );
+                                    }
+                                }
                             }
                             other => {
                                 tracing::error!(
@@ -4184,6 +4291,11 @@ impl DaemonServer {
                                                     Ok(()) => {
                                                         count += 1;
                                                         seq += 1;
+                                                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                        crate::daemon::qa_producers::note_predecessor_export(
+                                                            crate::ipc::qa_barrier::active_channel().as_deref(),
+                                                            &session_id,
+                                                        );
                                                     }
                                                     Err(error) => {
                                                         tracing::error!(
@@ -4564,6 +4676,11 @@ impl DaemonServer {
                 .arg("--handover-from")
                 .arg(&legacy_path)
                 .stdin(std::process::Stdio::null());
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            crate::daemon::qa_producers::inject_handover_fault(
+                crate::ipc::qa_barrier::active_channel().as_deref(),
+                &mut cmd,
+            );
             match successor_stdout {
                 Some(target) => {
                     cmd.stdout(target);
