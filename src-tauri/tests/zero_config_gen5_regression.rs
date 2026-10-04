@@ -199,6 +199,9 @@ async fn serve_one_cli_request(f: &Fixture) -> (Running, tokio::sync::oneshot::R
             binary_path: None,
             binary_mtime_ms: None,
             daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
+            // Legacy synthetic peer: advertises no capabilities, no admission stamp.
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         };
         write.write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
         line.clear();
