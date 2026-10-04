@@ -41,7 +41,7 @@ export function buildIsolatedEnv(context) {
     ...context.barrierHub.env(),
   };
   for (const key of Object.keys(env)) {
-    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID'].includes(key)) {
+    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID'].includes(key)) {
       throw new HarnessError('ASSERTION_FAILURE', `ambient FERRYX_* variable leaked into isolated env: ${key}`);
     }
   }
@@ -106,7 +106,7 @@ export async function runHeadlessDiagnosticClassifier(ctx) {
   const { evidence, barrierHub } = ctx;
   const isolated = buildIsolatedEnv(ctx);
   const binaryArgs = ['diagnostic-classifier', '--headless'];
-  evidence.action({ action: 'launch.binary', binary: ctx.binary, args: binaryArgs, env: { FERRYX_DATA_DIR: isolated.dirs.dataDir, FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir, FERRYX_QA_BARRIER_DIR: barrierHub.dir } });
+  evidence.action({ action: 'launch.binary', binary: ctx.binary, args: binaryArgs, env: { FERRYX_DATA_DIR: isolated.dirs.dataDir, FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir, FERRYX_QA_BARRIER_DIR: barrierHub.dir, FERRYX_QA_OPERATION_ID: ctx.operationId } });
   ctx.spawnOwned(ctx.binary, binaryArgs, { env: isolated.env });
 
   // Registration ACKs (startup scan + live watch) precede any trigger.

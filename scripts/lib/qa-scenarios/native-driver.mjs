@@ -1,9 +1,19 @@
 #!/usr/bin/env node
 // Task 3 native desktop automation for pane-liveness scenarios.
 // Real OS events only: focus a task-owned Ferryx window by PID, assert exactly
-// one enabled accessibility menu item `Split Right`, type the marker command,
-// capture a screenshot. Any unsupported surface is an explicit typed failure;
-// this driver can never fabricate a PASS.
+// one enabled accessibility split affordance, type the marker command, capture
+// a screenshot. Any unsupported surface is an explicit typed failure; this
+// driver can never fabricate a PASS.
+//
+// Selector reconciliation (plan: "bind the observed unique selector in runner
+// code before accepting it"): the product's real, uniquely-named, enabled
+// affordance is the pane toolbar button the UI annotates with
+// `aria-label`/`title` = `Split pane right`
+// (ui/src/components/ui/IconButton.tsx via
+// ui/src/components/TerminalSplitView.tsx). It reaches the OS accessibility
+// tree as an AX/UIA button by that exact name - the same surface this driver
+// already uses for the `Retry` button. The earlier binding (`Split Right`) named
+// a label the product never rendered, so the trigger could never match.
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -15,9 +25,11 @@ import { HarnessError, withDeadline, waitForFile, BUDGETS } from './common-harne
 export const MARKER_COMMAND_UNIX = "printf 'FERRYX_SPLIT_READY\\n'";
 export const MARKER_TEXT = 'FERRYX_SPLIT_READY';
 // Plan requirement: bind the observed unique selector in runner code before
-// accepting a menu action. The observed macOS menu label is `Split Right`.
-export const SPLIT_MENU_SELECTOR_DARWIN = { role: 'menu item', title: 'Split Right' };
-export const SPLIT_MENU_SELECTOR_WIN32 = { automationId: null, name: 'Split Right' };
+// accepting a native action. The observed macOS/Windows accessible name is the
+// real pane toolbar label `Split pane right`; a different name fails typed and
+// is repaired narrowly, never guessed clicked.
+export const SPLIT_MENU_SELECTOR_DARWIN = { role: 'button', title: 'Split pane right' };
+export const SPLIT_MENU_SELECTOR_WIN32 = { automationId: null, name: 'Split pane right' };
 
 function osascript(evidence, source) {
   const args = ['-e', source];
@@ -36,7 +48,7 @@ function osascript(evidence, source) {
         const text = `${stderr.trim()} ${stdout.trim()}`;
         if (/not allowed|not permitted|assistive|accessibility|-1719|-25211/i.test(text)) {
           rejectPromise(new HarnessError('AX_UNTRUSTED', `Accessibility automation denied: ${text.trim()}`));
-        } else if (/SPLIT_RIGHT_NOT_UNIQUE|SPLIT_RIGHT_DISABLED|PID_NOT_UNIQUE|NO_OWNED_WINDOW|Can.t get|Invalid index/i.test(text)) {
+        } else if (/SPLIT_RIGHT_NOT_UNIQUE|SPLIT_RIGHT_DISABLED|SPLIT_RIGHT_NOT_FOUND|PID_NOT_UNIQUE|NO_OWNED_WINDOW|Can.t get|Invalid index/i.test(text)) {
           rejectPromise(new HarnessError('ASSERTION_FAILURE', `native assertion failed via osascript: ${text.trim()}`));
         } else {
           rejectPromise(new HarnessError('ASSERTION_FAILURE', `osascript exited ${code}: ${text.trim()}`));
@@ -107,15 +119,23 @@ export async function focusWindowByPidDarwin(evidence, pid) {
   evidence.action({ action: 'focus-window-by-pid', pid, selector: { unixId: pid } });
 }
 
-// Assert exactly one matching, enabled menu item named `Split Right`, then
-// click it. A differing label/API fails explicitly.
+// Assert exactly one matching, enabled split affordance, then click it. A
+// differing label/API - or an ambiguous match - fails explicitly instead of
+// clicking a guess. `entire contents` is the recursive AX enumeration needed to
+// reach a button rendered inside the webview (a direct-child search cannot).
 export async function clickSplitRightDarwin(evidence, pid) {
-  const selector = `menu item "Split Right" of menu 1 of menu bar item "Shell" of menu bar 1 of (first process whose unix id is ${pid})`;
+  const label = SPLIT_MENU_SELECTOR_DARWIN.title;
   const source = [
     'tell application "System Events"',
-    `  set matches to every menu item of menu 1 of menu bar item "Shell" of menu bar 1 of (first process whose unix id is ${pid}) whose name is "Split Right"`,
-    '  if (count of matches) is not 1 then error "SPLIT_RIGHT_NOT_UNIQUE"',
-    `  set theItem to ${selector}`,
+    `  set owned to (every process whose unix id is ${pid})`,
+    '  if (count of owned) is not 1 then error "PID_NOT_UNIQUE"',
+    '  set p to item 1 of owned',
+    '  set frontmost of p to true',
+    '  set win to first window of p',
+    `  set matches to (every button of (entire contents of win) whose name is ${JSON.stringify(label)})`,
+    '  if (count of matches) > 1 then error "SPLIT_RIGHT_NOT_UNIQUE"',
+    '  if (count of matches) is 0 then error "SPLIT_RIGHT_NOT_FOUND"',
+    '  set theItem to item 1 of matches',
     '  if enabled of theItem is not true then error "SPLIT_RIGHT_DISABLED"',
     '  click theItem',
     'end tell',
@@ -124,12 +144,12 @@ export async function clickSplitRightDarwin(evidence, pid) {
     await osascript(evidence, source);
   } catch (error) {
     const message = error.message ?? '';
-    if (message.includes('SPLIT_RIGHT_NOT_UNIQUE') || message.includes("Can't get") || message.includes('Invalid index')) {
-      throw new HarnessError('ASSERTION_FAILURE', `actual menu label/API differs from bound selector: ${message}`);
+    if (message.includes('SPLIT_RIGHT_NOT_UNIQUE') || message.includes('SPLIT_RIGHT_NOT_FOUND') || message.includes("Can't get") || message.includes('Invalid index')) {
+      throw new HarnessError('ASSERTION_FAILURE', `actual split affordance differs from bound selector ${JSON.stringify(label)}: ${message}`);
     }
     throw error;
   }
-  evidence.action({ action: 'click-menu-item', selector: SPLIT_MENU_SELECTOR_DARWIN, pid, assertedUniqueEnabled: true });
+  evidence.action({ action: 'click-split-affordance', selector: SPLIT_MENU_SELECTOR_DARWIN, pid, assertedUniqueEnabled: true });
 }
 
 // Click the actual Retry button in the UI for recovery scenarios (e.g. split-attach-stall).
@@ -311,13 +331,15 @@ export async function captureScreenshot(evidence, path) {
 
 // Windows: System.Windows.Automation (UIA) is the real native API. Marker uses
 // a PowerShell Write-Output shell line, recorded in the scenario manifest.
+// UIA `Descendants` is already recursive, so it reaches the webview-rendered
+// pane toolbar button by its real accessible name.
 export async function windowsDriver(evidence, pid) {
   const command = [
     'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes;',
     `$proc = Get-Process -Id ${pid} -ErrorAction Stop;`,
     '$root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle);',
     'if (-not $root) { throw "NO_OWNED_WINDOW" }',
-    '$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "Split Right");',
+    '$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "Split pane right");',
     '$items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond);',
     'if ($items.Count -ne 1) { throw "SPLIT_RIGHT_NOT_UNIQUE" }',
     'if (-not $items.Item(0).Current.IsEnabled) { throw "SPLIT_RIGHT_DISABLED" }',
@@ -327,7 +349,7 @@ export async function windowsDriver(evidence, pid) {
   ].join(' ');
   const result = await powershell(evidence, command);
   if (result !== 'SPLIT_CLICKED') throw new HarnessError('ASSERTION_FAILURE', `unexpected UIA result: ${result}`);
-  evidence.action({ action: 'click-menu-item', selector: SPLIT_MENU_SELECTOR_WIN32, pid, assertedUniqueEnabled: true });
+  evidence.action({ action: 'click-split-affordance', selector: SPLIT_MENU_SELECTOR_WIN32, pid, assertedUniqueEnabled: true });
   // Review H5: this driver only clicks the menu. Marker typing is performed
   // by typeMarkerWindows on every marker path - never logged as an action
   // that did not happen.

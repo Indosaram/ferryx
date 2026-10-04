@@ -17,7 +17,7 @@ import {
   requireSevenTupleReceipt, requireFiveTupleReceipt,
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
 } from '../lib/qa-scenarios/common-harness.mjs';
-import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
+import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import { assertInvariants, assertSinglePty } from './pane-liveness.mjs';
 import {
   MARKER_TEXT,
@@ -947,4 +947,22 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
     expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
     expect(calls).toEqual(['focus', 'split', 'cancel', 'receipt', 'cancel']);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('private channel env carries the operation nonce so barrier-less scenarios can correlate', () => {
+  const root = fixtureRoot();
+  const hub = new BarrierHub(root, { runId: 'run-env', operationId: 'op-env' });
+  expect(hub.env()).toMatchObject({
+    FERRYX_QA_BARRIER_DIR: hub.dir,
+    FERRYX_QA_RUN_ID: 'run-env',
+    FERRYX_QA_OPERATION_ID: 'op-env',
+  });
+  // The isolated launch env refuses every FERRYX_* key outside its allowlist, so
+  // a successful build proves the operation nonce is allowlisted too.
+  const isolated = buildIsolatedEnv({ isolationRoot: root, barrierHub: hub });
+  expect(isolated.env.FERRYX_QA_OPERATION_ID).toBe('op-env');
+  // No nonce: the key is omitted so the headless lane's env is unchanged.
+  const bare = new BarrierHub(join(root, 'bare'), { runId: 'run-bare' });
+  expect(bare.env().FERRYX_QA_OPERATION_ID).toBeUndefined();
+  rmSync(root, { recursive: true, force: true });
 });

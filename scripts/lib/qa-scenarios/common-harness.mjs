@@ -483,7 +483,17 @@ export class BarrierHub {
     this.commands = [];
   }
 
-  env() { return { FERRYX_QA_BARRIER_DIR: this.dir, FERRYX_QA_RUN_ID: this.runId ?? '' }; }
+  // The private channel env: the barrier dir, the run nonce and the operation
+  // nonce. The operation nonce travels through the env as well as through every
+  // arm file because a scenario that pre-arms no barrier (split-cancel,
+  // suspension-ownership, stale-binding) still has to settle receipts the
+  // product can correlate; the key is omitted when no nonce exists so the
+  // headless lane's env is byte-identical to before.
+  env() {
+    const env = { FERRYX_QA_BARRIER_DIR: this.dir, FERRYX_QA_RUN_ID: this.runId ?? '' };
+    if (this.operationId) env.FERRYX_QA_OPERATION_ID = this.operationId;
+    return env;
+  }
 
   // Pre-arm BEFORE launch/trigger; acknowledge held vs released state later.
   prearm(name, {

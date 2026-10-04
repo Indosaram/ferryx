@@ -61,7 +61,9 @@ const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 const SCENARIO_PLANS = {
   'diagnostic-classifier': {
     barriers: ['backend-write', 'presentation'], marker: true, splitMenu: false,
-    receipts: ['fixture-setup', 'classifier', 'marker-output'],
+    // Receipt names are the product's real barrier settlements: the classifier
+    // stages settle on the backend-write/presentation barriers themselves.
+    receipts: ['fixture-setup', 'backend-write', 'presentation', 'marker-output'],
   },
   'split-happy': {
     barriers: [], marker: true, splitMenu: true,
@@ -70,7 +72,9 @@ const SCENARIO_PLANS = {
   },
   'split-attach-stall': {
     barriers: ['attach-handshake'], barrierHoldMs: 16_000, marker: true, splitMenu: true,
-    receipts: ['fixture-setup', 'split-create', 'failure-classified'],
+    // The actionable failure settles on the held attach-handshake barrier; there
+    // is no separate `failure-classified` receipt file.
+    receipts: ['fixture-setup', 'split-create', 'attach-handshake'],
     failureDeadlineMs: BUDGETS.attemptCeilingMs, sameIdRetry: true, singlePty: true,
   },
   'split-cancel': {
@@ -125,8 +129,12 @@ async function runNativeScenario(ctx) {
       FERRYX_DATA_DIR: isolated.dirs.dataDir,
       FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir,
       FERRYX_QA_BARRIER_DIR: barrierHub.dir,
+      FERRYX_QA_OPERATION_ID: ctx.operationId,
     },
   });
+  // The GUI lane installs the private channel from this env at boot and
+  // settles `fixture-setup` line 0 from the real isolated-profile session
+  // inventory before any trigger.
   const child = ctx.spawnOwned(ctx.binary, [], { env: isolated.env });
   const pid = child.pid;
   ctx.pid = pid;

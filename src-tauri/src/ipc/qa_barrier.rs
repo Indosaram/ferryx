@@ -35,6 +35,17 @@ use tauri::Manager;
 pub const PRODUCER_ID: &str = "ipc-qa-barrier";
 pub const WRITE_BARRIER: &str = "backend-write";
 pub const PRESENTATION_BARRIER: &str = "presentation";
+/// Runner contract: the operation nonce is handed to the product through the
+/// private inherited env as well as through every arm file. Scenarios that
+/// pre-arm no barrier (split-cancel, suspension-ownership, stale-binding) have
+/// no arm to read it from, yet every emission must echo it or
+/// `correlateReceipt` rejects the line.
+pub const OPERATION_ID_ENV: &str = "FERRYX_QA_OPERATION_ID";
+/// GUI-lane `fixture-setup` retry bound: the app's daemon attaches during
+/// startup, so the first inventory read may race it. The wait is bounded and
+/// the truth of the final attempt is always emitted.
+const FIXTURE_BOOT_ATTEMPTS: u32 = 20;
+const FIXTURE_BOOT_RETRY_MS: u64 = 250;
 
 /// Release-watch cadence of the feature-gated watcher task. Never a hot path:
 /// the channel only exists when the runner installed a private barrier dir.
@@ -151,6 +162,10 @@ pub struct QaBarrierChannel {
     run_id: String,
     pid: u32,
     arms: Mutex<HashMap<String, ArmSpec>>,
+    /// The runner's operation nonce as handed over through the private env.
+    /// Authoritative when present: a scenario that arms no barrier still needs
+    /// a correlation identity for every receipt it settles.
+    operation_nonce: Option<String>,
     /// Line counters per receipt file so appends stay one-JSON-per-line.
     receipt_lines: Mutex<HashMap<String, usize>>,
     held_tx: tokio::sync::broadcast::Sender<QaBarrierHeldEvent>,
@@ -199,6 +214,7 @@ impl QaBarrierChannel {
             run_id,
             pid: std::process::id(),
             arms: Mutex::new(HashMap::new()),
+            operation_nonce: None,
             receipt_lines: Mutex::new(HashMap::new()),
             held_tx,
             receipt_tx,
@@ -212,14 +228,32 @@ impl QaBarrierChannel {
             .map_err(|_| "FERRYX_QA_BARRIER_DIR is not set".to_string())?;
         let run_id = std::env::var("FERRYX_QA_RUN_ID")
             .map_err(|_| "FERRYX_QA_RUN_ID is not set".to_string())?;
+        let operation_nonce = std::env::var(OPERATION_ID_ENV).ok();
+        Self::from_env_values(&dir, &run_id, operation_nonce.as_deref())
+    }
+
+    /// Pure core of [`Self::from_env`]: no process-global reads, so the boot
+    /// decision is testable without mutating the shared environment.
+    fn from_env_values(
+        dir: &str,
+        run_id: &str,
+        operation_nonce: Option<&str>,
+    ) -> Result<Self, String> {
         if dir.trim().is_empty() || run_id.trim().is_empty() {
             return Err("FERRYX_QA_BARRIER_DIR/FERRYX_QA_RUN_ID must be non-empty".into());
         }
+        let operation_nonce = match operation_nonce {
+            Some(value) if !value.trim().is_empty() => Some(value.to_string()),
+            Some(_) => return Err(format!("{OPERATION_ID_ENV} must be non-empty when set")),
+            None => None,
+        };
         let dir = PathBuf::from(dir);
         if !dir.is_dir() {
             return Err(format!("barrier dir does not exist: {}", dir.display()));
         }
-        Ok(Self::new(dir, run_id))
+        let mut channel = Self::new(dir, run_id.to_string());
+        channel.operation_nonce = operation_nonce;
+        Ok(channel)
     }
 
     pub fn run_id(&self) -> &str {
@@ -326,8 +360,13 @@ impl QaBarrierChannel {
         Ok(ack)
     }
 
-    /// The runner stamps one operation nonce into every arm; emissions echo it.
+    /// The runner stamps one operation nonce into every arm AND into the
+    /// private env; emissions echo it. The env nonce is authoritative because a
+    /// scenario that pre-arms no barrier has no arm to read it from.
     pub fn operation_id(&self) -> Option<String> {
+        if let Some(nonce) = &self.operation_nonce {
+            return Some(nonce.clone());
+        }
         self.arms
             .lock()
             .ok()
@@ -589,6 +628,30 @@ impl QaBarrierChannel {
         );
     }
 
+    /// `fixture-setup` settlement for the GUI lane: the real isolated-profile
+    /// session inventory, one object per session as the runner's
+    /// `validateFixtureSetup` requires. Returns false when the runner supplied
+    /// no operation nonce, so a missing correlation is reported instead of
+    /// writing an uncorrelatable line.
+    pub fn emit_fixture_setup_from_sessions(&self, sessions: &[QaFixtureSession]) -> bool {
+        let Some(operation_id) = self.operation_id() else {
+            return false;
+        };
+        self.append_receipt(
+            "fixture-setup",
+            &operation_id,
+            json!({
+                "sessionId": sessions
+                    .first()
+                    .map(|session| session.backend_session_id.clone())
+                    .unwrap_or_default(),
+                "sessions": sessions,
+                "fixtureKind": "gui-session-inventory",
+            }),
+        );
+        true
+    }
+
     fn snapshot_json(snapshot: &PaneLivenessSnapshot) -> Value {
         serde_json::to_value(snapshot).unwrap_or(Value::Null)
     }
@@ -612,6 +675,157 @@ impl QaBarrierChannel {
         }
         missing
     }
+}
+
+/// Startup registration outcome for the GUI lane.
+pub struct GuiBarrierBoot {
+    pub channel: Arc<QaBarrierChannel>,
+    pub acked: Vec<String>,
+    pub rejected: Vec<String>,
+}
+
+/// GUI-boot installation of the private QA barrier channel.
+///
+/// The pane-liveness runner launches the real GUI with no arguments and hands
+/// the channel to the process through the private inherited env only. Every
+/// normal launch (no such env) returns `None` and installs nothing, so no QA
+/// surface is reachable without the `local-split-qa` feature and the runner's
+/// env. Installing here is what makes the already-implemented feature-gated
+/// producers reachable on the GUI path: the real backend-write stage
+/// (`ipc/native_terminal.rs`) and the real native presentation coordinator
+/// (`native_terminal/surface_host.rs`) both consult `active_channel()`.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub fn install_for_gui_boot() -> Option<GuiBarrierBoot> {
+    let channel = QaBarrierChannel::from_env().ok()?;
+    install(channel);
+    let channel = active_channel()?;
+    let (acked, rejected) = channel.scan_and_ack_arms();
+    Some(GuiBarrierBoot {
+        channel,
+        acked,
+        rejected,
+    })
+}
+
+/// One private fixture session observed in the GUI lane. Every field is a real
+/// observation (the daemon's own session id / incarnation / epoch plus the
+/// surface host's real collector snapshot); nothing is synthesized.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QaFixtureSession {
+    pub backend_session_id: String,
+    pub kind: String,
+    pub ownership_receipt: Value,
+}
+
+/// GUI-lane `fixture-setup` inventory.
+///
+/// The runner awaits `fixture-setup` line 0 immediately after launch, before
+/// any trigger, so the GUI boot path reports the private fixture sessions that
+/// really exist in the isolated profile. Only what the product can attest is
+/// reported: `idle` when the surface host's real collector snapshot shows no
+/// pending stage and no unpresented frame, `source` otherwise. The Task 3
+/// snapshot kinds that require a fixture producer
+/// (`created`/`adopted`/`externally-stopped`) are never claimed here - a
+/// receipt that fabricated them would be simulated evidence.
+pub async fn collect_gui_fixture_sessions(
+    daemon_client: &crate::daemon::DaemonClient,
+    surface_host: &NativeTerminalSurfaceHostState,
+) -> Vec<QaFixtureSession> {
+    let Ok(session_ids) = daemon_client.list_sessions().await else {
+        return Vec::new();
+    };
+    let daemon_epoch = daemon_client.epoch();
+    let mut sessions = Vec::new();
+    for session_id in session_ids {
+        let Ok(details) = daemon_client.describe_session(&session_id).await else {
+            continue;
+        };
+        let idle = surface_host
+            .session_liveness_observation(&session_id)
+            .is_some_and(|snapshot| {
+                snapshot.stage.is_none()
+                    && snapshot.has_unpresented_frames == Some(false)
+                    && classify_pane_liveness(&snapshot) == PaneLivenessVerdict::Idle
+            });
+        sessions.push(QaFixtureSession {
+            backend_session_id: session_id.clone(),
+            kind: if idle {
+                "idle".to_string()
+            } else {
+                "source".to_string()
+            },
+            ownership_receipt: json!({
+                "backendSessionId": session_id,
+                "incarnation": details.incarnation,
+                "daemonEpoch": daemon_epoch.map(|epoch| epoch.to_string()),
+                "running": details.running,
+                "workspaceId": details.workspace_id,
+                "cwd": details.cwd,
+            }),
+        });
+    }
+    sessions
+}
+
+/// Outcome of the GUI-lane `fixture-setup` settlement.
+pub struct GuiFixtureSetupOutcome {
+    pub emitted: bool,
+    pub sessions: Vec<QaFixtureSession>,
+}
+
+/// GUI-boot entry point. Installs the channel when the runner handed the
+/// process one, then settles `fixture-setup` from the real isolated-profile
+/// session inventory off the main thread. Returns immediately; a launch without
+/// the runner env does nothing at all.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub fn start_gui_boot_channel<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon_client: Arc<crate::daemon::DaemonClient>,
+) {
+    let Some(boot) = install_for_gui_boot() else {
+        return;
+    };
+    if !boot.rejected.is_empty() {
+        eprintln!(
+            "FERRYX_QA_ARM_REJECTED: rejected prelaunch arms: {:?}",
+            boot.rejected
+        );
+    }
+    tauri::async_runtime::spawn(async move {
+        let outcome = emit_gui_fixture_setup(&boot.channel, &daemon_client, &app).await;
+        if !outcome.emitted {
+            eprintln!(
+                "FERRYX_QA_FIXTURE_SETUP_UNSETTLED: {} real session(s) observed but no operation nonce was supplied",
+                outcome.sessions.len()
+            );
+        }
+    });
+}
+
+/// Bounded GUI-lane `fixture-setup`: the app's daemon attaches during startup,
+/// so the first inventory read may race it. The wait is bounded and the truth
+/// of the final attempt is always emitted.
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
+    channel: &QaBarrierChannel,
+    daemon_client: &crate::daemon::DaemonClient,
+    app: &tauri::AppHandle<R>,
+) -> GuiFixtureSetupOutcome {
+    let mut sessions = Vec::new();
+    for attempt in 0..FIXTURE_BOOT_ATTEMPTS {
+        sessions = collect_gui_fixture_sessions(
+            daemon_client,
+            &app.state::<NativeTerminalSurfaceHostState>(),
+        )
+        .await;
+        if !sessions.is_empty() || attempt + 1 == FIXTURE_BOOT_ATTEMPTS {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(FIXTURE_BOOT_RETRY_MS)).await;
+    }
+    let emitted = channel.emit_fixture_setup_from_sessions(&sessions);
+    GuiFixtureSetupOutcome { emitted, sessions }
 }
 
 /// Real collector snapshot for a session attached to surface host state. The
@@ -1070,5 +1284,106 @@ mod tests {
     fn channel_absent_without_install() {
         deactivate();
         assert!(active_channel().is_none());
+    }
+
+    // The GUI boot path must install nothing unless the runner handed the
+    // process a private barrier dir through the inherited env. `from_env_values`
+    // is the pure core of that decision, so no test mutates the shared process
+    // environment (and cannot race a neighbouring test).
+    #[test]
+    fn gui_boot_install_requires_the_private_runner_env() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap();
+
+        // No barrier dir: no channel, therefore no QA surface at all.
+        assert!(QaBarrierChannel::from_env_values("", TEST_RUN_ID, None).is_err());
+        assert!(QaBarrierChannel::from_env_values(dir_str, "", None).is_err());
+        // A dir the runner never created is refused rather than installed.
+        assert!(QaBarrierChannel::from_env_values("/definitely/not/a/barrier/dir", TEST_RUN_ID, None).is_err());
+        // A non-empty operation nonce is mandatory once the key is present.
+        assert!(QaBarrierChannel::from_env_values(dir_str, TEST_RUN_ID, Some("   ")).is_err());
+
+        // Runner env present: installed, and the env nonce is the correlation
+        // identity for a scenario that pre-arms no barrier.
+        let channel = QaBarrierChannel::from_env_values(dir_str, TEST_RUN_ID, Some(TEST_OPERATION_ID))
+            .expect("runner env installs the channel");
+        assert_eq!(channel.run_id(), TEST_RUN_ID);
+        assert_eq!(channel.operation_id(), Some(TEST_OPERATION_ID.to_string()));
+        assert_eq!(channel.producer_pid(), std::process::id());
+
+        // Headless path unchanged: the arm's nonce still resolves when the env
+        // carries none.
+        arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
+        let from_arm = QaBarrierChannel::from_env_values(dir_str, TEST_RUN_ID, None)
+            .expect("runner env without the optional nonce still installs");
+        from_arm.scan_and_ack_arms();
+        assert_eq!(from_arm.operation_id(), Some(TEST_OPERATION_ID.to_string()));
+    }
+
+    // GUI-lane fixture inventory: only the sessions that really exist are
+    // reported, and a scenario with no barrier still settles a correlatable
+    // line because the env nonce is authoritative.
+    #[test]
+    fn gui_fixture_setup_reports_real_sessions_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("barriers");
+        std::fs::create_dir_all(&dir).unwrap();
+        // No arm is written: this is the split-cancel / suspension-ownership /
+        // stale-binding shape, where only the env nonce can correlate.
+        let channel = QaBarrierChannel::from_env_values(
+            dir.to_str().unwrap(),
+            TEST_RUN_ID,
+            Some(TEST_OPERATION_ID),
+        )
+        .unwrap();
+
+        // Zero observed sessions must still settle truthfully: an empty
+        // inventory, never an invented fixture.
+        assert!(channel.emit_fixture_setup_from_sessions(&[]));
+        let empty = read_lines(&dir, "fixture-setup");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0]["sessions"], json!([]));
+        assert_eq!(empty[0]["runId"], json!(TEST_RUN_ID));
+        assert_eq!(empty[0]["operationId"], json!(TEST_OPERATION_ID));
+        assert_eq!(empty[0]["producer"], json!(PRODUCER_ID));
+
+        let observed = vec![
+            QaFixtureSession {
+                backend_session_id: "pty-real-1".to_string(),
+                kind: "idle".to_string(),
+                ownership_receipt: json!({"backendSessionId": "pty-real-1", "daemonEpoch": "42"}),
+            },
+            QaFixtureSession {
+                backend_session_id: "pty-real-2".to_string(),
+                kind: "source".to_string(),
+                ownership_receipt: json!({"backendSessionId": "pty-real-2", "incarnation": "inc-2"}),
+            },
+        ];
+        assert!(channel.emit_fixture_setup_from_sessions(&observed));
+        let lines = read_lines(&dir, "fixture-setup");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["sessionId"], json!("pty-real-1"));
+        assert_eq!(lines[1]["fixtureKind"], json!("gui-session-inventory"));
+        assert_eq!(lines[1]["sessions"][0]["backendSessionId"], json!("pty-real-1"));
+        assert_eq!(lines[1]["sessions"][0]["kind"], json!("idle"));
+        assert_eq!(lines[1]["sessions"][1]["ownershipReceipt"]["incarnation"], json!("inc-2"));
+        // The kinds the product cannot attest are never claimed.
+        for line in &lines {
+            for session in line["sessions"].as_array().unwrap() {
+                let kind = session["kind"].as_str().unwrap();
+                assert!(
+                    kind == "idle" || kind == "source",
+                    "GUI inventory must not fabricate fixture kinds: {kind}"
+                );
+            }
+        }
+
+        // Without a correlation identity the line is refused instead of
+        // written uncorrelatable.
+        let uncorrelated = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
+        assert!(!uncorrelated.emit_fixture_setup_from_sessions(&observed));
+        assert_eq!(read_lines(&dir, "fixture-setup").len(), 2);
     }
 }

@@ -1190,6 +1190,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     // process lifecycle, not only from tests.
     let cleanup_reaper_client = Arc::clone(&daemon_client);
     let pending_create_reaper_client = Arc::clone(&daemon_client);
+    // Task 3 (local-split-qa): the private QA barrier channel for the GUI lane.
+    // The pane-liveness runner launches this GUI with NO arguments and hands
+    // the channel over through the private inherited env only, so a normal
+    // launch installs nothing at all.
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let qa_boot_daemon_client = Arc::clone(&daemon_client);
     // Consumed by the setup hook below, which spawns the periodic worktree
     // rescan task; kept as a separate clone so `.manage(workspace_registry)`
     // below still owns the managed instance.
@@ -1342,6 +1348,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             tauri::async_runtime::spawn(async move {
                 ipc::terminal::start_pending_create_reaper(pending_create_reaper_client).await;
             });
+            // Task 3 (local-split-qa): install the private QA barrier channel on
+            // the GUI boot path and settle `fixture-setup` from the real
+            // isolated-profile session inventory. No-op without the runner env.
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            crate::ipc::qa_barrier::start_gui_boot_channel(
+                app.handle().clone(),
+                qa_boot_daemon_client,
+            );
             install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
             crate::worktree::spawn_worktree_rescan_task(
                 app.handle().clone(),
