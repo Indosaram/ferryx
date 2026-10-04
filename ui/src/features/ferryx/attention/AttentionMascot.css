@@ -82,3 +82,1088 @@
   fill: var(--mascot-silver-bright);
   stroke-width: 1.2;
 }
+
+/* All joint timelines settle at 6000ms; the wrapper alone owns completion. */
+.attention-mascot-stage[data-variant] .mascot-dance-cycle,
+.attention-mascot-stage[data-variant] .mascot-body,
+.attention-mascot-stage[data-variant] .mascot-arch,
+.attention-mascot-stage[data-variant] .mascot-left-arm,
+.attention-mascot-stage[data-variant] .mascot-right-arm,
+.attention-mascot-stage[data-variant] .mascot-left-leg,
+.attention-mascot-stage[data-variant] .mascot-right-leg,
+.attention-mascot-stage[data-variant] .mascot-left-elbow-pivot,
+.attention-mascot-stage[data-variant] .mascot-right-elbow-pivot,
+.attention-mascot-stage[data-variant] .mascot-left-knee-pivot,
+.attention-mascot-stage[data-variant] .mascot-right-knee-pivot {
+  animation-duration: 8000ms;
+  animation-iteration-count: 1;
+  animation-fill-mode: both;
+  animation-timing-function: ease-in-out;
+  transform-box: view-box;
+}
+.attention-mascot-stage[data-paused="true"] g { animation-play-state: paused; }
+.attention-mascot-stage[data-variant] .mascot-dance-cycle { animation-name: mascot-dance-cycle; }
+.mascot-body, .mascot-arch { transform-origin: 52px 49px; }
+.mascot-left-arm { transform-origin: 25px 48px; }
+.mascot-right-arm { transform-origin: 79px 48px; }
+.mascot-left-leg { transform-origin: 43px 61px; }
+.mascot-right-leg { transform-origin: 61px 61px; }
+.mascot-left-elbow-pivot { transform-origin: 18px 53px; }
+.mascot-right-elbow-pivot { transform-origin: 86px 53px; }
+.mascot-left-knee-pivot { transform-origin: 41px 69px; }
+.mascot-right-knee-pivot { transform-origin: 63px 69px; }
+@keyframes mascot-dance-cycle {
+  0%, 75%, 100% { transform: none; }
+}
+
+/* 01 Side step */
+[data-variant="01"] .mascot-body { animation-name: mascot-01-body; }
+@keyframes mascot-01-body {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(-5px); }
+  30% { transform: translateX(5px); }
+  45% { transform: translateX(-5px); }
+  60% { transform: translateX(5px); }
+}
+[data-variant="01"] .mascot-left-leg { animation-name: mascot-01-left-leg; }
+@keyframes mascot-01-left-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(-7px) rotate(14deg); }
+  30% { transform: none; }
+  45% { transform: translateX(-7px) rotate(14deg); }
+}
+[data-variant="01"] .mascot-right-leg { animation-name: mascot-01-right-leg; }
+@keyframes mascot-01-right-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: none; }
+  30% { transform: translateX(7px) rotate(-14deg); }
+  60% { transform: translateX(7px) rotate(-14deg); }
+}
+[data-variant="01"] .mascot-left-arm { animation-name: mascot-01-left-arm; }
+@keyframes mascot-01-left-arm {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(2px) rotate(-22deg); }
+  30% { transform: translateX(2px) rotate(22deg); }
+  45% { transform: translateX(2px) rotate(-22deg); }
+  60% { transform: translateX(2px) rotate(22deg); }
+}
+[data-variant="01"] .mascot-right-arm { animation-name: mascot-01-right-arm; }
+@keyframes mascot-01-right-arm {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(-2px) rotate(-22deg); }
+  30% { transform: translateX(-2px) rotate(22deg); }
+  45% { transform: translateX(-2px) rotate(-22deg); }
+  60% { transform: translateX(-2px) rotate(22deg); }
+}
+
+/* 02 Double bounce */
+[data-variant="02"] .mascot-body { animation-name: mascot-02-body; }
+@keyframes mascot-02-body {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateY(2px); }
+  20% { transform: translateY(-3px); }
+  30% { transform: none; }
+  40% { transform: translateY(2px); }
+  50% { transform: translateY(-3px); }
+  65% { transform: none; }
+}
+[data-variant="02"] .mascot-left-knee-pivot { animation-name: mascot-02-left-knee-pivot; }
+@keyframes mascot-02-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(14deg); }
+  20% { transform: rotate(-8deg); }
+  30% { transform: none; }
+  40% { transform: rotate(14deg); }
+  50% { transform: rotate(-8deg); }
+  65% { transform: none; }
+}
+[data-variant="02"] .mascot-right-knee-pivot { animation-name: mascot-02-right-knee-pivot; }
+@keyframes mascot-02-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-14deg); }
+  20% { transform: rotate(8deg); }
+  30% { transform: none; }
+  40% { transform: rotate(-14deg); }
+  50% { transform: rotate(8deg); }
+  65% { transform: none; }
+}
+[data-variant="02"] .mascot-left-arm { animation-name: mascot-02-left-arm; }
+@keyframes mascot-02-left-arm {
+  0%, 75%, 100% { transform: none; }
+  20% { transform: rotate(8deg); }
+  30% { transform: none; }
+  50% { transform: rotate(8deg); }
+  65% { transform: none; }
+}
+[data-variant="02"] .mascot-right-arm { animation-name: mascot-02-right-arm; }
+@keyframes mascot-02-right-arm {
+  0%, 75%, 100% { transform: none; }
+  20% { transform: rotate(-8deg); }
+  30% { transform: none; }
+  50% { transform: rotate(-8deg); }
+  65% { transform: none; }
+}
+
+/* 03 Shoulder shimmy */
+[data-variant="03"] .mascot-left-arm { animation-name: mascot-03-left-arm; }
+@keyframes mascot-03-left-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateY(-7px) rotate(32deg); }
+  20% { transform: none; }
+  30% { transform: translateY(-7px) rotate(32deg); }
+  40% { transform: none; }
+  50% { transform: translateY(-7px) rotate(32deg); }
+  60% { transform: none; }
+}
+[data-variant="03"] .mascot-right-arm { animation-name: mascot-03-right-arm; }
+@keyframes mascot-03-right-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: none; }
+  20% { transform: translateY(-7px) rotate(-32deg); }
+  30% { transform: none; }
+  40% { transform: translateY(-7px) rotate(-32deg); }
+  50% { transform: none; }
+  60% { transform: translateY(-7px) rotate(-32deg); }
+}
+[data-variant="03"] .mascot-left-elbow-pivot { animation-name: mascot-03-left-elbow-pivot; }
+@keyframes mascot-03-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(18deg); }
+  30% { transform: rotate(-18deg); }
+  50% { transform: rotate(18deg); }
+}
+[data-variant="03"] .mascot-right-elbow-pivot { animation-name: mascot-03-right-elbow-pivot; }
+@keyframes mascot-03-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  20% { transform: rotate(-18deg); }
+  40% { transform: rotate(18deg); }
+  60% { transform: rotate(-18deg); }
+}
+
+/* 04 Twist */
+[data-variant="04"] .mascot-arch { animation-name: mascot-04-arch; }
+@keyframes mascot-04-arch {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(-16deg) scaleX(.95); }
+  36% { transform: rotate(16deg) scaleX(.95); }
+  54% { transform: rotate(-16deg) scaleX(.95); }
+  66% { transform: rotate(16deg) scaleX(.95); }
+}
+[data-variant="04"] .mascot-left-leg { animation-name: mascot-04-left-leg; }
+@keyframes mascot-04-left-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(26deg); }
+  36% { transform: rotate(-26deg); }
+  54% { transform: rotate(26deg); }
+  66% { transform: rotate(-26deg); }
+}
+[data-variant="04"] .mascot-right-leg { animation-name: mascot-04-right-leg; }
+@keyframes mascot-04-right-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(26deg); }
+  36% { transform: rotate(-26deg); }
+  54% { transform: rotate(26deg); }
+  66% { transform: rotate(-26deg); }
+}
+[data-variant="04"] .mascot-left-arm { animation-name: mascot-04-left-arm; }
+@keyframes mascot-04-left-arm {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(-24deg); }
+  36% { transform: rotate(24deg); }
+  54% { transform: rotate(-24deg); }
+  66% { transform: rotate(24deg); }
+}
+[data-variant="04"] .mascot-right-arm { animation-name: mascot-04-right-arm; }
+@keyframes mascot-04-right-arm {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(-24deg); }
+  36% { transform: rotate(24deg); }
+  54% { transform: rotate(-24deg); }
+  66% { transform: rotate(24deg); }
+}
+
+/* 05 Disco point */
+[data-variant="05"] .mascot-right-arm { animation-name: mascot-05-right-arm; }
+@keyframes mascot-05-right-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-105deg); }
+  30% { transform: rotate(-105deg); }
+  42% { transform: rotate(25deg); }
+  60% { transform: rotate(25deg); }
+}
+[data-variant="05"] .mascot-right-elbow-pivot { animation-name: mascot-05-right-elbow-pivot; }
+@keyframes mascot-05-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-12deg); }
+  30% { transform: rotate(-12deg); }
+  42% { transform: rotate(45deg); }
+  60% { transform: rotate(45deg); }
+}
+[data-variant="05"] .mascot-left-arm { animation-name: mascot-05-left-arm; }
+@keyframes mascot-05-left-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-25deg); }
+  30% { transform: rotate(-25deg); }
+  42% { transform: rotate(105deg); }
+  60% { transform: rotate(105deg); }
+}
+[data-variant="05"] .mascot-left-elbow-pivot { animation-name: mascot-05-left-elbow-pivot; }
+@keyframes mascot-05-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-45deg); }
+  30% { transform: rotate(-45deg); }
+  42% { transform: rotate(12deg); }
+  60% { transform: rotate(12deg); }
+}
+[data-variant="05"] .mascot-left-leg { animation-name: mascot-05-left-leg; }
+@keyframes mascot-05-left-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translateX(-2px); }
+  48% { transform: translateX(2px); }
+}
+[data-variant="05"] .mascot-right-leg { animation-name: mascot-05-right-leg; }
+@keyframes mascot-05-right-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translateX(-2px); }
+  48% { transform: translateX(2px); }
+}
+
+/* 06 Moonwalk */
+[data-variant="06"] .mascot-body { animation-name: mascot-06-body; }
+@keyframes mascot-06-body {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(-5px); }
+  30% { transform: translateX(-7px); }
+  45% { transform: translateX(-4px); }
+  60% { transform: translateX(1px); }
+}
+[data-variant="06"] .mascot-left-leg { animation-name: mascot-06-left-leg; }
+@keyframes mascot-06-left-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(7px); }
+  30% { transform: translateX(-4px); }
+  45% { transform: translateX(7px); }
+  60% { transform: translateX(-4px); }
+}
+[data-variant="06"] .mascot-right-leg { animation-name: mascot-06-right-leg; }
+@keyframes mascot-06-right-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateX(-4px); }
+  30% { transform: translateX(7px); }
+  45% { transform: translateX(-4px); }
+  60% { transform: translateX(7px); }
+}
+[data-variant="06"] .mascot-left-knee-pivot { animation-name: mascot-06-left-knee-pivot; }
+@keyframes mascot-06-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: rotate(30deg) translateY(-3px); }
+  30% { transform: none; }
+  45% { transform: rotate(30deg) translateY(-3px); }
+  60% { transform: none; }
+}
+[data-variant="06"] .mascot-right-knee-pivot { animation-name: mascot-06-right-knee-pivot; }
+@keyframes mascot-06-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: none; }
+  30% { transform: rotate(-30deg) translateY(-3px); }
+  45% { transform: none; }
+  60% { transform: rotate(-30deg) translateY(-3px); }
+}
+
+/* 07 Running man */
+[data-variant="07"] .mascot-body { animation-name: mascot-07-body; }
+@keyframes mascot-07-body {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translateY(-4px); }
+  24% { transform: none; }
+  36% { transform: translateY(-4px); }
+  48% { transform: none; }
+  60% { transform: translateY(-4px); }
+}
+[data-variant="07"] .mascot-left-leg { animation-name: mascot-07-left-leg; }
+@keyframes mascot-07-left-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(6px,-10px) rotate(-32deg); }
+  24% { transform: translateX(-8px) rotate(20deg); }
+  36% { transform: translate(6px,-10px) rotate(-32deg); }
+  48% { transform: translateX(-8px) rotate(20deg); }
+  60% { transform: translate(6px,-10px) rotate(-32deg); }
+}
+[data-variant="07"] .mascot-right-leg { animation-name: mascot-07-right-leg; }
+@keyframes mascot-07-right-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translateX(8px) rotate(-20deg); }
+  24% { transform: translate(-6px,-10px) rotate(32deg); }
+  36% { transform: translateX(8px) rotate(-20deg); }
+  48% { transform: translate(-6px,-10px) rotate(32deg); }
+  60% { transform: translateX(8px) rotate(-20deg); }
+}
+[data-variant="07"] .mascot-left-knee-pivot { animation-name: mascot-07-left-knee-pivot; }
+@keyframes mascot-07-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-38deg); }
+  24% { transform: rotate(38deg); }
+  36% { transform: rotate(-38deg); }
+  48% { transform: rotate(38deg); }
+  60% { transform: rotate(-38deg); }
+}
+[data-variant="07"] .mascot-right-knee-pivot { animation-name: mascot-07-right-knee-pivot; }
+@keyframes mascot-07-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-38deg); }
+  24% { transform: rotate(38deg); }
+  36% { transform: rotate(-38deg); }
+  48% { transform: rotate(38deg); }
+  60% { transform: rotate(-38deg); }
+}
+[data-variant="07"] .mascot-left-arm { animation-name: mascot-07-left-arm; }
+@keyframes mascot-07-left-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(18deg); }
+  24% { transform: rotate(-18deg); }
+  36% { transform: rotate(18deg); }
+  48% { transform: rotate(-18deg); }
+  60% { transform: rotate(18deg); }
+}
+[data-variant="07"] .mascot-right-arm { animation-name: mascot-07-right-arm; }
+@keyframes mascot-07-right-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(18deg); }
+  24% { transform: rotate(-18deg); }
+  36% { transform: rotate(18deg); }
+  48% { transform: rotate(-18deg); }
+  60% { transform: rotate(18deg); }
+}
+
+/* 08 Charleston */
+[data-variant="08"] .mascot-left-leg { animation-name: mascot-08-left-leg; }
+@keyframes mascot-08-left-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(9px,-8px) rotate(-24deg); }
+  24% { transform: translate(-9px,3px) rotate(24deg); }
+  36% { transform: translate(9px,-8px) rotate(-24deg); }
+  48% { transform: translate(-9px,3px) rotate(24deg); }
+  60% { transform: translate(9px,-8px) rotate(-24deg); }
+}
+[data-variant="08"] .mascot-right-leg { animation-name: mascot-08-right-leg; }
+@keyframes mascot-08-right-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(-9px,3px) rotate(24deg); }
+  24% { transform: translate(9px,-8px) rotate(-24deg); }
+  36% { transform: translate(-9px,3px) rotate(24deg); }
+  48% { transform: translate(9px,-8px) rotate(-24deg); }
+  60% { transform: translate(-9px,3px) rotate(24deg); }
+}
+[data-variant="08"] .mascot-left-knee-pivot { animation-name: mascot-08-left-knee-pivot; }
+@keyframes mascot-08-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-32deg); }
+  24% { transform: rotate(32deg); }
+  36% { transform: rotate(-32deg); }
+  48% { transform: rotate(32deg); }
+  60% { transform: rotate(-32deg); }
+}
+[data-variant="08"] .mascot-right-knee-pivot { animation-name: mascot-08-right-knee-pivot; }
+@keyframes mascot-08-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-32deg); }
+  24% { transform: rotate(32deg); }
+  36% { transform: rotate(-32deg); }
+  48% { transform: rotate(32deg); }
+  60% { transform: rotate(-32deg); }
+}
+[data-variant="08"] .mascot-left-elbow-pivot { animation-name: mascot-08-left-elbow-pivot; }
+@keyframes mascot-08-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(35deg); }
+  60% { transform: rotate(35deg); }
+}
+[data-variant="08"] .mascot-right-elbow-pivot { animation-name: mascot-08-right-elbow-pivot; }
+@keyframes mascot-08-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-35deg); }
+  60% { transform: rotate(-35deg); }
+}
+
+/* 09 Heel-toe */
+[data-variant="09"] .mascot-arch { animation-name: mascot-09-arch; }
+@keyframes mascot-09-arch {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-8deg); }
+  24% { transform: rotate(8deg); }
+  42% { transform: rotate(8deg); }
+  54% { transform: rotate(-8deg); }
+}
+[data-variant="09"] .mascot-left-knee-pivot { animation-name: mascot-09-left-knee-pivot; }
+@keyframes mascot-09-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(32deg); }
+  24% { transform: rotate(-32deg); }
+  32% { transform: none; }
+}
+[data-variant="09"] .mascot-right-knee-pivot { animation-name: mascot-09-right-knee-pivot; }
+@keyframes mascot-09-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  36% { transform: none; }
+  42% { transform: rotate(-32deg); }
+  54% { transform: rotate(32deg); }
+  65% { transform: none; }
+}
+[data-variant="09"] .mascot-left-leg { animation-name: mascot-09-left-leg; }
+@keyframes mascot-09-left-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(-6px,-2px); }
+  24% { transform: translate(6px,-2px); }
+  32% { transform: none; }
+}
+[data-variant="09"] .mascot-right-leg { animation-name: mascot-09-right-leg; }
+@keyframes mascot-09-right-leg {
+  0%, 75%, 100% { transform: none; }
+  36% { transform: none; }
+  42% { transform: translate(6px,-2px); }
+  54% { transform: translate(-6px,-2px); }
+  65% { transform: none; }
+}
+
+/* 10 Shuffle */
+[data-variant="10"] .mascot-body { animation-name: mascot-10-body; }
+@keyframes mascot-10-body {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translateX(-2px); }
+  28% { transform: translateX(2px); }
+  44% { transform: translateX(2px); }
+  60% { transform: translateX(-2px); }
+}
+[data-variant="10"] .mascot-left-leg { animation-name: mascot-10-left-leg; }
+@keyframes mascot-10-left-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(17px,-2px) rotate(-8deg); }
+  28% { transform: translateX(-3px); }
+  44% { transform: translate(-2px,1px); }
+  60% { transform: translateX(3px); }
+}
+[data-variant="10"] .mascot-right-leg { animation-name: mascot-10-right-leg; }
+@keyframes mascot-10-right-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(-2px,1px); }
+  28% { transform: translateX(3px); }
+  44% { transform: translate(-17px,-2px) rotate(8deg); }
+  60% { transform: translateX(-3px); }
+}
+[data-variant="10"] .mascot-left-knee-pivot { animation-name: mascot-10-left-knee-pivot; }
+@keyframes mascot-10-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-16deg); }
+  28% { transform: rotate(12deg); }
+  44% { transform: rotate(-6deg); }
+  60% { transform: rotate(12deg); }
+}
+[data-variant="10"] .mascot-right-knee-pivot { animation-name: mascot-10-right-knee-pivot; }
+@keyframes mascot-10-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(6deg); }
+  28% { transform: rotate(-12deg); }
+  44% { transform: rotate(16deg); }
+  60% { transform: rotate(-12deg); }
+}
+[data-variant="10"] .mascot-left-arm { animation-name: mascot-10-left-arm; }
+@keyframes mascot-10-left-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(14deg); }
+  28% { transform: rotate(-14deg); }
+  44% { transform: rotate(-14deg); }
+  60% { transform: rotate(14deg); }
+}
+[data-variant="10"] .mascot-right-arm { animation-name: mascot-10-right-arm; }
+@keyframes mascot-10-right-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(14deg); }
+  28% { transform: rotate(-14deg); }
+  44% { transform: rotate(-14deg); }
+  60% { transform: rotate(14deg); }
+}
+
+/* 11 Salsa */
+[data-variant="11"] .mascot-body { animation-name: mascot-11-body; }
+@keyframes mascot-11-body {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateX(-3px); }
+  20% { transform: translateX(-1px); }
+  30% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  50% { transform: translateX(1px); }
+  60% { transform: translateX(3px); }
+}
+[data-variant="11"] .mascot-arch { animation-name: mascot-11-arch; }
+@keyframes mascot-11-arch {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-3deg); }
+  30% { transform: rotate(-3deg); }
+  40% { transform: rotate(3deg); }
+  60% { transform: rotate(3deg); }
+}
+[data-variant="11"] .mascot-left-leg { animation-name: mascot-11-left-leg; }
+@keyframes mascot-11-left-leg {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(9deg); }
+  20% { transform: translateY(-2px); }
+  30% { transform: rotate(9deg); }
+  40% { transform: none; }
+  50% { transform: rotate(-9deg); }
+  60% { transform: none; }
+}
+[data-variant="11"] .mascot-right-leg { animation-name: mascot-11-right-leg; }
+@keyframes mascot-11-right-leg {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: none; }
+  20% { transform: rotate(9deg); }
+  30% { transform: none; }
+  40% { transform: rotate(-9deg); }
+  50% { transform: translateY(-2px); }
+  60% { transform: rotate(-9deg); }
+}
+[data-variant="11"] .mascot-left-arm { animation-name: mascot-11-left-arm; }
+@keyframes mascot-11-left-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-13deg); }
+  20% { transform: rotate(7deg); }
+  30% { transform: rotate(-13deg); }
+  40% { transform: rotate(13deg); }
+  50% { transform: rotate(-7deg); }
+  60% { transform: rotate(13deg); }
+}
+[data-variant="11"] .mascot-right-arm { animation-name: mascot-11-right-arm; }
+@keyframes mascot-11-right-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-13deg); }
+  20% { transform: rotate(7deg); }
+  30% { transform: rotate(-13deg); }
+  40% { transform: rotate(13deg); }
+  50% { transform: rotate(-7deg); }
+  60% { transform: rotate(13deg); }
+}
+
+/* 12 Samba */
+[data-variant="12"] .mascot-body { animation-name: mascot-12-body; }
+@keyframes mascot-12-body {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translate(-5px,-5px); }
+  24% { transform: translate(5px,2px); }
+  36% { transform: translate(5px,-5px); }
+  48% { transform: translate(-5px,2px); }
+  60% { transform: translate(-5px,-5px); }
+}
+[data-variant="12"] .mascot-left-leg { animation-name: mascot-12-left-leg; }
+@keyframes mascot-12-left-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translateY(-9px) rotate(-28deg); }
+  24% { transform: none; }
+  36% { transform: none; }
+  48% { transform: translateY(-9px) rotate(-28deg); }
+  60% { transform: none; }
+}
+[data-variant="12"] .mascot-right-leg { animation-name: mascot-12-right-leg; }
+@keyframes mascot-12-right-leg {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: none; }
+  24% { transform: translateY(-9px) rotate(28deg); }
+  36% { transform: translateY(-9px) rotate(28deg); }
+  48% { transform: none; }
+  60% { transform: translateY(-9px) rotate(28deg); }
+}
+[data-variant="12"] .mascot-left-knee-pivot { animation-name: mascot-12-left-knee-pivot; }
+@keyframes mascot-12-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-30deg); }
+  24% { transform: none; }
+  48% { transform: rotate(-30deg); }
+  60% { transform: none; }
+}
+[data-variant="12"] .mascot-right-knee-pivot { animation-name: mascot-12-right-knee-pivot; }
+@keyframes mascot-12-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  24% { transform: rotate(30deg); }
+  36% { transform: rotate(30deg); }
+  48% { transform: none; }
+  60% { transform: rotate(30deg); }
+}
+[data-variant="12"] .mascot-left-arm { animation-name: mascot-12-left-arm; }
+@keyframes mascot-12-left-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(12deg); }
+  24% { transform: rotate(-12deg); }
+  36% { transform: rotate(-12deg); }
+  48% { transform: rotate(12deg); }
+}
+[data-variant="12"] .mascot-right-arm { animation-name: mascot-12-right-arm; }
+@keyframes mascot-12-right-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(12deg); }
+  24% { transform: rotate(-12deg); }
+  36% { transform: rotate(-12deg); }
+  48% { transform: rotate(12deg); }
+}
+
+/* 13 Robot */
+[data-variant="13"] .mascot-left-arm { animation-name: mascot-13-left-arm; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-left-arm {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(30deg); }
+  20% { transform: rotate(30deg); }
+  30% { transform: rotate(-10deg); }
+  42% { transform: rotate(-10deg); }
+  54% { transform: rotate(20deg); }
+  65% { transform: rotate(20deg); }
+}
+[data-variant="13"] .mascot-right-arm { animation-name: mascot-13-right-arm; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-right-arm {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(10deg); }
+  20% { transform: rotate(10deg); }
+  30% { transform: rotate(-30deg); }
+  42% { transform: rotate(-30deg); }
+  54% { transform: rotate(-20deg); }
+  65% { transform: rotate(-20deg); }
+}
+[data-variant="13"] .mascot-left-elbow-pivot { animation-name: mascot-13-left-elbow-pivot; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(65deg); }
+  20% { transform: rotate(65deg); }
+  30% { transform: rotate(-22deg); }
+  42% { transform: rotate(-22deg); }
+  54% { transform: rotate(40deg); }
+  65% { transform: rotate(40deg); }
+}
+[data-variant="13"] .mascot-right-elbow-pivot { animation-name: mascot-13-right-elbow-pivot; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(22deg); }
+  20% { transform: rotate(22deg); }
+  30% { transform: rotate(-65deg); }
+  42% { transform: rotate(-65deg); }
+  54% { transform: rotate(-40deg); }
+  65% { transform: rotate(-40deg); }
+}
+[data-variant="13"] .mascot-left-knee-pivot { animation-name: mascot-13-left-knee-pivot; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: none; }
+  20% { transform: none; }
+  30% { transform: rotate(16deg); }
+  42% { transform: rotate(16deg); }
+  54% { transform: none; }
+  65% { transform: none; }
+}
+[data-variant="13"] .mascot-right-knee-pivot { animation-name: mascot-13-right-knee-pivot; animation-timing-function: steps(1, end); }
+@keyframes mascot-13-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(-16deg); }
+  20% { transform: rotate(-16deg); }
+  30% { transform: none; }
+  42% { transform: none; }
+  54% { transform: rotate(-16deg); }
+  65% { transform: rotate(-16deg); }
+}
+
+/* 14 Arm wave */
+[data-variant="14"] .mascot-left-arm { animation-name: mascot-14-left-arm; }
+@keyframes mascot-14-left-arm {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(45deg); }
+  18% { transform: rotate(25deg); }
+  28% { transform: none; }
+  48% { transform: none; }
+  58% { transform: rotate(25deg); }
+  68% { transform: rotate(45deg); }
+}
+[data-variant="14"] .mascot-left-elbow-pivot { animation-name: mascot-14-left-elbow-pivot; }
+@keyframes mascot-14-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: none; }
+  18% { transform: rotate(55deg); }
+  28% { transform: none; }
+  48% { transform: none; }
+  58% { transform: rotate(55deg); }
+  68% { transform: none; }
+}
+[data-variant="14"] .mascot-arch { animation-name: mascot-14-arch; }
+@keyframes mascot-14-arch {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: none; }
+  28% { transform: translateY(-1px) rotate(-3deg); }
+  38% { transform: none; }
+  48% { transform: translateY(-1px) rotate(3deg); }
+  58% { transform: none; }
+}
+[data-variant="14"] .mascot-right-arm { animation-name: mascot-14-right-arm; }
+@keyframes mascot-14-right-arm {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: none; }
+  28% { transform: none; }
+  38% { transform: rotate(-25deg); }
+  48% { transform: rotate(-45deg); }
+  58% { transform: none; }
+}
+[data-variant="14"] .mascot-right-elbow-pivot { animation-name: mascot-14-right-elbow-pivot; }
+@keyframes mascot-14-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  28% { transform: none; }
+  38% { transform: rotate(-55deg); }
+  48% { transform: none; }
+  58% { transform: none; }
+}
+
+/* 15 Swing */
+[data-variant="15"] .mascot-body { animation-name: mascot-15-body; }
+@keyframes mascot-15-body {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateY(-1px); }
+  30% { transform: none; }
+  45% { transform: translateY(-1px); }
+  60% { transform: none; }
+}
+[data-variant="15"] .mascot-left-arm { animation-name: mascot-15-left-arm; }
+@keyframes mascot-15-left-arm {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: rotate(-25deg); }
+  30% { transform: rotate(25deg); }
+  45% { transform: rotate(-25deg); }
+  60% { transform: rotate(25deg); }
+}
+[data-variant="15"] .mascot-right-arm { animation-name: mascot-15-right-arm; }
+@keyframes mascot-15-right-arm {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: rotate(25deg); }
+  30% { transform: rotate(-25deg); }
+  45% { transform: rotate(25deg); }
+  60% { transform: rotate(-25deg); }
+}
+[data-variant="15"] .mascot-left-leg { animation-name: mascot-15-left-leg; }
+@keyframes mascot-15-left-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: translateY(-2px) rotate(12deg); }
+  30% { transform: none; }
+  45% { transform: translateY(-2px) rotate(12deg); }
+  60% { transform: none; }
+}
+[data-variant="15"] .mascot-right-leg { animation-name: mascot-15-right-leg; }
+@keyframes mascot-15-right-leg {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: none; }
+  30% { transform: translateY(-2px) rotate(-12deg); }
+  45% { transform: none; }
+  60% { transform: translateY(-2px) rotate(-12deg); }
+}
+[data-variant="15"] .mascot-left-knee-pivot { animation-name: mascot-15-left-knee-pivot; }
+@keyframes mascot-15-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: rotate(25deg); }
+  30% { transform: none; }
+  45% { transform: rotate(25deg); }
+  60% { transform: none; }
+}
+[data-variant="15"] .mascot-right-knee-pivot { animation-name: mascot-15-right-knee-pivot; }
+@keyframes mascot-15-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  15% { transform: none; }
+  30% { transform: rotate(-25deg); }
+  45% { transform: none; }
+  60% { transform: rotate(-25deg); }
+}
+
+/* 16 Skate */
+[data-variant="16"] .mascot-body { animation-name: mascot-16-body; }
+@keyframes mascot-16-body {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translate(-7px,-3px); }
+  34% { transform: translate(-4px,1px); }
+  50% { transform: translate(7px,-3px); }
+  66% { transform: translate(4px,1px); }
+}
+[data-variant="16"] .mascot-right-leg { animation-name: mascot-16-right-leg; }
+@keyframes mascot-16-right-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translate(7px,-6px) rotate(-28deg); }
+  34% { transform: none; }
+  50% { transform: rotate(8deg); }
+  66% { transform: none; }
+}
+[data-variant="16"] .mascot-left-leg { animation-name: mascot-16-left-leg; }
+@keyframes mascot-16-left-leg {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(-8deg); }
+  34% { transform: none; }
+  50% { transform: translate(-7px,-6px) rotate(28deg); }
+  66% { transform: none; }
+}
+[data-variant="16"] .mascot-right-knee-pivot { animation-name: mascot-16-right-knee-pivot; }
+@keyframes mascot-16-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: rotate(-32deg); }
+  34% { transform: none; }
+  50% { transform: none; }
+  66% { transform: none; }
+}
+[data-variant="16"] .mascot-left-knee-pivot { animation-name: mascot-16-left-knee-pivot; }
+@keyframes mascot-16-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: none; }
+  34% { transform: none; }
+  50% { transform: rotate(32deg); }
+  66% { transform: none; }
+}
+[data-variant="16"] .mascot-left-arm { animation-name: mascot-16-left-arm; }
+@keyframes mascot-16-left-arm {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translateX(3px) rotate(18deg); }
+  34% { transform: none; }
+  50% { transform: translateX(3px) rotate(-18deg); }
+  66% { transform: none; }
+}
+[data-variant="16"] .mascot-right-arm { animation-name: mascot-16-right-arm; }
+@keyframes mascot-16-right-arm {
+  0%, 75%, 100% { transform: none; }
+  18% { transform: translateX(-3px) rotate(18deg); }
+  34% { transform: none; }
+  50% { transform: translateX(-3px) rotate(-18deg); }
+  66% { transform: none; }
+}
+
+/* 17 Hopscotch */
+[data-variant="17"] .mascot-body { animation-name: mascot-17-body; }
+@keyframes mascot-17-body {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: translateY(2px); }
+  16% { transform: translateY(-9px); }
+  24% { transform: none; }
+  32% { transform: translateY(-9px); }
+  40% { transform: none; }
+  48% { transform: translateY(3px); }
+  56% { transform: none; }
+  66% { transform: none; }
+}
+[data-variant="17"] .mascot-right-leg { animation-name: mascot-17-right-leg; }
+@keyframes mascot-17-right-leg {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: translateY(-10px) rotate(30deg); }
+  16% { transform: translateY(-10px) rotate(30deg); }
+  24% { transform: translateY(-10px) rotate(30deg); }
+  32% { transform: translateY(-10px) rotate(30deg); }
+  40% { transform: translateY(-5px) rotate(18deg); }
+  48% { transform: none; }
+  56% { transform: none; }
+}
+[data-variant="17"] .mascot-right-knee-pivot { animation-name: mascot-17-right-knee-pivot; }
+@keyframes mascot-17-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(36deg); }
+  32% { transform: rotate(36deg); }
+  40% { transform: rotate(20deg); }
+  48% { transform: none; }
+  56% { transform: none; }
+}
+[data-variant="17"] .mascot-left-knee-pivot { animation-name: mascot-17-left-knee-pivot; }
+@keyframes mascot-17-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  8% { transform: rotate(18deg); }
+  16% { transform: none; }
+  24% { transform: rotate(18deg); }
+  32% { transform: none; }
+  40% { transform: rotate(18deg); }
+  48% { transform: none; }
+  56% { transform: none; }
+}
+[data-variant="17"] .mascot-left-arm { animation-name: mascot-17-left-arm; }
+@keyframes mascot-17-left-arm {
+  0%, 75%, 100% { transform: none; }
+  16% { transform: rotate(20deg); }
+  24% { transform: none; }
+  32% { transform: rotate(20deg); }
+  48% { transform: none; }
+}
+[data-variant="17"] .mascot-right-arm { animation-name: mascot-17-right-arm; }
+@keyframes mascot-17-right-arm {
+  0%, 75%, 100% { transform: none; }
+  16% { transform: rotate(-20deg); }
+  24% { transform: none; }
+  32% { transform: rotate(-20deg); }
+  48% { transform: none; }
+}
+
+/* 18 Toe tap */
+[data-variant="18"] .mascot-right-leg { animation-name: mascot-18-right-leg; }
+@keyframes mascot-18-right-leg {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateY(2px); }
+  20% { transform: translate(3px,-1px) rotate(-7deg); }
+  30% { transform: translateY(-3px); }
+  36% { transform: none; }
+  60% { transform: none; }
+}
+[data-variant="18"] .mascot-right-knee-pivot { animation-name: mascot-18-right-knee-pivot; }
+@keyframes mascot-18-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(10deg); }
+  20% { transform: rotate(-14deg); }
+  30% { transform: rotate(14deg); }
+  36% { transform: none; }
+  60% { transform: none; }
+}
+[data-variant="18"] .mascot-left-leg { animation-name: mascot-18-left-leg; }
+@keyframes mascot-18-left-leg {
+  0%, 75%, 100% { transform: none; }
+  30% { transform: none; }
+  40% { transform: translateY(2px); }
+  50% { transform: translate(-3px,-1px) rotate(7deg); }
+  60% { transform: translateY(-3px); }
+  68% { transform: none; }
+}
+[data-variant="18"] .mascot-left-knee-pivot { animation-name: mascot-18-left-knee-pivot; }
+@keyframes mascot-18-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  30% { transform: none; }
+  40% { transform: rotate(-10deg); }
+  50% { transform: rotate(14deg); }
+  60% { transform: rotate(-14deg); }
+  68% { transform: none; }
+}
+[data-variant="18"] .mascot-left-arm { animation-name: mascot-18-left-arm; }
+@keyframes mascot-18-left-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(8deg); }
+  30% { transform: none; }
+  50% { transform: rotate(-8deg); }
+  68% { transform: none; }
+}
+[data-variant="18"] .mascot-right-arm { animation-name: mascot-18-right-arm; }
+@keyframes mascot-18-right-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(8deg); }
+  30% { transform: none; }
+  50% { transform: rotate(-8deg); }
+  68% { transform: none; }
+}
+
+/* 19 Cheer jump */
+[data-variant="19"] .mascot-body { animation-name: mascot-19-body; }
+@keyframes mascot-19-body {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateY(2px); }
+  22% { transform: translateY(-10px); }
+  34% { transform: translateY(2px); }
+  44% { transform: none; }
+  54% { transform: translateY(-9px); }
+  66% { transform: translateY(1px); }
+}
+[data-variant="19"] .mascot-left-arm { animation-name: mascot-19-left-arm; }
+@keyframes mascot-19-left-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateX(7px) rotate(-12deg); }
+  22% { transform: translateX(7px) rotate(150deg); }
+  34% { transform: translateX(7px) rotate(75deg); }
+  44% { transform: translateX(7px) rotate(45deg); }
+  54% { transform: translateX(7px) rotate(150deg); }
+  66% { transform: translateX(7px) rotate(35deg); }
+}
+[data-variant="19"] .mascot-right-arm { animation-name: mascot-19-right-arm; }
+@keyframes mascot-19-right-arm {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: translateX(-7px) rotate(12deg); }
+  22% { transform: translateX(-7px) rotate(-150deg); }
+  34% { transform: translateX(-7px) rotate(-75deg); }
+  44% { transform: translateX(-7px) rotate(-45deg); }
+  54% { transform: translateX(-7px) rotate(-150deg); }
+  66% { transform: translateX(-7px) rotate(-35deg); }
+}
+[data-variant="19"] .mascot-left-elbow-pivot { animation-name: mascot-19-left-elbow-pivot; }
+@keyframes mascot-19-left-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(12deg); }
+  22% { transform: rotate(8deg); }
+  34% { transform: rotate(20deg); }
+  54% { transform: rotate(8deg); }
+  66% { transform: none; }
+}
+[data-variant="19"] .mascot-right-elbow-pivot { animation-name: mascot-19-right-elbow-pivot; }
+@keyframes mascot-19-right-elbow-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-12deg); }
+  22% { transform: rotate(-8deg); }
+  34% { transform: rotate(-20deg); }
+  54% { transform: rotate(-8deg); }
+  66% { transform: none; }
+}
+[data-variant="19"] .mascot-left-knee-pivot { animation-name: mascot-19-left-knee-pivot; }
+@keyframes mascot-19-left-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(12deg); }
+  22% { transform: rotate(-8deg); }
+  34% { transform: rotate(12deg); }
+  44% { transform: none; }
+  54% { transform: rotate(-8deg); }
+  66% { transform: rotate(8deg); }
+}
+[data-variant="19"] .mascot-right-knee-pivot { animation-name: mascot-19-right-knee-pivot; }
+@keyframes mascot-19-right-knee-pivot {
+  0%, 75%, 100% { transform: none; }
+  10% { transform: rotate(-12deg); }
+  22% { transform: rotate(8deg); }
+  34% { transform: rotate(-12deg); }
+  44% { transform: none; }
+  54% { transform: rotate(8deg); }
+  66% { transform: rotate(-8deg); }
+}
+
+/* 20 Bow and wiggle */
+[data-variant="20"] .mascot-arch { animation-name: mascot-20-arch; }
+@keyframes mascot-20-arch {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: translateY(2px) scaleY(.78); }
+  26% { transform: translateY(2px) scaleY(.78); }
+  36% { transform: none; }
+  44% { transform: rotate(-4deg); }
+  52% { transform: rotate(4deg); }
+  60% { transform: rotate(-4deg); }
+  68% { transform: rotate(4deg); }
+}
+[data-variant="20"] .mascot-left-arm { animation-name: mascot-20-left-arm; }
+@keyframes mascot-20-left-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(-8deg); }
+  26% { transform: rotate(-8deg); }
+  36% { transform: none; }
+  44% { transform: rotate(8deg); }
+  52% { transform: rotate(-8deg); }
+  60% { transform: rotate(8deg); }
+  68% { transform: rotate(-8deg); }
+}
+[data-variant="20"] .mascot-right-arm { animation-name: mascot-20-right-arm; }
+@keyframes mascot-20-right-arm {
+  0%, 75%, 100% { transform: none; }
+  12% { transform: rotate(8deg); }
+  26% { transform: rotate(8deg); }
+  36% { transform: none; }
+  44% { transform: rotate(8deg); }
+  52% { transform: rotate(-8deg); }
+  60% { transform: rotate(8deg); }
+  68% { transform: rotate(-8deg); }
+}
+[data-variant="20"] .mascot-left-leg { animation-name: mascot-20-left-leg; }
+@keyframes mascot-20-left-leg {
+  0%, 75%, 100% { transform: none; }
+  36% { transform: none; }
+  44% { transform: translateX(-2px) rotate(8deg); }
+  52% { transform: translateX(2px) rotate(-8deg); }
+  60% { transform: translateX(-2px) rotate(8deg); }
+  68% { transform: translateX(2px) rotate(-8deg); }
+}
+[data-variant="20"] .mascot-right-leg { animation-name: mascot-20-right-leg; }
+@keyframes mascot-20-right-leg {
+  0%, 75%, 100% { transform: none; }
+  36% { transform: none; }
+  44% { transform: translateX(-2px) rotate(8deg); }
+  52% { transform: translateX(2px) rotate(-8deg); }
+  60% { transform: translateX(-2px) rotate(8deg); }
+  68% { transform: translateX(2px) rotate(-8deg); }
+}

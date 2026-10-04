@@ -1,15 +1,184 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { AttentionMascot } from "../features/ferryx/attention/AttentionMascot";
-import { buildAttentionRows, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
+import { AttentionMascot, type MascotDanceId } from "../features/ferryx/attention/AttentionMascot";
+import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
+
+const mascotVariants: readonly MascotDanceId[] = [
+  "01", "02", "03", "04", "05", "06", "07", "08", "09", "10",
+  "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+];
+
+export const mascotPreviewSelectors = {
+  container: '[data-testid="qa-mascot-container"]',
+  stage: '[data-testid="qa-mascot-stage"]',
+  variant: '[data-testid="qa-mascot-variant"]',
+  time: '[data-testid="qa-mascot-time"]',
+  play: '[data-testid="qa-mascot-play"]',
+  cycle: '[data-testid="qa-mascot-stage"] [data-testid="qa-mascot-cycle"]',
+  text: '[data-testid="qa-mascot-text"]',
+  smile: '[data-testid="qa-mascot-stage"] [data-testid="qa-mascot-smile"]',
+} as const;
+
+export const mascotLivePreviewSelectors = {
+  scroll: '[data-testid="qa-mascot-live-scroll"]',
+  stage: '[data-testid="qa-mascot-live-stage"]',
+  cycle: '[data-testid="qa-mascot-live-cycle"]',
+  pause: '[data-testid="qa-mascot-live-pause"]',
+  smile: '[data-testid="qa-mascot-live-smile"]',
+} as const;
+
+function MascotLivePreview() {
+  const root = useRef<HTMLDivElement>(null);
+  const [mount, setMount] = useState(0);
+  const [renderCount, setRenderCount] = useState(0);
+
+  useLayoutEffect(() => {
+    const container = root.current;
+    if (!container) return;
+    // Keep capture IDs exclusive to the seekable preview. Annotate the real
+    // playback DOM here, including each rekeyed wrapper, without product props.
+    const annotate = () => {
+      container.querySelector(".attention-mascot-stage")?.setAttribute("data-testid", "qa-mascot-live-stage");
+      container.querySelector(".mascot-dance-cycle")?.setAttribute("data-testid", "qa-mascot-live-cycle");
+      container.querySelector(".mascot-smile")?.setAttribute("data-testid", "qa-mascot-live-smile");
+      container.querySelector("button[aria-pressed]")?.setAttribute("data-testid", "qa-mascot-live-pause");
+    };
+    annotate();
+    const observer = new MutationObserver(annotate);
+    observer.observe(container, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <section className="mt-4 border-t border-border pt-3" aria-label="Live mascot playback preview">
+      <p className="mb-2 text-[11px] text-muted-foreground">Live playback: scroll down to hide the stage, then back to restart the current dance.</p>
+      <div className="mb-2 flex flex-wrap gap-2 text-xs">
+        <button type="button" data-testid="qa-mascot-live-remount" onClick={() => setMount((count) => count + 1)}>Remount live mascot</button>
+        <button type="button" data-testid="qa-mascot-live-rerender" onClick={() => setRenderCount((count) => count + 1)}>Parent rerender</button>
+      </div>
+      <div data-testid="qa-mascot-live-scroll" data-render-count={renderCount} className="h-40 overflow-y-auto rounded border border-border">
+        <div ref={root} className="flex flex-col items-center p-2">
+          <AttentionMascot key={mount} />
+        </div>
+        <div className="h-80" aria-hidden="true" />
+      </div>
+    </section>
+  );
+}
+
+function MascotPreview() {
+  const [variant, setVariant] = useState<MascotDanceId>("01");
+  const [time, setTime] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [compact, setCompact] = useState(false);
+  const [visible, setVisible] = useState(true);
+  const [mount, setMount] = useState(0);
+  const [renderCount, setRenderCount] = useState(0);
+  const stage = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    for (const animation of stage.current?.getAnimations({ subtree: true }) ?? []) {
+      animation.currentTime = time;
+      if (playing) animation.play();
+      else animation.pause();
+    }
+  }, [variant, time, playing, mount]);
+
+  return (
+    <div data-testid="qa-mascot-preview" className="mt-4 rounded border border-border bg-background p-3">
+      <div className="flex flex-wrap gap-2 text-xs">
+        <label>Dance <select data-testid="qa-mascot-variant" value={variant} onChange={(event) => {
+          const selected = mascotVariants.find((id) => id === event.target.value);
+          if (selected) { setVariant(selected); setTime(0); setPlaying(false); }
+        }}>{mascotVariants.map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
+        <label>Time (ms) <input data-testid="qa-mascot-time" type="range" min={0} max={8000} step={1} value={time} onChange={(event) => {
+          setTime(Number(event.target.value)); setPlaying(false);
+        }} /></label>
+        <button type="button" data-testid="qa-mascot-play" aria-pressed={playing} onClick={() => {
+          if (playing) {
+            const animation = stage.current?.getAnimations({ subtree: true })[0];
+            setTime(Number(animation?.currentTime ?? time));
+          }
+          setPlaying(!playing);
+        }}>{playing ? "Pause" : "Play"}</button>
+        <button type="button" data-testid="qa-mascot-compact" aria-pressed={compact} onClick={() => setCompact(!compact)}>Compact</button>
+        <button type="button" data-testid="qa-mascot-visible" aria-pressed={visible} onClick={() => setVisible(!visible)}>Stage visibility</button>
+        <button type="button" data-testid="qa-mascot-remount" onClick={() => setMount(mount + 1)}>Remount</button>
+        <button type="button" data-testid="qa-mascot-rerender" onClick={() => setRenderCount(renderCount + 1)}>Parent rerender</button>
+      </div>
+      <div data-testid="qa-mascot-container" data-render-count={renderCount} className="flex w-[220px] flex-col items-center text-center" style={{ width: compact ? 180 : 220 }}>
+        <div ref={stage} data-testid="qa-mascot-stage" style={{ width: 104, height: 88, visibility: visible ? "visible" : "hidden" }}>
+          <AttentionMascot key={mount} variant={variant} paused={!playing} />
+        </div>
+        <p data-testid="qa-mascot-text" className="text-[12.5px] font-semibold text-worktree-sidebar-foreground">Nobody is waiting on you.</p>
+        <p data-testid="qa-mascot-text" className="mt-2 max-w-[260px] text-[10.5px] leading-relaxed text-muted-foreground/80">Agents show up here when they need your input or finish their work. Running sessions stay quiet.</p>
+      </div>
+      <MascotLivePreview />
+    </div>
+  );
+}
+
+function CompactInboxFixture() {
+  const [rows, setRows] = useState<readonly AttentionRow[]>([]);
+  const [mounted, setMounted] = useState(true);
+  const [openCount, setOpenCount] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const container = root.current;
+    if (!container) return;
+    // Annotate the real filter and rendered rows, not a parallel filter implementation.
+    const annotate = () => {
+      container.querySelector('[aria-label="Status filter"]')?.setAttribute("data-testid", "qa-inbox-compact-filter");
+      container.setAttribute("data-rendered-row-count", String(container.querySelectorAll('[data-testid="attention-row"]').length));
+    };
+    annotate();
+    const observer = new MutationObserver(annotate);
+    observer.observe(container, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <section className="mt-4" aria-label="Compact Inbox fixture">
+      <div className="mb-2 flex flex-wrap gap-2 text-xs">
+        <button type="button" data-testid="qa-inbox-compact-populate" onClick={() => setRows([
+          { id: "compact-needs-you", revision: 0, workspaceId: "qa-compact", sessionId: "qa-compact-input", state: "needs-you", who: "QA input agent", location: "Fixture / input", text: "Choose a fixture option." },
+          { id: "compact-done", revision: 0, workspaceId: "qa-compact", sessionId: "qa-compact-done", state: "done", who: "QA done agent", location: "Fixture / done", text: "Fixture work finished." },
+        ])}>Populate both statuses</button>
+        <button type="button" data-testid="qa-inbox-compact-clear" onClick={() => setRows([])}>Clear rows</button>
+        <button type="button" data-testid="qa-inbox-compact-remount" aria-pressed={mounted} onClick={() => setMounted((value) => !value)}>
+          {mounted ? "Unmount compact Inbox" : "Remount compact Inbox"}
+        </button>
+        <output data-testid="qa-inbox-compact-open-count" aria-label="Compact row open count">{openCount}</output>
+      </div>
+      <div
+        ref={root}
+        data-testid="qa-inbox-compact"
+        data-compact="true"
+        data-mounted={mounted}
+        data-row-count={rows.length}
+        className="flex h-80 w-[292px] max-w-full flex-col border border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
+      >
+        {mounted ? (
+          <AttentionInbox
+            rows={rows}
+            compact={true}
+            now={0}
+            onOpen={() => setOpenCount((count) => count + 1)}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
 
 const worktreeMain: Worktree = {
   path: "/repo/main",
@@ -78,7 +247,17 @@ function initialState(): WorkspaceState {
     worktreeLayouts: {},
     unreadTabIds: {},
     unreadWorktreePaths: {},
-    activityBySessionId: {},
+    // Lifecycle alone is not an activity baseline: recording needs a known prior state.
+    activityBySessionId: {
+      "session-bg": {
+        state: "working",
+        title: "",
+        isAgent: true,
+        agentType: "omo",
+        source: "screen",
+        agentSource: "screen",
+      },
+    },
   } as unknown as WorkspaceState;
 }
 
@@ -336,10 +515,9 @@ export function ActivitySurfaceHarness() {
         />
       </div>
 
-      <div data-testid="qa-mascot-preview" className="mt-4 flex gap-4 rounded border border-border bg-background p-3">
-        <AttentionMascot />
-        <AttentionMascot />
-      </div>
+      <CompactInboxFixture />
+
+      <MascotPreview />
 
       <pre data-testid="harness-state" className="mt-4 overflow-auto text-[10px] leading-tight text-muted-foreground">
         {JSON.stringify(
