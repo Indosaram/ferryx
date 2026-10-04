@@ -3,6 +3,7 @@
 // pattern that imports vitest from ui/node_modules.
 
 import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, chmodSync, watch, realpathSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -17,6 +18,7 @@ import {
   MonotonicBudget, validateFixtureSetup, SCENARIO_FIXTURE_REQUIREMENTS, BARRIER_ROLES,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
+  AppStdioSink, appStdioResult, APP_STDIO_TRUNCATION_MARKER,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import { assertInvariants, assertSinglePty, SCENARIO_PLANS } from './pane-liveness.mjs';
@@ -159,7 +161,7 @@ test('timing budgets match the plan contract', () => {
   expect(BUDGETS.cancelDaemonResponseBudgetMs).toBe(2_500);
 });
 
-test('cleanup reaps registered owned processes by PID and removes registered roots', async () => {
+test('cleanup reaps registered owned processes by PID, removes registered roots, and drains app stdio into registered artifacts', async () => {
   const root = fixtureRoot();
   const registry = new ResourceRegistry();
   const { spawn } = await import('node:child_process');
@@ -168,11 +170,68 @@ test('cleanup reaps registered owned processes by PID and removes registered roo
   const subRoot = join(root, 'owned-sub');
   mkdirSync(subRoot);
   registry.registerDirectory(subRoot);
+
+  // App stdio sink (task-9 pass-12 gap): the app's own stdout/stderr are drained
+  // into per-run artifacts under the evidence run dir, registered like every
+  // other resource, and closed by the SAME cleanup pass. `spawnOwned` is driven
+  // here exactly as the runner drives it (sink passed as an option).
+  const appDir = join(root, 'run-dir');
+  const sink = new AppStdioSink(appDir, { label: 'app' });
+  registry.registerLog(sink, 'app-stdio');
+  const drained = spawnOwned(registry, process.execPath, ['-e',
+    "process.stdout.write('spawn-line\\n'); process.stderr.write('[cmd_terminal_spawn] stage=daemon_spawn failed code=X\\n');"],
+  { stdioSink: sink });
+  // The child's own 'close' event fires only after both stdio pipes have been
+  // fully read, so the drain's writes are already queued when the sink is closed
+  // below. No sleep and no polling: the child's event is the barrier.
+  const drainedClosed = await withDeadline(
+    new Promise(resolvePromise => drained.once('close', () => resolvePromise(true))),
+    6000, 'drained-child-close',
+  );
+  expect(drainedClosed.timedOut).toBe(false);
+
   const cleanup = await registry.cleanup();
   const processReceipt = cleanup.find(r => r.kind === 'process');
   expect(processReceipt.exited).toBe(true);
   expect(registry.reaped).toContain(child.pid);
   expect(existsSync(subRoot)).toBe(false);
+
+  // (1) both streams really landed in the run dir, with their real content
+  const stdoutPath = join(appDir, 'app.stdout.log');
+  const stderrPath = join(appDir, 'app.stderr.log');
+  expect(sink.paths()).toEqual({ stdout: stdoutPath, stderr: stderrPath });
+  expect(readFileSync(stdoutPath, 'utf8')).toContain('spawn-line');
+  expect(readFileSync(stderrPath, 'utf8')).toContain('stage=daemon_spawn failed code=X');
+
+  // (2) teardown closed them and recorded them in the cleanup receipts
+  const logReceipt = cleanup.find(r => r.kind === 'log');
+  expect([logReceipt.label, logReceipt.closed, logReceipt.closedOk]).toEqual(['app-stdio', true, true]);
+  expect(logReceipt.streams.map(s => [s.name, s.path, s.truncated, s.droppedBytes]))
+    .toEqual([['stdout', stdoutPath, false, 0], ['stderr', stderrPath, false, 0]]);
+
+  // (3) the paths a reader finds in result.json (appStdioResult is the exact
+  // projection the runner writes there and into the launch.binary action)
+  const recorded = appStdioResult(sink);
+  expect([recorded.stdout, recorded.stderr, recorded.closed, recorded.truncated, recorded.droppedBytes])
+    .toEqual([stdoutPath, stderrPath, true, false, 0]);
+
+  // (4) a burst larger than the cap is truncated with an explicit marker in the
+  // file and a recorded dropped-byte count - never dropped silently
+  const cappedDir = join(root, 'capped-dir');
+  const capped = new AppStdioSink(cappedDir, { label: 'capped', maxBytes: 64 });
+  const fakeChild = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+  capped.attach(fakeChild);
+  fakeChild.stdout.emit('data', Buffer.alloc(4096, 0x61));
+  fakeChild.stderr.emit('data', Buffer.from('under the cap'));
+  const cappedReceipt = await capped.close();
+  const cappedText = readFileSync(join(cappedDir, 'capped.stdout.log'), 'utf8');
+  expect(cappedText.startsWith('a'.repeat(64))).toBe(true);
+  expect(cappedText).toContain(APP_STDIO_TRUNCATION_MARKER);
+  expect(cappedText).toContain('dropped 4032 bytes');
+  expect(cappedReceipt.streams.map(s => [s.bytes, s.truncated, s.droppedBytes]))
+    .toEqual([[64, true, 4032], [13, false, 0]]);
+  expect(appStdioResult(capped).droppedBytes).toBe(4032);
+  expect(appStdioResult(capped).truncated).toBe(true);
   rmSync(root, { recursive: true, force: true });
 });
 

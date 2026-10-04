@@ -20,6 +20,7 @@ import {
   computeCleanupGate, computeSourceDigest, withDeadline,
   assertPositiveRecovery, BARRIER_ROLES, MonotonicBudget, validateFixtureSetup,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
+  AppStdioSink, appStdioResult,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import {
@@ -196,6 +197,8 @@ async function runNativeScenario(ctx) {
   evidence.action({
     action: 'launch.binary',
     binary: ctx.binary,
+    // Where this run's app stdout/stderr land (same paths result.json carries).
+    appStdio: ctx.appStdio.paths(),
     env: {
       FERRYX_DATA_DIR: isolated.dirs.dataDir,
       FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir,
@@ -379,14 +382,25 @@ export async function main(argv) {
   const registry = new ResourceRegistry();
   const barrierHub = new BarrierHub(context.isolationRoot, { runId, operationId });
   registry.registerDirectory(context.isolationRoot);
+  // App stdio sink (task-9 pass-12 gap): ALWAYS ON for every app this run
+  // spawns. The runner pipes the child's stdout/stderr and previously drained
+  // neither, so the app's own `[cmd_terminal_spawn] stage=... failed code=...`
+  // lines reached no artifact and the investigation was blind. Both streams now
+  // stream to disk under this run's evidence dir - bounded, capped and closed by
+  // the same cleanup pass - and their paths travel in the `launch.binary` action
+  // and in result.json. This is never gated on an env var a future pass would
+  // have to remember to set.
+  const appStdio = new AppStdioSink(evidence.runDir, { label: 'app' });
+  registry.registerLog(appStdio, 'app-stdio');
   const fullContext = {
     ...context,
     evidence, registry, barrierHub, runId, operationId,
     evidenceRunDir: evidence.runDir,
+    appStdio,
     platformPreflight: context.platform,
     windowsAdmission,
     windowsRelaunchRecord: readWindowsRelaunchRecord(),
-    spawnOwned: (command, args, options) => spawnOwnedFn(registry, command, args, options),
+    spawnOwned: (command, args, options) => spawnOwnedFn(registry, command, args, { stdioSink: appStdio, ...options }),
   };
 
   const plan = SCENARIO_PLANS[context.scenario];
@@ -477,11 +491,17 @@ export async function main(argv) {
       result.cleanupGate = { ...gate, gateFailed: false };
     }
     result.barriers = barrierHub.snapshot();
+    // The app's own stdout/stderr as drained by the sink: the paths a reader
+    // needs to find the app's log without guessing, plus what the cap did.
+    result.appStdio = appStdioResult(appStdio);
     evidence.write('cleanup.json', {
       registered: {
         processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
         sockets: registry.sockets,
         directories: registry.directories,
+        // Per-run app-stdio artifacts (the app's own stdout/stderr), closed by
+        // this same cleanup pass and listed here so cleanup.json names them.
+        logs: registry.logs.map(entry => ({ label: entry.label, ...entry.sink.paths(), maxBytes: entry.sink.maxBytes })),
         // In-process listeners this run opened (the static frontend server on the
         // debug binary's devUrl). Closed by this same cleanup pass.
         servers: registry.servers.map(entry => entry.label),

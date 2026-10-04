@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  accessSync, constants, existsSync, mkdirSync, rmSync, statSync,
+  accessSync, constants, createWriteStream, existsSync, mkdirSync, rmSync, statSync,
   watch, writeFileSync, realpathSync, lstatSync, renameSync, readFileSync, readlinkSync,
 } from 'node:fs';
 import { homedir, platform, release, arch } from 'node:os';
@@ -749,6 +749,196 @@ export async function findIsolationRootHolders(root, {
 }
 
 // ---------------------------------------------------------------------------
+// App stdio sink: the app's own stdout/stderr, drained into per-run artifacts.
+//
+// `spawnOwned` pipes the child's stdout and stderr (`stdio: ['ignore','pipe',
+// 'pipe']`) and NOTHING drained them, so the app's own lines - above all
+// `[cmd_terminal_spawn] stage=... failed code=...` - reached no artifact at all:
+// the verifier measured `runner.err` at ~2 KB with ZERO `cmd_terminal_spawn`
+// hits, and could only localise the real cause by patching the STAGED
+// `spawnOwned` with a verifier-only drain gated on `FERRYX_VERIFIER_APP_STDERR` -
+// a patch that is not in the candidate. The sink is therefore ALWAYS ON in the
+// runner (the entrypoint injects it into every spawn it makes); it is never
+// behind an env var a later pass must remember to set.
+//
+// Three properties this class exists to guarantee:
+//   * the child is NEVER blocked by back-pressure: every chunk is consumed as it
+//     arrives and streamed straight to disk, and the bytes held in this process
+//     are bounded by the write stream's own buffer, never by the run's output;
+//   * nothing is dropped silently: each file is capped (APP_STDIO_MAX_BYTES) and
+//     the cap is recorded IN the file as an explicit marker, with the dropped
+//     byte count carried in the receipt;
+//   * teardown closes both files through the same `registry.cleanup()` pass as
+//     every other resource and reports what it really observed.
+
+export const APP_STDIO_MAX_BYTES = 4 * 1024 * 1024;
+
+// The marker written into a file the moment its cap is reached, so a truncated
+// artifact says so in its own bytes instead of ending mid-line with no warning.
+export const APP_STDIO_TRUNCATION_MARKER = '[app-stdio truncated:';
+
+function defaultLogWriteStream(path) {
+  return createWriteStream(path, { flags: 'a', mode: 0o600 });
+}
+
+// Bounded close of one log write stream: `end()` flushes and reports 'finish';
+// a stream that never finishes is destroyed at the deadline and reported as not
+// closed, so teardown can never hang on a stuck artifact.
+function endWriteStreamBounded(stream, timeoutMs) {
+  if (!stream || typeof stream.end !== 'function') return true;
+  if (stream.writableEnded === true || stream.destroyed === true) return true;
+  return new Promise(resolvePromise => {
+    const timer = setTimeout(() => {
+      try { stream.destroy(); } catch { /* the deadline verdict stands */ }
+      resolvePromise(false);
+    }, timeoutMs);
+    try {
+      stream.end(() => { clearTimeout(timer); resolvePromise(true); });
+    } catch { clearTimeout(timer); resolvePromise(false); }
+  });
+}
+
+export class AppStdioSink {
+  constructor(dir, { maxBytes = APP_STDIO_MAX_BYTES, label = 'app', open = defaultLogWriteStream } = {}) {
+    this.dir = dir;
+    this.label = label;
+    this.maxBytes = maxBytes;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    this.streams = [
+      { name: 'stdout', path: join(dir, `${label}.stdout.log`) },
+      { name: 'stderr', path: join(dir, `${label}.stderr.log`) },
+    ];
+    for (const entry of this.streams) {
+      entry.bytes = 0;
+      entry.droppedBytes = 0;
+      entry.truncated = false;
+      entry.writeError = null;
+      entry.stream = open(entry.path);
+      // A file that cannot be kept open degrades the diagnostic, it never
+      // crashes the run: the failure is recorded and reported in the receipt.
+      entry.stream?.on?.('error', error => { entry.writeError = String(error?.message ?? error); });
+    }
+    this.attachError = null;
+    this.closed = false;
+    this.closedOk = null;
+  }
+
+  // Where the two artifacts live, for result.json and the launch evidence.
+  paths() {
+    return { stdout: this.streams[0].path, stderr: this.streams[1].path };
+  }
+
+  // Attach to the child's two pipes. Both listeners stay attached for the whole
+  // life of the process: consuming every chunk is exactly what keeps the child's
+  // pipe from filling and blocking the app, so the drain is continuous and the
+  // cap below only stops the FILE from growing, never the reading.
+  attach(child) {
+    try {
+      this.drainInto(this.streams[0], child?.stdout);
+      this.drainInto(this.streams[1], child?.stderr);
+    } catch (error) {
+      this.attachError = String(error?.message ?? error);
+    }
+    return this;
+  }
+
+  drainInto(entry, source) {
+    if (!source || typeof source.on !== 'function') return entry;
+    source.on('data', chunk => this.writeChunk(entry, chunk));
+    // A read error on the pipe is recorded INTO the artifact instead of escaping
+    // as an unhandled 'error' event in the middle of a run.
+    source.on('error', error => this.writeChunk(entry, `\n[app-stdio ${entry.name} read error: ${error?.message ?? error}]\n`));
+    return entry;
+  }
+
+  writeChunk(entry, chunk) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    if (entry.truncated) { entry.droppedBytes += buf.length; return; }
+    const remaining = this.maxBytes - entry.bytes;
+    if (buf.length <= remaining) {
+      entry.bytes += buf.length;
+      this.writeRaw(entry, buf);
+      return;
+    }
+    if (remaining > 0) {
+      this.writeRaw(entry, buf.subarray(0, remaining));
+      entry.bytes += remaining;
+    }
+    entry.droppedBytes += buf.length - Math.max(0, remaining);
+    entry.truncated = true;
+    this.writeRaw(entry, Buffer.from(
+      `\n${APP_STDIO_TRUNCATION_MARKER} ${entry.path} reached the ${this.maxBytes}-byte cap; further output is dropped, and the dropped byte count is recorded in the cleanup receipt]\n`,
+      'utf8',
+    ));
+  }
+
+  writeRaw(entry, buf) {
+    try { entry.stream.write(buf); } catch (error) { entry.writeError = String(error?.message ?? error); }
+  }
+
+  // What teardown and result.json report: the paths, what each stream received,
+  // whether the cap bit, and whether the files really closed.
+  receipt() {
+    return {
+      label: this.label,
+      dir: this.dir,
+      maxBytes: this.maxBytes,
+      closed: this.closed === true,
+      closedOk: this.closedOk,
+      streams: this.streams.map(entry => ({
+        name: entry.name,
+        path: entry.path,
+        bytes: entry.bytes,
+        truncated: entry.truncated,
+        droppedBytes: entry.droppedBytes,
+        ...(entry.writeError ? { writeError: entry.writeError } : {}),
+      })),
+      ...(this.attachError ? { attachError: this.attachError } : {}),
+    };
+  }
+
+  // Idempotent: a second close (the runner's teardown plus a test's own) returns
+  // the same receipt instead of re-ending an already finished stream.
+  async close({ timeoutMs = BUDGETS.frontendCloseMs } = {}) {
+    if (this.closed) return this.receipt();
+    this.closed = true;
+    const outcomes = [];
+    for (const entry of this.streams) {
+      if (entry.droppedBytes > 0) {
+        this.writeRaw(entry, Buffer.from(
+          `\n[app-stdio ${entry.name} dropped ${entry.droppedBytes} bytes after the ${this.maxBytes}-byte cap]\n`,
+          'utf8',
+        ));
+      }
+      outcomes.push(await endWriteStreamBounded(entry.stream, timeoutMs));
+    }
+    this.closedOk = outcomes.every(Boolean);
+    return this.receipt();
+  }
+}
+
+// The result.json / launch-evidence projection of a sink: the paths a reader
+// needs to find the app's own log without guessing, plus what the cap did. This
+// is the single derivation the runner writes into result.json, so the artifact
+// and the verdict can never disagree about where the app's output went.
+export function appStdioResult(sink) {
+  if (!sink || typeof sink.receipt !== 'function') return null;
+  const receipt = sink.receipt();
+  const pathOf = name => receipt.streams.find(entry => entry.name === name)?.path ?? null;
+  return {
+    dir: receipt.dir,
+    stdout: pathOf('stdout'),
+    stderr: pathOf('stderr'),
+    maxBytes: receipt.maxBytes,
+    bytes: receipt.streams.reduce((total, entry) => total + entry.bytes, 0),
+    truncated: receipt.streams.some(entry => entry.truncated === true),
+    droppedBytes: receipt.streams.reduce((total, entry) => total + entry.droppedBytes, 0),
+    closed: receipt.closed === true,
+    closedOk: receipt.closedOk,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Resource registry + bounded event-driven cleanup.
 
 export class ResourceRegistry {
@@ -760,6 +950,9 @@ export class ResourceRegistry {
     // are closed by the SAME cleanup pass as everything else, so a served
     // frontend cannot outlive the run.
     this.servers = []; // { server, label }
+    // Per-run app-stdio artifacts (the app's own stdout/stderr, drained to
+    // disk). Closed by the same cleanup pass as everything else.
+    this.logs = []; // { sink, label }
     this.reaped = [];
     // Injectable only so the runner unit suite can replay teardown decisions
     // deterministically; production always uses the bounded real helpers.
@@ -779,6 +972,13 @@ export class ResourceRegistry {
   }
 
   registerDirectory(path) { this.directories.push(path); }
+
+  // The app's own stdout/stderr artifacts. Registered like every other resource
+  // so the SAME cleanup pass closes them and cleanup.json lists them, but
+  // deliberately NOT part of the cleanup gate: the gate's semantics
+  // (processes/sockets/directories) stay exactly as they were, so a diagnostic
+  // file can never flip a verdict.
+  registerLog(sink, label = 'app-stdio') { this.logs.push({ sink, label }); return sink; }
 
   // Graceful signal first, then a FORCED kill of this run's own tree/group when
   // the child does not exit, then verification from the child's 'exit' event
@@ -810,6 +1010,13 @@ export class ResourceRegistry {
       });
       receipts.push(receipt);
       if (receipt.exited) this.reaped.push(entry.pid);
+    }
+    // App stdio artifacts: closed AFTER the process reap (so the child's last
+    // lines are already on their way to disk) and BEFORE the roots below are
+    // removed. Closing is bounded and the receipt re-states what was observed.
+    for (const entry of this.logs) {
+      const receipt = await entry.sink.close({ timeoutMs: deps.logCloseMs ?? BUDGETS.frontendCloseMs });
+      receipts.push({ kind: 'log', label: entry.label, ...receipt });
     }
     for (const socketPath of this.sockets) {
       let removed = false;
@@ -1271,13 +1478,24 @@ export class EvidenceWriter {
   }
 }
 
-export function spawnOwned(registry, command, args, options) {
+export function spawnOwned(registry, command, args, options = {}) {
   // Review M1 / repair B3: on posix the child MUST lead its own process group
   // so descendants are reaped with the group. `detached` is forced AFTER the
   // caller spread so no caller option can defeat group ownership; win32 keeps
   // the in-tree `taskkill /T` cleanup instead. The child stays registered by
   // exact PID and its exit event is still awaited - no broad kills.
-  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options, detached: process.platform !== 'win32' });
+  //
+  // App stdio sink (the pass-12 gap): when the caller supplies one, BOTH pipes
+  // are drained to disk as they arrive, so the app's own `[cmd_terminal_spawn]
+  // stage=...` lines always land in an artifact. It is an option, never an
+  // env-var gate, and the entrypoint injects it into EVERY spawn it makes, so a
+  // normal QA run leaves the app's log on disk with nothing for a future pass to
+  // remember. Draining cannot change what the child sees: every chunk is
+  // consumed continuously (no back-pressure), and the child's exit code and
+  // cleanup semantics are untouched.
+  const { stdioSink = null, ...spawnOptions } = options;
+  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions, detached: process.platform !== 'win32' });
+  if (stdioSink && typeof stdioSink.attach === 'function') stdioSink.attach(child);
   registry.registerProcess(child, args.join(' '), { executable: command });
   return child;
 }
