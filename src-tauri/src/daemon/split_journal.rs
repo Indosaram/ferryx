@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 const JOURNAL_FILE: &str = "split_operations.json";
@@ -205,11 +206,7 @@ impl SplitJournal {
         entries: &BTreeMap<String, SplitJournalEntry>,
     ) -> Result<(), SplitJournalError> {
         let path = self.dir.join(JOURNAL_FILE);
-        let temp = self.dir.join(format!(
-            ".{JOURNAL_FILE}.tmp-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("writer")
-        ));
+        let temp = self.dir.join(temp_journal_file_name(std::thread::current().name()));
         let bytes = serde_json::to_vec(&entries.values().collect::<Vec<_>>())
             .map_err(|error| SplitJournalError::CorruptEntry(error.to_string()))?;
         let result = (|| -> Result<(), std::io::Error> {
@@ -254,6 +251,57 @@ fn validate_request_id(request_id: &str) -> Result<(), SplitJournalError> {
         return Err(SplitJournalError::InvalidRequestId);
     }
     Ok(())
+}
+
+/// Process-wide monotonic counter that makes atomic-write temp names unique.
+///
+/// Uniqueness must never depend on the thread name: `cargo test` names its
+/// threads after the test path, so concurrent writers inside one process can
+/// share a name.
+static TEMP_NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Upper bound on the sanitized thread-name tag inside a temp filename.
+const TEMP_NAME_TAG_MAX_CHARS: usize = 48;
+
+/// Builds the temp filename used by the atomic journal write.
+///
+/// The name is portable: Windows rejects `: / \\ * ? " < > |` in file names,
+/// and a Rust test thread is named after the test path (for example
+/// `daemon::split_journal::tests::local_split_reliability_...`). The thread name
+/// is therefore reduced to a sanitized, length-bounded debugging tag, while
+/// uniqueness comes from the pid and the process-wide monotonic counter.
+fn temp_journal_file_name(thread_name: Option<&str>) -> String {
+    let tag = sanitize_temp_name_tag(thread_name.unwrap_or("writer"));
+    let sequence = TEMP_NAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        ".{JOURNAL_FILE}.tmp-{}-{sequence}-{tag}",
+        std::process::id()
+    )
+}
+
+/// Maps every character outside `[A-Za-z0-9._-]` to `_` and bounds the length.
+fn sanitize_temp_name_tag(raw: &str) -> String {
+    let mut tag = String::with_capacity(TEMP_NAME_TAG_MAX_CHARS);
+    for character in raw.chars() {
+        if tag.len() >= TEMP_NAME_TAG_MAX_CHARS {
+            break;
+        }
+        tag.push(
+            if character.is_ascii_alphanumeric()
+                || character == '.'
+                || character == '_'
+                || character == '-'
+            {
+                character
+            } else {
+                '_'
+            },
+        );
+    }
+    if tag.is_empty() {
+        tag.push_str("writer");
+    }
+    tag
 }
 
 #[cfg(test)]
@@ -357,5 +405,29 @@ mod tests {
             SplitJournal::open(dir.path()),
             Err(SplitJournalError::CorruptEntry(_))
         ));
+    }
+
+    #[test]
+    fn local_split_temp_names_are_portable_bounded_and_unique() {
+        // The name `cargo test` gives a test thread: `:` is illegal on Windows.
+        let test_thread_name =
+            "daemon::split_journal::tests::local_split_reliability_round_trips_entries_after_reopen";
+        let forbidden = [':', '/', '\\', '*', '?', '"', '<', '>', '|'];
+
+        let first = temp_journal_file_name(Some(test_thread_name));
+        let second = temp_journal_file_name(Some(test_thread_name));
+
+        for name in [&first, &second] {
+            assert!(
+                !name.chars().any(|character| forbidden.contains(&character)),
+                "temp name is not portable: {name}"
+            );
+            assert!(name.len() <= 128, "temp name is not length-bounded: {name}");
+            assert!(name.starts_with(&format!(".{JOURNAL_FILE}.tmp-")));
+        }
+        assert_ne!(first, second, "successive temp names must be unique");
+
+        assert_eq!(sanitize_temp_name_tag(test_thread_name).len(), TEMP_NAME_TAG_MAX_CHARS);
+        assert_eq!(sanitize_temp_name_tag(""), "writer");
     }
 }
