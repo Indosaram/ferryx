@@ -26,6 +26,20 @@
 // name match and never by clicking a coordinate. A scope that stays ambiguous
 // or empty fails typed (`SPLIT_RIGHT_NOT_UNIQUE` / `SPLIT_RIGHT_NOT_FOUND` /
 // `SPLIT_RIGHT_DISABLED`) with the measured candidate set recorded in evidence.
+//
+// Window scoping (pass-6 blocker `SPLIT_RIGHT_NOT_FOUND` with
+// `candidateCount: 0`, which was a property of the WHOLE owned window):
+// `MainWindowHandle` is NOT trusted to name the app's real UI window - the
+// pass-6 probe saw four owned top-level windows (two visible: one titled `F`,
+// one title-less) while the search looked only at the `MainWindowHandle` one.
+// The search therefore enumerates EVERY top-level window the pid owns
+// (`buildWindowsOwnedWindowsScript`), searches the visible ones in the
+// deterministic order `orderOwnedWindowsForSearch` defines, and records which
+// window produced the match and how many were searched. When no window matches,
+// the probe emits a BOUNDED diagnostic inventory (accessible names + control
+// types + automation ids of the elements whose name/automation id contains
+// `Split`, per searched window, plus how many elements were inspected) instead
+// of failing blind - the typed `SPLIT_RIGHT_NOT_FOUND` verdict is unchanged.
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -43,6 +57,30 @@ export const MARKER_TEXT = 'FERRYX_SPLIT_READY';
 // is repaired narrowly, never guessed clicked.
 export const SPLIT_MENU_SELECTOR_DARWIN = { role: 'button', title: 'Split pane right' };
 export const SPLIT_MENU_SELECTOR_WIN32 = { automationId: null, name: 'Split pane right' };
+
+// Multi-property / multi-name binding for the Windows UIA search. The product's
+// pane affordance is an `IconButton` with `label="Split pane right"`
+// (ui/src/components/TerminalSplitView.tsx), which becomes the element's
+// `aria-label`/`title`; a webview-hosted element's UIA accessible name is NOT
+// guaranteed to equal that literal, so the search accepts a bounded set of
+// EXACT UIA property conditions instead of one literal:
+//   * every known accessible name of the pane affordance - exact equality only,
+//     never a substring and never "the first button". `Split terminal right`
+//     (ui/src/components/TabBar.tsx) is deliberately NOT in this list: it is a
+//     different affordance behind a different trigger, and no scenario in the
+//     plan opens the tab-bar split popup (`split-scenarios.mjs` drives
+//     `driver.split` for the pane toolbar affordance on every split path), so
+//     accepting it could click the wrong control.
+//   * every known AutomationId, IF the product exposes one. The list is empty
+//     today - the product exposes no automation id - so no id is guessed; the
+//     not-found inventory reports the real AutomationIds it observes so the
+//     next pass can bind one from evidence instead of from a guess.
+export const SPLIT_AFFORDANCE_NAMES_WIN32 = Object.freeze([SPLIT_MENU_SELECTOR_WIN32.name]);
+export const SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32 = Object.freeze([]);
+// Bounds for the not-found diagnostic inventory: a bounded probe of what IS in
+// scope, never a full accessibility-tree dump.
+export const WINDOW_INVENTORY_MATCH_CAP = 40;
+export const WINDOW_INVENTORY_INSPECT_CAP = 4000;
 
 function osascript(evidence, source) {
   const args = ['-e', source];
@@ -405,14 +443,6 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '$sw = [System.Diagnostics.Stopwatch]::StartNew();',
     '$handle = [IntPtr]::Zero;',
     '$processExited = $false;',
-    'while ($sw.ElapsedMilliseconds -lt $budgetMs) {',
-    '  $proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
-    '  if ($proc -eq $null) { $processExited = $true; break }',
-    '  $proc.Refresh();',
-    '  $candidate = $proc.MainWindowHandle;',
-    '  if ($candidate -ne [IntPtr]::Zero -and [FerryxQaWin]::IsWindowVisible($candidate)) { $handle = $candidate; break }',
-    '  Start-Sleep -Milliseconds 200;',
-    '}',
     '$windows = New-Object System.Collections.ArrayList;',
     '$cb = [FerryxQaWin+EnumProc]{ param($hWnd, $lParam)',
     '  $owner = [uint32]0;',
@@ -425,7 +455,20 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '    $windows.Add([ordered]@{ hwnd = $hWnd.ToInt64(); visible = [bool][FerryxQaWin]::IsWindowVisible($hWnd); className = $cls.ToString(); title = $title.ToString() }) | Out-Null;',
     '  }',
     '  return $true };',
+    'while ($sw.ElapsedMilliseconds -lt $budgetMs) {',
+    '  $proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
+    '  if ($proc -eq $null) { $processExited = $true; break }',
+    '  $proc.Refresh();',
+    '  $candidate = $proc.MainWindowHandle;',
+    '  if ($candidate -ne [IntPtr]::Zero -and [FerryxQaWin]::IsWindowVisible($candidate)) { $handle = $candidate; break }',
+    '  $windows.Clear();',
+    '  [FerryxQaWin]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null;',
+    '  if (@($windows | Where-Object { $_.visible }).Count -gt 0) { break }',
+    '  Start-Sleep -Milliseconds 200;',
+    '}',
+    '$windows.Clear();',
     '[FerryxQaWin]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null;',
+    '$visibleWindowCount = @($windows | Where-Object { $_.visible }).Count;',
     '$payload = [ordered]@{',
     "  probe = 'owned-window';",
     '  pid = $targetPid;',
@@ -435,7 +478,8 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '  waitedMs = [int]$sw.ElapsedMilliseconds;',
     '  mainWindowHandle = $handle.ToInt64();',
     '  processExited = $processExited;',
-    '  ok = [bool]($handle -ne [IntPtr]::Zero);',
+    '  visibleWindowCount = $visibleWindowCount;',
+    '  ok = [bool]($handle -ne [IntPtr]::Zero -or $visibleWindowCount -gt 0);',
     '  windows = $windows;',
     '};',
     'Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);',
@@ -444,6 +488,13 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
 
 export function classifyWindowsWindowProbe(probe) {
   const windows = asArray(probe?.windows);
+  // "A visible owned window exists" is the real readiness condition - never
+  // "MainWindowHandle is non-zero", which is only one of the owned windows and
+  // (pass-6) is not guaranteed to be the one carrying the webview UI.
+  const visibleWindows = windows.filter(window => window?.visible === true);
+  const visibleWindowCount = probe?.visibleWindowCount !== undefined && probe?.visibleWindowCount !== null
+    ? Number(probe.visibleWindowCount)
+    : (windows.length > 0 ? visibleWindows.length : (Number(probe?.mainWindowHandle) !== 0 ? 1 : 0));
   const measured = {
     pid: probe?.pid ?? null,
     interactive: probe?.interactive ?? null,
@@ -453,8 +504,9 @@ export function classifyWindowsWindowProbe(probe) {
     mainWindowHandle: probe?.mainWindowHandle ?? null,
     processExited: probe?.processExited ?? null,
     windows,
+    visibleWindowCount,
   };
-  if (probe?.ok === true && Number(probe?.mainWindowHandle) !== 0) return { ok: true, ...measured };
+  if (probe?.ok === true && visibleWindowCount >= 1) return { ok: true, ...measured };
   const interactive = probe?.interactive === true && Number(probe?.sessionId) !== 0;
   const visibility = `mainWindowHandle=${JSON.stringify(measured.mainWindowHandle)} interactive=${JSON.stringify(measured.interactive)} sessionId=${JSON.stringify(measured.sessionId)} processExited=${JSON.stringify(measured.processExited)} waitedMs=${JSON.stringify(measured.waitedMs)} topLevelWindows=${JSON.stringify(windows)}`;
   const code = interactive ? 'NO_OWNED_WINDOW' : 'NO_INTERACTIVE_SESSION';
@@ -476,13 +528,195 @@ export async function awaitOwnedWindowWindows(evidence, pid, budgetMs = BUDGETS.
   return verdict;
 }
 
-// Pane-scoped split affordance probe. Resolves the target pane from the OS
-// accessibility tree (focused element inside the owned window; deterministic
-// fallback: focus the pane's own focus sink when the window root/document owns
-// focus), then requires exactly one ACTIONABLE affordance in that pane scope.
-// Every candidate (name, control type, enabled, offscreen, rect, in-window) is
-// returned so a blocked run records why it blocked.
-export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitFocusWaitMs) {
+// Windows: every top-level window owned by the pid, enumerated immediately (no
+// wait). The split search must never key off `MainWindowHandle` (pass-6: the
+// pid owned four top-level windows, two visible, while the search only ever
+// looked at the `MainWindowHandle` one), so the runner enumerates here, orders
+// in JS (`orderOwnedWindowsForSearch`), and hands the ordered list to the probe.
+export function buildWindowsOwnedWindowsScript(pid) {
+  return [
+    "$ErrorActionPreference = 'Stop';",
+    'Add-Type @"',
+    'using System;',
+    'using System.Text;',
+    'using System.Runtime.InteropServices;',
+    'public class FerryxQaOwned {',
+    '  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);',
+    '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);',
+    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);',
+    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);',
+    '  [DllImport("user32.dll")] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);',
+    '}',
+    '"@;',
+    `$targetPid = ${pid};`,
+    '$proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
+    'if ($proc -eq $null) {',
+    "  Write-Output (([ordered]@{ probe = 'owned-windows'; pid = $targetPid; processExited = $true; interactive = [bool][System.Environment]::UserInteractive; sessionId = [int](Get-Process -Id $PID).SessionId; mainWindowHandle = 0; mainWindowVisible = $false; visibleWindowCount = 0; windows = @() }) | ConvertTo-Json -Compress -Depth 6);",
+    '  exit 0',
+    '}',
+    '$proc.Refresh();',
+    '$mainHandle = $proc.MainWindowHandle;',
+    '$windows = New-Object System.Collections.ArrayList;',
+    '$cb = [FerryxQaOwned+EnumProc]{ param($hWnd, $lParam)',
+    '  $owner = [uint32]0;',
+    '  [FerryxQaOwned]::GetWindowThreadProcessId($hWnd, [ref]$owner) | Out-Null;',
+    '  if ($owner -eq [uint32]$targetPid) {',
+    '    $title = New-Object System.Text.StringBuilder 256;',
+    '    [FerryxQaOwned]::GetWindowTextW($hWnd, $title, 256) | Out-Null;',
+    '    $cls = New-Object System.Text.StringBuilder 256;',
+    '    [FerryxQaOwned]::GetClassNameW($hWnd, $cls, 256) | Out-Null;',
+    '    $windows.Add([ordered]@{ hwnd = $hWnd.ToInt64(); visible = [bool][FerryxQaOwned]::IsWindowVisible($hWnd); className = $cls.ToString(); title = $title.ToString() }) | Out-Null;',
+    '  }',
+    '  return $true };',
+    '[FerryxQaOwned]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null;',
+    '$visible = @($windows | Where-Object { $_.visible });',
+    '$payload = [ordered]@{',
+    "  probe = 'owned-windows';",
+    '  pid = $targetPid;',
+    '  processExited = $false;',
+    '  interactive = [bool][System.Environment]::UserInteractive;',
+    '  sessionId = [int](Get-Process -Id $PID).SessionId;',
+    '  mainWindowHandle = $mainHandle.ToInt64();',
+    '  mainWindowVisible = [bool][FerryxQaOwned]::IsWindowVisible($mainHandle);',
+    '  visibleWindowCount = $visible.Count;',
+    '  windows = $windows;',
+    '};',
+    'Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);',
+  ].join('\n');
+}
+
+// The typed verdict for the enumeration. "A visible owned window exists" - never
+// "MainWindowHandle is the UI window" - is the readiness condition, and the
+// typed NO_OWNED_WINDOW is kept for the case where none is visible.
+export function classifyOwnedWindowsProbe(probe) {
+  const windows = asArray(probe?.windows);
+  const visibleWindows = windows.filter(window => window?.visible === true);
+  const measured = {
+    pid: probe?.pid ?? null,
+    interactive: probe?.interactive ?? null,
+    sessionId: probe?.sessionId ?? null,
+    processExited: probe?.processExited ?? null,
+    mainWindowHandle: probe?.mainWindowHandle ?? null,
+    mainWindowVisible: probe?.mainWindowVisible ?? null,
+    windows,
+    visibleWindowCount: visibleWindows.length,
+  };
+  if (visibleWindows.length === 0) {
+    return {
+      ok: false,
+      code: 'NO_OWNED_WINDOW',
+      detail: `the app owns no visible top-level window to search for the split affordance: mainWindowHandle=${JSON.stringify(measured.mainWindowHandle)} interactive=${JSON.stringify(measured.interactive)} sessionId=${JSON.stringify(measured.sessionId)} processExited=${JSON.stringify(measured.processExited)} topLevelWindows=${JSON.stringify(windows)}`,
+      ...measured,
+    };
+  }
+  return {
+    ok: true,
+    code: null,
+    detail: `enumerated ${windows.length} owned top-level window(s); ${visibleWindows.length} visible and searchable`,
+    ...measured,
+  };
+}
+
+// Deterministic search order, owned by the runner instead of by
+// `MainWindowHandle` alone: the main-handle window first when it is visible,
+// then every other visible owned window by ascending hwnd. Invisible windows
+// are never searched, and no window is searched twice. The probe still gives
+// priority to the window that actually contains the focused element (it can
+// only know that at run time), so this order decides the sweep, not the verdict.
+export function orderOwnedWindowsForSearch(windows, mainWindowHandle = null) {
+  const main = Number(mainWindowHandle);
+  const all = asArray(windows);
+  const asEntry = window => ({ hwnd: Number(window?.hwnd), title: String(window?.title ?? ''), className: String(window?.className ?? '') });
+  const others = all
+    .filter(window => window?.visible === true)
+    .map(asEntry)
+    .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0 && window.hwnd !== main)
+    .sort((left, right) => left.hwnd - right.hwnd);
+  const mainWindow = all.find(window => window?.visible === true && Number(window?.hwnd) === main);
+  return [...(mainWindow ? [asEntry(mainWindow)] : []), ...others];
+}
+
+// Enumerate the owned windows and record exactly what will be searched. Throws
+// the typed NO_OWNED_WINDOW when the pid owns no visible top-level window.
+export async function awaitOwnedWindowsWindows(evidence, pid) {
+  const stdout = await powershell(evidence, buildWindowsOwnedWindowsScript(pid));
+  const parsed = parseWindowsProbeLine(stdout, 'owned-windows');
+  if (!parsed.ok) {
+    throw new HarnessError('NO_OWNED_WINDOW', `owned-windows enumeration produced no structured evidence (${parsed.reason}): stdout=${JSON.stringify(stdout)}`);
+  }
+  const verdict = classifyOwnedWindowsProbe(parsed.probe);
+  const searchOrder = verdict.ok ? orderOwnedWindowsForSearch(verdict.windows, verdict.mainWindowHandle) : [];
+  evidence.action({
+    action: 'owned-windows-enumerated',
+    pid,
+    ok: verdict.ok,
+    code: verdict.code,
+    interactive: verdict.interactive,
+    sessionId: verdict.sessionId,
+    mainWindowHandle: verdict.mainWindowHandle,
+    mainWindowVisible: verdict.mainWindowVisible,
+    windows: verdict.windows,
+    visibleWindowCount: verdict.visibleWindowCount,
+    searchOrder,
+  });
+  if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);
+  return { ...verdict, searchOrder };
+}
+
+// PowerShell single-quoted literal + literal array: a window title or a product
+// label can never break out of the generated script.
+function psStringLiteral(value) {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+}
+function psStringArray(values) {
+  return `@(${values.map(psStringLiteral).join(', ')})`;
+}
+// Window titles/class names are evidence text, not code: a newline would break
+// the generated array literal, so they are flattened before being embedded (the
+// raw values stay in the enumeration action).
+function windowText(value) {
+  return String(value ?? '').replace(/[\r\n]+/g, ' ');
+}
+
+// Pane-scoped split affordance probe over EVERY visible owned window. The
+// caller supplies the windows to search (`orderOwnedWindowsForSearch`), the
+// probe re-checks each one's visibility, resolves the target pane from the OS
+// accessibility tree (focused element inside the searched windows;
+// deterministic fallback: focus a pane's own focus sink when the window
+// root/document owns focus), then requires exactly one ACTIONABLE affordance in
+// that pane scope. The window containing the focused element is searched first;
+// the remaining windows are searched from their root only if it yields nothing,
+// and the window that produced the match is recorded (`matchedWindowHwnd`).
+// Every candidate (name, control type, automation id, enabled, offscreen, rect,
+// in-window) is returned so a blocked run records why it blocked, and the
+// not-found path additionally returns a bounded inventory of every element
+// whose name or automation id contains `Split`.
+export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitFocusWaitMs, options = {}) {
+  const names = asArray(options.names ?? SPLIT_AFFORDANCE_NAMES_WIN32).map(String);
+  const automationIds = asArray(options.automationIds ?? SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32).map(String);
+  if (names.length + automationIds.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', 'the split affordance probe needs at least one exact accessible name or automation id; refusing to search for nothing');
+  }
+  const matchCap = Number.isFinite(options.inventoryMatchCap) ? options.inventoryMatchCap : WINDOW_INVENTORY_MATCH_CAP;
+  const inspectCap = Number.isFinite(options.inventoryInspectCap) ? options.inventoryInspectCap : WINDOW_INVENTORY_INSPECT_CAP;
+  const searchWindows = asArray(options.windows)
+    .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
+    .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
+  const conditionBindings = [
+    ...names.map((_, index) => `$conditionName${index}`),
+    ...automationIds.map((_, index) => `$conditionAutomationId${index}`),
+  ];
+  const conditionLines = [
+    ...names.map((_, index) => `$conditionName${index} = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $selectorNames[${index}]);`),
+    ...automationIds.map((_, index) => `$conditionAutomationId${index} = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $selectorAutomationIds[${index}]);`),
+  ];
+  const conditionAssembly = conditionBindings.length === 1
+    ? [`$condition = ${conditionBindings[0]};`]
+    : [
+      `$conditionArray = [System.Windows.Automation.Condition[]]@(${conditionBindings.join(', ')});`,
+      '$condition = New-Object System.Windows.Automation.OrCondition -ArgumentList (, $conditionArray);',
+    ];
   return [
     "$ErrorActionPreference = 'Stop';",
     'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, Microsoft.VisualBasic;',
@@ -497,15 +731,29 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '"@;',
     `$targetPid = ${pid};`,
     `$focusBudgetMs = ${focusBudgetMs};`,
-    `$name = ${JSON.stringify(SPLIT_MENU_SELECTOR_WIN32.name)};`,
+    `$inventoryMatchCap = ${matchCap};`,
+    `$inventoryInspectCap = ${inspectCap};`,
+    `$windowHandles = @(${searchWindows.map(window => window.hwnd).join(', ')});`,
+    `$windowTitles = ${psStringArray(searchWindows.map(window => window.title))};`,
+    `$windowClasses = ${psStringArray(searchWindows.map(window => window.className))};`,
+    `$selectorNames = ${psStringArray(names)};`,
+    `$selectorAutomationIds = ${psStringArray(automationIds)};`,
+    '$primaryName = $selectorNames[0];',
     '$diag = [ordered]@{',
     "  probe = 'split-right';",
     '  pid = $targetPid;',
-    '  selector = $name;',
+    '  selector = $primaryName;',
+    '  selectorNames = $selectorNames;',
+    '  selectorAutomationIds = $selectorAutomationIds;',
     '  interactive = [bool][System.Environment]::UserInteractive;',
     '  sessionId = [int](Get-Process -Id $PID).SessionId;',
     '  mainWindowHandle = 0;',
     '  windowVisible = $false;',
+    '  visibleWindowCount = 0;',
+    '  windowsSearched = @();',
+    '  windowsSearchedCount = 0;',
+    '  windowSearchDepths = @();',
+    '  matchedWindowHwnd = $null;',
     '  focusedFound = $false;',
     '  focusSource = $null;',
     '  scopeDepth = -1;',
@@ -514,27 +762,80 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '  actionableCount = 0;',
     '  candidates = @();',
     '  chosen = $null;',
+    '  inventory = $null;',
     '};',
     'function Emit { Write-Output ($diag | ConvertTo-Json -Compress -Depth 8) }',
     'function Fail($code, $detail) { $diag.failure = $code; $diag.detail = $detail; Emit; exit 0 }',
-    '$proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
-    "if ($proc -eq $null) { Fail 'NO_OWNED_WINDOW' 'the launched process exited before any split affordance could be addressed' }",
-    '$handle = $proc.MainWindowHandle;',
-    '$diag.mainWindowHandle = $handle.ToInt64();',
-    "if ($handle -eq [IntPtr]::Zero) { Fail 'NO_OWNED_WINDOW' 'the launched process owns no main window handle' }",
-    '$diag.windowVisible = [bool][FerryxQaRect]::IsWindowVisible($handle);',
-    "if (-not $diag.windowVisible) { Fail 'NO_OWNED_WINDOW' 'the owned main window exists but is not visible' }",
-    '$root = [System.Windows.Automation.AutomationElement]::FromHandle($handle);',
-    "if ($root -eq $null) { Fail 'NO_OWNED_WINDOW' 'no UIA root element for the owned window handle' }",
-    'try { [Microsoft.VisualBasic.Interaction]::AppActivate($targetPid) | Out-Null } catch { }',
-    '$windowRect = New-Object FerryxQaRectStruct;',
-    '[FerryxQaRect]::GetWindowRect($handle, [ref]$windowRect) | Out-Null;',
-    'function InWindow($element) {',
+    'function InRect($element, $rect) {',
     '  $r = $null;',
     '  try { $r = $element.Current.BoundingRectangle } catch { return $false };',
     '  if ($r.IsEmpty) { return $false };',
-    '  return ($r.Left -ge ($windowRect.Left - 2) -and $r.Top -ge ($windowRect.Top - 2) -and $r.Right -le ($windowRect.Right + 2) -and $r.Bottom -le ($windowRect.Bottom + 2))',
+    '  return ($r.Left -ge ($rect.Left - 2) -and $r.Top -ge ($rect.Top - 2) -and $r.Right -le ($rect.Right + 2) -and $r.Bottom -le ($rect.Bottom + 2))',
     '}',
+    'function InWindow($element) {',
+    '  foreach ($w in $searched) { if (InRect $element $w.rect) { return $true } };',
+    '  return $false',
+    '}',
+    'function ContainsSplit($text) {',
+    '  if ($null -eq $text) { return $false };',
+    "  return ($text.ToString().ToLowerInvariant().IndexOf('split') -ge 0)",
+    '}',
+    'function BuildInventory($windowList, $inspectCap, $matchCap) {',
+    '  $perWindow = New-Object System.Collections.ArrayList;',
+    '  $totalInspected = 0;',
+    '  $totalMatches = 0;',
+    '  $truncated = $false;',
+    '  foreach ($w in $windowList) {',
+    '    $inventoryRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$w.hwnd));',
+    '    $inspected = 0;',
+    '    $matchList = New-Object System.Collections.ArrayList;',
+    '    $windowTruncated = $false;',
+    '    if ($inventoryRoot -ne $null) {',
+    '      $all = $inventoryRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition);',
+    '      for ($i = 0; $i -lt $all.Count; $i = $i + 1) {',
+    '        if ($inspected -ge $inspectCap) { $windowTruncated = $true; break };',
+    '        $inspected = $inspected + 1;',
+    '        try {',
+    '          $element = $all.Item($i);',
+    '          $elementName = $element.Current.Name;',
+    '          $elementAutomationId = $element.Current.AutomationId;',
+    '          if ((ContainsSplit $elementName) -or (ContainsSplit $elementAutomationId)) {',
+    '            if ($matchList.Count -lt $matchCap) {',
+    '              $matchList.Add([ordered]@{ name = $elementName; controlType = $element.Current.ControlType.ProgrammaticName; automationId = $elementAutomationId; enabled = [bool]$element.Current.IsEnabled; offscreen = [bool]$element.Current.IsOffscreen }) | Out-Null;',
+    '            } else { $windowTruncated = $true }',
+    '          }',
+    '        } catch { }',
+    '      }',
+    '    }',
+    '    $totalInspected = $totalInspected + $inspected;',
+    '    $totalMatches = $totalMatches + $matchList.Count;',
+    '    if ($windowTruncated) { $truncated = $true };',
+    '    $perWindow.Add([ordered]@{ hwnd = $w.hwnd; title = $w.title; className = $w.className; inspectedCount = $inspected; matchCount = $matchList.Count; truncated = $windowTruncated; matches = @($matchList) }) | Out-Null;',
+    '  }',
+    '  return [ordered]@{ windows = @($perWindow); inspectedCount = $totalInspected; matchCount = $totalMatches; truncated = $truncated; inspectCap = $inspectCap; matchCap = $matchCap; filter = \'name or automationId contains "split" (case-insensitive)\' };',
+    '}',
+    ...conditionLines,
+    ...conditionAssembly,
+    '$proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;',
+    "if ($proc -eq $null) { Fail 'NO_OWNED_WINDOW' 'the launched process exited before any split affordance could be addressed' }",
+    '$proc.Refresh();',
+    '$mainHandle = $proc.MainWindowHandle;',
+    '$diag.mainWindowHandle = $mainHandle.ToInt64();',
+    '$diag.windowVisible = [bool][FerryxQaRect]::IsWindowVisible($mainHandle);',
+    '$searched = New-Object System.Collections.ArrayList;',
+    'for ($i = 0; $i -lt $windowHandles.Count; $i = $i + 1) {',
+    '  $hwnd = [int64]$windowHandles[$i];',
+    '  if ($hwnd -eq 0) { continue };',
+    '  if (-not [FerryxQaRect]::IsWindowVisible([System.IntPtr]::new($hwnd))) { continue };',
+    '  $rect = New-Object FerryxQaRectStruct;',
+    '  [FerryxQaRect]::GetWindowRect([System.IntPtr]::new($hwnd), [ref]$rect) | Out-Null;',
+    '  $searched.Add([ordered]@{ hwnd = $hwnd; title = $windowTitles[$i]; className = $windowClasses[$i]; rect = $rect }) | Out-Null;',
+    '}',
+    '$diag.visibleWindowCount = $searched.Count;',
+    '$diag.windowsSearchedCount = $searched.Count;',
+    '$diag.windowsSearched = @($searched | ForEach-Object { [ordered]@{ hwnd = $_.hwnd; title = $_.title; className = $_.className } });',
+    "if ($searched.Count -eq 0) { Fail 'NO_OWNED_WINDOW' 'no visible top-level window owned by the process could be searched for the split affordance' }",
+    'try { [Microsoft.VisualBasic.Interaction]::AppActivate($targetPid) | Out-Null } catch { }',
     '$focused = [System.Windows.Automation.AutomationElement]::FocusedElement;',
     'if ($focused -ne $null -and $focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { $focused = $null }',
     'if ($focused -ne $null -and -not (InWindow $focused)) { $focused = $null }',
@@ -543,34 +844,54 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     'while ($focused -eq $null -and $sw.ElapsedMilliseconds -lt $focusBudgetMs) {',
     '  $candidateFocus = [System.Windows.Automation.AutomationElement]::FocusedElement;',
     '  if ($candidateFocus -ne $null -and $candidateFocus.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document -and (InWindow $candidateFocus)) { $focused = $candidateFocus; $diag.focusSource = \'focused-element\'; break }',
-    '  if (-not $setFocusTried -and $sw.ElapsedMilliseconds -gt 400) { $setFocusTried = $true; try { $root.SetFocus() } catch { } }',
+    '  if (-not $setFocusTried -and $sw.ElapsedMilliseconds -gt 400) { $setFocusTried = $true; try { ([System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$searched[0].hwnd))).SetFocus() } catch { } }',
     '  Start-Sleep -Milliseconds 100;',
     '}',
     'if ($focused -eq $null) {',
     '  $editCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit);',
-    '  $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition);',
-    '  if ($edits.Count -eq 1) {',
-    '    try { $edits.Item(0).SetFocus(); $focused = [System.Windows.Automation.AutomationElement]::FocusedElement; $diag.focusSource = \'pane-focus-sink\' } catch { $focused = $null }',
+    '  foreach ($window in $searched) {',
+    '    if ($focused -ne $null) { break };',
+    '    $windowRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$window.hwnd));',
+    '    if ($windowRoot -eq $null) { continue };',
+    '    $edits = $windowRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition);',
+    '    if ($edits.Count -eq 1) {',
+    '      try { $edits.Item(0).SetFocus(); $focused = [System.Windows.Automation.AutomationElement]::FocusedElement; $diag.focusSource = \'pane-focus-sink\' } catch { $focused = $null }',
+    '    }',
     '  }',
     '}',
     '$diag.focusedFound = [bool]($focused -ne $null);',
     "if ($focused -eq $null) { Fail 'SPLIT_RIGHT_NOT_FOUND' 'no focused pane could be identified inside the owned window, so no affordance was clicked' }",
-    '$condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $name);',
     '$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker;',
     '$scope = $null;',
-    '$node = $focused;',
-    '$depth = 0;',
-    'while ($node -ne $null) {',
-    '  $found = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
-    '  if ($found.Count -ge 1) { $scope = $node; break }',
-    '  if ($node -eq $root) { break }',
-    '  $node = $walker.GetParent($node);',
-    '  $depth = $depth + 1;',
-    '  if ($depth -gt 64) { break }',
+    '$scopeRect = $null;',
+    '$depths = New-Object System.Collections.ArrayList;',
+    'foreach ($pass in @(1, 2)) {',
+    '  for ($i = 0; $i -lt $searched.Count -and $scope -eq $null; $i = $i + 1) {',
+    '    $containsFocus = [bool]($focused -ne $null -and (InRect $focused $searched[$i].rect));',
+    '    if ($pass -eq 1 -and -not $containsFocus) { continue };',
+    '    if ($pass -eq 2 -and $containsFocus) { continue };',
+    '    $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$searched[$i].hwnd));',
+    '    if ($root -eq $null) { continue };',
+    '    $node = $root;',
+    '    if ($containsFocus) { $node = $focused };',
+    '    $depth = 0;',
+    '    while ($node -ne $null) {',
+    '      $found = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '      if ($found.Count -ge 1) { $scope = $node; $scopeRect = $searched[$i].rect; $diag.scopeDepth = $depth; $diag.matchedWindowHwnd = $searched[$i].hwnd; $diag.scopeIsWindowRoot = [bool]($node -eq $root); break };',
+    '      if ($node -eq $root) { break };',
+    '      $node = $walker.GetParent($node);',
+    '      $depth = $depth + 1;',
+    '      if ($depth -gt 64) { break };',
+    '    };',
+    '    $depths.Add([ordered]@{ hwnd = $searched[$i].hwnd; depth = $depth; containsFocus = $containsFocus }) | Out-Null;',
+    '  }',
     '}',
-    '$diag.scopeDepth = $depth;',
-    "if ($scope -eq $null) { Fail 'SPLIT_RIGHT_NOT_FOUND' 'no ancestor of the focused pane contains the split affordance' }",
-    '$diag.scopeIsWindowRoot = [bool]($scope -eq $root);',
+    '$diag.windowSearchDepths = @($depths);',
+    'if ($scope -eq $null) {',
+    '  foreach ($entry in $depths) { if ($entry.containsFocus) { $diag.scopeDepth = $entry.depth; break } };',
+    '  $diag.inventory = BuildInventory $searched $inventoryInspectCap $inventoryMatchCap;',
+    "  Fail 'SPLIT_RIGHT_NOT_FOUND' 'no ancestor of the focused pane contains the split affordance in any visible owned window (the bounded inventory names every element whose name or automation id contains Split)'",
+    '}',
     '$items = $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
     '$candidates = New-Object System.Collections.ArrayList;',
     'for ($i = 0; $i -lt $items.Count; $i = $i + 1) {',
@@ -605,12 +926,30 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
 
 export function classifyWindowsSplitRight(probe) {
   const candidates = asArray(probe?.candidates);
+  const windowsSearched = asArray(probe?.windowsSearched);
+  const selectorNames = asArray(probe?.selectorNames);
+  // "A visible owned window was searched" - never "MainWindowHandle is the UI
+  // window" - decides the window scope. A probe that predates the enumeration
+  // (no `windowsSearched`/`visibleWindowCount`) still classifies from the
+  // main-handle measurement.
+  const visibleWindowCount = probe?.visibleWindowCount !== undefined && probe?.visibleWindowCount !== null
+    ? Number(probe.visibleWindowCount)
+    : (windowsSearched.length > 0
+      ? windowsSearched.length
+      : (Number(probe?.mainWindowHandle) !== 0 && probe?.windowVisible === true ? 1 : 0));
   const measured = {
     selector: probe?.selector ?? SPLIT_MENU_SELECTOR_WIN32.name,
+    selectorNames: selectorNames.length > 0 ? selectorNames : [...SPLIT_AFFORDANCE_NAMES_WIN32],
+    selectorAutomationIds: asArray(probe?.selectorAutomationIds),
     interactive: probe?.interactive ?? null,
     sessionId: probe?.sessionId ?? null,
     mainWindowHandle: probe?.mainWindowHandle ?? null,
     windowVisible: probe?.windowVisible ?? null,
+    visibleWindowCount,
+    windowsSearched,
+    windowsSearchedCount: probe?.windowsSearchedCount ?? windowsSearched.length,
+    windowSearchDepths: asArray(probe?.windowSearchDepths),
+    matchedWindowHwnd: probe?.matchedWindowHwnd ?? null,
     focusedFound: probe?.focusedFound ?? null,
     focusSource: probe?.focusSource ?? null,
     scopeDepth: probe?.scopeDepth ?? null,
@@ -619,10 +958,13 @@ export function classifyWindowsSplitRight(probe) {
     actionableCount: probe?.actionableCount ?? null,
     candidates,
     chosen: probe?.chosen ?? null,
+    inventory: probe?.inventory ?? null,
     psFailure: probe?.failure ?? null,
     psDetail: probe?.detail ?? null,
   };
-  const evidenceText = JSON.stringify({ ...measured, psFailure: undefined, psDetail: undefined });
+  // The recorded detail stays bounded: the bounded inventory travels as its own
+  // structured field, never dumped into this string.
+  const evidenceText = JSON.stringify({ ...measured, inventory: undefined, psFailure: undefined, psDetail: undefined });
   if (probe?.result === 'SPLIT_CLICKED') {
     return { ok: true, code: null, derivedCode: null, detail: 'clicked the single actionable split affordance of the focused pane', ...measured };
   }
@@ -630,7 +972,7 @@ export function classifyWindowsSplitRight(probe) {
   const actionableCount = Number(probe?.actionableCount ?? 0);
   // Derived from the measured shape; the probe's own verdict is honoured when
   // it names a typed code (the probe measured the window/focus state directly).
-  const derivedCode = Number(probe?.mainWindowHandle) === 0 || probe?.windowVisible !== true
+  const derivedCode = visibleWindowCount < 1
     ? 'NO_OWNED_WINDOW'
     : probe?.focusedFound !== true
       ? 'SPLIT_RIGHT_NOT_FOUND'
@@ -652,12 +994,18 @@ export function classifyWindowsSplitRight(probe) {
   return { ok: false, code, derivedCode, detail, ...measured };
 }
 
-// Click the split affordance of the FOCUSED pane of the owned window. The
-// window scope, the pane scope, and the enabled/visible check are all asserted
-// before the click; an ambiguous, absent, or non-actionable match fails typed
-// and is recorded with the measured candidate set.
+// Click the split affordance of the FOCUSED pane. The window set is enumerated
+// from the pid (never assumed from `MainWindowHandle`), ordered by
+// `orderOwnedWindowsForSearch`, and the probe re-checks visibility before it
+// searches each window; an ambiguous, absent, or non-actionable match fails
+// typed and is recorded with the measured candidate set and - on the not-found
+// path - the bounded inventory of everything named/id'd like a split affordance.
 export async function windowsDriver(evidence, pid) {
-  const stdout = await powershell(evidence, buildWindowsSplitRightScript(pid));
+  const enumeration = await awaitOwnedWindowsWindows(evidence, pid);
+  if (enumeration.searchOrder.length === 0) {
+    throw new HarnessError('NO_OWNED_WINDOW', enumeration.detail);
+  }
+  const stdout = await powershell(evidence, buildWindowsSplitRightScript(pid, BUDGETS.splitFocusWaitMs, { windows: enumeration.searchOrder }));
   const parsed = parseWindowsProbeLine(stdout, 'split-right');
   if (!parsed.ok) {
     throw new HarnessError('SPLIT_RIGHT_NOT_FOUND', `split-right probe produced no structured evidence (${parsed.reason}): stdout=${JSON.stringify(stdout)}`);
@@ -666,22 +1014,28 @@ export async function windowsDriver(evidence, pid) {
   evidence.action({
     action: 'click-split-affordance',
     selector: SPLIT_MENU_SELECTOR_WIN32,
+    selectorNames: [...SPLIT_AFFORDANCE_NAMES_WIN32],
+    selectorAutomationIds: [...SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32],
     pid,
     assertedUniqueEnabled: verdict.ok,
     code: verdict.code,
     window: { mainWindowHandle: verdict.mainWindowHandle, windowVisible: verdict.windowVisible, interactive: verdict.interactive, sessionId: verdict.sessionId },
+    windowsSearched: verdict.windowsSearched,
+    windowsSearchedCount: verdict.windowsSearchedCount,
+    matchedWindowHwnd: verdict.matchedWindowHwnd,
     scope: { focusedFound: verdict.focusedFound, focusSource: verdict.focusSource, depth: verdict.scopeDepth, isWindowRoot: verdict.scopeIsWindowRoot },
     candidateCount: verdict.candidateCount,
     actionableCount: verdict.actionableCount,
     candidates: verdict.candidates,
     chosen: verdict.chosen,
+    splitInventory: verdict.inventory,
     detail: verdict.detail,
   });
   if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);
   // Review H5: this driver only clicks the menu. Marker typing is performed
   // by typeMarkerWindows on every marker path - never logged as an action
   // that did not happen.
-  return { clicked: true, chosen: verdict.chosen };
+  return { clicked: true, chosen: verdict.chosen, matchedWindowHwnd: verdict.matchedWindowHwnd };
 }
 
 // Review blocker 5: the Windows marker must be typed on EVERY marker path,

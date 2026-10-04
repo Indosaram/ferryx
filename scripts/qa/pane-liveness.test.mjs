@@ -13,6 +13,7 @@ import {
   BUDGETS, EXIT, HEADLESS_ELIGIBLE, SCENARIOS, HarnessError, parseInvocation, preflight,
   BarrierHub, ResourceRegistry, correlateReceipt, computeCleanupGate,
   computeSourceDigest, withDeadline, assertPositiveRecovery, spawnOwned,
+  reapProcess, removePathWithRetry,
   MonotonicBudget, validateFixtureSetup, SCENARIO_FIXTURE_REQUIREMENTS, BARRIER_ROLES,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
@@ -191,6 +192,174 @@ test('regression H10 false-pass: a cleanup failure cannot leave a passing gate',
   okRegistry.registerDirectory('/tmp/also-not-removed');
   const okGate = computeCleanupGate(okRegistry, [{ kind: 'directory', path: '/tmp/also-not-removed', removed: true }]);
   expect(okGate.ok).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// Pass-6 cleanup-gate defect (E/task-9/REPORT-PASS6.md §5): the runner's own
+// `taskkill /T` (no `/F`) left the app's `--daemon` descendant alive, so the
+// isolation root stayed held (`directoriesRemoved: false`) AND the stdio pipe
+// that descendant inherited stayed open, so node never exited after printing
+// its result. One cause, two symptoms. These tests lock the forced reap, its
+// exact-PID scoping, the bounded root-removal retry and the still-held holder
+// report.
+
+// A child handle that never exits: the escalation path must still be bounded
+// and must never claim an unexited process as reaped.
+function fakeRunningChild(pid) {
+  return { pid, exitCode: null, signalCode: null, killed: false, once() {}, kill() { this.killed = true; } };
+}
+
+test('pass-6 cleanup: the escalated reap force-kills the owned tree by exact PID', async () => {
+  const winKills = [];
+  const win = await reapProcess(
+    { pid: 4242, label: '', child: fakeRunningChild(4242), executable: 'C:\\stage\\ferryx.exe' },
+    { platform: 'win32', rows: [], graceMs: 0, forceMs: 0, runKill: (file, args) => winKills.push([file, args]) },
+  );
+  expect(winKills).toEqual([['taskkill', ['/T', '/PID', '4242']], ['taskkill', ['/T', '/F', '/PID', '4242']]]);
+  expect(win.escalated).toBe(true);
+  expect(win.exited).toBe(false);
+  expect(win.method).toBe('taskkill /T /F (forced process tree)');
+
+  const posixSignals = [];
+  const posix = await reapProcess(
+    { pid: 4243, label: '', child: fakeRunningChild(4243), executable: '/stage/ferryx' },
+    { platform: 'posix', rows: [], graceMs: 0, forceMs: 0, signalProcess: (pid, signal) => posixSignals.push([pid, signal]) },
+  );
+  expect(posixSignals).toEqual([[-4243, 'SIGTERM'], [-4243, 'SIGKILL']]);
+  expect(posix.escalated).toBe(true);
+  expect(posix.method).toBe('SIGKILL to task-owned process group (escalated from SIGTERM)');
+});
+
+test('pass-6 cleanup: reap scoping signals only this run\'s exact PIDs and never a name pattern', async () => {
+  const calls = [];
+  const rows = [
+    { pid: 333, ppid: 111, executable: 'C:\\stage\\ferryx.exe' }, // the app's own --daemon descendant
+    { pid: 444, ppid: 111, executable: 'C:\\Windows\\explorer.exe' }, // unrelated: never signalled
+  ];
+  const receipt = await reapProcess(
+    { pid: 111, label: '', child: fakeRunningChild(111), executable: 'C:\\stage\\ferryx.exe' },
+    {
+      platform: 'win32', rows, roots: ['C:\\stage\\runtime\\split-happy'], graceMs: 0, forceMs: 0,
+      runKill: (file, args) => calls.push([file, args]), alive: () => true,
+    },
+  );
+  // Graceful, forced, then the identity-verified descendant - all by exact PID.
+  const signalled = calls.flatMap(([, args]) => args.filter(token => /^\d+$/.test(token)));
+  expect(signalled).toEqual(['111', '111', '333']);
+  expect(receipt.descendants.map(d => ({ pid: d.pid, ppid: d.ppid, identityVerified: d.identityVerified }))).toEqual([
+    { pid: 333, ppid: 111, identityVerified: true },
+    { pid: 444, ppid: 111, identityVerified: false },
+  ]);
+  expect(receipt.descendantsForceReaped).toEqual([333]);
+  // A name/command-line pattern (or a foreign PID) must never appear in a kill.
+  const serialized = JSON.stringify(calls);
+  for (const forbidden of ['*', '-like', '.mjs', 'ferryx.exe', 'explorer', '999']) {
+    expect(serialized).not.toContain(forbidden);
+  }
+});
+
+test('pass-6 cleanup: isolation-root removal is retried within a bounded budget', async () => {
+  const sleeps = [];
+  let present = true;
+  let failures = 2;
+  const removal = await removePathWithRetry('/iso/root', {
+    attempts: 6, intervalMs: 10, deadlineMs: 1000,
+    remove: () => { if (failures > 0) failures -= 1; else present = false; },
+    exists: () => present,
+    sleep: async ms => { sleeps.push(ms); },
+    now: () => 0,
+  });
+  expect(removal).toEqual({ removed: true, attempts: 3 });
+  expect(sleeps).toEqual([10, 10]);
+
+  const stuckSleeps = [];
+  const stuck = await removePathWithRetry('/iso/held', {
+    attempts: 4, intervalMs: 10, deadlineMs: 1000,
+    remove: () => { throw new Error('EBUSY: still held by the force-reaped descendant'); },
+    exists: () => true,
+    sleep: async ms => { stuckSleeps.push(ms); },
+    now: () => 0,
+  });
+  expect(stuck).toEqual({ removed: false, attempts: 4 });
+  expect(stuckSleeps).toEqual([10, 10, 10]); // bounded: never an unbounded poll
+});
+
+test('pass-6 cleanup: a still-held root keeps cleanupGate.ok=false and names the holder', async () => {
+  const root = 'C:\\stage\\runtime\\split-happy';
+  const registry = new ResourceRegistry({
+    // The app is already gone and its own `--daemon` descendant still holds the
+    // root: exactly the pass-6 measurement.
+    snapshot: async () => [{ pid: 22456, ppid: 7716, executable: 'C:\\stage\\ferryx.exe' }],
+    remove: () => { throw new Error('EBUSY: held by the daemon child'); },
+    exists: () => true,
+    sleep: async () => {},
+    now: () => 0,
+    alive: pid => pid === 22456,
+    graceMs: 0,
+    forceMs: 0,
+    runKill: () => {},
+    // Never signal a real PID from a fabricated fixture.
+    signalProcess: () => {},
+  });
+  registry.registerProcess({ pid: 7716, exitCode: 0, signalCode: null, once() {}, kill() {} }, '', { executable: 'C:\\stage\\ferryx.exe' });
+  registry.registerDirectory(root);
+  const receipts = await registry.cleanup();
+  const gate = computeCleanupGate(registry, receipts);
+  expect(gate).toEqual({ processesReaped: true, socketsRemoved: true, directoriesRemoved: false, ok: false });
+  const directory = receipts.find(receipt => receipt.kind === 'directory');
+  expect(directory.removed).toBe(false);
+  expect(directory.attempts).toBe(BUDGETS.cleanupRootRetryAttempts);
+  expect(directory.holders).toEqual([{
+    pid: 22456, ppid: 7716, executable: 'C:\\stage\\ferryx.exe',
+    identityVerified: true, identity: 'executable is the binary this run launched', holderOf: root,
+  }]);
+});
+
+test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group', async () => {
+  if (process.platform === 'win32') return; // taskkill /T /F covers the tree there
+  const registry = new ResourceRegistry();
+  const grandchildSrc = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  const leaderSrc = [
+    "process.on('SIGTERM', () => {});",
+    `const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSrc)}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
+    "process.stdout.write('READY:' + c.pid + '\\n');",
+    'setInterval(() => {}, 1000);',
+  ].join(' ');
+  const child = spawnOwned(registry, process.execPath, ['-e', leaderSrc]);
+  const grandchildPid = await new Promise((resolvePromise, rejectPromise) => {
+    let buffer = '';
+    const onData = chunk => {
+      buffer += String(chunk);
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (line.startsWith('READY:')) {
+          child.stdout.off('data', onData);
+          resolvePromise(parseInt(line.slice(6), 10));
+        }
+      }
+    };
+    child.stdout.on('data', onData);
+    child.once('error', rejectPromise);
+  });
+  expect(Number.isInteger(grandchildPid)).toBe(true);
+  let reaped = false;
+  try {
+    const receipts = await registry.cleanup();
+    const receipt = receipts.find(entry => entry.kind === 'process');
+    expect(receipt.escalated).toBe(true); // SIGTERM was ignored: the force step ran
+    expect(receipt.exited).toBe(true);
+    expect(receipt.descendants.map(d => d.pid)).toContain(grandchildPid);
+    reaped = true;
+  } finally {
+    // Fixture-owned fallback so a broken escalation cannot leak an orphan.
+    if (!reaped) { try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* already gone */ } }
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+  expect(() => process.kill(-child.pid, 0)).toThrow();
+  expect(() => process.kill(grandchildPid, 0)).toThrow();
+  expect(reaped).toBe(true);
 });
 
 test('regression P2 correlation: receipts must echo runId/operationId/producer nonces', () => {
@@ -1366,6 +1535,9 @@ test('windows session probe script is newline-joined like every other PowerShell
 test('no generated PowerShell script merges a statement onto the here-string header or terminator line', async () => {
   const native = await import('../lib/qa-scenarios/native-driver.mjs');
   const { buildWindowsSessionProbeScript } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  // The pass-6 process-table read is a PowerShell builder too: the same
+  // line-structure rule has to hold for it (pass-5 defect class).
+  const { buildProcessTableScript } = await import('../lib/qa-scenarios/common-harness.mjs');
   const scripts = {
     'owned-window wait': native.buildWindowsWindowWaitScript(4242, 8000),
     'split-right': native.buildWindowsSplitRightScript(4242, 2500),
@@ -1374,6 +1546,7 @@ test('no generated PowerShell script merges a statement onto the here-string hea
     'focus': native.buildWindowsFocusScript(4242),
     'type-marker': native.buildWindowsTypeMarkerScript(),
     'session probe': buildWindowsSessionProbeScript(),
+    'process table': buildProcessTableScript(),
   };
   for (const [name, script] of Object.entries(scripts)) {
     // A here-string header or terminator sharing its line with anything else is
@@ -1382,5 +1555,184 @@ test('no generated PowerShell script merges a statement onto the here-string hea
     expect([name, /[^\n]"@/.test(script)]).toEqual([name, false]);
     expect([name, script.split('\n').length > 1]).toEqual([name, true]);
     expect([name, script.split('\n').includes('')]).toEqual([name, false]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pass-6 blocker (scripts lane). The split click EXECUTED for the first time
+// and then measured `candidateCount: 0` window-wide, so the accessible name was
+// absent from the whole owned window - and `MainWindowHandle` is not guaranteed
+// to be the app's real UI window (the probe saw four owned top-level windows,
+// two visible). These tests replay the builders and classifiers; nothing here
+// launches PowerShell, a product process, a window, or a scheduled task.
+
+test('split-affordance search enumerates every owned window and searches the visible ones main-handle-first', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  const probe = {
+    probe: 'owned-windows', pid: 7716, interactive: true, sessionId: 1, processExited: false,
+    mainWindowHandle: 19663500, mainWindowVisible: true,
+    windows: [
+      { hwnd: 4787552, visible: true, className: 'T', title: '' },
+      { hwnd: 19663500, visible: true, className: 'T', title: 'F' },
+      { hwnd: 3001, visible: false, className: 'T', title: 'hidden' },
+      { hwnd: 1313834, visible: true, className: 'T', title: 'F' },
+    ],
+  };
+  const verdict = native.classifyOwnedWindowsProbe(probe);
+  expect(verdict.ok).toBe(true);
+  expect(verdict.code).toBeNull();
+  expect(verdict.visibleWindowCount).toBe(3);
+  // Deterministic order: the main handle first, then every other visible window
+  // by ascending hwnd. An invisible window is never searched.
+  const ordered = native.orderOwnedWindowsForSearch(verdict.windows, verdict.mainWindowHandle);
+  expect(ordered.map(window => window.hwnd)).toEqual([19663500, 1313834, 4787552]);
+  expect(ordered.map(window => window.title)).toEqual(['F', 'F', '']);
+  // The search script receives exactly that order, one literal array per field.
+  const lines = powerShellScriptLines(native.buildWindowsSplitRightScript(4242, 2500, { windows: ordered }));
+  expect(lines).toContain('$windowHandles = @(19663500, 1313834, 4787552);');
+  expect(lines).toContain("$windowTitles = @('F', 'F', '');");
+  expect(lines).toContain("$windowClasses = @('T', 'T', 'T');");
+  // A main handle that is not visible (or zero) is not privileged: the visible
+  // owned windows are still the search set, in ascending-hwnd order.
+  const noMain = native.classifyOwnedWindowsProbe({ ...probe, mainWindowHandle: 0, mainWindowVisible: false });
+  expect(noMain.ok).toBe(true);
+  expect(native.orderOwnedWindowsForSearch(noMain.windows, noMain.mainWindowHandle).map(window => window.hwnd)).toEqual([1313834, 4787552, 19663500]);
+  // No visible owned window at all: typed NO_OWNED_WINDOW and nothing to search.
+  const none = native.classifyOwnedWindowsProbe({ ...probe, windows: probe.windows.map(window => ({ ...window, visible: false })) });
+  expect(none.ok).toBe(false);
+  expect(none.code).toBe('NO_OWNED_WINDOW');
+  expect(none.detail).toContain('topLevelWindows=');
+  expect(native.orderOwnedWindowsForSearch(none.windows, none.mainWindowHandle)).toEqual([]);
+  // The runner's own owned-window gate accepts ANY visible owned window too, so
+  // `MainWindowHandle` naming a different (or no) window is no longer fatal...
+  const otherVisible = native.classifyWindowsWindowProbe({
+    probe: 'owned-window', pid: 7716, interactive: true, sessionId: 1, budgetMs: 8000, waitedMs: 120,
+    mainWindowHandle: 0, processExited: false, ok: true, visibleWindowCount: 1,
+    windows: [{ hwnd: 4787552, visible: true, className: 'T', title: '' }],
+  });
+  expect(otherVisible.ok).toBe(true);
+  expect(otherVisible.visibleWindowCount).toBe(1);
+  // ...and it still refuses a probe whose owned windows are all invisible.
+  expect(native.classifyWindowsWindowProbe({ ...otherVisible, ok: true, visibleWindowCount: 0, windows: [{ hwnd: 4787552, visible: false, className: 'T', title: '' }] }).ok).toBe(false);
+  // The enumeration script is line-joined like every other PowerShell builder.
+  const enumLines = powerShellScriptLines(native.buildWindowsOwnedWindowsScript(4242));
+  expect(enumLines).not.toContain('');
+  expect(enumLines.filter(line => line === 'Add-Type @"')).toHaveLength(1);
+  expect(enumLines[enumLines.length - 1]).toBe('Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);');
+});
+
+test('split-affordance match is multi-property and exact, never a substring or first-match heuristic', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  // The product's pane affordance only; the tab-bar popup (`Split terminal
+  // right`) is a different affordance for a different trigger and is not
+  // accepted by default, and no automation id is guessed.
+  expect(native.SPLIT_AFFORDANCE_NAMES_WIN32).toEqual(['Split pane right']);
+  expect(native.SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32).toEqual([]);
+  const script = native.buildWindowsSplitRightScript(4242, 2500, {
+    windows: [{ hwnd: 1, title: '', className: 'T' }],
+    names: ['Split pane right', 'Split terminal right'],
+    automationIds: ['split-pane-right'],
+  });
+  const lines = powerShellScriptLines(script);
+  expect(lines).toContain("$selectorNames = @('Split pane right', 'Split terminal right');");
+  expect(lines).toContain("$selectorAutomationIds = @('split-pane-right');");
+  // Every bound name/automation id is an EXACT UIA property condition combined
+  // with OrCondition - never a substring filter and never an index pick.
+  expect(lines).toContain('$conditionName0 = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $selectorNames[0]);');
+  expect(lines).toContain('$conditionName1 = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $selectorNames[1]);');
+  expect(lines).toContain('$conditionAutomationId0 = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $selectorAutomationIds[0]);');
+  expect(lines).toContain('$conditionArray = [System.Windows.Automation.Condition[]]@($conditionName0, $conditionName1, $conditionAutomationId0);');
+  expect(lines).toContain('$condition = New-Object System.Windows.Automation.OrCondition -ArgumentList (, $conditionArray);');
+  expect(script).not.toMatch(/Name -match|Name -like/);
+  // A single bound name needs no OrCondition wrapper at all.
+  expect(powerShellScriptLines(native.buildWindowsSplitRightScript(4242, 2500, { windows: [{ hwnd: 1, title: '', className: 'T' }] })))
+    .toContain('$condition = $conditionName0;');
+  // A match found by AutomationId alone still classifies as a click, and the
+  // bound property set is surfaced in the evidence.
+  const byId = native.classifyWindowsSplitRight({
+    probe: 'split-right', selector: 'Split pane right', interactive: true, sessionId: 1,
+    mainWindowHandle: 1, windowVisible: true, visibleWindowCount: 1,
+    focusedFound: true, focusSource: 'focused-element', scopeDepth: 2, scopeIsWindowRoot: false,
+    windowsSearched: [{ hwnd: 1, title: '', className: 'T' }], windowsSearchedCount: 1, matchedWindowHwnd: 1,
+    candidateCount: 1, actionableCount: 1,
+    candidates: [{ index: 0, name: '', controlType: 'ControlType.Button', automationId: 'split-pane-right', enabled: true, offscreen: false, rectEmpty: false, rect: '10,10,20,20', inWindow: true }],
+    chosen: { index: 0, automationId: 'split-pane-right' },
+    result: 'SPLIT_CLICKED',
+  });
+  expect(byId.ok).toBe(true);
+  expect(byId.matchedWindowHwnd).toBe(1);
+  expect(byId.selectorAutomationIds).toEqual(['split-pane-right']);
+  // A probe that reports no bound names still records the default binding, and
+  // refusing to search for nothing is typed instead of an empty match.
+  expect(native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' }).selectorNames).toEqual(['Split pane right']);
+  expect(() => native.buildWindowsSplitRightScript(4242, 2500, { names: [], automationIds: [] })).toThrowError(/at least one exact accessible name/);
+});
+
+test('split-affordance not-found path keeps the typed verdict and emits a bounded Split inventory', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  const inventory = {
+    windows: [
+      { hwnd: 19663500, title: 'F', className: 'T', inspectedCount: 412, matchCount: 1, truncated: false, matches: [{ name: 'Split terminal right', controlType: 'ControlType.MenuItem', automationId: '', enabled: true, offscreen: false }] },
+      { hwnd: 4787552, title: '', className: 'T', inspectedCount: 0, matchCount: 0, truncated: false, matches: [] },
+    ],
+    inspectedCount: 412, matchCount: 1, truncated: false, inspectCap: 4000, matchCap: 40,
+    filter: 'name or automationId contains "split" (case-insensitive)',
+  };
+  const probe = {
+    probe: 'split-right', selector: 'Split pane right', interactive: true, sessionId: 1,
+    mainWindowHandle: 19663500, windowVisible: true, visibleWindowCount: 2,
+    windowsSearched: [{ hwnd: 19663500, title: 'F', className: 'T' }, { hwnd: 4787552, title: '', className: 'T' }],
+    windowsSearchedCount: 2, matchedWindowHwnd: null,
+    windowSearchDepths: [{ hwnd: 19663500, depth: 10, containsFocus: true }, { hwnd: 4787552, depth: 0, containsFocus: false }],
+    focusedFound: true, focusSource: null, scopeDepth: 10, scopeIsWindowRoot: false,
+    candidateCount: 0, actionableCount: 0, candidates: [], chosen: null,
+    failure: 'SPLIT_RIGHT_NOT_FOUND',
+    detail: 'no ancestor of the focused pane contains the split affordance in any visible owned window',
+    inventory,
+  };
+  const verdict = native.classifyWindowsSplitRight(probe);
+  expect(verdict.ok).toBe(false);
+  expect(verdict.code).toBe('SPLIT_RIGHT_NOT_FOUND');
+  expect(verdict.derivedCode).toBe('SPLIT_RIGHT_NOT_FOUND');
+  // Every pre-existing measured field survives.
+  expect(verdict.visibleWindowCount).toBe(2);
+  expect(verdict.windowsSearchedCount).toBe(2);
+  expect(verdict.windowsSearched.map(window => window.hwnd)).toEqual([19663500, 4787552]);
+  expect(verdict.windowSearchDepths).toHaveLength(2);
+  expect(verdict.scopeDepth).toBe(10);
+  expect(verdict.focusedFound).toBe(true);
+  expect(verdict.candidates).toEqual([]);
+  expect(verdict.actionableCount).toBe(0);
+  expect(verdict.chosen).toBeNull();
+  // The inventory names what IS there, per window, bounded.
+  expect(verdict.inventory.matchCount).toBe(1);
+  expect(verdict.inventory.inspectedCount).toBe(412);
+  expect(verdict.inventory.windows).toHaveLength(2);
+  expect(verdict.inventory.windows[0].matches[0].name).toBe('Split terminal right');
+  // The recorded detail stays bounded: the inventory is a structured field.
+  expect(verdict.detail).not.toContain('Split terminal right');
+  expect(verdict.detail).toContain('"scopeDepth":10');
+  // A probe that predates the inventory still classifies typed.
+  const legacy = native.classifyWindowsSplitRight({ ...probe, inventory: null });
+  expect(legacy.code).toBe('SPLIT_RIGHT_NOT_FOUND');
+  expect(legacy.inventory).toBeNull();
+  // The generated probe builds the inventory only on the not-found path, with
+  // the bounded caps, and keeps every typed verdict.
+  const script = native.buildWindowsSplitRightScript(4242, 2500, { windows: [{ hwnd: 1, title: '', className: 'T' }] });
+  expect(script).toContain('$diag.inventory = BuildInventory $searched $inventoryInspectCap $inventoryMatchCap;');
+  expect(script).toContain('$inventoryMatchCap = 40;');
+  expect(script).toContain('$inventoryInspectCap = 4000;');
+  expect(script).toContain('if ($inspected -ge $inspectCap) { $windowTruncated = $true; break };');
+  expect(script).toContain('if ($matchList.Count -lt $matchCap) {');
+  // The inventory is emitted on the not-found path only, before its typed Fail
+  // (the fail is located by its own detail text: an earlier focus failure line
+  // carries the same typed code).
+  const notFoundStart = script.indexOf('if ($scope -eq $null) {');
+  const notFoundFail = script.indexOf('no ancestor of the focused pane contains the split affordance in any visible owned window');
+  expect(notFoundStart).toBeGreaterThan(-1);
+  expect(notFoundFail).toBeGreaterThan(notFoundStart);
+  expect(script.slice(notFoundStart, notFoundFail)).toContain('$diag.inventory = BuildInventory $searched $inventoryInspectCap $inventoryMatchCap;');
+  for (const code of ['NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED']) {
+    expect(script).toContain(code);
   }
 });
