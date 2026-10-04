@@ -301,13 +301,30 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
     .await
     .expect("initial output timeout");
 
+    // The attach contract requires the persisted seven-field pane binding. This fixture's
+    // ordinary spawn is its own identity source: the backend session, the PTY incarnation the
+    // daemon reported for it, and the epoch the spawn answered with.
+    let attach_tuple = crate::daemon::protocol::PaneAttachTuple {
+        backend_session_id: spawned.session_id.clone(),
+        incarnation: spawned
+            .session
+            .incarnation
+            .clone()
+            .expect("spawn response reports the session's PTY incarnation"),
+        daemon_epoch: spawned.daemon_epoch.clone(),
+        // The fixture binds no frontend pane, so these three carry fixture-local identity.
+        frontend_session_id: "attach-history-frontend".into(),
+        pane_identity: "attach-history-pane".into(),
+        binding_key: "attach-history-binding".into(),
+        attempt_generation: 1,
+    };
     let attach_res = cmd_terminal_attach(
         app.handle().clone(),
         client_state.clone(),
         spawned.session_id.clone(),
         None,
         None,
-        None,
+        Some(attach_tuple),
     )
     .await
     .expect("attach");
@@ -3271,6 +3288,26 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
     server.abort();
 }
 
+/// The reinstalled proxy session this fixture attaches through, and the PTY incarnation its
+/// daemon reports for it: the attach contract requires the persisted seven-field pane binding,
+/// so the installed binding and the daemon's describe answer must agree on both values.
+const P13_PROXY_SESSION_ID: &str = "daemon-session:reinstalled-p13-proxy";
+const P13_PROXY_INCARNATION: &str = "p13-proxy-incarnation";
+
+#[cfg(feature = "native-terminal")]
+fn p13_proxy_pane_binding() -> crate::daemon::protocol::PaneAttachTuple {
+    crate::daemon::protocol::PaneAttachTuple {
+        backend_session_id: P13_PROXY_SESSION_ID.into(),
+        incarnation: Some(P13_PROXY_INCARNATION.into()),
+        // The proxy generation the fixture's reattach answers with (Epoch(2) -> AttachOk epoch 2).
+        daemon_epoch: "2".into(),
+        frontend_session_id: "p13-frontend-session".into(),
+        pane_identity: "p13-pane-identity".into(),
+        binding_key: "p13-binding-key".into(),
+        attempt_generation: 1,
+    }
+}
+
 #[tokio::test]
 async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
@@ -3392,6 +3429,32 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                                 }
                             }
                         }
+                        DaemonRequest::DescribeSession { session_id } => {
+                            if session_id == P13_PROXY_SESSION_ID {
+                                let mut session =
+                                    crate::daemon::protocol::DaemonSessionDetails::new(
+                                        P13_PROXY_SESSION_ID.into(),
+                                        None,
+                                        None,
+                                        None,
+                                        80,
+                                        24,
+                                        true,
+                                        Some(42),
+                                        Some(43),
+                                        None,
+                                        false,
+                                    );
+                                session.incarnation = Some(P13_PROXY_INCARNATION.into());
+                                DaemonResponse::DescribeSessionOk { session }
+                            } else {
+                                DaemonResponse::Error {
+                                    message: format!("Session '{session_id}' not found"),
+                                    code: Some("SESSION_NOT_FOUND".into()),
+                                    details: None,
+                                }
+                            }
+                        }
                         _ => DaemonResponse::Error {
                             message: "unexpected req".into(),
                             code: None,
@@ -3408,8 +3471,23 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
     });
 
     let client = Arc::new(DaemonClient::new_with_socket(socket));
-    let app = tauri::test::mock_builder()
-        .manage(client.clone())
+    // The attach contract requires the persisted seven-field pane binding for the session it
+    // attaches to, so install the binding this fixture's proxy session carries before attaching.
+    #[allow(unused_mut)]
+    let mut builder = tauri::test::mock_builder().manage(client.clone());
+    #[cfg(feature = "native-terminal")]
+    {
+        let surface_host =
+            crate::native_terminal::surface_host::NativeTerminalSurfaceHostState::default();
+        surface_host
+            .attach_test_session_for_liveness(P13_PROXY_SESSION_ID, 2, None)
+            .expect("seed proxy liveness session");
+        surface_host
+            .begin_replay_request_with_tuple(P13_PROXY_SESSION_ID, Some(p13_proxy_pane_binding()))
+            .expect("install persisted pane binding");
+        builder = builder.manage(surface_host);
+    }
+    let app = builder
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let client_state = app.state::<Arc<DaemonClient>>();
