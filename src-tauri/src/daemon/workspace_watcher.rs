@@ -96,6 +96,56 @@ mod tests {
             "promoted project watch missed nested file change"
         );
     }
+
+    #[tokio::test]
+    async fn refresh_survives_registered_projects_whose_paths_are_gone() {
+        // Given one live project plus registrations whose root, or root and parent, vanished.
+        let (root, service, live, vanished_parent) = crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(root.path()).unwrap();
+            let live = base.join("live");
+            std::fs::create_dir_all(&live).unwrap();
+            let vanished_parent = base.join("vanished/parent");
+            let service = Arc::new(DaemonWorkspaceService::new(
+                crate::worktree::WorkspaceRegistry::new(),
+                root.path().join("data/catalog"),
+            ));
+            let row = |repo_root: PathBuf| CatalogRow {
+                repo_root,
+                mirror_exposed: false,
+                availability: Availability::Ready,
+            };
+            let mut catalog = service.catalog.lock();
+            let workspaces = &mut catalog.as_mut().unwrap().workspaces;
+            workspaces.insert("live".into(), row(live.clone()));
+            workspaces.insert("root-gone".into(), row(base.join("root-gone")));
+            workspaces.insert("parent-gone".into(), row(vanished_parent.join("gone")));
+            drop(catalog);
+            Ok((root, service, live, vanished_parent))
+        })
+        .await
+        .unwrap();
+        // When the native watch set is refreshed.
+        let refreshed = WorkspaceWatch::new().unwrap().refresh(service.clone()).await;
+        let (watched_live, watched_vanished) = match &refreshed {
+            Ok(watch) => (
+                watch.paths.get(&live).copied(),
+                watch.paths.contains_key(&vanished_parent),
+            ),
+            Err(_) => (None, false),
+        };
+        drop(refreshed);
+        drop(service);
+        crate::ipc::run_blocking(move || {
+            root.close().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // Then missing paths are skipped and the live project is still watched recursively.
+        assert_eq!(watched_live, Some(true), "live project must stay watched");
+        assert!(!watched_vanished, "a vanished parent must never be watched");
+    }
 }
 impl WorkspaceWatch {
     pub(crate) fn new() -> Result<Self, String> {
@@ -141,7 +191,10 @@ impl WorkspaceWatch {
             let catalog = service.catalog().map_err(crate::ipc::IpcError::internal)?;
             let mut paths = BTreeMap::new();
             for row in catalog.workspaces.values() {
-                if let Some(parent) = row.repo_root.parent() {
+                // A registration can outlive its directories (temp or removed worktrees).
+                // The native backend refuses to watch a missing path, and one refusal fails
+                // the whole inventory snapshot, so only existing parents are watched.
+                if let Some(parent) = row.repo_root.parent().filter(|parent| parent.is_dir()) {
                     paths.entry(parent.to_owned()).or_insert(false);
                 }
                 if row.repo_root.is_dir() {

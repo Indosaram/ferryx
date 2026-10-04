@@ -455,11 +455,36 @@ impl RelayState {
 
     /// Cache a token just issued or revalidated by this machine's gateway.
     pub fn set_account_state(&self, account: Arc<crate::account::service::AccountState>) {
-        *self.inner.account_state.lock() = Some(account);
+        let previous = {
+            let mut guard = self.inner.account_state.lock();
+            let prev = guard.take();
+            *guard = Some(account.clone());
+            prev
+        };
+        if let Some(prev) = previous {
+            if !Arc::ptr_eq(&prev, &account) {
+                prev.set_liveness_probe(None);
+            }
+        }
+        let weak_inner = Arc::downgrade(&self.inner);
+        account.set_liveness_probe(Some(Arc::new(move |machine_id: &str| {
+            let Some(inner) = weak_inner.upgrade() else {
+                return false;
+            };
+            let online = inner
+                .control_channels
+                .lock()
+                .get(machine_id)
+                .is_some_and(|ch| !ch.tx.is_closed());
+            online
+        })));
     }
 
     pub fn clear_account_state(&self) {
-        *self.inner.account_state.lock() = None;
+        let previous = self.inner.account_state.lock().take();
+        if let Some(prev) = previous {
+            prev.set_liveness_probe(None);
+        }
     }
 
     #[cfg(test)]
