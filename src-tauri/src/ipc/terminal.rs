@@ -1931,7 +1931,7 @@ mod qa_split_producers {
         u64::try_from(seconds * 1_000 + millis).ok()
     }
 
-    fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+    fn operation_state<Epoch>(state: &SplitOperationResult<Epoch>) -> &'static str {
         match state {
             SplitOperationResult::Absent { .. } => "absent",
             SplitOperationResult::Pending { .. } => "pending",

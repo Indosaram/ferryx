@@ -1197,7 +1197,7 @@ pub(crate) async fn hold_backend_write_barrier(
 /// without one (the headless lane) the settlement is written exactly as before
 /// and `daemonFacts` is `null`.
 pub(crate) fn settle_backend_write_barrier(
-    channel: &QaBarrierChannel,
+    channel: &Arc<QaBarrierChannel>,
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
     operation_id: Option<&str>,
@@ -2005,7 +2005,7 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string());
+        let channel = Arc::new(QaBarrierChannel::new(dir.clone(), TEST_RUN_ID.to_string()));
         channel.scan_and_ack_arms();
         let state = NativeTerminalSurfaceHostState::default();
 

@@ -369,7 +369,7 @@ pub fn describe_incarnation(
     server: &super::server::DaemonServer,
     session_id: &str,
 ) -> Option<String> {
-    match server.session_service().handle_describe_session(session_id) {
+    match server.session_service.handle_describe_session(session_id) {
         crate::daemon::protocol::DaemonResponse::DescribeSessionOk { session } => {
             session.incarnation
         }
@@ -455,7 +455,7 @@ async fn hold_unrelated_remote_rpc(
         .cloned()
         .ok_or_else(|| "no live session can carry the unrelated remote RPC".to_string())?;
     let (workspace_id, incarnation) = {
-        let metadata = server.session_service().session_metadata.read();
+        let metadata = server.session_service.session_metadata.read();
         match metadata.get(&session_id) {
             Some(meta) => (
                 meta.workspace_id.clone(),
@@ -616,7 +616,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn channel(dir: &Path) -> QaBarrierChannel {
+    fn test_channel(dir: &Path) -> QaBarrierChannel {
         let channel = QaBarrierChannel::new(dir.to_path_buf(), TEST_RUN_ID.to_string());
         channel.scan_and_ack_arms();
         channel
@@ -639,7 +639,7 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
+        let channel = test_channel(&dir);
         let legacy = dir.join("legacy-4242-1700000000000.sock");
         let records = vec![
             record("session-b", "inc-b", true, false),
@@ -678,8 +678,8 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
-        let legacy = dir.path().join("legacy-7-1.sock");
+        let channel = test_channel(&dir);
+        let legacy = dir.join("legacy-7-1.sock");
         let records = vec![record("session-a", "inc-a", false, false)];
         assert!(emit_handover_transfer(
             &channel,
@@ -704,8 +704,8 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
-        let legacy = dir.path().join("legacy-99-5.sock");
+        let channel = test_channel(&dir);
+        let legacy = dir.join("legacy-99-5.sock");
         let records = vec![record("session-a", "inc-a", false, true)];
         assert!(emit_rollback_relinquishment(
             &channel,
@@ -734,8 +734,8 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
-        let legacy = dir.path().join("legacy-1-1.sock");
+        let channel = test_channel(&dir);
+        let legacy = dir.join("legacy-1-1.sock");
         let records = vec![
             record("session-a", "inc-a", false, true),
             record("session-b", "inc-b", true, false),
@@ -761,14 +761,14 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, WRITE_BARRIER, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
+        let channel = test_channel(&dir);
 
         let mut untouched = std::process::Command::new("/bin/true");
         inject_handover_fault(Some(&channel), &mut untouched);
         assert!(untouched.get_envs().next().is_none());
 
         arm(&dir, ABORT_ARM, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
+        let channel = test_channel(&dir);
         let mut injected = std::process::Command::new("/bin/true");
         inject_handover_fault(Some(&channel), &mut injected);
         let mut value = None;
@@ -802,7 +802,7 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, HELD_RPC, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
+        let channel = test_channel(&dir);
         std::fs::write(
             dir.join(format!("{TRIGGER_REMOTE_RPC}.request.json")),
             serde_json::to_vec(&json!({
@@ -835,7 +835,7 @@ mod tests {
         let dir = root.path().join("barriers");
         std::fs::create_dir_all(&dir).unwrap();
         arm(&dir, HELD_RPC, TEST_RUN_ID, TEST_OPERATION_ID);
-        let channel = channel(&dir);
+        let channel = test_channel(&dir);
         let spec = channel.spec(HELD_RPC).unwrap();
         assert!(!release_present(&dir, &spec));
         std::fs::write(

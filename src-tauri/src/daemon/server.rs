@@ -2920,7 +2920,7 @@ impl DaemonServer {
                                     expected.incarnation.clone(),
                                 );
                             record.adopted_incarnation =
-                                crate::daemon::qa_producers::describe_incarnation(self, &session_id);
+                                crate::daemon::qa_producers::describe_incarnation(self.as_ref(), &session_id);
                             record.adopted_readers_installed = 1;
                             record.adopted_reader_live =
                                 crate::daemon::qa_producers::adopted_reader_live(
