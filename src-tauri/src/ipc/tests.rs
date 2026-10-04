@@ -306,11 +306,13 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
     // daemon reported for it, and the epoch the spawn answered with.
     let attach_tuple = crate::daemon::protocol::PaneAttachTuple {
         backend_session_id: spawned.session_id.clone(),
-        incarnation: spawned
-            .session
-            .incarnation
-            .clone()
-            .expect("spawn response reports the session's PTY incarnation"),
+        incarnation: Some(
+            spawned
+                .session
+                .incarnation
+                .clone()
+                .expect("spawn response reports the session's PTY incarnation"),
+        ),
         daemon_epoch: spawned.daemon_epoch.clone(),
         // The fixture binds no frontend pane, so these three carry fixture-local identity.
         frontend_session_id: "attach-history-frontend".into(),
