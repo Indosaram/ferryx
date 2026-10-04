@@ -289,9 +289,20 @@ export const BUDGETS = Object.freeze({
   //     outlasts the ~73s burst that was measured. If 180s of retries inside one
   //     burst still cannot get through, that is the measurement that decides
   //     whether anything heavier is justified - the condition lifts on its own.
-  interactiveRelaunchSequenceMs: 180_000,
+  // Pass-19 measured exactly that: 15 attempts stalled back-to-back for ~153s
+  // and the burst was STILL GOING when the 180s sequence ran out (pass 18 saw
+  // ~73s), so 180s does not get through on this host at this time. The lever
+  // that costs only wall-clock is a longer sequence, so the budget is raised to
+  // 15 minutes (10s x 90) - still bounded, still fail-closed, still retried only
+  // for a stall (a deterministic failure returns on the FIRST attempt). The
+  // condition demonstrably lifts on its own (pass 18: 8 stalls then 4 clean
+  // successes at ~0.5s; pass-17 r1 completed the whole chain), so waiting it out
+  // is cheaper than anything heavier. Re-measure this number if a burst ever
+  // exceeds the sequence: a run that exhausts 15 minutes is the evidence that
+  // the host state itself needs resetting rather than retried.
+  interactiveRelaunchSequenceMs: 900_000,
   interactiveRelaunchEntryMarkerMs: 10_000,
-  interactiveRelaunchAttempts: 18,
+  interactiveRelaunchAttempts: 90,
   // Pass-6 cleanup defect (E/task-9/REPORT-PASS6.md §5): the app's own
   // `--daemon` descendant outlived `taskkill /T` (no `/F`), which kept the
   // isolation root held AND kept the stdio pipe it inherited open, so the
