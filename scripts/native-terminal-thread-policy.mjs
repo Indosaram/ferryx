@@ -8,10 +8,32 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RULE_FILE = join(REPO_ROOT, "scripts/native-terminal-thread-policy.rules.yml");
 const DEFAULT_TARGETS = [join(REPO_ROOT, "src-tauri/src")];
 
+// @ast-grep/cli is a pinned devDependency, so the checked-in binary must be preferred over a
+// system install: CI runners install the devDependency with `bun install` and have no ast-grep
+// on PATH. Falling back to PATH keeps Homebrew/system installs working on developer machines.
+function localAstGrepCandidates() {
+  const binDir = join(REPO_ROOT, "node_modules", ".bin");
+  return process.platform === "win32"
+    ? [join(binDir, "ast-grep.cmd"), join(binDir, "ast-grep.exe")]
+    : [join(binDir, "ast-grep"), join(binDir, "sg")];
+}
+
+function probeBinary(candidate) {
+  try {
+    return Bun.spawnSync([candidate, "--version"], { stdout: "pipe", stderr: "pipe" }).success;
+  } catch {
+    // Bun.spawnSync throws when the executable cannot be found at all; a candidate that cannot
+    // run must not abort the search for one that can.
+    return false;
+  }
+}
+
 function resolveAstGrepBinary() {
+  for (const candidate of localAstGrepCandidates()) {
+    if (existsSync(candidate) && probeBinary(candidate)) return candidate;
+  }
   for (const candidate of ["sg", "ast-grep"]) {
-    const probe = Bun.spawnSync([candidate, "--version"], { stdout: "pipe", stderr: "pipe" });
-    if (probe.success) return candidate;
+    if (probeBinary(candidate)) return candidate;
   }
   return null;
 }
@@ -22,7 +44,9 @@ export async function scanThreadPolicy(targets = DEFAULT_TARGETS) {
   }
   const binary = resolveAstGrepBinary();
   if (!binary) {
-    throw new Error("ast-grep is required for the native terminal thread policy (brew install ast-grep)");
+    throw new Error(
+      "ast-grep is required for the native terminal thread policy (bun install for the pinned @ast-grep/cli devDependency, or brew install ast-grep)",
+    );
   }
   const present = targets.filter((target) => existsSync(target));
   if (present.length === 0) {

@@ -112,14 +112,19 @@ fn disk_scan_merges_dirty_locked_prunable_and_detached_metadata() {
             .create_worktree(super::CreateWorktreeOptions::new("ws", slug, path))
             .unwrap();
     }
+    // Fixture temp paths are verbatim (`\\?\C:\...`) on Windows and git rejects them as
+    // arguments ("could not create leading directories of '//?/C:/...'"). Production callers
+    // normalize through this helper before handing a path to git, so the fixture does too.
+    let locked_arg = git::normalize_path_for_git(&locked);
     git::run_git(
         manager.repo_root(),
-        &["worktree", "lock", locked.to_str().unwrap()],
+        &["worktree", "lock", locked_arg.to_str().unwrap()],
     )
     .unwrap();
+    let detached_arg = git::normalize_path_for_git(&detached);
     git::run_git(
         manager.repo_root(),
-        &["worktree", "add", "--detach", detached.to_str().unwrap()],
+        &["worktree", "add", "--detach", detached_arg.to_str().unwrap()],
     )
     .unwrap();
     fs::write(locked.join("scratch"), b"dirty").unwrap();
