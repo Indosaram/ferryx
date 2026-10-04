@@ -27,6 +27,7 @@ import {
   performInspectionHandshake,
 } from '../lib/qa-scenarios/native-driver.mjs';
 import {
+  assertConflictWaveReported,
   runSplitHappyScenario,
   runSplitAttachStallScenario,
   runSplitCancelScenario,
@@ -2575,6 +2576,43 @@ test('split scenarios declare the pre-trigger pane step; scenarios that never sp
   for (const scenario of ['diagnostic-classifier', 'retained-handover', 'handover-abort', 'suspension-ownership', 'stale-binding']) {
     expect([scenario, Boolean(SCENARIO_PLANS[scenario].pane)]).toEqual([scenario, false]);
   }
+});
+
+// H-18: the conflicting-fingerprint rejection. The `split-concurrent` batch drives
+// duplicate/fingerprint-conflict pairs against the real daemon, and the daemon's own
+// pre-check (`daemon/session_service.rs::create_split`) rejects a reused request
+// identity carrying different parameters with the typed `SPAWN_REQUEST_CONFLICT`.
+// This binds the scenario's PASS to that rejection really being reported, and each
+// mutation below proves the assertion can fail.
+test('split-concurrent binds PASS to the conflict wave really rejecting the reused fingerprint', () => {
+  const settled = {
+    stage: 'split-concurrent-batch',
+    conflictRequests: 2,
+    conflictRejected: 2,
+    conflictRejectionCodes: ['SpawnRequestConflict'],
+    conflictDistinctSessionIds: [],
+  };
+  expect(assertConflictWaveReported(settled)).toBe(true);
+
+  // Mutation 1: a batch that produced no rejection cannot pass, even though every
+  // other field is healthy.
+  expect(() => assertConflictWaveReported({ ...settled, conflictRejected: 0, conflictRejectionCodes: [] }))
+    .toThrowError(/ASSERTION_FAILURE/);
+
+  // Mutation 2: a rejection under another code is not this rejection.
+  expect(() => assertConflictWaveReported({ ...settled, conflictRejectionCodes: ['InternalError'] }))
+    .toThrowError(/SPAWN_REQUEST_CONFLICT/);
+
+  // Mutation 3: a batch that never settled (e.g. admission failure) is not a pass.
+  expect(() => assertConflictWaveReported({
+    stage: 'split-concurrent-batch',
+    conflictRejected: 0,
+    conflictRejectionCodes: [],
+    unsettledReason: 'batch admission failed',
+  })).toThrowError(/ASSERTION_FAILURE/);
+
+  // Mutation 4: a missing settlement is not a pass.
+  expect(() => assertConflictWaveReported(undefined)).toThrowError(/ASSERTION_FAILURE/);
 });
 
 test('split-happy binds its presentation and marker receipts to the SPLIT pane, not to the app pane that settled first', async () => {

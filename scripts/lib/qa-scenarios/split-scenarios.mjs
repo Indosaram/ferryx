@@ -29,6 +29,24 @@ export function assertSinglePty(receipt, label = 'pty-check') {
   return true;
 }
 
+// The `split-concurrent` conflict wave's reporting contract. The batch drives
+// duplicate/fingerprint-conflict pairs against the real daemon, and the daemon's
+// own pre-check (`daemon/session_service.rs::create_split`, typed
+// `SPAWN_REQUEST_CONFLICT`) rejects a reused request identity carrying different
+// parameters. A scenario PASS is bound to that rejection really being reported by
+// the batch settlement, never to the batch merely having been requested.
+export function assertConflictWaveReported(batch, label = 'split-concurrent-batch') {
+  const rejected = batch?.conflictRejected;
+  if (typeof rejected !== 'number' || rejected < 1) {
+    throw new HarnessError('ASSERTION_FAILURE', `${label}: the conflicting-fingerprint request was not rejected (conflictRejected=${JSON.stringify(rejected)}): ${JSON.stringify(batch)}`);
+  }
+  const codes = Array.isArray(batch?.conflictRejectionCodes) ? batch.conflictRejectionCodes : [];
+  if (!codes.includes('SpawnRequestConflict')) {
+    throw new HarnessError('ASSERTION_FAILURE', `${label}: rejection codes lack SPAWN_REQUEST_CONFLICT (${JSON.stringify(codes)}): ${JSON.stringify(batch)}`);
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // 1. split-happy scenario adapter
 // ---------------------------------------------------------------------------
@@ -327,6 +345,21 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   barrierHub.release('held-rpc');
   evidence.action({ action: 'held-rpc.released' });
   await barrierHub.awaitReceipt('held-rpc', 0, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'held-rpc settlement'));
+
+  // 7b. The conflict wave's own settlement. Deliberately NOT taken from the
+  // scenario's attempt budget: the 16-request batch is not part of the measured
+  // split attempt, so a slow-but-correct batch must not spend the attempt
+  // ceiling. The wait is still bounded, and a batch that never settles fails.
+  const batch = await barrierHub.awaitReceipt(
+    'split-concurrent-batch', 0, BUDGETS.stagePrepareCreateStatusMs,
+  );
+  assertConflictWaveReported(batch);
+  evidence.action({
+    action: 'split-concurrent-batch-settlement',
+    conflictRejected: batch.conflictRejected,
+    conflictRejectionCodes: batch.conflictRejectionCodes,
+    conflictDistinctSessionIds: batch.conflictDistinctSessionIds,
+  });
 
   // 8. Screenshot and inspection handshake
   const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
