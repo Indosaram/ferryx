@@ -401,10 +401,21 @@ export async function main(argv) {
     // always emitted, including on deliberate assertion failures.
     const receipts = await registry.cleanup();
     const gate = computeCleanupGate(registry, receipts);
+    // Pass-6: when an isolation root is still held after the forced reap of this
+    // run's own tree, the holder (pid + identity evidence) travels with the
+    // verdict instead of being dropped; the gate itself stays false - a held
+    // root is never reported as a clean teardown.
+    const holders = receipts.flatMap(receipt => (receipt.holders ?? []).map(holder => ({ path: receipt.path, ...holder })));
     // Review blocker 10: cleanup failures can never ride along a PASS/exit-0.
+    // Exit-code decision (deliberate, not incidental): a cleanup failure forces
+    // verdict FAIL and EXIT.scenarioFailure even when the scenario settled on a
+    // typed code. That is the runner's own documented contract ("the cleanup
+    // gate can still force FAIL"), and the typed identity is not lost - it stays
+    // in result.error.code and in the cleanup receipts - so no new mapping is
+    // invented here.
     if (!gate.ok) {
       result.verdict = 'FAIL';
-      result.cleanupGate = { ...gate, gateFailed: true };
+      result.cleanupGate = { ...gate, gateFailed: true, ...(holders.length > 0 ? { holders } : {}) };
       exitCode = EXIT.scenarioFailure;
     } else {
       result.cleanupGate = { ...gate, gateFailed: false };
@@ -412,7 +423,7 @@ export async function main(argv) {
     result.barriers = barrierHub.snapshot();
     evidence.write('cleanup.json', {
       registered: {
-        processes: registry.processes.map(p => ({ pid: p.pid, label: p.label })),
+        processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
         sockets: registry.sockets,
         directories: registry.directories,
       },

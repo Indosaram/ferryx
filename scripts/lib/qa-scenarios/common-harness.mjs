@@ -21,7 +21,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   accessSync, constants, existsSync, mkdirSync, rmSync, statSync,
-  watch, writeFileSync, realpathSync, lstatSync, renameSync, readFileSync,
+  watch, writeFileSync, realpathSync, lstatSync, renameSync, readFileSync, readlinkSync,
 } from 'node:fs';
 import { homedir, platform, release, arch } from 'node:os';
 import { isAbsolute, join, resolve, dirname, parse } from 'node:path';
@@ -273,6 +273,17 @@ export const BUDGETS = Object.freeze({
   ownedWindowReadyMs: 8_000,
   splitFocusWaitMs: 4_000,
   interactiveRelaunchTimeoutMs: 180_000,
+  // Pass-6 cleanup defect (E/task-9/REPORT-PASS6.md §5): the app's own
+  // `--daemon` descendant outlived `taskkill /T` (no `/F`), which kept the
+  // isolation root held AND kept the stdio pipe it inherited open, so the
+  // runner's node process never exited after printing its result. Teardown now
+  // escalates to a forced tree/group kill, then retries the root removal inside
+  // these bounds, then reports the holder when the root is still held.
+  cleanupGraceMs: 400,
+  cleanupRootRetryMs: 6_000,
+  cleanupRootRetryIntervalMs: 250,
+  cleanupRootRetryAttempts: 8,
+  cleanupHolderProbeMs: 8_000,
 });
 
 // Exit codes: 0 is reserved for a truthful native PASS (or a completed,
@@ -429,18 +440,274 @@ function sha256File(path) {
 }
 
 // ---------------------------------------------------------------------------
+// Owned-process identity, bounded process-table read and forced reap.
+//
+// The pass-6 cleanup defect (E/task-9/REPORT-PASS6.md §5) has ONE cause and two
+// symptoms: the app's own `--daemon` descendant outlives `taskkill /T` (no
+// `/F`), so (a) the isolation root stays held (`directoriesRemoved: false`,
+// `cleanupGate.ok: false`) and (b) the stdio pipe that descendant inherited
+// stays open, so the runner's node process never exits after printing its
+// result. Killing that descendant by exact PID makes the root removable
+// (`ISO_REMOVED_AFTER_KILL=True`, measured before any kill).
+//
+// Everything here is exact-PID scoped and identity-verified, never a name or
+// command-line pattern (the verifier's own pass-6 `CommandLine -like
+// '*pane-liveness.mjs*'` cleanup matched every runner on the host - that is the
+// anti-pattern):
+//   * the signalled set is the PIDs THIS runner spawned through its own child
+//     handles, plus their process trees/groups;
+//   * a descendant discovered through the process table is signalled only when
+//     its identity is positively verified (its executable is the binary this
+//     run launched, or it lives inside this run's own isolation root);
+//   * a descendant whose identity is positively NOT ours is reported and never
+//     signalled.
+
+export function normalizeProcessPath(value, platform = process.platform) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const slashed = value.replace(/\\/g, '/').replace(/\/+$/, '');
+  return platform === 'win32' ? slashed.toLowerCase() : slashed;
+}
+
+function isAbsoluteProcessPath(value) {
+  return typeof value === 'string' && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value));
+}
+
+export function isPathInside(childPath, parentPath, platform = process.platform) {
+  const child = normalizeProcessPath(childPath, platform);
+  const parent = normalizeProcessPath(parentPath, platform);
+  if (!child || !parent) return false;
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+// Identity verdict for one process-table row: `true` is positive proof that the
+// row belongs to this run, `false` is positive proof that it does not (such a
+// row is never signalled), `null` means this platform exposed no executable
+// path and the caller must fall back to handle/descendant scoping.
+export function verifyProcessIdentity(row, { executable = null, roots = [], platform = process.platform } = {}) {
+  const observed = normalizeProcessPath(row?.executable, platform);
+  if (!observed) return { verified: null, reason: 'executable path is not observable on this platform' };
+  const wanted = isAbsoluteProcessPath(executable) ? normalizeProcessPath(executable, platform) : null;
+  if (wanted && observed === wanted) return { verified: true, reason: 'executable is the binary this run launched' };
+  const ownedRoots = roots.filter(root => isAbsoluteProcessPath(root));
+  if (ownedRoots.some(root => isPathInside(observed, root, platform))) {
+    return { verified: true, reason: "executable lives inside this run's own isolation root" };
+  }
+  if (!wanted && ownedRoots.length === 0) {
+    return { verified: null, reason: 'no owned executable or isolation root was recorded to compare against' };
+  }
+  return { verified: false, reason: `executable ${observed} is neither the launched binary nor inside this run's isolation root` };
+}
+
+// Breadth-first walk of ONE process-table read, starting from the exact PIDs
+// this run spawned. Parent links are the scoping proof: a foreign runner's tree
+// is rooted at a different PID and can never appear here.
+export function descendantsOf(rows, rootPids) {
+  const byParent = new Map();
+  for (const row of rows ?? []) {
+    if (!row || row.pid === null || row.pid === undefined) continue;
+    const key = String(row.ppid);
+    byParent.set(key, [...(byParent.get(key) ?? []), row]);
+  }
+  const seen = new Set((rootPids ?? []).map(String));
+  const queue = [...seen];
+  const descendants = [];
+  while (queue.length > 0) {
+    for (const row of byParent.get(queue.shift()) ?? []) {
+      const key = String(row.pid);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      descendants.push(row);
+      queue.push(key);
+    }
+  }
+  return descendants;
+}
+
+export function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// Windows process table: exact fields from CIM in one bounded read, with no
+// name or command-line matching anywhere. Newline-joined statements (the
+// pass-5 here-string rule).
+export function buildProcessTableScript() {
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue';",
+    '$rows = @();',
+    'try { $rows = @(Get-CimInstance Win32_Process | ForEach-Object { [ordered]@{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; executable = [string]$_.ExecutablePath } }) } catch { $rows = @() };',
+    'Write-Output (ConvertTo-Json -InputObject @($rows) -Compress -Depth 4);',
+  ].join('\n');
+}
+
+// PowerShell 5.1 unwraps single-element arrays and prints nothing for an empty
+// one; normalize at this system boundary instead of trusting the shape.
+export function parseProcessTableJson(stdout) {
+  const lines = String(stdout ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let parsed;
+    try { parsed = JSON.parse(lines[index]); } catch { continue; }
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .filter(row => row && Number.isFinite(Number(row.pid)))
+      .map(row => ({ pid: Number(row.pid), ppid: Number(row.ppid), executable: row.executable || null }));
+  }
+  return [];
+}
+
+// POSIX process table (`ps -Ao pid=,ppid=,command=`): argv[0] counts as an
+// executable only when it is absolute; on Linux the caller replaces it with the
+// kernel's own /proc/<pid>/exe, which is authoritative.
+export function parsePosixProcessTable(stdout) {
+  const rows = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const argv0 = match[3].trim().split(/\s+/)[0] ?? '';
+    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), executable: isAbsoluteProcessPath(argv0) ? argv0 : null });
+  }
+  return rows;
+}
+
+async function probeOutput(file, args, timeoutMs) {
+  const child = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // A probe that cannot even be spawned (ENOENT) or that dies must resolve as
+  // "no data": an unhandled ChildProcess 'error' event would otherwise crash the
+  // runner's teardown instead of degrading the identity evidence.
+  const unavailable = new Promise(resolvePromise => { child.once('error', () => resolvePromise({ stdout: '' })); });
+  const outcome = await withDeadline(Promise.race([collectOutput(child), unavailable]), timeoutMs, `process-table probe (${file})`);
+  if (outcome.timedOut || outcome.error) {
+    try { child.kill('SIGKILL'); } catch { /* the deadline verdict is already decided */ }
+    return { timedOut: true, stdout: '' };
+  }
+  return { timedOut: false, stdout: outcome.value?.stdout ?? '' };
+}
+
+// One bounded process-table read. An unanswerable probe returns []: that
+// degrades identity evidence, it never turns a cleanup failure into a pass.
+export async function defaultProcessSnapshot({ timeoutMs = BUDGETS.cleanupHolderProbeMs, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    const probe = await probeOutput('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', buildProcessTableScript()], timeoutMs);
+    return probe.timedOut ? [] : parseProcessTableJson(probe.stdout);
+  }
+  const probe = await probeOutput('ps', ['-Ao', 'pid=,ppid=,command='], timeoutMs);
+  if (probe.timedOut) return [];
+  const rows = parsePosixProcessTable(probe.stdout);
+  if (existsSync('/proc/self/exe')) {
+    for (const row of rows) {
+      try { row.executable = readlinkSync(`/proc/${row.pid}/exe`); } catch { /* keep argv[0] */ }
+    }
+  }
+  return rows;
+}
+
+function defaultRunKill(file, args) {
+  try {
+    const child = spawn(file, args, { stdio: 'ignore' });
+    // A kill helper that cannot be spawned must not raise an unhandled 'error'
+    // event: the target's own 'exit' event decides the receipt either way.
+    child.on('error', () => { /* the exit event decides */ });
+  } catch { /* the exit event decides */ }
+}
+
+function defaultSignalProcess(pid, signal) { return process.kill(pid, signal); }
+
+function defaultSleep(ms) { return new Promise(resolvePromise => setTimeout(resolvePromise, ms)); }
+
+// Bounded wait for one child's own 'exit' event. The timer is cleared the moment
+// the event lands, so a fast exit never leaves a pending handle behind.
+function awaitExitWithin(child, send, timeoutMs) {
+  return new Promise(resolvePromise => {
+    let settled = false;
+    const finish = value => { if (settled) return; settled = true; clearTimeout(timer); resolvePromise(value); };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', () => finish(true));
+    // A child that exited between the caller's check and this listener never
+    // emits again: report the recorded state instead of burning the deadline.
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+    else { try { send(); } catch { /* the exit event decides */ } }
+  });
+}
+
+function sendGracefulKill({ platform, pid, child, runKill, signalProcess }) {
+  if (platform === 'win32') { runKill('taskkill', ['/T', '/PID', String(pid)]); return; }
+  try { signalProcess(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* exit event decides */ } }
+}
+
+function sendForcedKill({ platform, pid, child, runKill, signalProcess }) {
+  if (platform === 'win32') { runKill('taskkill', ['/T', '/F', '/PID', String(pid)]); return; }
+  try { signalProcess(-pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* exit event decides */ } }
+}
+
+function forceKillExactPid(pid, { platform, runKill, signalProcess }) {
+  if (platform === 'win32') { runKill('taskkill', ['/F', '/PID', String(pid)]); return; }
+  try { signalProcess(pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
+// Bounded retry of a removal that can fail while a force-reaped descendant is
+// still releasing its handles (Windows) or its cwd (POSIX). Bounded by attempts
+// AND a deadline; `removed` is always re-derived from the filesystem, so a held
+// root can never be reported as removed.
+export async function removePathWithRetry(target, {
+  attempts = BUDGETS.cleanupRootRetryAttempts,
+  intervalMs = BUDGETS.cleanupRootRetryIntervalMs,
+  deadlineMs = BUDGETS.cleanupRootRetryMs,
+  remove = path => rmSync(path, { recursive: true, force: true }),
+  exists = path => existsSync(path),
+  sleep = defaultSleep,
+  now = () => Date.now(),
+} = {}) {
+  const startedAt = now();
+  let used = 0;
+  let removed = false;
+  while (used < attempts) {
+    used += 1;
+    try { remove(target); } catch { /* a held handle is reported below, never swallowed */ }
+    if (!exists(target)) { removed = true; break; }
+    if (used >= attempts) break;
+    if (now() - startedAt + intervalMs > deadlineMs) break;
+    await sleep(intervalMs);
+  }
+  return { removed, attempts: used };
+}
+
+// Who still holds an isolation root? Reported, never killed. Candidates are
+// limited to this run's own spawned PIDs and their descendants, each carrying
+// its identity verdict, so the runner can name the holder (pass-6: the app's own
+// `--daemon` descendant) without a host-wide name search.
+export async function findIsolationRootHolders(root, {
+  ownedPids = [], executable = null, roots = [], snapshot = defaultProcessSnapshot,
+  alive = isProcessAlive, platform = process.platform,
+} = {}) {
+  const rows = await snapshot({ timeoutMs: BUDGETS.cleanupHolderProbeMs });
+  const holders = [];
+  for (const pid of ownedPids) {
+    if (!alive(pid)) continue;
+    holders.push({ pid, ppid: null, executable: executable ?? null, identityVerified: true, identity: 'runner-spawned-child', holderOf: root });
+  }
+  for (const row of descendantsOf(rows, ownedPids)) {
+    if (!alive(row.pid)) continue;
+    const verdict = verifyProcessIdentity(row, { executable, roots: [root, ...roots], platform });
+    holders.push({ pid: row.pid, ppid: row.ppid ?? null, executable: row.executable ?? null, identityVerified: verdict.verified, identity: verdict.reason, holderOf: root });
+  }
+  return holders;
+}
+
+// ---------------------------------------------------------------------------
 // Resource registry + bounded event-driven cleanup.
 
 export class ResourceRegistry {
-  constructor() {
-    this.processes = []; // { pid, label, child }
+  constructor(deps = {}) {
+    this.processes = []; // { pid, label, child, executable }
     this.sockets = [];
     this.directories = [];
     this.reaped = [];
+    // Injectable only so the runner unit suite can replay teardown decisions
+    // deterministically; production always uses the bounded real helpers.
+    this.deps = { ...deps };
   }
 
-  registerProcess(child, label) {
-    this.processes.push({ pid: child.pid, label, child });
+  registerProcess(child, label, { executable = null } = {}) {
+    this.processes.push({ pid: child.pid, label, child, executable });
     return child;
   }
 
@@ -448,14 +715,34 @@ export class ResourceRegistry {
 
   registerDirectory(path) { this.directories.push(path); }
 
-  // SIGTERM each recorded PID (TerminateProcess on win32) and verify exit via
-  // the child 'exit' event with a bounded deadline. Broad kills are forbidden.
-  // Directories registered here are removed only after the caller has
-  // persisted evidence (runner writes cleanup.json from the evidence runDir).
+  // Graceful signal first, then a FORCED kill of this run's own tree/group when
+  // the child does not exit, then verification from the child's 'exit' event
+  // within a bounded deadline. Broad kills (pkill/killall/name patterns) are
+  // forbidden. Directories registered here are removed only after the caller has
+  // persisted evidence (the runner writes cleanup.json from the evidence
+  // runDir), and their removal is retried within a bounded budget so a
+  // force-reaped descendant can release the handles it still holds.
   async cleanup() {
     const receipts = [];
+    const deps = this.deps;
+    const snapshot = deps.snapshot ?? defaultProcessSnapshot;
+    // ONE process-table read per teardown, taken BEFORE any signal: it captures
+    // the descendant set (a graceful app exit can orphan its own `--daemon`
+    // child, and a daemon that left the process group escapes a group kill) and
+    // the identity evidence that decides whether a discovered PID may be
+    // signalled at all.
+    // The read is only needed when this run actually spawned something: with no
+    // owned PID there is no tree to walk and nothing to name. A held root still
+    // gets its holder probe in the failure path below.
+    const rows = this.processes.length > 0 ? await snapshot({ timeoutMs: BUDGETS.cleanupHolderProbeMs }) : [];
+    const ownedPids = this.processes.map(entry => entry.pid);
+    const roots = [...this.directories];
+    const executable = this.processes.find(entry => entry.executable)?.executable ?? null;
     for (const entry of this.processes) {
-      const receipt = await reapProcess(entry);
+      const receipt = await reapProcess(entry, {
+        rows, roots, snapshot, platform: deps.platform, graceMs: deps.graceMs, forceMs: deps.forceMs,
+        runKill: deps.runKill, signalProcess: deps.signalProcess, alive: deps.alive,
+      });
       receipts.push(receipt);
       if (receipt.exited) this.reaped.push(entry.pid);
     }
@@ -465,35 +752,84 @@ export class ResourceRegistry {
       receipts.push({ kind: 'socket', path: socketPath, removed });
     }
     for (const dir of this.directories) {
-      let removed = false;
-      try { rmSync(dir, { recursive: true, force: true }); removed = !existsSync(dir); } catch { removed = false; }
-      receipts.push({ kind: 'directory', path: dir, removed });
+      const removal = await removePathWithRetry(dir, {
+        remove: deps.remove, exists: deps.exists, sleep: deps.sleep, now: deps.now,
+        attempts: deps.attempts, intervalMs: deps.intervalMs, deadlineMs: deps.deadlineMs,
+      });
+      const receipt = { kind: 'directory', path: dir, removed: removal.removed, attempts: removal.attempts };
+      if (!removal.removed) {
+        // Still held: name the holder (pid + identity) instead of claiming a
+        // clean teardown. Nothing reported here is ever signalled.
+        receipt.holders = await findIsolationRootHolders(dir, {
+          ownedPids, executable, roots, snapshot, alive: deps.alive,
+        });
+      }
+      receipts.push(receipt);
     }
     return receipts;
   }
 }
 
-export async function reapProcess({ pid, label, child }) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
-    return { kind: 'process', pid, label, exited: true, alreadyTerminated: true, code: child?.exitCode ?? null, signal: child?.signalCode ?? null };
-  }
-  // Review M1: descendants are covered by terminating the task-owned process
-  // GROUP (posix: detached spawn + kill(-pid); win32: taskkill /T on the
-  // exact PID). Broad pkill/killall remain forbidden.
-  const exited = await new Promise(resolvePromise => {
-    const timer = setTimeout(() => resolvePromise(false), BUDGETS.cleanupVerifyTimeoutMs);
-    child.once('exit', () => { clearTimeout(timer); resolvePromise(true); });
-    if (process.platform === 'win32') {
-      try { spawn('taskkill', ['/T', '/PID', String(pid)], { stdio: 'ignore' }); } catch { /* exit event decides */ }
-      try { child.kill(); } catch { /* already gone */ }
-    } else {
-      try { process.kill(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* exit event decides */ } }
-    }
+// Force-reap ONE process this run spawned, together with its own tree. The
+// escalation is bounded at every step and the receipt always re-states what was
+// observed, so a surviving child can never be reported as reaped.
+export async function reapProcess(entry, options = {}) {
+  const { pid, label, child, executable = null } = entry;
+  const platform = options.platform ?? process.platform;
+  const runKill = options.runKill ?? defaultRunKill;
+  const signalProcess = options.signalProcess ?? defaultSignalProcess;
+  const alive = options.alive ?? isProcessAlive;
+  const graceMs = options.graceMs ?? BUDGETS.cleanupGraceMs;
+  const forceMs = options.forceMs ?? BUDGETS.cleanupVerifyTimeoutMs;
+  const roots = options.roots ?? [];
+  const rows = options.rows ?? await (options.snapshot ?? defaultProcessSnapshot)({ timeoutMs: BUDGETS.cleanupHolderProbeMs });
+
+  // Descendants captured BEFORE any signal, each with its identity verdict.
+  const descendants = descendantsOf(rows, [pid]).map(row => {
+    const verdict = verifyProcessIdentity(row, { executable, roots, platform });
+    return { pid: row.pid, ppid: row.ppid ?? null, executable: row.executable ?? null, identityVerified: verdict.verified, identity: verdict.reason };
   });
+  const selfRow = (rows ?? []).find(row => Number(row?.pid) === Number(pid)) ?? null;
+  const selfIdentity = verifyProcessIdentity(selfRow, { executable, roots, platform });
+
+  const alreadyTerminated = !child || child.exitCode !== null || child.signalCode !== null;
+  let exited = true;
+  let escalated = false;
+  if (!alreadyTerminated) {
+    exited = await awaitExitWithin(child, () => sendGracefulKill({ platform, pid, child, runKill, signalProcess }), graceMs);
+    if (!exited) {
+      escalated = true;
+      exited = await awaitExitWithin(child, () => sendForcedKill({ platform, pid, child, runKill, signalProcess }), forceMs);
+    }
+    if (!exited) {
+      // Last resort only, and only AFTER the tree/group force kill: on Windows
+      // this terminates just this one process, which is exactly how the app's
+      // own `--daemon` descendant (the pass-6 isolation-root holder) survived
+      // the previous version, where it was the first move instead of the last.
+      exited = await awaitExitWithin(child, () => { try { child.kill(); } catch { /* exit event decides */ } }, forceMs);
+    }
+  }
+
+  // Sweep the captured descendants by exact PID. This is what actually closes
+  // the pass-6 leak when the app exits on its own (orphaning its daemon) or the
+  // daemon left the process group: an unverified PID is never signalled.
+  const forceReaped = [];
+  for (const descendant of descendants) {
+    if (descendant.identityVerified === false) continue;
+    if (!alive(descendant.pid)) continue;
+    forceKillExactPid(descendant.pid, { platform, runKill, signalProcess });
+    forceReaped.push(descendant.pid);
+  }
+
   return {
-    kind: 'process', pid, label, exited,
-    code: child.exitCode, signal: child.signalCode,
-    method: process.platform === 'win32' ? 'taskkill /T (process tree)' : 'SIGTERM to task-owned process group',
+    kind: 'process', pid, label, exited, alreadyTerminated, escalated,
+    code: child?.exitCode ?? null, signal: child?.signalCode ?? null,
+    identityVerified: selfIdentity.verified,
+    method: alreadyTerminated ? 'already-terminated (no signal sent)'
+      : platform === 'win32' ? (escalated ? 'taskkill /T /F (forced process tree)' : 'taskkill /T (process tree)')
+      : (escalated ? 'SIGKILL to task-owned process group (escalated from SIGTERM)' : 'SIGTERM to task-owned process group'),
+    ...(descendants.length > 0 ? { descendants } : {}),
+    ...(forceReaped.length > 0 ? { descendantsForceReaped: forceReaped } : {}),
   };
 }
 
@@ -775,7 +1111,7 @@ export function spawnOwned(registry, command, args, options) {
   // the in-tree `taskkill /T` cleanup instead. The child stays registered by
   // exact PID and its exit event is still awaited - no broad kills.
   const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options, detached: process.platform !== 'win32' });
-  registry.registerProcess(child, args.join(' '));
+  registry.registerProcess(child, args.join(' '), { executable: command });
   return child;
 }
 
