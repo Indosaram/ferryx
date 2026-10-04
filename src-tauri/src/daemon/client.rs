@@ -6981,6 +6981,20 @@ mod local_split_transport_tests {
         let peer = async {
             let mut connection = fixture.accept(true).await;
             eof(&mut connection).await;
+            // Create reconciles with the daemon before it writes: the create stage's first
+            // request is a status probe, and only an `absent`/`canCreate` answer lets the
+            // Spawn follow on the next dedicated connection.
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::SpawnOperationStatus { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"absent", "canCreate":true}}),
+            )
+            .await;
+            eof(&mut connection).await;
             let mut connection = fixture.accept(true).await;
             assert!(matches!(
                 read_request(&mut connection).await,
@@ -7031,7 +7045,7 @@ mod local_split_transport_tests {
         drop((general, interactive));
         drop(fixture.listener);
         fixture.root.close().unwrap();
-        eprintln!("LOCAL_SPLIT_TRANSPORT isolated=true sockets_disposed=4 cleanup=true");
+        eprintln!("LOCAL_SPLIT_TRANSPORT isolated=true sockets_disposed=5 cleanup=true");
     }
 
     #[tokio::test]
@@ -7267,6 +7281,18 @@ mod local_split_transport_tests {
             ));
         };
         let peer = async {
+            // The create stage reconciles first: one status probe, then exactly one Spawn write.
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::SpawnOperationStatus { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"absent", "canCreate":true}}),
+            )
+            .await;
+            eof(&mut connection).await;
             let mut connection = fixture.accept(true).await;
             assert!(matches!(
                 read_request(&mut connection).await,

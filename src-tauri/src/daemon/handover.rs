@@ -473,8 +473,21 @@ mod spawn_owner_tests {
         assert_eq!(manager.prepare_handover(&terminals).unwrap_err(), "HANDOVER_BUSY");
         assert_eq!(manager.status(), HandoverStatus::Active);
         drop(owner);
+        // `prepare_handover` allocates the legacy socket inside the daemon runtime directory
+        // (`get_runtime_dir()`), never inside this fixture's canonical socket directory, so the
+        // containment target is that runtime directory rather than `root`.
+        let runtime_dir = get_runtime_dir();
+        fs::create_dir_all(&runtime_dir).expect("daemon runtime directory");
         let (legacy, sessions, listener) = manager.prepare_handover(&terminals).unwrap();
-        assert!(legacy.starts_with(root.path()));
+        assert!(
+            legacy.starts_with(&runtime_dir),
+            "legacy socket {} must live inside the daemon runtime directory {}",
+            legacy.display(),
+            runtime_dir.display()
+        );
+        assert!(legacy
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("legacy-")));
         assert!(sessions.is_empty());
         assert!(manager.retain_spawn_owner().is_err());
         manager.abort_handover().unwrap();
