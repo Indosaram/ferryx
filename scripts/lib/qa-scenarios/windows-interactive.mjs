@@ -330,6 +330,7 @@ export function summarizeDelegationLedger(ledger) {
       exitBudgetMs: attempt.exitBudgetMs ?? null,
       outcome: attempt.outcome,
       exitCode: attempt.exitCode ?? null,
+      exitFileBytes: attempt.exitFileBytes ?? null,
       kill: attempt.teardown?.kill
         ? {
           killed: (attempt.teardown.kill.killed ?? []).map(entry => entry.pid),
@@ -418,21 +419,80 @@ function deferredStop() {
   return { promise, stop: () => resolveFn() };
 }
 
-// Await the delegated run's exit file with the outer budget as the only
-// authority (the underlying watcher has its own shorter internal deadline, so
-// a fresh bounded wait is re-armed while budget remains). Event-driven: no
-// fixed sleep, no polling loop.
-async function awaitExitFile(exitPath, timeoutMs) {
-  const deadlineAt = Date.now() + timeoutMs;
+// The exit file's creation and its payload are TWO events: cmd.exe's
+// `echo %ERRORLEVEL% > file` creates the file and then writes its content, so a
+// watcher armed on the file's APPEARANCE can read it in between and see zero
+// bytes. Pass 20 lost a COMPLETED inner run that way - the run carrying the first
+// native scenario verdict of the effort - reporting `unreadable exit code ""`
+// while the file on disk held `34 20 0D 0A` = "4 \r\n", four parseable bytes.
+// Creation is not content (verifier trap 18).
+//
+// So this wait is for the CONTENT the caller needs: `waitForFile` gets the
+// acceptance predicate below (its watcher stays armed across the create event and
+// resolves on the write), and every armed segment is bounded by
+// `EXIT_FILE_CONTENT_REARM_MS` so a missed filesystem event cannot hold the wait
+// past one short segment. The total budget is the caller's own deadline - no
+// unbounded loop and no fixed sleep decides anything here.
+const EXIT_FILE_CONTENT_REARM_MS = 250;
+// The fallback total budget when the caller passes none (the delegation always
+// passes the attempt's remaining sequence budget explicitly).
+const EXIT_FILE_CONTENT_BUDGET_MS = BUDGETS.interactiveRelaunchSequenceMs;
+// Accepted only when the payload really parses as an exit code: a 0-byte or
+// half-written read is "not yet written", never a verdict about the run.
+const EXIT_FILE_PAYLOAD_ACCEPTED = text => parseRelaunchExitFile(text) !== null;
+
+export async function awaitExitFile(exitPath, timeoutMs = EXIT_FILE_CONTENT_BUDGET_MS) {
+  const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : EXIT_FILE_CONTENT_BUDGET_MS;
+  const deadlineAt = Date.now() + budgetMs;
+  let appeared = false;
+  let lastText = null;
+  let lastWatchError = null;
   while (Date.now() < deadlineAt) {
     const remaining = deadlineAt - Date.now();
     const stopper = deferredStop();
-    const attempt = await withDeadline(waitForFile(exitPath, stopper.promise), remaining, 'interactive-relaunch', { onStop: stopper.stop });
-    if (attempt.timedOut) return { timedOut: true, text: null };
-    if (attempt.error) continue;
-    return { timedOut: false, text: attempt.value };
+    const segmentMs = Math.max(1, Math.min(remaining, EXIT_FILE_CONTENT_REARM_MS));
+    const attempt = await withDeadline(waitForFile(exitPath, stopper.promise, { accept: EXIT_FILE_PAYLOAD_ACCEPTED }), segmentMs, 'interactive-relaunch', { onStop: stopper.stop });
+    if (attempt.timedOut || attempt.error) {
+      if (attempt.error) {
+        // A watcher failure (a vanished path, or this segment's own cancellation)
+        // re-arms while budget remains instead of ending the wait.
+        lastWatchError = String(attempt.error?.message ?? attempt.error);
+      }
+      // Creation is not content, so the wait continues - but the file's
+      // APPEARANCE is recorded here, independently of its payload, so a deadline
+      // that expires on an empty file reports an appeared-but-unwritten exit file
+      // (the caller's UNREADABLE_EXIT, naming the bytes observed) rather than a
+      // missing one.
+      if (readText(exitPath) !== null) appeared = true;
+      continue;
+    }
+    const text = attempt.value;
+    if (typeof text !== 'string') continue;
+    appeared = true;
+    lastText = text;
+    if (EXIT_FILE_PAYLOAD_ACCEPTED(text)) {
+      return { timedOut: false, empty: false, text, bytes: Buffer.byteLength(text, 'utf8'), path: exitPath, budgetMs, watchError: null };
+    }
   }
-  return { timedOut: true, text: null };
+  // One final observation at the deadline: the content the last segment may have
+  // missed, and the appearance that decides which typed failure applies.
+  const finalText = readText(exitPath);
+  if (finalText !== null) {
+    appeared = true;
+    if (lastText === null) lastText = finalText;
+  }
+  // The deadline expired: either the file never appeared (the typed no-exit-file
+  // outcome), or it appeared without ever carrying a parseable payload - reported
+  // with the path, the bytes actually observed and the deadline, never a bare "".
+  return {
+    timedOut: !appeared,
+    empty: appeared,
+    text: lastText,
+    bytes: typeof lastText === 'string' ? Buffer.byteLength(lastText, 'utf8') : 0,
+    path: exitPath,
+    budgetMs,
+    watchError: lastWatchError,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +509,24 @@ async function awaitEntryMarker(markerPath, timeoutMs) {
   const waitedMs = Date.now() - startedAt;
   if (attempt.timedOut) return { appeared: false, waitedMs, text: null, watchError: null };
   if (attempt.error) return { appeared: false, waitedMs, text: null, watchError: String(attempt.error?.message ?? attempt.error) };
-  return { appeared: true, waitedMs, text: String(attempt.value), watchError: null };
+  // The marker's ASSERTION is its appearance - the bat's first line reached its
+  // own redirect, which is exactly what proves the process executed its first
+  // line - so the two-step create-then-write can never turn a started attempt
+  // into a stall verdict here (that would end and kill a run that really
+  // started). The read-once assumption still holds for the recorded TEXT though:
+  // the same race can return "" for a marker whose line was written, so the
+  // content is re-read within one bounded slice instead of being stored empty.
+  const text = String(attempt.value);
+  if (text.trim() !== '') return { appeared: true, waitedMs, text, watchError: null };
+  const enrichStopper = deferredStop();
+  const enriched = await withDeadline(
+    waitForFile(markerPath, enrichStopper.promise, { accept: value => value.trim() !== '' }),
+    EXIT_FILE_CONTENT_REARM_MS,
+    'interactive-relaunch-entry-marker-content',
+    { onStop: enrichStopper.stop },
+  );
+  if (enriched.timedOut || enriched.error) return { appeared: true, waitedMs, text, watchError: null };
+  return { appeared: true, waitedMs, text: String(enriched.value), watchError: null };
 }
 
 // The stalled attempt's own task state, recorded RAW (see plan.queryArgs).
@@ -559,6 +636,8 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
     createCode: null,
     runCode: null,
     exitBudgetMs: plan.timeoutMs,
+    exitFileBytes: null,
+    exitFileContentBudgetMs: null,
     taskQuery: null,
     teardown: null,
     outcome: null,
@@ -641,13 +720,19 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
       ledger.teardown = { endCode: ended.code ?? null, deleteCode: null, kill: { attempted: false, matched: [], refused: [], killed: [], reason: 'the attempt ran its first line; no kill was attempted' } };
       ledger.outcome = 'NO_EXIT_FILE';
       return done({ outcome: 'NO_EXIT_FILE', stalled: false, code: 'INTERACTIVE_RELAUNCH_FAILED', exitCode: null, innerStdout, innerStderr },
-        `delegated run in the interactive console session produced no exit file within ${plan.timeoutMs}ms (task ${taskName} ended)`);
+        `delegated run in the interactive console session produced no exit file within ${plan.timeoutMs}ms (observed bytes=${waited.bytes ?? 0}: the file never appeared; task ${taskName} ended)`);
     }
     const exitCode = parseRelaunchExitFile(waited.text);
     if (exitCode === null) {
       ledger.outcome = 'UNREADABLE_EXIT';
+      // Never a bare "": the typed failure names the path, the bytes actually
+      // observed and the deadline that expired (pass 20: the file held 4 bytes -
+      // "4 \r\n" - while the single read saw "", and a completed run carrying the
+      // first native scenario verdict was discarded as unreadable).
+      ledger.exitFileBytes = waited.bytes ?? 0;
+      ledger.exitFileContentBudgetMs = waited.budgetMs ?? plan.timeoutMs;
       return done({ outcome: 'UNREADABLE_EXIT', stalled: false, code: 'INTERACTIVE_RELAUNCH_FAILED', exitCode: null, innerStdout, innerStderr },
-        `delegated run wrote an unreadable exit code ${JSON.stringify(waited.text)}`);
+        `delegated run wrote an unreadable exit code: path=${waited.path ?? plan.exitPath} bytesObserved=${waited.bytes ?? 0} content=${JSON.stringify(waited.text)} after the ${waited.budgetMs ?? plan.timeoutMs}ms exit-file content budget expired (the file appeared, so the run reached its exit line; a 0-byte observation is a create-before-write read, not a verdict about the run)`);
     }
     ledger.outcome = 'COMPLETED';
     ledger.exitCode = exitCode;

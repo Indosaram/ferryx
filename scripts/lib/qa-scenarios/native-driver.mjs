@@ -880,6 +880,7 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '  matchedWindowHwnd = $null;',
     '  focusedFound = $false;',
     '  focusSource = $null;',
+    '  scopeOrigin = $null;',
     '  scopeDepth = -1;',
     '  scopeIsWindowRoot = $false;',
     '  candidateCount = 0;',
@@ -989,10 +990,23 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '  }',
     '}',
     '$diag.focusedFound = [bool]($focused -ne $null);',
-    "if ($focused -eq $null) { Fail 'SPLIT_RIGHT_NOT_FOUND' 'no focused pane could be identified inside the owned window, so no affordance was clicked' }",
+    // Pass-20 defect: with no resolvable focused element this probe FAILED here
+    // (`focusedFound:false`, `scopeDepth:-1`) while an independent probe measured
+    // `ControlType.Button | Split pane right` present in the same 108-element
+    // window at the same moment - the focus-scoped search never ran. Focus is now
+    // a scope PREFERENCE, not a precondition: when it cannot be resolved the
+    // search falls back to the window roots of EVERY visible owned window and
+    // decides on the pooled candidates, so a false not-found becomes either a
+    // real match or a real ambiguity - never an invented one. The honest
+    // possibility is recorded rather than hidden: if the app renders one pane
+    // toolbar per pane leaf, a single-pane window holds exactly one such button;
+    // if several are found, `SPLIT_RIGHT_NOT_UNIQUE` is the correct answer and
+    // the scenario genuinely needs pane scoping.
+    "if ($focused -eq $null) { $diag.scopeOrigin = 'window-root' } else { $diag.scopeOrigin = 'focused-pane' }",
     '$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker;',
     '$scope = $null;',
     '$scopeRect = $null;',
+    '$scopeRoots = New-Object System.Collections.ArrayList;',
     '$depths = New-Object System.Collections.ArrayList;',
     '$warmSw = [System.Diagnostics.Stopwatch]::StartNew();',
     '$warmAttempts = 0;',
@@ -1004,6 +1018,23 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     'while ($scope -eq $null -and $warmSw.ElapsedMilliseconds -lt $warmBudgetMs) {',
     '  $warmAttempts = $warmAttempts + 1;',
     '  $depths.Clear();',
+    '  $scopeRoots.Clear();',
+    '  if ($focused -eq $null) {',
+    // The fallback scope: every visible owned window's root that currently
+    // exposes the bound name, pooled. Searching them ALL in one pass is what
+    // keeps the uniqueness decision honest - the first window to match is never
+    // clicked while another window matches too.
+    '    foreach ($window in $searched) {',
+    '      $fallbackRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$window.hwnd));',
+    '      if ($fallbackRoot -eq $null) { continue };',
+    '      $fallbackMatches = $fallbackRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '      $depths.Add([ordered]@{ hwnd = $window.hwnd; depth = 0; containsFocus = $false; matchCount = $fallbackMatches.Count }) | Out-Null;',
+    '      if ($fallbackMatches.Count -ge 1) {',
+    '        $scopeRoots.Add($fallbackRoot) | Out-Null;',
+    '        if ($null -eq $scope) { $scope = $fallbackRoot; $diag.scopeDepth = 0; $diag.matchedWindowHwnd = $window.hwnd; $diag.scopeIsWindowRoot = $true };',
+    '      };',
+    '    }',
+    '  } else {',
     '  foreach ($pass in @(1, 2)) {',
     '    for ($i = 0; $i -lt $searched.Count -and $scope -eq $null; $i = $i + 1) {',
     '      $containsFocus = [bool]($focused -ne $null -and (InRect $focused $searched[$i].rect));',
@@ -1011,12 +1042,14 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '      if ($pass -eq 2 -and $containsFocus) { continue };',
     '      $root = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$searched[$i].hwnd));',
     '      if ($root -eq $null) { continue };',
+    '      $scopeOriginForNode = \'window-root\';',
+    '      if ($containsFocus) { $scopeOriginForNode = \'focused-pane\' };',
     '      $node = $root;',
     '      if ($containsFocus) { $node = $focused };',
     '      $depth = 0;',
     '      while ($node -ne $null) {',
     '        $found = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
-    '        if ($found.Count -ge 1) { $scope = $node; $scopeRect = $searched[$i].rect; $diag.scopeDepth = $depth; $diag.matchedWindowHwnd = $searched[$i].hwnd; $diag.scopeIsWindowRoot = [bool]($node -eq $root); break };',
+    '        if ($found.Count -ge 1) { $scope = $node; $scopeRect = $searched[$i].rect; $scopeRoots.Add($node) | Out-Null; $diag.scopeDepth = $depth; $diag.matchedWindowHwnd = $searched[$i].hwnd; $diag.scopeIsWindowRoot = [bool]($node -eq $root); $diag.scopeOrigin = $scopeOriginForNode; break };',
     '        if ($node -eq $root) { break };',
     '        $node = $walker.GetParent($node);',
     '        $depth = $depth + 1;',
@@ -1024,6 +1057,7 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '      };',
     '      $depths.Add([ordered]@{ hwnd = $searched[$i].hwnd; depth = $depth; containsFocus = $containsFocus }) | Out-Null;',
     '    }',
+    '  }',
     '  }',
     '  if ($scope -ne $null) { break };',
     '  Start-Sleep -Milliseconds $warmIntervalMs;',
@@ -1034,9 +1068,21 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     'if ($scope -eq $null) {',
     '  foreach ($entry in $depths) { if ($entry.containsFocus) { $diag.scopeDepth = $entry.depth; break } };',
     '  $diag.inventory = BuildInventory $searched $inventoryInspectCap $inventoryMatchCap;',
-    "  Fail 'SPLIT_RIGHT_NOT_FOUND' 'no ancestor of the focused pane contains the split affordance in any visible owned window (the bounded inventory names every element whose name or automation id contains Split)'",
+    "  Fail 'SPLIT_RIGHT_NOT_FOUND' 'no ancestor of the focused pane contains the split affordance in any visible owned window, and neither do the window roots themselves when no focused pane could be identified (the bounded inventory names every element whose name or automation id contains Split)'",
     '}',
-    '$items = $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    // Pooled over the searched scope SET: exactly one node on the focused path
+    // (the found ancestor, as before) and every matching window root on the
+    // fallback path. `$items` stays the flat element list that the candidate
+    // loop, the count evidence and the single-actionable click below all address
+    // by index - so the pass-4 ambiguity rule is decided across the whole
+    // searched scope, never per window.
+    '$items = New-Object System.Collections.ArrayList;',
+    'foreach ($scopeNode in $scopeRoots) {',
+    '  $nodeItems = $scopeNode.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);',
+    '  for ($j = 0; $j -lt $nodeItems.Count; $j = $j + 1) {',
+    '    $items.Add($nodeItems.Item($j)) | Out-Null;',
+    '  }',
+    '}',
     '$candidates = New-Object System.Collections.ArrayList;',
     'for ($i = 0; $i -lt $items.Count; $i = $i + 1) {',
     '  try {',
@@ -1049,9 +1095,12 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '$diag.candidateCount = $items.Count;',
     '$actionable = @($candidates | Where-Object { $_.enabled -and (-not $_.offscreen) -and (-not $_.rectEmpty) -and $_.inWindow });',
     '$diag.actionableCount = $actionable.Count;',
-    'if ($items.Count -eq 0) { Fail \'SPLIT_RIGHT_NOT_FOUND\' \'the focused pane scope contains no element with the bound accessible name\' }',
-    'elseif ($actionable.Count -gt 1) { Fail \'SPLIT_RIGHT_NOT_UNIQUE\' \'the focused pane scope contains more than one actionable split affordance\' }',
-    'elseif ($actionable.Count -eq 0) { Fail \'SPLIT_RIGHT_DISABLED\' \'the split affordance is present but not actionable (disabled, offscreen, empty rect, or outside the owned window)\' }',
+    // The three verdict details name the scope that ACTUALLY searched (the
+    // focused pane's subtree, or the window roots the fallback used), so a
+    // window-wide run can never be reported as a focused-pane miss.
+    "if ($items.Count -eq 0) { Fail 'SPLIT_RIGHT_NOT_FOUND' \"the searched $($diag.scopeOrigin) scope contains no element with the bound accessible name\" }",
+    "elseif ($actionable.Count -gt 1) { Fail 'SPLIT_RIGHT_NOT_UNIQUE' \"the searched $($diag.scopeOrigin) scope contains more than one actionable split affordance\" }",
+    "elseif ($actionable.Count -eq 0) { Fail 'SPLIT_RIGHT_DISABLED' \"the searched $($diag.scopeOrigin) scope contains a split affordance that is not actionable (disabled, offscreen, empty rect, or outside the owned window)\" }",
     'else {',
     '  $chosen = $items.Item([int]$actionable[0].index);',
     '  $diag.chosen = [ordered]@{ index = [int]$actionable[0].index; name = $chosen.Current.Name; controlType = $chosen.Current.ControlType.ProgrammaticName; enabled = [bool]$chosen.Current.IsEnabled; offscreen = [bool]$chosen.Current.IsOffscreen; rect = $actionable[0].rect; inWindow = $true };',
@@ -1118,6 +1167,9 @@ export function classifyWindowsSplitRight(probe) {
     focusSource: probe?.focusSource ?? null,
     scopeDepth: probe?.scopeDepth ?? null,
     scopeIsWindowRoot: probe?.scopeIsWindowRoot ?? null,
+    // Which scope produced the result: the focused pane's own subtree, or the
+    // window roots the fallback searched when no focused pane could be resolved.
+    scopeOrigin: probe?.scopeOrigin ?? null,
     candidateCount: probe?.candidateCount ?? null,
     actionableCount: probe?.actionableCount ?? null,
     candidates,
@@ -1153,7 +1205,7 @@ export function classifyWindowsSplitRight(probe) {
     : code === 'SPLIT_RIGHT_NOT_UNIQUE'
       ? `more than one actionable ${JSON.stringify(measured.selector)} affordance in the focused pane scope${divergence}: ${evidenceText}`
       : code === 'SPLIT_RIGHT_NOT_FOUND'
-        ? `the ${JSON.stringify(measured.selector)} affordance of the focused pane could not be identified${divergence}: ${evidenceText}`
+        ? `the ${JSON.stringify(measured.selector)} affordance of the ${measured.scopeOrigin === 'window-root' ? 'searched window scope' : 'focused pane'} could not be identified${divergence}: ${evidenceText}`
         : `the ${JSON.stringify(measured.selector)} affordance is present but not actionable${divergence}: ${evidenceText}`;
   return { ok: false, code, derivedCode, detail, ...measured };
 }
@@ -1187,7 +1239,7 @@ export async function windowsDriver(evidence, pid) {
     windowsSearched: verdict.windowsSearched,
     windowsSearchedCount: verdict.windowsSearchedCount,
     matchedWindowHwnd: verdict.matchedWindowHwnd,
-    scope: { focusedFound: verdict.focusedFound, focusSource: verdict.focusSource, depth: verdict.scopeDepth, isWindowRoot: verdict.scopeIsWindowRoot },
+    scope: { focusedFound: verdict.focusedFound, focusSource: verdict.focusSource, origin: verdict.scopeOrigin, depth: verdict.scopeDepth, isWindowRoot: verdict.scopeIsWindowRoot },
     candidateCount: verdict.candidateCount,
     actionableCount: verdict.actionableCount,
     candidates: verdict.candidates,

@@ -1478,21 +1478,38 @@ export class BarrierHub {
   }
 }
 
-export function waitForFile(path, stopPromise) {
+// `options.accept` is an optional acceptance predicate over the file's CONTENT.
+// It exists because CREATION IS NOT CONTENT: cmd.exe's `echo %ERRORLEVEL% > file`
+// creates the file and then writes its payload in a second step, so a watcher
+// armed on the file's appearance can read it in between and see zero bytes - the
+// pass-20 defect that discarded a completed run whose exit file held 4 perfectly
+// parseable bytes (`34 20 0D 0A` = "4 \r\n"). With a predicate, the watcher stays
+// armed across the create event and resolves on the write that satisfies it. With
+// no predicate the behaviour is exactly as before (resolve as soon as the file is
+// readable), so every existing caller is unchanged.
+export function waitForFile(path, stopPromise, options = {}) {
+  const accept = typeof options.accept === 'function' ? options.accept : null;
   return new Promise((resolvePromise, rejectPromise) => {
     const present = () => { try { return readFileSync(path, 'utf8'); } catch { return null; } };
-    const initial = present();
+    const satisfied = () => {
+      const data = present();
+      if (data === null) return null;
+      return accept === null || accept(data) ? data : null;
+    };
+    const initial = satisfied();
     if (initial !== null) return resolvePromise(initial);
     let watcher;
+    const close = () => { if (watcher) watcher.close(); clearTimeout(timer); };
     const finish = error => {
-      if (watcher) watcher.close();
-      clearTimeout(timer);
-      if (error) rejectPromise(error);
-      else {
-        const data = present();
-        if (data === null) rejectPromise(new HarnessError('BARRIER_ACK_TIMEOUT', `watcher race: ${path} vanished`));
-        else resolvePromise(data);
-      }
+      if (error) { close(); rejectPromise(error); return; }
+      const data = present();
+      if (data === null) { close(); rejectPromise(new HarnessError('BARRIER_ACK_TIMEOUT', `watcher race: ${path} vanished`)); return; }
+      // Present but not yet accepted (created, not yet written): keep the watcher
+      // armed for the next event instead of resolving with content that is not
+      // there yet.
+      if (accept !== null && !accept(data)) return;
+      close();
+      resolvePromise(data);
     };
     const timer = setTimeout(() => finish(new HarnessError('BARRIER_ACK_TIMEOUT', `watcher deadline for ${path}`)), 60_000);
     // Cancellation (review M3): an outer deadline closes the watcher and
@@ -1504,9 +1521,9 @@ export function waitForFile(path, stopPromise) {
     }
     try {
       watcher = watch(dirname(path), { persistent: true }, (event, filename) => {
-        if (present() !== null) finish();
+        if (satisfied() !== null) finish();
       });
-      if (present() !== null) finish();
+      if (satisfied() !== null) finish();
     } catch (error) { finish(error); }
   });
 }

@@ -1964,6 +1964,105 @@ test('split-affordance not-found path keeps the typed verdict and emits a bounde
 });
 
 // ---------------------------------------------------------------------------
+// Pass-20 blocker (verifier REPORT-PASS20 trap: the split search failed on focus
+// RESOLUTION instead of falling back to the window). The driver reported
+// `SPLIT_RIGHT_NOT_FOUND` with `focusedFound:false` / `scopeDepth:-1` while an
+// independent probe's UIA dump at the same moment showed
+// `ControlType.Button | Split pane right` present in the same 108-element window:
+// the focus-scoped search never ran. These tests replay the generated script and
+// its classifier; nothing here launches PowerShell, a product, or a window.
+
+test('split-affordance search falls back to the window roots when no focused pane can be resolved', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  const script = native.buildWindowsSplitRightScript(4242, 2500, { windows: [{ hwnd: 19663500, title: 'F', className: 'T' }] });
+  const lines = powerShellScriptLines(script);
+  // The pass-20 signature: focus is a scope PREFERENCE now, never a precondition
+  // that fails the search before it starts.
+  expect(script).not.toContain("Fail 'SPLIT_RIGHT_NOT_FOUND' 'no focused pane could be identified");
+  expect(lines).toContain("if ($focused -eq $null) { $diag.scopeOrigin = 'window-root' } else { $diag.scopeOrigin = 'focused-pane' }");
+  expect(lines).toContain('  if ($focused -eq $null) {');
+  // Every visible owned window's root is searched, and the roots that expose the
+  // bound name are POOLED before the uniqueness decision - so a window-wide run
+  // can never click the first of several matches.
+  expect(lines).toContain('      $fallbackMatches = $fallbackRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition);');
+  expect(lines).toContain('        $scopeRoots.Add($fallbackRoot) | Out-Null;');
+  expect(lines).toContain('$items = New-Object System.Collections.ArrayList;');
+  expect(lines).toContain('foreach ($scopeNode in $scopeRoots) {');
+  const pooled = script.indexOf('foreach ($scopeNode in $scopeRoots) {');
+  const counted = script.indexOf('$diag.actionableCount = $actionable.Count;');
+  const ambiguous = script.indexOf("Fail 'SPLIT_RIGHT_NOT_UNIQUE'");
+  const disabled = script.indexOf("Fail 'SPLIT_RIGHT_DISABLED'");
+  // Pool first, count second, then the ambiguity rule - the decision is made over
+  // the whole searched scope. (`Fail 'SPLIT_RIGHT_NOT_FOUND'` also appears on the
+  // walk's own not-found path, which is deliberately BEFORE the pooling, so the
+  // verdict block's own ordering is what these three assert.)
+  expect(pooled).toBeGreaterThan(-1);
+  expect(counted).toBeGreaterThan(pooled);
+  expect(ambiguous).toBeGreaterThan(counted);
+  expect(disabled).toBeGreaterThan(ambiguous);
+  // The clicked element is still addressed BY INDEX into the pooled list, and
+  // the click is still the only branch that clicks.
+  expect(lines).toContain('  $chosen = $items.Item([int]$actionable[0].index);');
+  expect(lines.map(line => line.trim())).toContain('$invoke.Invoke();');
+  // The typed not-found path still emits the bounded inventory before its Fail,
+  // and the fallback did not remove a single typed code.
+  const notFoundStart = script.indexOf('if ($scope -eq $null) {');
+  const notFoundFail = script.indexOf('no ancestor of the focused pane contains the split affordance in any visible owned window');
+  expect(notFoundStart).toBeGreaterThan(-1);
+  expect(notFoundFail).toBeGreaterThan(notFoundStart);
+  expect(script.slice(notFoundStart, notFoundFail)).toContain('$diag.inventory = BuildInventory $searched $inventoryInspectCap $inventoryMatchCap;');
+  for (const code of ['NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED']) {
+    expect(script).toContain(code);
+  }
+  // The three verdict details name the scope that actually searched, so a
+  // window-root run is never reported as a focused-pane miss.
+  expect(lines).toContain("if ($items.Count -eq 0) { Fail 'SPLIT_RIGHT_NOT_FOUND' \"the searched $($diag.scopeOrigin) scope contains no element with the bound accessible name\" }");
+});
+
+test('the window-root fallback reports a real match or a real ambiguity, never an invented one', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  const candidate = (index, extra = {}) => ({
+    index, name: 'Split pane right', controlType: 'ControlType.Button', automationId: '',
+    enabled: true, offscreen: false, rectEmpty: false, rect: '10,10,20,20', inWindow: true, ...extra,
+  });
+  // The pass-20 probe shape: no focused element could be resolved, so the window
+  // roots were the searched scope.
+  const base = {
+    probe: 'split-right', selector: 'Split pane right', interactive: true, sessionId: 1,
+    mainWindowHandle: 19663500, windowVisible: true, visibleWindowCount: 2,
+    windowsSearched: [{ hwnd: 19663500, title: 'F', className: 'T' }, { hwnd: 4787552, title: '', className: 'T' }],
+    windowsSearchedCount: 2,
+    focusedFound: false, focusSource: null, scopeOrigin: 'window-root', scopeDepth: 0, scopeIsWindowRoot: true,
+  };
+  // Exactly one actionable match across the pooled window roots: click it, and
+  // record which scope produced it.
+  const clicked = native.classifyWindowsSplitRight({ ...base, result: 'SPLIT_CLICKED', candidateCount: 1, actionableCount: 1, candidates: [candidate(0)], chosen: candidate(0) });
+  expect(clicked.ok).toBe(true);
+  expect(clicked.scopeOrigin).toBe('window-root');
+  expect(clicked.chosen.index).toBe(0);
+  // Two actionable matches pooled from two window roots: still typed, with the
+  // full candidate list - the fallback is not allowed to resolve ambiguity.
+  const ambiguous = native.classifyWindowsSplitRight({ ...base, candidateCount: 2, actionableCount: 2, candidates: [candidate(0), candidate(1)], failure: 'SPLIT_RIGHT_NOT_UNIQUE' });
+  expect(ambiguous.ok).toBe(false);
+  expect(ambiguous.code).toBe('SPLIT_RIGHT_NOT_UNIQUE');
+  expect(ambiguous.candidates).toHaveLength(2);
+  expect(ambiguous.chosen).toBeNull();
+  // Nothing found anywhere: the typed verdict and the window scope are recorded.
+  const absent = native.classifyWindowsSplitRight({ ...base, candidateCount: 0, actionableCount: 0, candidates: [], failure: 'SPLIT_RIGHT_NOT_FOUND' });
+  expect(absent.ok).toBe(false);
+  expect(absent.code).toBe('SPLIT_RIGHT_NOT_FOUND');
+  expect(absent.scopeOrigin).toBe('window-root');
+  expect(absent.scopeDepth).toBe(0);
+  expect(absent.detail).toContain('searched window scope');
+  // Present but not actionable is still DISABLED, not a click.
+  expect(native.classifyWindowsSplitRight({ ...base, candidateCount: 1, actionableCount: 0, candidates: [candidate(0, { enabled: false })], failure: 'SPLIT_RIGHT_DISABLED' }).code).toBe('SPLIT_RIGHT_DISABLED');
+  // A probe that predates the field reports null, never a fabricated origin.
+  const legacy = native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' });
+  expect(legacy.scopeOrigin).toBeNull();
+  expect(legacy.code).toBe('SPLIT_RIGHT_NOT_FOUND');
+});
+
+// ---------------------------------------------------------------------------
 // Task-9 lane (authored; executed by the sole remote verifier). Two root causes,
 // both established by the decisive control in
 // `.omo/evidence/local-pane-liveness-completion-replan/task-9/ACCESSIBILITY-EXPERIMENT.md`:

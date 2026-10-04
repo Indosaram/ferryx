@@ -7,8 +7,8 @@
 // the frozen scripts/qa/pane-liveness.test.mjs. The frozen gate argv is
 // unchanged - `bun run --cwd ui test --config ../scripts/qa/pane-liveness-vitest.config.mjs` -
 // so the frozen command really executes this coverage instead of leaving it
-// outside every gate. The frozen suite is byte-identical to before and still
-// holds its 64 tests; this file adds 15 (79 under the one frozen command).
+// outside every gate. This file adds 20 (86 under the one frozen command: the
+// frozen suite holds 66 after the pass-21 window-root-fallback tests).
 //
 // Authored only - execution is delegated to the sole remote verifier per plan.
 // Nothing here launches a product, a scheduled task, a PowerShell probe, a
@@ -17,11 +17,11 @@
 
 import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BUDGETS, EXIT, HarnessError, ResourceRegistry } from '../lib/qa-scenarios/common-harness.mjs';
+import { BUDGETS, EXIT, HarnessError, ResourceRegistry, waitForFile, withDeadline } from '../lib/qa-scenarios/common-harness.mjs';
 
 const fixtureRoot = () => realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'delegation-retry-')));
 
@@ -650,4 +650,100 @@ test('the registry closes the sink before it removes the run roots', async () =>
   expect(appStdioResult(sink)).toMatchObject({ closed: true, closedOk: true });
   expect(readFileSync(join(runDir, 'app.stdout.log'), 'utf8')).toContain('[app-stdio closed:');
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-20 defect (verifier REPORT-PASS20 section 10 / trap 18): the delegated
+// exit file was watched for its CREATION and then read ONCE. cmd.exe's
+// `echo %ERRORLEVEL% > file` creates the file and writes its content in two
+// steps, so that single read could land in between and return "" - which
+// discarded a COMPLETED inner run carrying the first native scenario verdict of
+// the effort, while the file on disk held 4 parseable bytes (`34 20 0D 0A` =
+// "4 \r\n"). Creation is not content. These tests drive the real wait against
+// real files in a temp fixture root; nothing is launched.
+
+test('the delegated exit file is read for its content, not for its creation', async () => {
+  const { awaitExitFile, parseRelaunchExitFile } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const root = fixtureRoot();
+  try {
+    const exitPath = join(root, 'relaunch.exit');
+    // cmd.exe's redirect, step 1: the file EXISTS and is EMPTY.
+    writeFileSync(exitPath, '', 'ascii');
+    const pending = awaitExitFile(exitPath, 5_000);
+    // Step 2, the measured payload: 4 bytes, "4 \r\n".
+    writeFileSync(exitPath, '4 \r\n', 'ascii');
+    const waited = await pending;
+    expect(waited.timedOut).toBe(false);
+    expect(waited.empty).toBe(false);
+    expect(waited.bytes).toBe(4);
+    expect(parseRelaunchExitFile(waited.text)).toBe(4);
+    // ...and the 0-byte read of that same file is never accepted as a verdict.
+    expect(parseRelaunchExitFile('')).toBeNull();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an exit file created but never written fails typed, naming the path, the bytes and the deadline', async () => {
+  const { awaitExitFile } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const root = fixtureRoot();
+  try {
+    const exitPath = join(root, 'relaunch.exit');
+    writeFileSync(exitPath, '', 'ascii');
+    const waited = await awaitExitFile(exitPath, 300);
+    // The file appeared, so this is NOT the "no exit file" outcome: it is an
+    // appeared-but-unwritten exit file, reported with the evidence the pass-20
+    // failure lacked (its detail was a bare `""`).
+    expect(waited.timedOut).toBe(false);
+    expect(waited.empty).toBe(true);
+    expect(waited.bytes).toBe(0);
+    expect(waited.path).toBe(exitPath);
+    expect(waited.budgetMs).toBe(300);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an exit file that never appears is still the typed no-exit-file outcome', async () => {
+  const { awaitExitFile } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const root = fixtureRoot();
+  try {
+    const waited = await awaitExitFile(join(root, 'relaunch.exit'), 200);
+    expect(waited.timedOut).toBe(true);
+    expect(waited.empty).toBe(false);
+    expect(waited.bytes).toBe(0);
+    expect(waited.text).toBeNull();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a half-written exit payload is not accepted; the completed payload is', async () => {
+  const { awaitExitFile, parseRelaunchExitFile } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const root = fixtureRoot();
+  try {
+    const exitPath = join(root, 'relaunch.exit');
+    writeFileSync(exitPath, '', 'ascii');
+    const pending = awaitExitFile(exitPath, 5_000);
+    writeFileSync(exitPath, 'x', 'ascii');
+    writeFileSync(exitPath, '0 \r\n', 'ascii');
+    const waited = await pending;
+    expect(parseRelaunchExitFile(waited.text)).toBe(0);
+    expect(waited.bytes).toBe(4);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('waitForFile keeps its creation-only semantics for callers that pass no acceptance predicate', async () => {
+  const root = fixtureRoot();
+  try {
+    const emptyPath = join(root, 'empty');
+    writeFileSync(emptyPath, '', 'ascii');
+    // The predicate is OPT-IN: an existing empty file still resolves for the
+    // barrier and marker callers exactly as it did before.
+    await expect(waitForFile(emptyPath)).resolves.toBe('');
+    const contentPath = join(root, 'content');
+    writeFileSync(contentPath, 'ready\n', 'ascii');
+    await expect(waitForFile(contentPath, undefined, { accept: value => value.trim() === 'ready' })).resolves.toBe('ready\n');
+    // A predicate that is not satisfied yet does NOT resolve: the watcher stays
+    // armed for the write, bounded by the caller's own deadline - which is what
+    // the exit-file wait passes and what the old read-once path did not do.
+    let stop = () => {};
+    const stopPromise = new Promise(resolvePromise => { stop = resolvePromise; });
+    const armed = await withDeadline(waitForFile(emptyPath, stopPromise, { accept: value => value.trim() !== '' }), 120, 'not-yet-satisfied', { onStop: stop });
+    expect(armed.timedOut).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
