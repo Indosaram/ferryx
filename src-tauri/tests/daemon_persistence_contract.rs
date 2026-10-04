@@ -325,6 +325,8 @@ impl TestDaemonClient {
                 cwd: None,
                 shell: Some("/bin/sh".to_string()),
                 startup: None,
+                // Legacy spawn fixture: no local-split envelope on the wire.
+                local_split: None,
                 cols,
                 rows,
             })
@@ -622,6 +624,9 @@ async fn test_harness_rejects_foreign_handshake_before_commands() {
             binary_path: None,
             binary_mtime_ms: None,
             daemon_version: None,
+            // Legacy synthetic peer: advertises no capabilities, no admission stamp.
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         };
         write
             .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
