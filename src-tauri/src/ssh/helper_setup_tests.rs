@@ -958,3 +958,34 @@ fn ssh_helper_setup_qualified_runtime_root_fits_unix_socket_limit() {
     assert_ne!(roots[0], roots[2]);
     assert_ne!(roots[1], roots[2]);
 }
+
+#[test]
+fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
+    // Regression (live maho-win 2026-10-04): the Windows arm used to pass
+    // "-Command -" through `RemoteExecutor::command`, which encodes it as an
+    // `-EncodedCommand` script. The remote pwsh then decoded and executed a
+    // program literally named `-Command` (exit 1), so every helper install on
+    // Windows failed and no qualified helper could ever be provisioned there.
+    let env = sample_windows_env("C:\\Users\\sook");
+    let host = sample_host("ssh-maho-win");
+    let location = qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
+    let (cmd, input) = install_invocation(&env, &location, b"BINARY".to_vec());
+
+    assert!(
+        cmd.starts_with("pwsh -NoLogo -NoProfile -NonInteractive -Command -"),
+        "windows upload must run in stdin mode, got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("-EncodedCommand"),
+        "upload transport must not wrap the stdin marker as a script, got: {cmd}"
+    );
+    assert!(!input.is_empty(), "upload payload must stay attached to stdin");
+
+    // Document why the raw path exists: `command` is script-encoding by design,
+    // so the stdin-mode helper must bypass it.
+    let encoded = RemoteExecutor::Pwsh.command("-Command -");
+    assert!(
+        encoded.contains("-EncodedCommand"),
+        "executor.command is expected to wrap scripts: {encoded}"
+    );
+}
