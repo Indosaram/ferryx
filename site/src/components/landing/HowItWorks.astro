@@ -1,0 +1,75 @@
+---
+// Section CTA link: every internal URL resolves against BASE_URL (the site can deploy
+// under a base path).
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const steps = [
+  {
+    n: '01',
+    title: 'Add your repository',
+    body: 'Point Ferryx at a repo and it becomes a workspace in the sidebar, one per project. Switching between them takes a keystroke, not a second window.',
+    detail: 'Cmd+1..9 switches workspaces',
+  },
+  {
+    n: '02',
+    title: 'Give each task its own worktree',
+    body: 'Ask for isolation and the app creates a managed Git worktree for the task, names it, and removes it when you are done — agents edit in their own tree, never your main checkout.',
+    detail: '.orca-worktrees/<workspace>/<slug> on orca/<workspace>/<slug>',
+  },
+  {
+    n: '03',
+    title: 'Start any agent in a pane',
+    body: 'Run claude, codex, gemini — any command that works in a terminal works in a pane — and split the window as they run. A browser tab sits beside them for previews and CI.',
+    detail: 'Cmd+D split right, Cmd+Shift+D split down, Cmd+Shift+B browser',
+  },
+  {
+    n: '04',
+    title: 'Step away, get pinged, review',
+    body: 'Every pane reports working, waiting on you, or idle, and Ferryx notifies you when an agent needs a decision. Pair a phone with a 6-digit PIN to check in from anywhere; review the branch, then the worktree goes with it.',
+    detail: 'Pair with a 6-digit PIN',
+  },
+];
+---
+
+<section id="how-it-works" class="py-24 sm:py-28 border-t border-line bg-page-raised">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6">
+    <div class="text-center max-w-2xl mx-auto mb-16">
+      <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+        How it works
+      </p>
+      <h2 class="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+        Your day with Ferryx
+      </h2>
+      <p class="mt-4 text-[15px] leading-relaxed text-ink-soft">
+        The same four moves every day: add a repo, isolate the task, start the agents, review the
+        branch.
+      </p>
+    </div>
+
+    <ol class="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-4 list-none">
+      {
+        steps.map((step) => (
+          <li class="flex flex-col rounded-2xl border border-line bg-surface p-6 shadow-card">
+            <span class="font-mono text-[13px] text-ink-faint">{step.n}</span>
+            <h3 class="mt-3 text-[17px] font-medium tracking-[-0.015em] text-ink">{step.title}</h3>
+            <p class="mt-3 text-[15px] leading-relaxed text-ink-soft">{step.body}</p>
+            <p class="mt-auto pt-4 border-t border-line font-mono text-[12px] leading-relaxed break-words text-ink-faint">
+              {step.detail}
+            </p>
+          </li>
+        ))
+      }
+    </ol>
+
+    <div class="mt-14 text-center">
+      <a
+        href={`${baseUrl}docs/introduction/`}
+        class="group inline-flex items-center font-medium text-ink hover:text-ink-soft transition-colors"
+      >
+        Read the first-session guide <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span>
+      </a>
+    </div>
+  </div>
+</section>

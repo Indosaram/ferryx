@@ -1,0 +1,51 @@
+---
+// The 11 agents with shipped status detection, alphabetical. Any other command still
+// runs in a pane — it just runs without a status read.
+const agents = [
+  'Antigravity',
+  'Claude Code',
+  'Cline',
+  'Codex',
+  'Cursor',
+  'Gajae Code (gjc)',
+  'GitHub Copilot CLI',
+  'Grok',
+  'Kimi',
+  'OMO',
+  'OpenCode',
+];
+---
+
+<section id="agents" class="py-20 sm:py-24 border-t border-line bg-page">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6">
+    <div class="text-center max-w-2xl mx-auto mb-10">
+      <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">Agents</p>
+      <h2 class="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+        Works with the agents you already use
+      </h2>
+      <p class="mt-4 text-[15px] leading-relaxed text-ink-soft">
+        Any command that runs in a terminal runs in a pane — Claude Code, Codex, Gemini CLI, or
+        anything else you can type.
+      </p>
+    </div>
+
+    <ul class="flex flex-wrap justify-center gap-2">
+      {
+        agents.map((agent) => (
+          <li class="rounded-full border border-line bg-surface px-3 py-1 text-[13px] text-ink-soft">
+            {agent}
+          </li>
+        ))
+      }
+      <li class="rounded-full border border-line bg-surface px-3 py-1 text-[13px] text-ink-soft">
+        + any CLI
+      </li>
+    </ul>
+
+    <p class="mx-auto mt-6 max-w-2xl text-center text-[13px] leading-relaxed text-ink-faint">
+      Status detection ships for the 11 agents above and reads each pane as working, waiting on
+      you, or idle. It drives the pane status indicator, desktop notifications, and the Dock
+      attention badge on macOS.
+    </p>
+  </div>
+</section>

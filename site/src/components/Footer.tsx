@@ -12,10 +12,14 @@ export function Footer({ basePath }: { readonly basePath: string }) {
     <footer className="border-t border-line bg-page py-12 text-[13px] text-ink-faint">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-6">
         <div className="flex items-center space-x-3">
-          <img src={iconSrc} alt="Ferryx" width={24} height={24} className="h-6 w-6 rounded-md" />
+          <picture className="block h-6 w-6 shrink-0">
+            <source srcSet={`${basePath}ferryx-icon-64.avif`} type="image/avif" />
+            <source srcSet={`${basePath}ferryx-icon-64.webp`} type="image/webp" />
+            <img src={iconSrc} alt="Ferryx" width={24} height={24} className="h-6 w-6 rounded-md" />
+          </picture>
           <span className="font-medium text-ink tracking-tight">Ferryx</span>
-          <span className="text-line-strong">|</span>
-          <span>Ultra-lightweight Rust Native AI Workspace</span>
+          <span className="text-line-strong" aria-hidden="true">|</span>
+          <span>Parallel coding agents, one window.</span>
         </div>
 
         <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
@@ -38,10 +42,28 @@ export function Footer({ basePath }: { readonly basePath: string }) {
             Discord
           </a>
           <a
-            href="#features"
+            href={`${basePath}#how-it-works`}
+            className="hover:text-ink transition-colors"
+          >
+            How it works
+          </a>
+          <a
+            href={`${basePath}#features`}
             className="hover:text-ink transition-colors"
           >
             Features
+          </a>
+          <a
+            href={`${basePath}#faq`}
+            className="hover:text-ink transition-colors"
+          >
+            FAQ
+          </a>
+          <a
+            href={`${basePath}#install`}
+            className="hover:text-ink transition-colors"
+          >
+            Install
           </a>
           <a
             href={`${basePath}docs/architecture/`}

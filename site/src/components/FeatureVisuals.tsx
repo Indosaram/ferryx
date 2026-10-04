@@ -14,12 +14,12 @@ function useCycle(length: number, intervalMs = FRAME_MS) {
 
 function Chrome({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-[#0e0e10]">
+    <div className="overflow-hidden rounded-xl border border-line bg-[#0e0e10]" aria-hidden="true">
       <div className="flex h-8 items-center gap-1.5 border-b border-white/10 px-3">
         <i className="h-2 w-2 rounded-full bg-white/25" />
         <i className="h-2 w-2 rounded-full bg-white/25" />
         <i className="h-2 w-2 rounded-full bg-white/25" />
-        <span className="ml-1.5 font-mono text-[10px] text-white/40">{label}</span>
+        <span className="ml-1.5 font-mono text-[10px] text-white/60">{label}</span>
       </div>
       {/* Fixed body height: a growing visual would reflow the whole page on every frame. */}
       <div className="h-[168px] overflow-hidden">{children}</div>
@@ -31,7 +31,7 @@ export function GhosttyVisual() {
   const frame = useCycle(3);
   const rows = [
     "$ ferryx --version",
-    "ferryx 0.1.0 (libghostty + wgpu)",
+    "terminal: libghostty-vt",
     "renderer: wgpu / Metal",
   ];
   return (
@@ -66,7 +66,7 @@ export function AgentsVisual() {
               className={`h-2 w-2 shrink-0 rounded-full ${index === active ? "bg-emerald-400" : "bg-white/20"}`}
             />
             <span className="w-16 shrink-0 text-white/80">{agent.name}</span>
-            <span className="truncate text-white/40">{agent.task}</span>
+            <span className="truncate text-white/65">{agent.task}</span>
           </div>
         ))}
       </div>
@@ -79,8 +79,8 @@ export function SplitVisual() {
   return (
     <Chrome label="split panes">
       <div className={`flex h-full gap-2 p-3 ${vertical ? "flex-col" : "flex-row"}`}>
-        <div className="flex-1 rounded-md bg-white/[0.07] transition-all duration-500" />
-        <div className="flex-1 rounded-md bg-white/[0.04] transition-all duration-500" />
+        <div className="flex-1 rounded-md bg-white/[0.07] transition-colors duration-500" />
+        <div className="flex-1 rounded-md bg-white/[0.04] transition-colors duration-500" />
       </div>
     </Chrome>
   );
@@ -134,10 +134,10 @@ export function PersistenceVisual() {
       <div className="flex h-full flex-col justify-center gap-3 px-4 font-mono text-[13px]">
         {stages.map((stage, index) => (
           <div key={stage} className="flex items-center gap-3">
-            <span className={index <= step ? "text-emerald-300/80" : "text-white/20"}>
+            <span className={index <= step ? "text-emerald-300/80" : "text-white/40"}>
               {index <= step ? "✓" : "·"}
             </span>
-            <span className={index <= step ? "text-white/75" : "text-white/25"}>{stage}</span>
+            <span className={index <= step ? "text-white/75" : "text-white/45"}>{stage}</span>
           </div>
         ))}
       </div>

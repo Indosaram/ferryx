@@ -13,7 +13,7 @@ export function Benchmarks() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="text-center max-w-2xl mx-auto mb-16">
           <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
-            Architecture, Not a Benchmark
+            Architecture, not a benchmark
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
             A source-linked inventory of what Ferryx implements. It does not claim comparative performance without comparative measurements.
@@ -22,7 +22,7 @@ export function Benchmarks() {
 
         <div className="rounded-3xl border border-line bg-surface overflow-hidden shadow-card">
           <div className="p-6 border-b border-line bg-page-raised">
-            <h3 className="text-[17px] font-medium tracking-[-0.015em] text-ink">Implementation Inventory</h3>
+            <h3 className="text-[17px] font-medium tracking-[-0.015em] text-ink">Implementation inventory</h3>
             <p className="text-[13px] text-ink-faint mt-1">Each row names the repository location that supports the claim.</p>
           </div>
           <div className="overflow-x-auto">
@@ -35,8 +35,8 @@ export function Benchmarks() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {comparisonRows.map((row, idx) => (
-                  <tr key={idx} className="hover:bg-page-raised transition-colors">
+                {comparisonRows.map((row) => (
+                  <tr key={row.component} className="hover:bg-page-raised transition-colors">
                     <td className="py-4 px-6 text-[15px] text-ink font-medium">{row.component}</td>
                     <td className="py-4 px-6 text-[14px] text-ink-soft">{row.implementation}</td>
                     <td className="py-4 px-6 font-mono text-[12px] text-ink-faint">{row.evidence}</td>

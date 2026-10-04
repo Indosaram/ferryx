@@ -12,46 +12,76 @@ const basePath = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_U
 export function Features() {
   const features = [
     {
-      visual: GhosttyVisual,
-      eyebrow: "Rendering",
-      title: "Native Ghostty & wgpu Engine",
-      description: "Desktop terminal panes render directly via native libghostty and a GPU-accelerated wgpu pipeline for crisp font rasterization and low-latency throughput.",
-      points: ["libghostty terminal core", "wgpu GPU pipeline", "50-frame offscreen p50 3.10 ms on M4 Max"],
-    },
-    {
       visual: AgentsVisual,
       eyebrow: "Agents",
-      title: "Multi-Agent Workspaces",
-      description: "Orchestrate parallel AI coding agents (Claude, Codex, Gemini Flash) in isolated split-panes with real-time status indicators.",
-      points: ["Isolated worktree per agent", "Live status indicators", "Launch from the tab bar"],
-    },
-    {
-      visual: SplitVisual,
-      eyebrow: "Layout",
-      title: "Flexible Split-Pane Tiling",
-      description: "Arbitrary vertical and horizontal terminal splits with responsive pointer drag resizing and smooth layout transitions.",
-      points: ["Vertical & horizontal splits", "Pointer drag resizing", "Drag tabs into any pane"],
-    },
-    {
-      visual: MobileVisual,
-      eyebrow: "Remote",
-      title: "Mobile Web Pairing",
-      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output through a dependency-free DOM grid and steer agent workflows on the go.",
-      points: ["6-digit PIN pairing", "Streamed terminal grid", "Steer agents from a phone"],
-    },
-    {
-      visual: ZeroElectronVisual,
-      eyebrow: "Architecture",
-      title: "Zero Electron Overhead",
-      description: "Built on Tauri v2 and native WebView2/WebKit engines paired with a headless Rust PTY daemon. The core is cross-platform; selected OS integrations remain macOS-first.",
-      points: ["Tauri v2 shell", "Headless Rust PTY daemon", "Cross-platform core, macOS-first integrations"],
+      title: "Every agent in its own worktree",
+      description:
+        "Run Claude Code, Codex, Gemini CLI — anything that runs in a terminal — each in its own pane. When you ask for isolation, the app creates a managed Git worktree under .orca-worktrees/<workspace-id>/<slug> on branch orca/<workspace-id>/<slug>, jailed to the repo root, and removes it when you're done.",
+      points: [
+        "One pane per agent, side by side in one window",
+        "App creates, names and removes the worktrees for you",
+        "Status detection for 11 agents: working, waiting on you, idle",
+      ],
     },
     {
       visual: PersistenceVisual,
       eyebrow: "Reliability",
-      title: "Resilient Persistence",
-      description: "Automatic workspace state snapshotting and background daemon reattachment guarantee you never lose work on crash or exit.",
-      points: ["Layout snapshots", "Daemon survives the GUI", "Reattach with replay"],
+      title: "Close the window. The agents keep working.",
+      description:
+        "A headless Rust daemon owns the terminals, not the window: closing, reloading or crashing the GUI does not kill running agents while the daemon lives. On reconnect, output you missed is replayed from a 512 KiB ring buffer per session — and if it wrapped, you are told there is a gap. Stopping the daemon or rebooting the host ends live sessions.",
+      points: [
+        "GUI can close, reload or crash; agents keep running",
+        "Missed output replays on reconnect, with a gap warning if it wrapped",
+        "Workspace layout snapshots and restores",
+      ],
+    },
+    {
+      visual: MobileVisual,
+      eyebrow: "Remote",
+      title: "Check in from your phone",
+      description:
+        "Pair a phone or browser with a 6-digit PIN or QR code and the mobile web client streams your terminal. It connects out through a relay tunnel, so it needs no inbound port and no public IP — and you can run your own self-hosted relay instead. Keep remote access off unless you need it.",
+      points: [
+        "Pair with a 6-digit PIN or QR code",
+        "No inbound port or public IP — outbound relay tunnel",
+        "Run your own self-hosted relay if you prefer",
+      ],
+    },
+    {
+      visual: SplitVisual,
+      eyebrow: "Layout",
+      title: "Terminals, browser and splits in one layout",
+      description:
+        "Split panes vertically or horizontally, drag tabs into any pane, and keep a native WebView browser tab next to your terminals so docs and dashboards sit beside the agents that need them. The layout is yours to rearrange and it snapshots with the workspace.",
+      points: [
+        "Vertical and horizontal splits, drag tabs into any pane",
+        "Native browser tabs beside terminals (Cmd+Shift+B)",
+        "Cmd+K palette, Cmd+T new tab, Cmd+D / Cmd+Shift+D to split",
+      ],
+    },
+    {
+      visual: GhosttyVisual,
+      eyebrow: "Rendering",
+      title: "Fast native terminal rendering",
+      description:
+        "Terminal output is parsed by libghostty-vt and each pane is drawn by WGPU on a native child surface, instead of a browser terminal emulator in the page.",
+      points: [
+        "libghostty-vt parses output; WGPU renders each pane natively",
+        "Internal render benchmark: 50-frame offscreen p50 3.10 ms on M4 Max",
+        "No performance comparison is claimed against other terminals",
+      ],
+    },
+    {
+      visual: ZeroElectronVisual,
+      eyebrow: "Architecture",
+      title: "No Electron under the hood",
+      description:
+        "Built in Rust on Tauri v2 with the OS webview — no Electron, no bundled Chromium — while a headless Rust PTY daemon owns the terminals. One codebase ships for macOS, Windows and Linux; some OS integrations (the Dock attention badge) are macOS-only.",
+      points: [
+        "Tauri v2 shell on the OS webview — no Electron, no bundled Chromium",
+        "Headless Rust PTY daemon owns the terminals",
+        "Cross-platform core; Dock badge is macOS-only",
+      ],
     },
   ];
 
@@ -60,13 +90,15 @@ export function Features() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="text-center max-w-2xl mx-auto mb-16 sm:mb-20">
           <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
-            Why Ferryx
+            What you get
           </p>
           <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
-            Speed. Isolation. Total control.
+            Everything one window needs to run a fleet of agents
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
-            Ferryx combines a measured WGPU terminal path, a leak-checked libghostty-vt boundary, and a headless Rust daemon for parallel agent collaboration.
+            Ferryx is a desktop terminal workspace for running several CLI coding agents at once.
+            Each agent gets its own pane and a status you can read at a glance, isolation on
+            request gives it its own managed worktree, and you can check in from your phone.
           </p>
         </div>
 

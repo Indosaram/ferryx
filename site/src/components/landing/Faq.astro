@@ -1,0 +1,87 @@
+---
+const faqs: { q: string; a: string }[] = [
+  {
+    q: "Is Ferryx free?",
+    a: "Yes. Ferryx is free to download, and local use needs no account. The source ships under SUL-1.0, which allows personal, non-commercial, and your own internal business use; it is not OSI-approved open source.",
+  },
+  {
+    q: "Which agents does it support?",
+    a: "Any command that runs in a terminal runs in a pane, including Claude Code, Codex, and Gemini CLI. Status detection for working, waiting on you, and idle ships for 11 agents: Antigravity, Claude Code, Cline, Codex, GitHub Copilot CLI, Cursor, Gajae Code, Grok, Kimi, OMO, and OpenCode.",
+  },
+  {
+    q: "Will my agents keep running if I close the app?",
+    a: "Yes. A headless Rust daemon owns the terminals, so closing, reloading, or crashing the window does not kill running agents while the daemon lives, and missed output replays when you reconnect. Stopping the daemon or rebooting the host ends them.",
+  },
+  {
+    q: "Do I have to use worktrees?",
+    a: "No. Panes can share a single checkout, and isolation is per task: when you ask for it, the app creates, names, and removes a managed Git worktree under .orca-worktrees.",
+  },
+  {
+    q: "Can I check on agents from my phone?",
+    a: "Yes. Pair a phone or browser with a 6-digit PIN or QR code and the mobile web client streams your terminals over an outbound relay tunnel, with no inbound SSH port or public IP required. A self-hosted relay works too, and remote access stays off unless you turn it on.",
+  },
+  {
+    q: "Why does Windows warn when I install it?",
+    a: "The Windows installer is not code-signed yet, so SmartScreen warns before it runs. Every release publishes SHA256SUMS.txt; verify the download with sha256sum -c SHA256SUMS.txt.",
+  },
+  {
+    q: "Does it run on a headless Linux server?",
+    a: "Yes. Install the headless ferryx-cli daemon and CLI with curl -fsSL https://relay.ferryx.dev/install.sh | bash, then pair the machine as a remote to watch it from the app.",
+  },
+  {
+    q: "How mature is it?",
+    a: "Ferryx is early software: rough edges and breaking changes are possible, and calendar-versioned releases ship often. Help and questions live on Discord; issues and source are on GitHub.",
+  },
+];
+---
+
+<section id="faq" class="py-24 sm:py-28 border-t border-line bg-page">
+  <div class="mx-auto max-w-3xl px-4 sm:px-6">
+    <div class="mb-16">
+      <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+        FAQ
+      </p>
+      <h2 class="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+        Questions before you install
+      </h2>
+    </div>
+
+    <div>
+      {
+        faqs.map((f, i) => (
+          <details class="group border-b border-line" open={i === 0 ? true : undefined}>
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-6 py-5 text-[16px] font-medium text-ink [&::-webkit-details-marker]:hidden">
+              <span>{f.q}</span>
+              <svg
+                class="h-4 w-4 shrink-0 text-ink-faint transition-transform duration-200 group-open:rotate-180 motion-reduce:transition-none"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </summary>
+            <div class="pb-5 pr-8 text-[15px] leading-relaxed text-ink-soft">{f.a}</div>
+          </details>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<script
+  type="application/ld+json"
+  set:html={JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  })}
+/>

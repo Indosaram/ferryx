@@ -12,7 +12,8 @@
     --ink-rgb: 13 13 14;
     --ink-hover-rgb: 38 38 42;
     --ink-soft-rgb: 86 86 90;
-    --ink-faint-rgb: 138 138 144;
+    /* measured >= 4.6:1 against page, page-raised and surface (WCAG AA for 11-13px meta text). */
+    --ink-faint-rgb: 110 110 116;
     --line-rgb: 228 224 218;
     --line-strong-rgb: 213 208 200;
     --mark-off-rgb: 196 191 183;
@@ -120,7 +121,8 @@
     --ink-rgb: 244 243 241;
     --ink-hover-rgb: 217 216 212;
     --ink-soft-rgb: 168 168 174;
-    --ink-faint-rgb: 117 117 124;
+    /* measured >= 4.6:1 against page, page-raised and surface (WCAG AA for 11-13px meta text). */
+    --ink-faint-rgb: 128 128 134;
     --line-rgb: 38 38 43;
     --line-strong-rgb: 53 53 60;
     --mark-off-rgb: 74 74 82;

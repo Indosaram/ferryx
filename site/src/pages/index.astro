@@ -1,11 +1,17 @@
 ---
-import '../index.css';
+import landingStyles from '../index.css?inline';
 import { Navbar } from '../components/Navbar';
 import { Hero } from '../components/Hero';
 import { Features } from '../components/Features';
 import { Benchmarks } from '../components/Benchmarks';
 import { Footer } from '../components/Footer';
-import LiveFerryxDemo from '../components/LiveFerryxDemo';
+import LiveFerryxDemo from '../components/LazyLiveDemo';
+import PainPoints from '../components/landing/PainPoints.astro';
+import HowItWorks from '../components/landing/HowItWorks.astro';
+import AgentSupport from '../components/landing/AgentSupport.astro';
+import Alternatives from '../components/landing/Alternatives.astro';
+import Faq from '../components/landing/Faq.astro';
+import GetStarted from '../components/landing/GetStarted.astro';
 import SiteAnalytics from '../components/SiteAnalytics.astro';
 import { THEME_STORAGE_KEY } from '../lib/theme';
 
@@ -62,6 +68,15 @@ const structuredData = {
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <style is:inline set:html={landingStyles} />
+    <style is:inline>
+      @font-face {
+        font-family: 'Inter Fallback';
+        src: local('Arial');
+        size-adjust: 107.31%;
+      }
+      body { font-family: Inter, 'Inter Fallback', sans-serif; }
+    </style>
     <script is:inline define:vars={{ THEME_STORAGE_KEY }}>
       // Runs before first paint so a dark-theme visitor never sees a light flash.
       const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -106,24 +121,17 @@ const structuredData = {
     <meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="preload"
-      as="style"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-    />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-      media="print"
-      onload="this.media='all'"
-    />
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'" />
   </head>
   <body class="bg-page text-ink antialiased selection:bg-ink selection:text-page min-h-screen">
     <div class="min-h-screen bg-page text-ink flex flex-col selection:bg-ink selection:text-page">
       <Navbar client:load basePath={baseUrl} />
       <main class="flex-1">
         <Hero client:load basePath={baseUrl} />
+        <PainPoints />
         <section id="preview" class="relative z-0 overflow-hidden pb-8 sm:pb-12">
+          <a href="#how-it-works" class="sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:left-4 focus-visible:top-4 focus-visible:z-30 focus-visible:rounded-full focus-visible:border focus-visible:border-line focus-visible:bg-surface focus-visible:px-3 focus-visible:py-1 focus-visible:text-[13px] focus-visible:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30">Skip past the live preview</a>
           <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-14 text-center">
             <h2 class="text-[clamp(1.75rem,3.2vw,2.5rem)] font-medium tracking-[-0.03em] leading-[1.1] text-ink">The real workspace, running in your browser</h2>
             <p class="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-ink-soft">This live preview mounts the genuine Ferryx sidebar, tab bar, and split terminal view against a mocked backend, so you can explore the multi-agent workspace layout before you install anything.</p>
@@ -132,18 +140,24 @@ const structuredData = {
             <!-- The clip matters: scale-105 exists to hide the blur's soft edges, and without it
                  the image overflows the wash below and leaves an unwashed bright band on top. -->
             <div class="absolute inset-x-0 top-0 h-[860px] overflow-hidden">
-              <div
-                class="h-full w-full bg-cover bg-center scale-105 blur-[1px]"
-                style={`background-image: url('${baseUrl}demo-bg.jpg');`}
-              />
+              <picture>
+                <source srcset={`${baseUrl}demo-bg.avif`} type="image/avif" />
+                <source srcset={`${baseUrl}demo-bg.webp`} type="image/webp" />
+                <img src={`${baseUrl}demo-bg.jpg`} alt="" loading="lazy" decoding="async" width="1024" height="683" class="h-full w-full object-cover object-center scale-105 blur-[1px]" />
+              </picture>
             </div>
             <div class="absolute inset-x-0 top-0 h-[860px] bg-demo-wash" />
             <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-20">
-              <LiveFerryxDemo client:only="react" />
+              <LiveFerryxDemo client:visible />
             </div>
           </div>
         </section>
+        <HowItWorks />
         <Features client:visible />
+        <AgentSupport />
+        <Alternatives />
+        <Faq />
+        <GetStarted />
         <Benchmarks client:visible />
       </main>
       <Footer client:visible basePath={baseUrl} />

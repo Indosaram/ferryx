@@ -1,5 +1,4 @@
 import { Github } from "lucide-react";
-import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { DiscordIcon } from "@/components/ui/PlatformIcons";
 import { DownloadMenu } from "@/components/DownloadMenu";
@@ -21,13 +20,17 @@ export function Navbar({ basePath }: { basePath: string }) {
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 sm:gap-3 rounded-full border border-line bg-nav-fill/85 px-3 sm:px-5 backdrop-blur-xl shadow-nav">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <a href={basePath} className="flex min-w-0 items-center gap-2 sm:gap-2.5 group">
-            <img
-              src={iconSrc}
-              alt="Ferryx Logo"
-              width={28}
-              height={28}
-              className="h-7 w-7 shrink-0 rounded-lg transition-transform group-hover:scale-105"
-            />
+            <picture>
+              <source srcSet={`${basePath}ferryx-icon-64.avif`} type="image/avif" />
+              <source srcSet={`${basePath}ferryx-icon-64.webp`} type="image/webp" />
+              <img
+                src={iconSrc}
+                alt="Ferryx Logo"
+                width={28}
+                height={28}
+                className="h-7 w-7 shrink-0 rounded-lg transition-transform group-hover:scale-105"
+              />
+            </picture>
             <span className="truncate text-[15px] font-medium tracking-[-0.02em] text-ink">
               Ferryx
             </span>
@@ -47,14 +50,17 @@ export function Navbar({ basePath }: { basePath: string }) {
         </div>
 
         <nav className="hidden md:flex items-center gap-7 text-[14px] font-medium text-ink-soft">
-          <a href={`${basePath}docs/introduction/`} className="hover:text-ink transition-colors">
-            Docs
+          <a href={`${basePath}#how-it-works`} className="hover:text-ink transition-colors">
+            How it works
           </a>
-          <a href="#features" className="hover:text-ink transition-colors">
+          <a href={`${basePath}#features`} className="hover:text-ink transition-colors">
             Features
           </a>
-          <a href="#architecture" className="hover:text-ink transition-colors">
-            Architecture
+          <a href={`${basePath}#faq`} className="hover:text-ink transition-colors">
+            FAQ
+          </a>
+          <a href={`${basePath}docs/introduction/`} className="hover:text-ink transition-colors">
+            Docs
           </a>
         </nav>
 
@@ -68,22 +74,18 @@ export function Navbar({ basePath }: { basePath: string }) {
             target="_blank"
             rel="noreferrer"
             aria-label="Join the Ferryx Discord"
-            className="hidden sm:inline-flex text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:inline-flex h-9 w-9 items-center justify-center rounded-full text-ink-soft transition-colors hover:bg-ink/[0.04] hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
-            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
-              <DiscordIcon className="h-4 w-4" />
-            </Button>
+            <DiscordIcon className="h-4 w-4" />
           </a>
           <a
             href={GITHUB_REPO_URL}
             target="_blank"
             rel="noreferrer"
             aria-label="Ferryx on GitHub"
-            className="hidden sm:inline-flex text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:inline-flex h-9 w-9 items-center justify-center rounded-full text-ink-soft transition-colors hover:bg-ink/[0.04] hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
-            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
-              <Github className="h-4 w-4" />
-            </Button>
+            <Github className="h-4 w-4" />
           </a>
           <DownloadMenu variant="navbar" />
         </div>
