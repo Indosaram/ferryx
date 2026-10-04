@@ -284,10 +284,18 @@ export async function clickRetryDarwin(evidence, pid) {
 // A probe that issues exactly ONE enumeration therefore reads the pre-activation
 // tree and reports a typed not-found for an affordance that does exist. Every
 // probe that can be the FIRST UIA client of a run therefore
-//   1. attaches ONCE with a cheap `FindAll(Descendants, TrueCondition)` per
-//      searched window root (that call is what triggers the lazy build), and
+//   1. RE-ISSUES the `FindAll(Descendants, TrueCondition)` attach per searched
+//      window root on a bounded interval - re-issuing the attach is what drives
+//      the lazy build - until the observed tree leaves the Chromium-internal
+//      baseline (a `Document` element, or an element count above it) or the
+//      attach's own bounded budget expires, and
 //   2. repeats its REAL query on a bounded interval until that query matches or
 //      the probe's own warm budget expires.
+// Pass 9 measured the requirement (`task-9/latency-probe.json`): the tree is
+// never built at the attach (16 elements / 2 named at first-attach delays of 1 s
+// through 12 s from launch) and flips 317-353 ms later, so the attach loop is
+// bounded at ~1.5x the worst measurement while the name-search budget keeps the
+// 4 s it already had.
 // Only the OBSERVATION is retried: not-found (with the same bounded inventory),
 // not-unique and disabled are still decided from the last observation exactly as
 // before, so the warm-up can never turn a genuine absence into a match.
@@ -303,25 +311,59 @@ export async function clickRetryDarwin(evidence, pid) {
 // ---------------------------------------------------------------------------
 export const UIA_WARM_BUDGET_MS = BUDGETS.uiaWarmBudgetMs;
 export const UIA_WARM_RETRY_INTERVAL_MS = BUDGETS.uiaWarmRetryIntervalMs;
+// The warm ATTACH loop's own ceiling: pass 9 measured the attach -> DOM flip at
+// 317-353 ms, so the loop is bounded at ~1.5x the worst measurement instead of
+// the name-search budget above (~12x the requirement).
+export const UIA_WARM_ATTACH_BUDGET_MS = BUDGETS.uiaWarmAttachBudgetMs;
+export const UIA_WARM_ATTACH_INTERVAL_MS = BUDGETS.uiaWarmAttachIntervalMs;
 
-// The warm enumeration every warmed probe runs once, before its real query. One
+// The warm attach every warmed probe runs before its real query. The
 // `FindAll(Descendants, TrueCondition)` per window root is what attaches the UIA
-// client and triggers the tree build; the result is discarded except for the
-// measured element count, which is recorded so a later pass can tell the attach
-// really happened (16 elements at the attach, 93 after activation, in the pass-8
-// measurement).
-function uiaWarmLines(windowVar, warmBudgetMs, warmIntervalMs) {
+// client and drives the tree build, and it is RE-ISSUED on a bounded interval
+// until the observed tree leaves the Chromium-internal baseline (a `Document`
+// element, or a count above it) or the attach budget expires. Pass 9 measured
+// the flip at 317-353 ms after the first attach; the single no-wait pass this
+// replaced read 16 pre-activation elements on every run, so two of three runs
+// then burned the whole name-search budget retrying the NAME-condition search,
+// which does not re-trigger Chromium's build. Only the OBSERVATION is retried.
+function uiaWarmLines(windowVar, warmBudgetMs, warmIntervalMs, attachBudgetMs, attachIntervalMs) {
   return [
     `$warmBudgetMs = ${warmBudgetMs};`,
     `$warmIntervalMs = ${warmIntervalMs};`,
+    `$warmAttachBudgetMs = ${attachBudgetMs};`,
+    `$warmAttachIntervalMs = ${attachIntervalMs};`,
+    '$warmBaselineElements = 16;',
     '$warmElements = 0;',
-    `foreach ($warmWindow in ${windowVar}) {`,
-    '  $warmRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$warmWindow.hwnd));',
-    '  if ($warmRoot -eq $null) { continue };',
-    '  $warmNodes = $warmRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition);',
-    '  $warmElements = $warmElements + $warmNodes.Count;',
+    '$warmHasDocument = $false;',
+    '$warmAttachCount = 0;',
+    '$warmAttachCounts = New-Object System.Collections.ArrayList;',
+    '$warmAttachSw = [System.Diagnostics.Stopwatch]::StartNew();',
+    'while ($true) {',
+    '  $warmAttachCount = $warmAttachCount + 1;',
+    '  $warmElements = 0;',
+    '  $warmHasDocument = $false;',
+    `  foreach ($warmWindow in ${windowVar}) {`,
+    '    $warmRoot = [System.Windows.Automation.AutomationElement]::FromHandle([System.IntPtr]::new([int64]$warmWindow.hwnd));',
+    '    if ($warmRoot -eq $null) { continue };',
+    '    $warmNodes = $warmRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition);',
+    '    $warmElements = $warmElements + $warmNodes.Count;',
+    '    for ($warmIndex = 0; $warmIndex -lt $warmNodes.Count; $warmIndex = $warmIndex + 1) {',
+    '      try {',
+    '        if ($warmNodes.Item($warmIndex).Current.ControlType.ProgrammaticName -eq \'ControlType.Document\') { $warmHasDocument = $true; break }',
+    '      } catch { }',
+    '    }',
+    '  }',
+    '  $warmAttachCounts.Add($warmElements) | Out-Null;',
+    '  if ($warmHasDocument) { break };',
+    '  if ($warmElements -gt $warmBaselineElements) { break };',
+    '  if ($warmAttachSw.ElapsedMilliseconds -ge $warmAttachBudgetMs) { break };',
+    '  Start-Sleep -Milliseconds $warmAttachIntervalMs;',
     '}',
     '$diag.warmElements = $warmElements;',
+    '$diag.warmAttachCount = $warmAttachCount;',
+    '$diag.warmAttachElementCounts = @($warmAttachCounts);',
+    '$diag.warmDocumentSeen = $warmHasDocument;',
+    '$diag.warmAttachElapsedMs = [int]$warmAttachSw.ElapsedMilliseconds;',
   ];
 }
 
@@ -780,6 +822,8 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
   const inspectCap = Number.isFinite(options.inventoryInspectCap) ? options.inventoryInspectCap : WINDOW_INVENTORY_INSPECT_CAP;
   const warmBudgetMs = Number.isFinite(options.warmBudgetMs) ? options.warmBudgetMs : UIA_WARM_BUDGET_MS;
   const warmIntervalMs = Number.isFinite(options.warmRetryIntervalMs) ? options.warmRetryIntervalMs : UIA_WARM_RETRY_INTERVAL_MS;
+  const warmAttachBudgetMs = Number.isFinite(options.warmAttachBudgetMs) ? options.warmAttachBudgetMs : UIA_WARM_ATTACH_BUDGET_MS;
+  const warmAttachIntervalMs = Number.isFinite(options.warmAttachIntervalMs) ? options.warmAttachIntervalMs : UIA_WARM_ATTACH_INTERVAL_MS;
   const searchWindows = asArray(options.windows)
     .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
     .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
@@ -916,9 +960,10 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '$diag.windowsSearched = @($searched | ForEach-Object { [ordered]@{ hwnd = $_.hwnd; title = $_.title; className = $_.className } });',
     "if ($searched.Count -eq 0) { Fail 'NO_OWNED_WINDOW' 'no visible top-level window owned by the process could be searched for the split affordance' }",
     // Warm the accessibility tree before the FIRST UIA call of this probe (the
-    // focused-element read below): the attach is what builds the lazy tree, so
-    // the queries that follow it must not read the pre-activation snapshot.
-    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs),
+    // focused-element read below): re-issuing the attach is what builds the lazy
+    // tree, so the queries that follow it must not read the pre-activation
+    // snapshot.
+    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs, warmAttachBudgetMs, warmAttachIntervalMs),
     'try { [Microsoft.VisualBasic.Interaction]::AppActivate($targetPid) | Out-Null } catch { }',
     '$focused = [System.Windows.Automation.AutomationElement]::FocusedElement;',
     'if ($focused -ne $null -and $focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { $focused = $null }',
@@ -1056,12 +1101,19 @@ export function classifyWindowsSplitRight(probe) {
     windowsSearchedCount: probe?.windowsSearchedCount ?? windowsSearched.length,
     windowSearchDepths: asArray(probe?.windowSearchDepths),
     matchedWindowHwnd: probe?.matchedWindowHwnd ?? null,
-    // Warm-up telemetry (never part of a verdict): the element count the tree
-    // attach's own enumeration saw, and how many bounded re-queries the real
+    // Warm-up telemetry (never part of a verdict): the element count the last
+    // attach's own enumeration saw, how many times the attach was re-issued and
+    // the count at each attempt (`warmAttachCount` above 1 with a rising last
+    // count is what proves the attach loop drove the build), whether a
+    // `Document` element was observed, and how many bounded re-queries the real
     // observation needed (`1` = the tree was already warm when this probe ran).
     warmElements: probe?.warmElements ?? null,
     warmAttempts: probe?.warmAttempts ?? null,
     warmElapsedMs: probe?.warmElapsedMs ?? null,
+    warmAttachCount: probe?.warmAttachCount ?? null,
+    warmAttachElementCounts: asArray(probe?.warmAttachElementCounts),
+    warmDocumentSeen: probe?.warmDocumentSeen ?? null,
+    warmAttachElapsedMs: probe?.warmAttachElapsedMs ?? null,
     focusedFound: probe?.focusedFound ?? null,
     focusSource: probe?.focusSource ?? null,
     scopeDepth: probe?.scopeDepth ?? null,
@@ -1144,6 +1196,10 @@ export async function windowsDriver(evidence, pid) {
     warmElements: verdict.warmElements,
     warmAttempts: verdict.warmAttempts,
     warmElapsedMs: verdict.warmElapsedMs,
+    warmAttachCount: verdict.warmAttachCount,
+    warmAttachElementCounts: verdict.warmAttachElementCounts,
+    warmDocumentSeen: verdict.warmDocumentSeen,
+    warmAttachElapsedMs: verdict.warmAttachElapsedMs,
     detail: verdict.detail,
   });
   if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);
@@ -1176,6 +1232,8 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
   }
   const warmBudgetMs = Number.isFinite(options.warmBudgetMs) ? options.warmBudgetMs : UIA_WARM_BUDGET_MS;
   const warmIntervalMs = Number.isFinite(options.warmRetryIntervalMs) ? options.warmRetryIntervalMs : UIA_WARM_RETRY_INTERVAL_MS;
+  const warmAttachBudgetMs = Number.isFinite(options.warmAttachBudgetMs) ? options.warmAttachBudgetMs : UIA_WARM_ATTACH_BUDGET_MS;
+  const warmAttachIntervalMs = Number.isFinite(options.warmAttachIntervalMs) ? options.warmAttachIntervalMs : UIA_WARM_ATTACH_INTERVAL_MS;
   const searchWindows = asArray(options.windows)
     .map(window => ({ hwnd: Number(window?.hwnd), title: windowText(window?.title), className: windowText(window?.className) }))
     .filter(window => Number.isFinite(window.hwnd) && window.hwnd !== 0);
@@ -1237,8 +1295,9 @@ export function buildWindowsNewPaneScript(pid, options = {}) {
     // Warm the accessibility tree before the FIRST UIA call of this probe (the
     // candidate enumeration below): this probe IS the attach in every split
     // scenario, and pass 8 measured the attach's own enumeration reading 16
-    // Chromium-internal nodes with no DOM at all.
-    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs),
+    // Chromium-internal nodes with no DOM at all, while pass 9 measured the DOM
+    // appearing 317-353 ms after that attach.
+    ...uiaWarmLines('$searched', warmBudgetMs, warmIntervalMs, warmAttachBudgetMs, warmAttachIntervalMs),
     '$candidates = New-Object System.Collections.ArrayList;',
     '$elements = New-Object System.Collections.ArrayList;',
     '$warmSw = [System.Diagnostics.Stopwatch]::StartNew();',
@@ -1320,6 +1379,10 @@ export function classifyWindowsNewPane(probe) {
     warmElements: probe?.warmElements ?? null,
     warmAttempts: probe?.warmAttempts ?? null,
     warmElapsedMs: probe?.warmElapsedMs ?? null,
+    warmAttachCount: probe?.warmAttachCount ?? null,
+    warmAttachElementCounts: asArray(probe?.warmAttachElementCounts),
+    warmDocumentSeen: probe?.warmDocumentSeen ?? null,
+    warmAttachElapsedMs: probe?.warmAttachElapsedMs ?? null,
     psFailure: probe?.failure ?? null,
     psDetail: probe?.detail ?? null,
   };
@@ -1382,6 +1445,10 @@ export async function windowsNewPane(evidence, pid) {
     warmElements: verdict.warmElements,
     warmAttempts: verdict.warmAttempts,
     warmElapsedMs: verdict.warmElapsedMs,
+    warmAttachCount: verdict.warmAttachCount,
+    warmAttachElementCounts: verdict.warmAttachElementCounts,
+    warmDocumentSeen: verdict.warmDocumentSeen,
+    warmAttachElapsedMs: verdict.warmAttachElapsedMs,
     detail: verdict.detail,
   });
   if (!verdict.ok) throw new HarnessError(verdict.code, verdict.detail);

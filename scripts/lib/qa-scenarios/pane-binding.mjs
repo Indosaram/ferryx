@@ -122,7 +122,20 @@ export async function bindPaneSession({
     });
   } catch (error) {
     if (error?.code === 'BARRIER_ACK_TIMEOUT') {
-      throw new HarnessError('PANE_BINDING_UNBOUND', `no ${receiptName} receipt named a session other than the ${fixtureIds.size} fixture session(s) within ${timeoutMs}ms, so the UI pane step created no observable pane (observed sessions: ${JSON.stringify(observedSessionIds(barrierHub, receiptName))})`);
+      // The block has to say WHICH stream it read and WHAT that stream held.
+      // "no pane was created" (an absent or empty stream) and "a pane was
+      // created but never presented" (lines that named only fixture sessions)
+      // are different defects, and the observed session list alone cannot tell
+      // them apart. Fail-closed behaviour is unchanged: the same typed code, the
+      // same decision, only more of the measurement in the message.
+      const namedSessions = observedSessionIds(barrierHub, receiptName);
+      const receiptFile = typeof barrierHub.receiptPath === 'function'
+        ? `"${barrierHub.receiptPath(receiptName)}"`
+        : 'unknown';
+      const receiptLines = typeof barrierHub.receiptLineCount === 'function'
+        ? barrierHub.receiptLineCount(receiptName)
+        : 'unknown';
+      throw new HarnessError('PANE_BINDING_UNBOUND', `no ${receiptName} receipt named a session other than the ${fixtureIds.size} fixture session(s) within ${timeoutMs}ms, so the UI pane step created no observable pane (receipt: ${receiptFile}, receipt lines: ${receiptLines}, sessions named by those lines: ${JSON.stringify(namedSessions)}, fixture sessions excluded: ${JSON.stringify([...fixtureIds])}, observed pane sessions: ${JSON.stringify(namedSessions.filter(id => !fixtureIds.has(id)))})`);
     }
     throw error;
   }

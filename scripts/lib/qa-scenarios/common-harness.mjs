@@ -312,6 +312,17 @@ export const BUDGETS = Object.freeze({
   // the frozen `attemptCeilingMs` correctness ceiling.
   uiaWarmBudgetMs: 4_000,
   uiaWarmRetryIntervalMs: 100,
+  // Pass-9 measured the requirement directly (four fresh launches, first attach
+  // delayed 1/3/6/12 s): the tree is NEVER built at the attach - exactly 16
+  // Chromium-internal elements, 2 named, at every delay - and flips 317-353 ms
+  // later, a 36 ms spread that is independent of launch-relative time
+  // (`task-9/latency-probe.json`). Re-issuing the attach is what drives the
+  // build, so the warm ATTACH loop gets this dedicated ceiling (~1.5x the worst
+  // measurement) while the name-search budget above stays at the 4 s it already
+  // had: the loop exits on the first observation that leaves the baseline, so
+  // the budget is only ever reached when the tree really never activates.
+  uiaWarmAttachBudgetMs: 500,
+  uiaWarmAttachIntervalMs: 100,
   paneBindingReadyMs: 8_000,
   setupCeilingMs: 45_000,
 });
@@ -1077,6 +1088,21 @@ export class BarrierHub {
     const parsed = correlateReceipt(JSON.parse(outcome.value), this, label);
     if (entry) entry.receipts.push(parsed);
     return parsed;
+  }
+
+  // The receipt stream's own file, and its physical line count. A blocked
+  // pane-binding report needs both to tell "the stream held nothing" (the pane
+  // step created no pane at all) from "the stream held lines that named only
+  // fixture sessions" (a pane was created but never presented) - the observed
+  // session list alone cannot separate those two defects.
+  receiptPath(name) {
+    return join(this.dir, `${name}.receipt.jsonl`);
+  }
+
+  receiptLineCount(name) {
+    let text;
+    try { text = readFileSync(this.receiptPath(name), 'utf8'); } catch { return 0; }
+    return text.split('\n').filter(line => line.trim().length > 0).length;
   }
 
   // Every settled line of one receipt stream, for evidence and for the

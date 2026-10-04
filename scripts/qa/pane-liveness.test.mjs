@@ -1615,6 +1615,72 @@ test('no generated PowerShell script merges a statement onto the here-string hea
     expect([name, script.split('\n').length > 1]).toEqual([name, true]);
     expect([name, script.split('\n').includes('')]).toEqual([name, false]);
   }
+  // Pass-9 defect (scripts lane; the reason two of three runs burned the full
+  // 4 s): the warm emitter ran ONE `FindAll(Descendants, TrueCondition)` per
+  // window root with no wait - `warmElements: 16` (the Chromium-internal
+  // pre-activation tree) on all three runs - while the retry loop that did exist
+  // retried the scope search under the affordance NAME condition
+  // (`warmAttempts: 33` / `warmElapsedMs: 4087` on the two failures), and a
+  // name-condition `FindAll` on an unbuilt tree does not re-trigger Chromium's
+  // build. The attach is what drives the build (pass 9 measured the flip 317-353
+  // ms after it), so both warmed builders must RE-ISSUE the attach inside a loop
+  // that exits on the observed tree, never on a fixed sleep.
+  const warmAttachLines = {
+    'split-right': native.buildWindowsSplitRightScript(4242, 2500, { windows: [{ hwnd: 19663500, title: 'F', className: 'T' }] }).split('\n'),
+    'new-pane': native.buildWindowsNewPaneScript(4242, { windows: [{ hwnd: 19663500, title: 'F', className: 'T' }] }).split('\n'),
+  };
+  for (const [name, lines] of Object.entries(warmAttachLines)) {
+    const loopStart = lines.indexOf('$warmAttachSw = [System.Diagnostics.Stopwatch]::StartNew();');
+    const reissue = lines.indexOf('    $warmNodes = $warmRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition);');
+    const counts = lines.indexOf('  $warmAttachCounts.Add($warmElements) | Out-Null;');
+    const documentBreak = lines.indexOf('  if ($warmHasDocument) { break };');
+    const baselineBreak = lines.indexOf('  if ($warmElements -gt $warmBaselineElements) { break };');
+    const budgetBreak = lines.indexOf('  if ($warmAttachSw.ElapsedMilliseconds -ge $warmAttachBudgetMs) { break };');
+    const intervalSleep = lines.indexOf('  Start-Sleep -Milliseconds $warmAttachIntervalMs;');
+    // The re-issued attach is INSIDE the loop (after the stopwatch the loop is
+    // measured from); the loop exits on the observed tree first and only then on
+    // its own bounded deadline; and the sleep comes after the observation, so no
+    // fixed sleep is ever the mechanism.
+    expect([name, loopStart]).not.toEqual([name, -1]);
+    expect([name, reissue > loopStart]).toEqual([name, true]);
+    expect([name, counts > reissue]).toEqual([name, true]);
+    expect([name, documentBreak > counts]).toEqual([name, true]);
+    expect([name, baselineBreak > documentBreak]).toEqual([name, true]);
+    expect([name, budgetBreak > baselineBreak]).toEqual([name, true]);
+    expect([name, intervalSleep > budgetBreak]).toEqual([name, true]);
+    // The attach loop is bounded by its own ~1.5x-of-measurement ceiling, not by
+    // the 4 s name-search budget it must not consume.
+    expect([name, lines.includes('$warmAttachBudgetMs = 500;')]).toEqual([name, true]);
+    expect([name, lines.includes('$warmBudgetMs = 4000;')]).toEqual([name, true]);
+    // ...and it reports its own attach count, the count at each attempt, and the
+    // structural signal, so the next pass can confirm the loop worked from the
+    // evidence alone.
+    expect([name, lines.includes('$diag.warmElements = $warmElements;')]).toEqual([name, true]);
+    expect([name, lines.includes('$diag.warmAttachCount = $warmAttachCount;')]).toEqual([name, true]);
+    expect([name, lines.includes('$diag.warmAttachElementCounts = @($warmAttachCounts);')]).toEqual([name, true]);
+    expect([name, lines.includes('$diag.warmDocumentSeen = $warmHasDocument;')]).toEqual([name, true]);
+  }
+  // Both classifiers surface that telemetry unchanged (it is never part of a
+  // verdict), and a probe predating the attach loop reports null/empty instead
+  // of a fabricated count.
+  const warmVerdict = native.classifyWindowsNewPane({
+    probe: 'new-pane', selectorNames: ['New Terminal'], interactive: true, sessionId: 1,
+    windowsSearched: [{ hwnd: 19663500, title: 'F', className: 'T' }], windowsSearchedCount: 1,
+    candidateCount: 0, actionableCount: 0, candidates: [], failure: 'PANE_AFFORDANCE_NOT_FOUND',
+    warmElements: 110, warmAttempts: 1, warmElapsedMs: 29,
+    warmAttachCount: 4, warmAttachElementCounts: [16, 16, 16, 110], warmDocumentSeen: true, warmAttachElapsedMs: 342,
+  });
+  expect(warmVerdict.code).toBe('PANE_AFFORDANCE_NOT_FOUND');
+  expect(warmVerdict.warmElements).toBe(110);
+  expect(warmVerdict.warmAttachCount).toBe(4);
+  expect(warmVerdict.warmAttachElementCounts).toEqual([16, 16, 16, 110]);
+  expect(warmVerdict.warmDocumentSeen).toBe(true);
+  expect(warmVerdict.warmAttachElapsedMs).toBe(342);
+  const legacyWarm = native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' });
+  expect(legacyWarm.warmAttachCount).toBeNull();
+  expect(legacyWarm.warmAttachElementCounts).toEqual([]);
+  expect(legacyWarm.warmDocumentSeen).toBeNull();
+  expect(legacyWarm.warmAttachElapsedMs).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
@@ -1984,14 +2050,38 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     expect(binding.fixtureSessionIds).toEqual(['b-fixture']);
     expect(binding.observedPaneSessionIds).toEqual(['b-pane']);
     expect(actions.map(action => action.action)).toEqual(['pane-session-bound']);
-    // A pane that never presents is a typed block, never an assumed binding.
+    // A pane that never presents is a typed block, never an assumed binding -
+    // and the block has to say WHICH stream it read and WHAT that stream held:
+    // "no pane was created" (an absent or empty stream) and "a pane was created
+    // but never presented" (lines that named only fixture sessions) are
+    // different defects, and the observed session list alone cannot tell them
+    // apart. This is the exact pass-9 failure shape: `observed sessions: []` with
+    // no way to tell which of the two it was.
     writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
       `${line({ sessionId: 'b-fixture', attachTuple: tuple('b-fixture'), presented: true })}\n`);
-    await expect(bindPaneSession({
+    const fixtureOnly = await bindPaneSession({
       barrierHub: hub,
       fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
       timeoutMs: 300,
-    })).rejects.toThrowError(/PANE_BINDING_UNBOUND/);
+    }).then(() => null, error => error);
+    expect(fixtureOnly.code).toBe('PANE_BINDING_UNBOUND');
+    expect(fixtureOnly.detail).toContain(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`));
+    expect(fixtureOnly.detail).toContain('receipt lines: 1');
+    expect(fixtureOnly.detail).toContain('sessions named by those lines: ["b-fixture"]');
+    expect(fixtureOnly.detail).toContain('fixture sessions excluded: ["b-fixture"]');
+    expect(fixtureOnly.detail).toContain('observed pane sessions: []');
+    // Nothing in the stream at all: the same typed code, and the report says so
+    // instead of leaving the reader to guess.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`), '');
+    const emptyStream = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      timeoutMs: 300,
+    }).then(() => null, error => error);
+    expect(emptyStream.code).toBe('PANE_BINDING_UNBOUND');
+    expect(emptyStream.detail).toContain('receipt lines: 0');
+    expect(emptyStream.detail).toContain('sessions named by those lines: []');
+    expect(emptyStream.detail).toContain('fixture sessions excluded: ["b-fixture"]');
     // Two distinct non-fixture panes cannot be told apart: ambiguous, typed.
     writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
       `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`
