@@ -986,6 +986,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                     loan.return_to_slot();
 
                     let dispatch_failure_coordinator = Arc::clone(&completion_coordinator);
+                    let completion_window_for_closure = completion_window.clone();
                     if let Err(err) = dispatch_render_on_main_thread(&completion_window, move || {
                         if discard_retired_completion(&completion_slot) {
                             return;
@@ -1047,7 +1048,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 if let Some(presentation_receipt) =
                                     pane_liveness_presentation_receipt(frame_attach_tuple, true)
                                 {
-                                    if let Err(error) = completion_window.emit(
+                                    if let Err(error) = completion_window_for_closure.emit(
                                         crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT,
                                         presentation_receipt,
                                     ) {
