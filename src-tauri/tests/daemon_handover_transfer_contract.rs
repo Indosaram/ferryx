@@ -115,6 +115,8 @@ impl TestDaemonClient {
                 rows,
                 shell: shell.map(str::to_string),
                 startup: None,
+                // Legacy spawn fixture: no local-split envelope on the wire.
+                local_split: None,
             })
             .await?;
         match resp {
