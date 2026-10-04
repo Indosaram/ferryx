@@ -2129,6 +2129,9 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     expect(binding.fixtureSessionIds).toEqual(['b-fixture']);
     expect(binding.observedPaneSessionIds).toEqual(['b-pane']);
     expect(actions.map(action => action.action)).toEqual(['pane-session-bound']);
+    // Which source settled the binding is part of the evidence (task-9 pass-13):
+    // the product's own tuple settled this one.
+    expect(actions[0].settledBy).toBe('presentation-tuple');
     // A pane that never presents is a typed block, never an assumed binding -
     // and the block has to say WHICH stream it read and WHAT that stream held:
     // "no pane was created" (an absent or empty stream) and "a pane was created
@@ -2170,6 +2173,276 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
       `${line({ sessionId: 'b-pane', attachTuple: { backendSessionId: 'b-pane' }, presented: true })}\n`);
     await expect(bindPaneSession({ barrierHub: hub, timeoutMs: 500 })).rejects.toThrowError(/missing 7-tuple field/);
+
+    // -----------------------------------------------------------------------
+    // The measured daemon inventory delta (task-9 pass-13). The pre-split pane's
+    // presentation producer requires the seven-field attachTuple and emits
+    // NOTHING without it, so when no receipt settles a session the binding falls
+    // back to the sessions the isolated daemon reports AFTER the click minus the
+    // ones it reported BEFORE, excluding the settled fixture sessions.
+    // -----------------------------------------------------------------------
+    const inventoryOf = (sessions, extra = {}) => ({ ok: true, code: null, detail: null, transport: 'unix-socket', endpoint: { transport: 'unix-socket', socketPath: '/tmp/x/daemon.sock' }, sessions, epoch: 7, elapsedMs: 1, ...extra });
+    // An empty stream: the receipt path settles nothing, so the delta is used.
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`), '');
+    let afterReads = 0;
+    const deltaBinding = await bindPaneSession({
+      evidence: { action: action => actions.push(action) },
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      inventory: {
+        before: inventoryOf(['b-fixture']),
+        readAfter: async () => { afterReads += 1; return inventoryOf(['b-fixture', 'b-pane']); },
+      },
+      timeoutMs: 300,
+    });
+    expect(afterReads).toBe(1);
+    expect(deltaBinding.settledBy).toBe('inventory-delta');
+    expect(deltaBinding.backendSessionId).toBe('b-pane');
+    expect(deltaBinding.source).toBe('daemon-inventory-delta');
+    expect(deltaBinding.fixtureSessionIds).toEqual(['b-fixture']);
+    expect(deltaBinding.observedPaneSessionIds).toEqual(['b-pane']);
+    expect(deltaBinding.inventoryDelta.added).toEqual(['b-pane']);
+    expect(deltaBinding.inventoryDelta.removed).toEqual([]);
+    expect(deltaBinding.inventoryDelta.epoch).toBe(7);
+    // The three frontend-owned identities are ABSENT on this path, never
+    // invented: the daemon has no concept of paneIdentity/bindingKey.
+    expect(deltaBinding.frontendSessionId).toBeUndefined();
+    expect(deltaBinding.paneIdentity).toBeUndefined();
+    expect(deltaBinding.bindingKey).toBeUndefined();
+    expect(actions[actions.length - 1].action).toBe('pane-session-bound');
+    expect(actions[actions.length - 1].settledBy).toBe('inventory-delta');
+    // The fixture session is excluded even when it appears inside the click
+    // window: it is a session the product created before any pane existed, so it
+    // can never be the pane the click opened.
+    const fixtureRecreated = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      inventory: { before: inventoryOf(['b-old']), readAfter: async () => inventoryOf(['b-fixture', 'b-pane']) },
+      timeoutMs: 300,
+    });
+    expect(fixtureRecreated.backendSessionId).toBe('b-pane');
+    expect(fixtureRecreated.observedPaneSessionIds).toEqual(['b-pane']);
+    // Zero added sessions: typed UNBOUND, and the detail names what the two
+    // measured inventories really held.
+    const zeroDelta = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      inventory: { before: inventoryOf(['b-fixture', 'b-old']), readAfter: async () => inventoryOf(['b-fixture']) },
+      timeoutMs: 300,
+    }).then(() => null, error => error);
+    expect(zeroDelta.code).toBe('PANE_BINDING_UNBOUND');
+    expect(zeroDelta.detail).toContain('the measured daemon inventory delta named no new session either');
+    expect(zeroDelta.detail).toContain('before-read 2 session(s) ["b-fixture","b-old"]');
+    expect(zeroDelta.detail).toContain('after-read 1 session(s) ["b-fixture"]');
+    expect(zeroDelta.detail).toContain('removed ["b-old"]');
+    // More than one new session: the SAME one-session guard with the SAME typed
+    // code as the receipt path - never "whichever id sorted first" - and the
+    // detail names every candidate so the next pass can see what appeared.
+    const twoAdded = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      inventory: { before: inventoryOf(['b-fixture']), readAfter: async () => inventoryOf(['b-fixture', 'b-pane', 'b-restored']) },
+      timeoutMs: 300,
+    }).then(() => null, error => error);
+    expect(twoAdded.code).toBe('PANE_BINDING_AMBIGUOUS');
+    expect(twoAdded.detail).toContain('["b-pane","b-restored"]');
+    expect(twoAdded.detail).toContain('cannot say which pane it split');
+    // A read that could not be taken is a typed failure that says WHY, never a
+    // guessed binding.
+    const unreadable = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      inventory: { before: { ok: false, code: 'DAEMON_RUNTIME_MISSING', detail: 'no daemon socket at /tmp/x/runtime/daemon.sock' }, readAfter: async () => inventoryOf(['b-pane']) },
+      timeoutMs: 300,
+    }).then(() => null, error => error);
+    expect(unreadable.code).toBe('PANE_BINDING_UNBOUND');
+    expect(unreadable.detail).toContain('could not be measured: before-read DAEMON_RUNTIME_MISSING');
+    // No inventory wired at all (a scenario that never needed it) keeps the same
+    // typed code and the same enriched receipt detail as before this change.
+    const noInventory = await bindPaneSession({
+      barrierHub: hub,
+      fixture: { sessions: [{ kind: 'source', backendSessionId: 'b-fixture', ownershipReceipt: { owned: true } }] },
+      timeoutMs: 300,
+    }).then(() => null, error => error);
+    expect(noInventory.code).toBe('PANE_BINDING_UNBOUND');
+    expect(noInventory.detail).toContain('no daemon inventory reader was wired into the pane step');
+    expect(noInventory.detail).toContain('receipt lines: 0');
+    // The product's own tuple is PREFERRED: when it settles, the delta is never
+    // even read (no wasted read, and no chance of the fallback overriding it).
+    writeFileSync(join(hub.dir, `${PANE_PRESENTATION_RECEIPT}.receipt.jsonl`),
+      `${line({ sessionId: 'b-pane', attachTuple: tuple('b-pane'), presented: true })}\n`);
+    let unusedAfterReads = 0;
+    const preferred = await bindPaneSession({
+      barrierHub: hub,
+      inventory: { before: inventoryOf([]), readAfter: async () => { unusedAfterReads += 1; return inventoryOf(['b-other']); } },
+      timeoutMs: 300,
+    });
+    expect(preferred.settledBy).toBe('presentation-tuple');
+    expect(preferred.backendSessionId).toBe('b-pane');
+    expect(unusedAfterReads).toBe(0);
+
+    // -----------------------------------------------------------------------
+    // The client itself, against a fake daemon that speaks the product's own
+    // framing (newline-delimited JSON; `handshake`/`handshakeOk` then
+    // `listSessions`/`listSessionsOk`), over BOTH transports.
+    // -----------------------------------------------------------------------
+    const inventoryModule = await import('../lib/qa-scenarios/daemon-inventory.mjs');
+    const { createServer: createNetServer } = await import('node:net');
+    const fakeDaemon = ({ sessions, epoch = 7, token = null }) => {
+      const received = [];
+      const server = createNetServer(socket => {
+        socket.setEncoding('utf8');
+        let buffered = '';
+        socket.on('data', chunk => {
+          buffered += chunk;
+          let index = buffered.indexOf('\n');
+          while (index !== -1) {
+            const frame = JSON.parse(buffered.slice(0, index));
+            buffered = buffered.slice(index + 1);
+            received.push(frame);
+            if (frame.type === 'handshake') {
+              if (token !== null && frame.token !== token) {
+                socket.write(`${JSON.stringify({ type: 'error', message: 'rejected', code: 'TRANSPORT_UNAUTHORIZED' })}\n`);
+                socket.end();
+                return;
+              }
+              socket.write(`${JSON.stringify({ type: 'handshakeOk', version: inventoryModule.DAEMON_PROTOCOL_VERSION, pid: 4242, epoch })}\n`);
+            } else if (frame.type === 'listSessions') {
+              socket.write(`${JSON.stringify({ type: 'listSessionsOk', epoch, sessions })}\n`);
+            }
+            index = buffered.indexOf('\n');
+          }
+        });
+      });
+      return { server, received };
+    };
+
+    // POSIX: the endpoint IS the Unix socket, and no token is presented because
+    // the socket's ownership and mode are the credential. The runtime dir name is
+    // deliberately one character: a Unix socket path is capped at 104 bytes on
+    // macOS, and this temp root is already long.
+    const unixRuntime = join(root, 'u');
+    mkdirSync(unixRuntime, { recursive: true });
+    const unixFake = fakeDaemon({ sessions: ['s-fixture', 's-pane'], epoch: 11 });
+    await new Promise(resolvePromise => unixFake.server.listen(join(unixRuntime, 'daemon.sock'), resolvePromise));
+    try {
+      const read = await inventoryModule.readDaemonSessionInventory({ runtimeDir: unixRuntime, platform: 'linux', totalMs: 3_000 });
+      expect(read.ok).toBe(true);
+      expect(read.sessions).toEqual(['s-fixture', 's-pane']);
+      expect(read.epoch).toBe(11);
+      expect(read.transport).toBe('unix-socket');
+      // READ-ONLY: the only requests on the wire are the two read verbs.
+      expect(unixFake.received.map(frame => frame.type)).toEqual(['handshake', 'listSessions']);
+      expect(unixFake.received.every(frame => inventoryModule.READ_ONLY_REQUEST_TYPES.includes(frame.type))).toBe(true);
+      expect(unixFake.received[0].version).toBe(inventoryModule.DAEMON_PROTOCOL_VERSION);
+      expect(unixFake.received[0].token).toBeUndefined();
+    } finally { await new Promise(resolvePromise => unixFake.server.close(resolvePromise)); }
+
+    // Windows: the endpoint file holds the loopback port, and the first frame
+    // must carry this boot's token (trimmed) as a top-level field.
+    const winRuntime = join(root, 'runtime-win');
+    mkdirSync(winRuntime, { recursive: true });
+    const winFake = fakeDaemon({ sessions: ['s-a'], epoch: 3, token: 'tok-abc' });
+    await new Promise(resolvePromise => winFake.server.listen(0, '127.0.0.1', resolvePromise));
+    const winPort = winFake.server.address().port;
+    writeFileSync(join(winRuntime, 'daemon.port'), `${winPort}\n`);
+    writeFileSync(join(winRuntime, 'daemon.token'), '  tok-abc \n');
+    try {
+      const read = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 3_000 });
+      expect(read.ok).toBe(true);
+      expect(read.sessions).toEqual(['s-a']);
+      expect(read.transport).toBe('loopback-port');
+      expect(winFake.received[0]).toEqual({ type: 'handshake', version: inventoryModule.DAEMON_PROTOCOL_VERSION, token: 'tok-abc' });
+      // The bearer credential is never part of what the harness records.
+      expect(JSON.stringify(read.endpoint)).not.toContain('tok-abc');
+      expect(JSON.stringify(inventoryModule.describeDaemonEndpoint(read.endpoint))).not.toContain('tok-abc');
+      // A wrong token is refused by the daemon's own first-frame gate, typed.
+      writeFileSync(join(winRuntime, 'daemon.token'), 'wrong-token\n');
+      const unauthorized = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 3_000 });
+      expect(unauthorized.ok).toBe(false);
+      expect(unauthorized.code).toBe('DAEMON_UNAUTHORIZED');
+      // Every failure this client can report is one of its declared identities.
+      expect(inventoryModule.DAEMON_INVENTORY_FAILURES).toContain(unauthorized.code);
+      // Missing runtime files, an unparseable port and an absent token each keep
+      // their own typed identity instead of collapsing into one failure.
+      writeFileSync(join(winRuntime, 'daemon.token'), 'tok-abc\n');
+      const missingRuntime = await inventoryModule.readDaemonSessionInventory({ runtimeDir: join(root, 'runtime-absent'), platform: 'linux', totalMs: 500 });
+      expect(missingRuntime.code).toBe('DAEMON_RUNTIME_MISSING');
+      writeFileSync(join(winRuntime, 'daemon.port'), 'not-a-port\n');
+      const badPort = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 500 });
+      expect(badPort.code).toBe('DAEMON_PORT_INVALID');
+      writeFileSync(join(winRuntime, 'daemon.port'), `${winPort}\n`);
+      rmSync(join(winRuntime, 'daemon.token'));
+      const noToken = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 500 });
+      expect(noToken.code).toBe('DAEMON_TOKEN_MISSING');
+      // A listener that accepts and never answers is bounded: typed, never a hang.
+      writeFileSync(join(winRuntime, 'daemon.token'), 'tok-abc\n');
+      const silent = createNetServer(() => {});
+      await new Promise(resolvePromise => silent.listen(0, '127.0.0.1', resolvePromise));
+      try {
+        writeFileSync(join(winRuntime, 'daemon.port'), `${silent.address().port}\n`);
+        const timedOut = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', readTimeoutMs: 300, totalMs: 900 });
+        expect(timedOut.ok).toBe(false);
+        expect(timedOut.code).toBe('DAEMON_READ_TIMEOUT');
+      } finally { await new Promise(resolvePromise => silent.close(resolvePromise)); }
+      // An already-expired total deadline is the same kind of typed refusal.
+      writeFileSync(join(winRuntime, 'daemon.port'), `${winPort}\n`);
+      const expired = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 0 });
+      expect(expired.code).toBe('DAEMON_DEADLINE');
+      // A protocol the harness does not speak is refused by the daemon and
+      // reported as such rather than parsed as a session list.
+      const mismatchFake = createNetServer(socket => {
+        socket.setEncoding('utf8');
+        let buffered = '';
+        socket.on('data', chunk => {
+          buffered += chunk;
+          if (buffered.includes('\n')) socket.write(`${JSON.stringify({ type: 'protocolMismatch', expectedVersion: 6, receivedVersion: 5 })}\n`);
+        });
+      });
+      await new Promise(resolvePromise => mismatchFake.listen(0, '127.0.0.1', resolvePromise));
+      try {
+        writeFileSync(join(winRuntime, 'daemon.port'), `${mismatchFake.address().port}\n`);
+        const mismatch = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 1_000 });
+        expect(mismatch.code).toBe('DAEMON_PROTOCOL_MISMATCH');
+      } finally { await new Promise(resolvePromise => mismatchFake.close(resolvePromise)); }
+      // The measured delta is pure arithmetic over the two inventories, and the
+      // fixture sessions are excluded from the added set.
+      expect(inventoryModule.computeInventoryDelta({
+        before: { sessions: ['f', 'a'] }, after: { sessions: ['f', 'a', 'b'] }, fixtureSessionIds: ['f'],
+      })).toEqual({ added: ['b'], removed: [], beforeCount: 2, afterCount: 3, fixtureExcluded: ['f'] });
+      expect(inventoryModule.computeInventoryDelta({
+        before: { sessions: ['f'] }, after: { sessions: ['f', 'n1', 'n2'] }, fixtureSessionIds: ['f'],
+      }).added).toEqual(['n1', 'n2']);
+    } finally { await new Promise(resolvePromise => winFake.server.close(resolvePromise)); }
+
+    // The reader factory wires the runtime dir, consumes the pre-trigger setup
+    // budget, and records the read as evidence without the token.
+    const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+    const readerActions = [];
+    const budgetCalls = [];
+    const reader = createPaneInventoryReader({
+      isolationRoot: root,
+      platform: 'win32',
+      evidence: { action: action => readerActions.push(action) },
+      budget: { consume: (cap, label) => { budgetCalls.push([cap, label]); return 700; } },
+      readInventory: async request => {
+        expect(request.runtimeDir).toBe(join(root, 'runtime'));
+        expect(request.platform).toBe('win32');
+        expect(request.totalMs).toBe(700);
+        return { ok: true, code: null, detail: null, transport: 'loopback-port', endpoint: { transport: 'loopback-port', portPath: join(root, 'runtime', 'daemon.port'), tokenPath: join(root, 'runtime', 'daemon.token') }, sessions: ['s2', 's1'], epoch: 5, elapsedMs: 2 };
+      },
+    });
+    expect(reader.runtimeDir).toBe(join(root, 'runtime'));
+    const snapshotted = await reader.snapshot('pane-inventory-before');
+    expect(snapshotted.ok).toBe(true);
+    expect(budgetCalls).toEqual([[BUDGETS.daemonInventoryTotalMs, 'pane-inventory-before']]);
+    expect(readerActions).toEqual([{
+      action: 'pane-inventory-before', ok: true, code: null, detail: null,
+      transport: 'loopback-port',
+      endpoint: { transport: 'loopback-port', portPath: join(root, 'runtime', 'daemon.port'), tokenPath: join(root, 'runtime', 'daemon.token') },
+      sessionCount: 2, sessionIds: ['s1', 's2'], epoch: 5, elapsedMs: 2,
+    }]);
+    expect(JSON.stringify(readerActions)).not.toContain('tok-abc');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

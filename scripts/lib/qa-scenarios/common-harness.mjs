@@ -324,6 +324,21 @@ export const BUDGETS = Object.freeze({
   uiaWarmAttachBudgetMs: 500,
   uiaWarmAttachIntervalMs: 100,
   paneBindingReadyMs: 8_000,
+  // Task-9 pass-13: the pre-split pane's session identity must come from an
+  // honest producer even when the native surface never attaches - the product's
+  // presentation producer requires the seven-field attachTuple and
+  // `pane_liveness_presentation_receipt` returns None (emitting nothing at all)
+  // without it, and three of those fields are frontend-owned identities the
+  // daemon has no concept of, so nothing may be synthesised. The second source
+  // is the isolated daemon's own session inventory, read over the control wire
+  // (`handshake` + `listSessions` only) before and after the pane click. Every
+  // blocking step of that read is bounded here - connect, per-read, and a total
+  // deadline - so a hung or wedged daemon yields a typed failure instead of a
+  // hang, and the read is charged to the pre-trigger `setupCeilingMs`, never to
+  // the frozen `attemptCeilingMs` correctness ceiling.
+  daemonInventoryConnectMs: 1_500,
+  daemonInventoryReadMs: 2_000,
+  daemonInventoryTotalMs: 3_000,
   setupCeilingMs: 45_000,
 });
 

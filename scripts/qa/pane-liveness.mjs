@@ -30,7 +30,7 @@ import {
   awaitOwnedWindowWindows, selectNativeDriver,
 } from '../lib/qa-scenarios/native-driver.mjs';
 import { ensureFrontendServed } from '../lib/qa-scenarios/frontend-server.mjs';
-import { bindPaneSession } from '../lib/qa-scenarios/pane-binding.mjs';
+import { bindPaneSession, createPaneInventoryReader } from '../lib/qa-scenarios/pane-binding.mjs';
 import { admitWindowsInteractiveDesktop, readWindowsRelaunchRecord } from '../lib/qa-scenarios/windows-interactive.mjs';
 import {
   runSplitHappyScenario,
@@ -59,6 +59,10 @@ const SOURCE_FILES = [
   'scripts/lib/qa-scenarios/windows-interactive.mjs',
   'scripts/lib/qa-scenarios/frontend-server.mjs',
   'scripts/lib/qa-scenarios/pane-binding.mjs',
+  // The pane step's measured second source: the read-only daemon session
+  // inventory client. It joins SOURCE_FILES so the evidence `sourceDigest`
+  // covers the module that can now settle the pre-split pane's binding.
+  'scripts/lib/qa-scenarios/daemon-inventory.mjs',
 ];
 const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
@@ -244,11 +248,34 @@ async function runNativeScenario(ctx) {
   let paneBinding = null;
   if (plan.pane) {
     const driver = selectNativeDriver(ctx);
+    // Honest session identity for the pre-split pane (task-9 pass-13). The
+    // product's own presentation receipt is PREFERRED, but its producer requires
+    // the seven-field attachTuple and `pane_liveness_presentation_receipt`
+    // returns None - emitting nothing at all - without it, while three of those
+    // fields are frontend-owned identities the daemon has no concept of and must
+    // never be invented. So the click is bracketed by two MEASURED, read-only
+    // reads of the isolated daemon's own session inventory (before the click
+    // here, after it on demand inside the binding), and the binding records which
+    // source settled it (`settledBy`). The reads are bounded and non-mutating
+    // (`handshake` + `listSessions` only): a read that cannot be taken leaves a
+    // typed reason in the evidence rather than failing a run whose receipt
+    // settles the binding on its own.
+    const inventory = createPaneInventoryReader({
+      isolationRoot: ctx.isolationRoot,
+      platform: ctx.platform,
+      evidence,
+      budget: setupBudget,
+    });
+    const inventoryBefore = await inventory.snapshot('pane-inventory-before');
     await driver.newPane(evidence, pid);
     paneBinding = await bindPaneSession({
       evidence,
       barrierHub,
       fixture,
+      inventory: {
+        before: inventoryBefore,
+        readAfter: () => inventory.snapshot('pane-inventory-after'),
+      },
       timeoutMs: setupBudget.consume(BUDGETS.paneBindingReadyMs, 'pane binding'),
     });
     ctx.paneBinding = paneBinding;
