@@ -1207,3 +1207,180 @@ test('windows lane blocks are typed, nonzero, and never a pass', async () => {
   expect(runner.classifyNativeFailure('ASSERTION_FAILURE')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
   expect(runner.classifyNativeFailure('RECOVERY_UNPROVEN')).toEqual({ verdict: 'FAIL', exitCode: EXIT.scenarioFailure });
 });
+
+// ---------------------------------------------------------------------------
+// Pass-5 blocker (scripts lane). The driver's own PowerShell scripts are
+// LINE-structured: a here-string header (`@"`) must end its line and its
+// terminator (`"@`) must start one. Space-joining the arrays produced
+// `UnexpectedCharactersAfterHereStringHeader` on the real desktop, so the split
+// click never executed and the selector scoping was never reached. These tests
+// replay the builders' generated strings; nothing here launches PowerShell, a
+// product process, a window, or a scheduled task.
+
+const powerShellScriptLines = script => script.split('\n');
+
+test('split-right PowerShell script keeps the here-string header and terminator on their own lines', async () => {
+  const { buildWindowsSplitRightScript } = await import('../lib/qa-scenarios/native-driver.mjs');
+  const script = buildWindowsSplitRightScript(4242, 2500);
+  const lines = powerShellScriptLines(script);
+  // The measured defect signature: `Add-Type @" using System; ...` on one line,
+  // and a terminator sharing a line with the statement before it.
+  expect(script).not.toMatch(/@"[^\n]/);
+  expect(script).not.toMatch(/[^\n]"@/);
+  expect(lines).not.toContain('');
+  expect(lines.filter(line => line === 'Add-Type @"')).toHaveLength(1);
+  expect(lines.filter(line => line === '"@;')).toHaveLength(1);
+  const header = lines.indexOf('Add-Type @"');
+  const footer = lines.indexOf('"@;');
+  // Header and terminator own their lines: the statements around them are whole,
+  // separate lines, and the here-string body sits between them.
+  expect(lines[header - 1]).toBe('Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, Microsoft.VisualBasic;');
+  expect(lines[header + 1]).toBe('using System;');
+  expect(lines[footer - 1]).toBe('}');
+  expect(lines[footer + 1]).toBe('$targetPid = 4242;');
+  expect(header).toBeLessThan(footer);
+  // The C# body survives verbatim.
+  expect(lines).toContain('using System.Runtime.InteropServices;');
+  expect(lines).toContain('public struct FerryxQaRectStruct { public int Left; public int Top; public int Right; public int Bottom; }');
+  expect(lines).toContain('public class FerryxQaRect {');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out FerryxQaRectStruct rect);');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);');
+  // Every typed failure path and the candidate/chosen evidence are unchanged.
+  expect(lines).toContain('function Fail($code, $detail) { $diag.failure = $code; $diag.detail = $detail; Emit; exit 0 }');
+  expect(lines).toContain('$diag.candidates = $candidates;');
+  expect(lines).toContain('$diag.candidateCount = $items.Count;');
+  expect(lines).toContain('$diag.actionableCount = $actionable.Count;');
+  expect(script).toContain("$diag.chosen = [ordered]@{ index = [int]$actionable[0].index;");
+  expect(script).toContain("$diag.result = 'SPLIT_CLICKED';");
+  for (const code of ['NO_OWNED_WINDOW', 'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED']) {
+    expect(script).toContain(code);
+  }
+  // The probe prints exactly one JSON line and exits 0 on every path.
+  expect(lines[lines.length - 1]).toBe('Emit;');
+  expect(lines).toContain("function Emit { Write-Output ($diag | ConvertTo-Json -Compress -Depth 8) }");
+});
+
+test('owned-window wait PowerShell script keeps the here-string header and terminator on their own lines', async () => {
+  const { buildWindowsWindowWaitScript } = await import('../lib/qa-scenarios/native-driver.mjs');
+  const script = buildWindowsWindowWaitScript(4242, 8000);
+  const lines = powerShellScriptLines(script);
+  expect(script).not.toMatch(/@"[^\n]/);
+  expect(script).not.toMatch(/[^\n]"@/);
+  // One array element per line: the EnumProc callback body is separated by the
+  // newline join itself, not by embedded escapes, so no blank line survives.
+  expect(lines).not.toContain('');
+  const header = lines.indexOf('Add-Type @"');
+  const footer = lines.indexOf('"@;');
+  expect(lines[header - 1]).toBe("$ErrorActionPreference = 'Stop';");
+  expect(lines[header + 1]).toBe('using System;');
+  expect(lines[footer - 1]).toBe('}');
+  expect(lines[footer + 1]).toBe('$targetPid = 4242;');
+  expect(header).toBeLessThan(footer);
+  expect(lines).toContain('public class FerryxQaWin {');
+  expect(lines).toContain('  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);');
+  // The EnumProc delegate body is its own line per statement, including the
+  // closing brace of the `if` block and the delegate's `return`.
+  expect(lines).toContain('$cb = [FerryxQaWin+EnumProc]{ param($hWnd, $lParam)');
+  expect(lines).toContain('  if ($owner -eq [uint32]$targetPid) {');
+  expect(lines).toContain('  }');
+  expect(lines).toContain('  return $true };');
+  expect(lines).toContain('$budgetMs = 8000;');
+  expect(lines).toContain("  probe = 'owned-window';");
+  expect(lines[lines.length - 1]).toBe('Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);');
+});
+
+test('owned-window capture PowerShell script keeps the here-string header and terminator on their own lines', async () => {
+  const { buildWindowsCaptureScript } = await import('../lib/qa-scenarios/native-driver.mjs');
+  const script = buildWindowsCaptureScript(4242, "C:\\ev\\shot's.png");
+  const lines = powerShellScriptLines(script);
+  expect(script).not.toMatch(/@"[^\n]/);
+  expect(script).not.toMatch(/[^\n]"@/);
+  expect(lines).not.toContain('');
+  const header = lines.indexOf('Add-Type @"');
+  const footer = lines.indexOf('"@;');
+  expect(lines[header - 1]).toBe('if (-not $handle) { throw "NO_OWNED_WINDOW" }');
+  expect(lines[header + 1]).toBe('  using System;');
+  expect(lines[footer - 1]).toBe('  }');
+  expect(lines[footer + 1]).toBe('$r = New-Object RECT;');
+  expect(header).toBeLessThan(footer);
+  expect(lines).toContain('  using System.Runtime.InteropServices;');
+  expect(lines).toContain('  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }');
+  expect(lines).toContain('    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);');
+  // The single-quoted capture path is still escaped for PowerShell, and the
+  // probe still prints its bounds line.
+  expect(lines).toContain("$b.Save('C:\\ev\\shot''s.png');");
+  expect(lines[lines.length - 1]).toBe('"$($r.Left),$($r.Top),$w,$h"');
+});
+
+test('retry, focus, and marker PowerShell scripts keep one statement per line and carry no here-string', async () => {
+  const { buildWindowsRetryScript, buildWindowsFocusScript, buildWindowsTypeMarkerScript } = await import('../lib/qa-scenarios/native-driver.mjs');
+  // These three carry no here-string, so their only risk is the same space join
+  // silently flattening statements onto one line. Each is asserted line by line.
+  const retry = powerShellScriptLines(buildWindowsRetryScript(4242));
+  expect(retry).toHaveLength(16);
+  expect(retry[0]).toBe('Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes;');
+  expect(retry[1]).toBe('$proc = Get-Process -Id 4242 -ErrorAction Stop;');
+  expect(retry).toContain('if (-not $root) { throw "NO_OWNED_WINDOW" }');
+  expect(retry).toContain('if ($items.Count -eq 0) {');
+  expect(retry).toContain('  foreach ($btn in $allButtons) {');
+  expect(retry).toContain('}');
+  expect(retry).toContain('if ($items.Count -eq 0) { throw "RETRY_BUTTON_NOT_FOUND" }');
+  expect(retry[retry.length - 1]).toBe('"RETRY_CLICKED"');
+
+  expect(powerShellScriptLines(buildWindowsFocusScript(4242))).toEqual([
+    '$proc = Get-Process -Id 4242 -ErrorAction Stop;',
+    'Add-Type -AssemblyName Microsoft.VisualBasic;',
+    '[Microsoft.VisualBasic.Interaction]::AppActivate($proc.Id) | Out-Null;',
+    "'FOCUSED'",
+  ]);
+
+  expect(powerShellScriptLines(buildWindowsTypeMarkerScript())).toEqual([
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    "[System.Windows.Forms.SendKeys]::SendWait('Write-Output ''FERRYX_SPLIT_READY''{ENTER}');",
+    "'TYPED'",
+  ]);
+
+  for (const script of [buildWindowsRetryScript(4242), buildWindowsFocusScript(4242), buildWindowsTypeMarkerScript()]) {
+    expect(script).not.toContain('@"');
+    expect(script).not.toContain('"@');
+  }
+});
+
+test('windows session probe script is newline-joined like every other PowerShell builder', async () => {
+  const { buildWindowsSessionProbeScript } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const lines = powerShellScriptLines(buildWindowsSessionProbeScript());
+  expect(lines).toHaveLength(19);
+  expect(lines[0]).toBe("$ErrorActionPreference = 'Continue';");
+  expect(lines).toContain('$sessions = @();');
+  expect(lines).toContain('$self = Get-Process -Id $PID;');
+  expect(lines).toContain('$payload = [ordered]@{');
+  expect(lines).toContain('  userName = $env:USERNAME;');
+  expect(lines).not.toContain('');
+  expect(lines[lines.length - 1]).toBe('Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);');
+  // No here-string here: the join is line-based purely so a here-string can
+  // never be added to a flattened script again.
+  expect(lines.join('\n')).not.toContain('@"');
+});
+
+test('no generated PowerShell script merges a statement onto the here-string header or terminator line', async () => {
+  const native = await import('../lib/qa-scenarios/native-driver.mjs');
+  const { buildWindowsSessionProbeScript } = await import('../lib/qa-scenarios/windows-interactive.mjs');
+  const scripts = {
+    'owned-window wait': native.buildWindowsWindowWaitScript(4242, 8000),
+    'split-right': native.buildWindowsSplitRightScript(4242, 2500),
+    'owned-window capture': native.buildWindowsCaptureScript(4242, "C:\\ev\\shot's.png"),
+    'retry': native.buildWindowsRetryScript(4242),
+    'focus': native.buildWindowsFocusScript(4242),
+    'type-marker': native.buildWindowsTypeMarkerScript(),
+    'session probe': buildWindowsSessionProbeScript(),
+  };
+  for (const [name, script] of Object.entries(scripts)) {
+    // A here-string header or terminator sharing its line with anything else is
+    // the pass-5 failure; a one-line script is the space join that caused it.
+    expect([name, /@"[^\n]/.test(script)]).toEqual([name, false]);
+    expect([name, /[^\n]"@/.test(script)]).toEqual([name, false]);
+    expect([name, script.split('\n').length > 1]).toEqual([name, true]);
+    expect([name, script.split('\n').includes('')]).toEqual([name, false]);
+  }
+});

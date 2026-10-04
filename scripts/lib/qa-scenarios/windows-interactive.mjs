@@ -177,6 +177,9 @@ function runTool(file, args, timeoutMs = 15_000) {
   return collect(spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'] }), timeoutMs);
 }
 
+// The session probe is a PowerShell script: its array is newline-joined so each
+// statement keeps its own line (same rule as native-driver.mjs - a space join
+// would break any here-string added here later).
 export function buildWindowsSessionProbeScript() {
   return [
     "$ErrorActionPreference = 'Continue';",
@@ -198,7 +201,7 @@ export function buildWindowsSessionProbeScript() {
     '  qwinsta = $sessions;',
     '};',
     'Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);',
-  ].join(' ');
+  ].join('\n');
 }
 
 export async function probeWindowsSession({ timeoutMs = BUDGETS.windowsSessionProbeMs } = {}) {

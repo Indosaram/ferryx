@@ -217,9 +217,16 @@ export async function clickRetryDarwin(evidence, pid) {
   return { clicked: true };
 }
 
+// Every PowerShell script builder below is LINE-structured and therefore joins
+// its array with newlines, never with spaces: a here-string header (`@"`) must
+// end its line and its terminator (`"@`) must start one. The space join
+// flattened `buildWindowsSplitRightScript` into `Add-Type @" using System; ...`
+// and the real desktop rejected it in pass 5
+// (`UnexpectedCharactersAfterHereStringHeader`) before any click could run.
+
 // Windows: Click actual Retry button via UIA.
-export async function clickRetryWindows(evidence, pid) {
-  const command = [
+export function buildWindowsRetryScript(pid) {
+  return [
     'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes;',
     `$proc = Get-Process -Id ${pid} -ErrorAction Stop;`,
     '$root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle);',
@@ -236,8 +243,11 @@ export async function clickRetryWindows(evidence, pid) {
     '$invoke = $items.Item(0).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern);',
     '$invoke.Invoke();',
     '"RETRY_CLICKED"',
-  ].join(' ');
-  const result = await powershell(evidence, command);
+  ].join('\n');
+}
+
+export async function clickRetryWindows(evidence, pid) {
+  const result = await powershell(evidence, buildWindowsRetryScript(pid));
   if (result !== 'RETRY_CLICKED') throw new HarnessError('ASSERTION_FAILURE', `unexpected Retry result: ${result}`);
   evidence.action({ action: 'click-retry', pid, surface: 'UIA button whose Name contains Retry' });
   return { clicked: true };
@@ -287,8 +297,8 @@ export async function captureOwnedWindowDarwin(evidence, path, pid) {
 }
 
 // Windows: Capture owned window only (by MainWindowHandle bounds) and return metadata.
-export async function captureOwnedWindowWindows(evidence, path, pid) {
-  const command = [
+export function buildWindowsCaptureScript(pid, path) {
+  return [
     'Add-Type -AssemblyName System.Drawing,System.Windows.Forms;',
     `$proc = Get-Process -Id ${pid} -ErrorAction Stop;`,
     '$handle = $proc.MainWindowHandle;',
@@ -310,8 +320,11 @@ export async function captureOwnedWindowWindows(evidence, path, pid) {
     '$g.CopyFromScreen($r.Left, $r.Top, 0, 0, $b.Size);',
     `$b.Save('${path.replace(/'/g, "''")}');`,
     `"$($r.Left),$($r.Top),$w,$h"`,
-  ].join(' ');
-  const res = await powershell(evidence, command);
+  ].join('\n');
+}
+
+export async function captureOwnedWindowWindows(evidence, path, pid) {
+  const res = await powershell(evidence, buildWindowsCaptureScript(pid, path));
   const [x, y, w, h] = res.split(',').map(s => parseInt(s.trim(), 10));
   const bounds = { x, y, width: w, height: h };
   const screenshotSha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -401,16 +414,16 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '  Start-Sleep -Milliseconds 200;',
     '}',
     '$windows = New-Object System.Collections.ArrayList;',
-    '$cb = [FerryxQaWin+EnumProc]{ param($hWnd, $lParam)\n',
-    '  $owner = [uint32]0;\n',
-    '  [FerryxQaWin]::GetWindowThreadProcessId($hWnd, [ref]$owner) | Out-Null;\n',
-    '  if ($owner -eq [uint32]$targetPid) {\n',
-    '    $title = New-Object System.Text.StringBuilder 256;\n',
-    '    [FerryxQaWin]::GetWindowTextW($hWnd, $title, 256) | Out-Null;\n',
-    '    $cls = New-Object System.Text.StringBuilder 256;\n',
-    '    [FerryxQaWin]::GetClassNameW($hWnd, $cls, 256) | Out-Null;\n',
-    '    $windows.Add([ordered]@{ hwnd = $hWnd.ToInt64(); visible = [bool][FerryxQaWin]::IsWindowVisible($hWnd); className = $cls.ToString(); title = $title.ToString() }) | Out-Null;\n',
-    '  }\n',
+    '$cb = [FerryxQaWin+EnumProc]{ param($hWnd, $lParam)',
+    '  $owner = [uint32]0;',
+    '  [FerryxQaWin]::GetWindowThreadProcessId($hWnd, [ref]$owner) | Out-Null;',
+    '  if ($owner -eq [uint32]$targetPid) {',
+    '    $title = New-Object System.Text.StringBuilder 256;',
+    '    [FerryxQaWin]::GetWindowTextW($hWnd, $title, 256) | Out-Null;',
+    '    $cls = New-Object System.Text.StringBuilder 256;',
+    '    [FerryxQaWin]::GetClassNameW($hWnd, $cls, 256) | Out-Null;',
+    '    $windows.Add([ordered]@{ hwnd = $hWnd.ToInt64(); visible = [bool][FerryxQaWin]::IsWindowVisible($hWnd); className = $cls.ToString(); title = $title.ToString() }) | Out-Null;',
+    '  }',
     '  return $true };',
     '[FerryxQaWin]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null;',
     '$payload = [ordered]@{',
@@ -426,7 +439,7 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '  windows = $windows;',
     '};',
     'Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);',
-  ].join(' ');
+  ].join('\n');
 }
 
 export function classifyWindowsWindowProbe(probe) {
@@ -587,7 +600,7 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
     '  }',
     '}',
     'Emit;',
-  ].join(' ');
+  ].join('\n');
 }
 
 export function classifyWindowsSplitRight(probe) {
@@ -674,26 +687,32 @@ export async function windowsDriver(evidence, pid) {
 // Review blocker 5: the Windows marker must be typed on EVERY marker path,
 // not only inside the split flow. Focus the task-owned process window, then
 // send the marker command through SendKeys (real OS input events).
-export async function focusWindowWindows(evidence, pid) {
-  const command = [
+export function buildWindowsFocusScript(pid) {
+  return [
     `$proc = Get-Process -Id ${pid} -ErrorAction Stop;`,
     "Add-Type -AssemblyName Microsoft.VisualBasic;",
     '[Microsoft.VisualBasic.Interaction]::AppActivate($proc.Id) | Out-Null;',
     "'FOCUSED'",
-  ].join(' ');
-  const result = await powershell(evidence, command);
+  ].join('\n');
+}
+
+export async function focusWindowWindows(evidence, pid) {
+  const result = await powershell(evidence, buildWindowsFocusScript(pid));
   if (result !== 'FOCUSED') throw new HarnessError('ASSERTION_FAILURE', `unexpected AppActivate result: ${result}`);
   evidence.action({ action: 'focus-window-by-pid', pid, selector: { processId: pid }, surface: 'AppActivate' });
 }
 
-export async function typeMarkerWindows(evidence, pid) {
-  const markerShellCommand = "Write-Output 'FERRYX_SPLIT_READY'";
-  const command = [
+export function buildWindowsTypeMarkerScript() {
+  return [
     "Add-Type -AssemblyName System.Windows.Forms;",
     "[System.Windows.Forms.SendKeys]::SendWait('Write-Output ''FERRYX_SPLIT_READY''{ENTER}');",
     "'TYPED'",
-  ].join(' ');
-  const result = await powershell(evidence, command);
+  ].join('\n');
+}
+
+export async function typeMarkerWindows(evidence, pid) {
+  const markerShellCommand = "Write-Output 'FERRYX_SPLIT_READY'";
+  const result = await powershell(evidence, buildWindowsTypeMarkerScript());
   if (result !== 'TYPED') throw new HarnessError('ASSERTION_FAILURE', `unexpected SendKeys result: ${result}`);
   evidence.action({ action: 'type-marker', pid, markerCommand: markerShellCommand, shell: 'powershell', surface: 'SendKeys into focused QA leaf' });
   return { markerCommand: markerShellCommand, shell: 'powershell' };
