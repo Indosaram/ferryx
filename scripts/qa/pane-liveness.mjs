@@ -199,6 +199,7 @@ async function runNativeScenario(ctx) {
     env: {
       FERRYX_DATA_DIR: isolated.dirs.dataDir,
       FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir,
+      FERRYX_SESSION_DIR: isolated.dirs.sessionDir,
       FERRYX_QA_BARRIER_DIR: barrierHub.dir,
       FERRYX_QA_OPERATION_ID: ctx.operationId,
     },

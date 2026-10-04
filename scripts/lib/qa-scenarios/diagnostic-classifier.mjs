@@ -28,16 +28,32 @@ export function buildIsolatedEnv(context) {
   const dataDir = join(context.isolationRoot, 'data');
   const runtimeDir = join(context.isolationRoot, 'runtime');
   const homeDir = join(context.isolationRoot, 'home');
-  for (const dir of [dataDir, runtimeDir, homeDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Pass-11 leak (controlled A/B, measured): the product resolves its persisted
+  // `session_state.json` through `session_dir_override()` = FERRYX_SESSION_DIR
+  // BEFORE any host-profile fallback (`src-tauri/src/daemon/server.rs:361`,
+  // consumed at `src-tauri/src/ipc/session.rs:10`). Without this override the app
+  // reads AND rewrites the HOST's real profile
+  // (`%APPDATA%\com.ferryx.app\dev\session_state.json`), boots into the host's
+  // restored layout instead of the empty state, and the pane step's `New
+  // Terminal` affordance does not exist. The repository's own Windows QA recipe
+  // requires both variables and says so:
+  // `docs/evidence/windows-terminal-20260912/windows-environment.md:13`
+  // ("Set BOTH FERRYX_SESSION_DIR and FERRYX_RUNTIME_DIR to unique QA paths").
+  const sessionDir = join(context.isolationRoot, 'session');
+  for (const dir of [dataDir, runtimeDir, homeDir, sessionDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   // Review M5: allowlist ONLY. The child env is a fresh literal object, so no
   // ambient variable (FERRYX_MACHINE_TOKEN, account tokens, proxy settings,
   // ...) can leak into the isolated app; the QA barrier/run nonces are added
-  // exclusively through the private channel keys below.
+  // exclusively through the private channel keys below. Every FERRYX_* key that
+  // appears here is either a product override the app itself reads
+  // (FERRYX_DATA_DIR / FERRYX_RUNTIME_DIR / FERRYX_SESSION_DIR) or a QA channel
+  // key this harness owns - never an ambient value.
   const env = {
     PATH: process.env.PATH,
     HOME: homeDir,
     FERRYX_DATA_DIR: dataDir,
     FERRYX_RUNTIME_DIR: runtimeDir,
+    FERRYX_SESSION_DIR: sessionDir,
     // Product-facing fixture declaration: which fixture session kinds this
     // scenario's `fixture-setup` settlement must provision and report. Derived
     // from the single requirement map (never a second list), so the kinds the
@@ -46,13 +62,13 @@ export function buildIsolatedEnv(context) {
     ...context.barrierHub.env(),
   };
   for (const key of Object.keys(env)) {
-    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID', 'FERRYX_QA_FIXTURE_KINDS'].includes(key)) {
+    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID', 'FERRYX_QA_FIXTURE_KINDS'].includes(key)) {
       throw new HarnessError('ASSERTION_FAILURE', `ambient FERRYX_* variable leaked into isolated env: ${key}`);
     }
   }
   return {
     env,
-    dirs: { dataDir, runtimeDir, homeDir },
+    dirs: { dataDir, runtimeDir, homeDir, sessionDir },
   };
 }
 
@@ -111,7 +127,7 @@ export async function runHeadlessDiagnosticClassifier(ctx) {
   const { evidence, barrierHub } = ctx;
   const isolated = buildIsolatedEnv(ctx);
   const binaryArgs = ['diagnostic-classifier', '--headless'];
-  evidence.action({ action: 'launch.binary', binary: ctx.binary, args: binaryArgs, env: { FERRYX_DATA_DIR: isolated.dirs.dataDir, FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir, FERRYX_QA_BARRIER_DIR: barrierHub.dir, FERRYX_QA_OPERATION_ID: ctx.operationId } });
+  evidence.action({ action: 'launch.binary', binary: ctx.binary, args: binaryArgs, env: { FERRYX_DATA_DIR: isolated.dirs.dataDir, FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir, FERRYX_SESSION_DIR: isolated.dirs.sessionDir, FERRYX_QA_BARRIER_DIR: barrierHub.dir, FERRYX_QA_OPERATION_ID: ctx.operationId } });
   ctx.spawnOwned(ctx.binary, binaryArgs, { env: isolated.env });
 
   // Registration ACKs (startup scan + live watch) precede any trigger.

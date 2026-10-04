@@ -1188,7 +1188,7 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('private channel env carries the operation nonce so barrier-less scenarios can correlate', () => {
+test('isolated launch env is an allowlist: product dir overrides and QA nonces only, every other FERRYX_* key refused', () => {
   const root = fixtureRoot();
   const hub = new BarrierHub(root, { runId: 'run-env', operationId: 'op-env' });
   expect(hub.env()).toMatchObject({
@@ -1200,6 +1200,26 @@ test('private channel env carries the operation nonce so barrier-less scenarios 
   // a successful build proves the operation nonce is allowlisted too.
   const isolated = buildIsolatedEnv({ isolationRoot: root, barrierHub: hub });
   expect(isolated.env.FERRYX_QA_OPERATION_ID).toBe('op-env');
+  // Pass-11 leak: the product's session-state override (`session_dir_override`,
+  // FERRYX_SESSION_DIR) must resolve inside THIS run's isolation root, so a run
+  // can only ever read/write its own `session/session_state.json` and never the
+  // host's real profile (`%APPDATA%\com.ferryx.app\dev\session_state.json`).
+  // Without it the app restores the host layout, the empty state never renders
+  // and the pane step's `New Terminal` affordance cannot exist.
+  expect(isolated.env.FERRYX_SESSION_DIR).toBe(join(root, 'session'));
+  expect(isolated.dirs.sessionDir).toBe(join(root, 'session'));
+  expect(existsSync(join(root, 'session'))).toBe(true);
+  // Every product dir override resolves under this run's owned isolation root
+  // (asserted as exact joined paths, so it holds on every platform), which is
+  // what makes the host profile unreachable.
+  expect(isolated.env.FERRYX_DATA_DIR).toBe(join(root, 'data'));
+  expect(isolated.env.FERRYX_RUNTIME_DIR).toBe(join(root, 'runtime'));
+  expect(isolated.env.HOME).toBe(join(root, 'home'));
+  // The guard still throws on any FERRYX_* key the allowlist does not own: a
+  // private channel cannot smuggle an ambient key into the isolated app.
+  const smugglingHub = { dir: join(root, 'barriers'), env: () => ({ FERRYX_MACHINE_TOKEN: 'ambient' }) };
+  expect(() => buildIsolatedEnv({ isolationRoot: join(root, 'guard-root'), barrierHub: smugglingHub }))
+    .toThrow(/ambient FERRYX_\* variable leaked into isolated env: FERRYX_MACHINE_TOKEN/);
   // No nonce: the key is omitted so the headless lane's env is unchanged.
   const bare = new BarrierHub(join(root, 'bare'), { runId: 'run-bare' });
   expect(bare.env().FERRYX_QA_OPERATION_ID).toBeUndefined();
