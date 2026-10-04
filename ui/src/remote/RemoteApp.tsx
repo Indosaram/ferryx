@@ -417,7 +417,6 @@ export const RemoteHostConnection: React.FC<{
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = remoteHostState.hosts[hostId] ?? null;
-  const transportBaseUrl = hostTransportUrl(activeHost, transport.url);
   const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
@@ -448,6 +447,14 @@ export const RemoteHostConnection: React.FC<{
     () => (initialMagicLinkRequested ? null : getStoredAccountSessionToken(relayUrl)),
   );
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
+  // Account mode has no remoteHostStore record, so hostTransportUrl would leave this
+  // pointing at the relay root. Every machine API then 404s there (the relay only serves
+  // them under /host/<machineId>), which is why the remote chat view and workspace refresh
+  // stayed empty. Derive the host-scoped base URL from the connected machine instead.
+  const accountHostBaseUrl = activeTunnelConnection && !activeHost
+    ? `${relayUrl}/host/${encodeURIComponent(activeTunnelConnection.machine.machineId)}`
+    : null;
+  const transportBaseUrl = accountHostBaseUrl ?? hostTransportUrl(activeHost, transport.url);
   // The transferred tunnel is owned here: close it when it is replaced or on unmount.
   // AccountConnection.close is idempotent, so explicit closes elsewhere are safe.
   useEffect(() => {

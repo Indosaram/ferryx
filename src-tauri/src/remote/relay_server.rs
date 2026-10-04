@@ -1837,6 +1837,7 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["direct", "offer"])
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
+            | ("GET", ["agent-history", _])
             | ("GET", ["attach"])
     )
 }
@@ -1891,6 +1892,9 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
         // Session listing is workspace-scoped; a single session is epoch-fenced.
         ["sessions"] => &["workspaceId", "daemonEpoch"],
         ["sessions", _] => &["daemonEpoch"],
+        // Chat history pages by limit/cursor. Without this the relay answers 400 and the
+        // remote chat view stays empty even though the machine serves the route.
+        ["agent-history", _] => &["limit", "cursor"],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
