@@ -2404,6 +2404,22 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .await;
         }
 
+        // The attach fence proves identity by comparing the pane binding's incarnation with the
+        // owner's authoritative answer, so this spawn must project the proxy's own incarnation.
+        // Leaving the field empty (the previous behaviour) made the binding unbuildable, so every
+        // paired attach was rejected as unprovable before it could reach the fence's owner check.
+        let incarnation = match daemon_client.describe_session(&proxy_session_id).await {
+            Ok(details) => details.incarnation,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %proxy_session_id,
+                    %error,
+                    "paired spawn could not read the proxy incarnation; attach re-reads it from the owner"
+                );
+                None
+            }
+        };
+
         crate::daemon::client::DaemonSpawnResult {
             session_id: proxy_session_id.clone(),
             epoch: host.generation.0,
@@ -2426,9 +2442,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 kernel_stopped: None,
                 registry_suspended: None,
                 suspension_source: None,
-                // Machine Session carries an epoch-qualified target, not a local
-                // split incarnation; do not invent one for the paired proxy.
-                incarnation: None,
+                // The paired proxy actor's own incarnation, as reported by its owning daemon.
+                incarnation,
             },
         }
     } else {

@@ -175,6 +175,11 @@ struct Owner {
     sender: mpsc::Sender<Command>,
     task: tokio::task::JoinHandle<()>,
     identity: Arc<()>,
+    /// Lifetime incarnation of this proxy actor, minted by the runtime at install time.
+    ///
+    /// Constant for as long as this actor owns the id; a replacement actor (a reattach, or a
+    /// reincarnation after the previous actor died) mints a different one.
+    incarnation: String,
     #[cfg(test)]
     completed: tokio::sync::watch::Receiver<bool>,
 }
@@ -332,6 +337,17 @@ impl Runtime {
             .get(id)
             .is_some_and(|o| !o.task.is_finished())
     }
+    /// Lifetime incarnation of the proxy actor that currently owns `id`.
+    ///
+    /// `None` once no live actor owns the id: a session cannot be attached through a proxy that
+    /// is gone, and the next reattach installs a new incarnation the caller must re-bind to.
+    pub fn session_incarnation(&self, id: &str) -> Option<String> {
+        self.owners
+            .lock()
+            .get(id)
+            .filter(|owner| !owner.task.is_finished())
+            .map(|owner| owner.incarnation.clone())
+    }
     pub fn list(&self) -> Vec<String> {
         self.owners
             .lock()
@@ -405,6 +421,9 @@ impl Runtime {
 
         let (sender, receiver) = mpsc::channel(32);
         let identity = Arc::new(());
+        // The session's lifetime incarnation, minted by this runtime: it stays constant for as
+        // long as this actor owns the id, and every replacement actor mints a different one.
+        let incarnation = uuid::Uuid::new_v4().to_string();
         #[cfg(test)]
         let (completed_tx, completed) = tokio::sync::watch::channel(false);
         let reap = ReapOwner {
@@ -647,6 +666,7 @@ impl Runtime {
                 sender,
                 task,
                 identity,
+                incarnation,
                 #[cfg(test)]
                 completed,
             },
@@ -1608,5 +1628,60 @@ mod tests {
 
         let _ = shutdown.send(());
         let _ = server.await;
+    }
+
+    /// The identity the attach fence proves for a paired session: minted by the runtime per
+    /// actor, constant for that actor's life, and never reused by a replacement actor.
+    #[tokio::test]
+    async fn paired_session_incarnation_is_stable_per_actor_and_distinct_across_reincarnation() {
+        let runtime = Runtime::default();
+        let descriptor = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "incarnation-machine".into(),
+                daemon_epoch: Epoch(10),
+                session_id: "incarnation-session".into(),
+            },
+            after_sequence: None,
+        };
+        let first = runtime
+            .install(
+                Proxy::new(descriptor.clone(), Arc::new(TerminalOutputHub::new(32)))
+                    .expect("proxy construction"),
+            )
+            .expect("install paired proxy");
+        let incarnation = runtime
+            .session_incarnation(&first)
+            .expect("a live actor must report an incarnation");
+        assert!(!incarnation.is_empty(), "an incarnation must be a real value");
+        assert_eq!(
+            runtime.session_incarnation(&first).as_deref(),
+            Some(incarnation.as_str()),
+            "the incarnation must be stable for the actor's whole life"
+        );
+
+        // A reattach installs a replacement actor for the same logical session id.
+        runtime.force_reap_owner(&first);
+        assert_eq!(
+            runtime.session_incarnation(&first),
+            None,
+            "a session with no live actor must not report an incarnation"
+        );
+        let second = runtime
+            .install(
+                Proxy::new(descriptor, Arc::new(TerminalOutputHub::new(32)))
+                    .expect("proxy construction"),
+            )
+            .expect("install replacement proxy");
+        assert_eq!(
+            second, first,
+            "the same descriptor names the same paired session id"
+        );
+        assert_ne!(
+            runtime.session_incarnation(&second).as_deref(),
+            Some(incarnation.as_str()),
+            "a replacement actor must not reuse the previous incarnation"
+        );
     }
 }

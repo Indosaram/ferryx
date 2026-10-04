@@ -2597,7 +2597,12 @@ impl DaemonSessionService {
                     kernel_stopped: None,
                     registry_suspended: None,
                     suspension_source: None,
-                    incarnation: None,
+                    // The remote session's own creation identity: minted by the runtime at spawn,
+                    // persisted with the descriptor, and never shared with a replacement session.
+                    // Reporting `None` here left the attach fence unable to prove identity, so
+                    // remote attach was rejected as unprovable (`Attach binding incarnation cannot
+                    // be proven`, ipc/terminal.rs).
+                    incarnation: Some(d.client_request_id.clone()),
                 },
             };
         }
@@ -2609,6 +2614,10 @@ impl DaemonSessionService {
                     .session_sequence_range(session_id)
                     .unwrap_or((None, None));
                 let running = self.terminal_service.paired().contains(session_id);
+                // The proxy actor's own lifetime incarnation. Reporting `None` here left the
+                // attach fence unable to prove identity, so every paired attach was rejected as
+                // unprovable (`Attach binding incarnation cannot be proven`, ipc/terminal.rs).
+                let incarnation = self.terminal_service.paired().session_incarnation(session_id);
                 return DaemonResponse::DescribeSessionOk {
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
@@ -2626,7 +2635,7 @@ impl DaemonSessionService {
                         kernel_stopped: None,
                         registry_suspended: None,
                         suspension_source: None,
-                        incarnation: None,
+                        incarnation,
                     },
                 };
             }
@@ -2692,5 +2701,81 @@ impl DaemonSessionService {
                 incarnation: pty_session.incarnation().map(str::to_owned),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::server::DaemonServer;
+    use crate::remote::machine_protocol::RemoteTerminalTarget;
+    use crate::scoped_contracts::Epoch;
+    use crate::terminal::output_hub::TerminalOutputHub;
+    use crate::terminal::paired_daemon::{Descriptor, Proxy};
+
+    /// The paired describe branch must report the proxy actor's own incarnation, because the
+    /// attach fence in `ipc/terminal.rs` proves identity by comparing exactly that value with the
+    /// binding's. Reporting `None` (the previous behaviour) made remote/paired attach impossible:
+    /// every attach was rejected with `Attach binding incarnation cannot be proven`.
+    #[tokio::test]
+    async fn paired_describe_reports_the_incarnation_the_attach_fence_proves() {
+        let server = DaemonServer::new();
+        let descriptor = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "describe-incarnation-machine".into(),
+                daemon_epoch: Epoch(10),
+                session_id: "describe-incarnation-session".into(),
+            },
+            after_sequence: None,
+        };
+        let proxy = Proxy::new(descriptor, Arc::new(TerminalOutputHub::new(32)))
+            .expect("proxy construction");
+        let session_id = server
+            .terminal_service()
+            .paired()
+            .install(proxy)
+            .expect("install paired proxy");
+
+        let describe = |session_id: &str| match server.session_service().handle_describe_session(session_id) {
+            DaemonResponse::DescribeSessionOk { session } => session,
+            other => panic!("a paired session must describe: {other:?}"),
+        };
+
+        let first = describe(&session_id);
+        let incarnation = first
+            .incarnation
+            .clone()
+            .expect("a paired describe must report an incarnation");
+        assert!(!incarnation.is_empty(), "an incarnation must be a real value");
+        assert_eq!(
+            Some(incarnation.clone()),
+            server
+                .terminal_service()
+                .paired()
+                .session_incarnation(&session_id),
+            "the reported incarnation must be the proxy actor's own identity"
+        );
+
+        // Stable for the session's lifetime: a second describe answers the same identity, so the
+        // binding the frontend persisted from the attach response keeps proving identity.
+        assert_eq!(
+            describe(&session_id).incarnation,
+            Some(incarnation),
+            "the incarnation must not change while the actor owns the session"
+        );
+
+        // Once the actor is gone the branch reports no incarnation, so a stale binding cannot pass
+        // the fence and the caller must reattach and re-bind.
+        server
+            .terminal_service()
+            .paired()
+            .force_reap_owner(&session_id);
+        assert_eq!(
+            describe(&session_id).incarnation,
+            None,
+            "a session with no live proxy actor must not report an incarnation"
+        );
     }
 }
