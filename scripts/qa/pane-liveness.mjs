@@ -58,7 +58,9 @@ const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 // driver asserts on settled receipts. Barrier semantics are defined by the
 // private channel (task-3-rust-proposal.md); a binary without local-split-qa
 // support fails the registration ACK explicitly (typed BARRIER_ACK_TIMEOUT).
-const SCENARIO_PLANS = {
+// Exported so the runner unit suite can replay the pre-launch pre-arm of every
+// scenario without launching a product.
+export const SCENARIO_PLANS = {
   'diagnostic-classifier': {
     barriers: ['backend-write', 'presentation'], marker: true, splitMenu: false,
     // Receipt names are the product's real barrier settlements: the classifier

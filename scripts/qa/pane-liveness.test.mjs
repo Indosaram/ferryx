@@ -18,7 +18,7 @@ import {
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
-import { assertInvariants, assertSinglePty } from './pane-liveness.mjs';
+import { assertInvariants, assertSinglePty, SCENARIO_PLANS } from './pane-liveness.mjs';
 import {
   MARKER_TEXT,
   performInspectionHandshake,
@@ -324,6 +324,51 @@ test('BarrierHub prearm validates targetRole and awaitBound correlates bound-ack
   expect(ack.targetBackendSessionId).toBe('backend-999');
 
   rmSync(root, { recursive: true, force: true });
+});
+
+// The runner pre-arms every barrier of a scenario BEFORE it launches the
+// product (pane-liveness.mjs `main`), so a barrier whose mapped role `prearm()`
+// refuses kills the scenario with an uncaught ASSERTION_FAILURE and exit 1
+// before the binary is ever spawned - the exact failure observed for
+// split-attach-stall with `BARRIER_ROLES['attach-handshake'] = 'producer'`.
+// This replays that pre-arm expression for all nine scenarios without a launch.
+test('regression BARRIER_ROLES: every scenario pre-arm carries a role prearm() accepts', () => {
+  const root = fixtureRoot();
+  const hub = new BarrierHub(root, { runId: 'run-roles', operationId: 'op-roles' });
+  try {
+    // targetRole is the handover-side selector only: predecessor/successor, or
+    // no role at all. Nothing else may appear in the map.
+    for (const [name, role] of Object.entries(BARRIER_ROLES)) {
+      expect(role === null || role === 'predecessor' || role === 'successor').toBe(true);
+      expect(() => hub.prearm(`map-${name}`, { targetRole: role })).not.toThrow();
+    }
+
+    for (const scenario of SCENARIOS) {
+      const plan = SCENARIO_PLANS[scenario];
+      expect(plan).toBeDefined();
+      for (const barrier of plan.barriers) {
+        // A barrier a scenario arms must be declared in the role map.
+        expect(Object.prototype.hasOwnProperty.call(BARRIER_ROLES, barrier)).toBe(true);
+        const targetRole = plan.barrierRoles?.[barrier] ?? BARRIER_ROLES[barrier];
+        // The arm name stays filename-legal on every platform (no ':').
+        expect(() => hub.prearm(`${scenario}--${barrier}`, { targetRole })).not.toThrow();
+      }
+    }
+
+    // Non-handover stages carry no targetRole; handover barriers name their side.
+    expect(BARRIER_ROLES['backend-write']).toBeNull();
+    expect(BARRIER_ROLES['presentation']).toBeNull();
+    expect(BARRIER_ROLES['attach-handshake']).toBeNull();
+    expect(BARRIER_ROLES['held-rpc']).toBeNull();
+    expect(BARRIER_ROLES['predecessor-export']).toBe('predecessor');
+    expect(BARRIER_ROLES['successor-adopt']).toBe('successor');
+    expect(BARRIER_ROLES['commit']).toBe('predecessor');
+    expect(BARRIER_ROLES['abort']).toBe('successor');
+
+    // An arm written with no role must not carry a targetRole field at all.
+    const arm = JSON.parse(readFileSync(join(hub.dir, 'map-attach-handshake.arm.json'), 'utf8'));
+    expect(arm).not.toHaveProperty('targetRole');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('regression B4: post-release recovery must be positively observed; Unknown is nonpassing', () => {

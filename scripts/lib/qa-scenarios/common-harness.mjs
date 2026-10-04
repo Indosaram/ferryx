@@ -53,11 +53,30 @@ export const CANCEL_ACK_MAX_MS = 3_000;
 export const DAEMON_CANCEL_CLEANUP_MAX_MS = 2_500;
 export const WARM_NATIVE_READY_TARGET_MS = 2_000;
 
+// Barrier -> the handover-side `targetRole` its arm spec may carry. The
+// vocabulary is exactly 'predecessor'/'successor': `targetRole` names the side
+// of a retained-handover transfer a barrier is aimed at, and BOTH ends of the
+// channel enforce it - `prearm()` below and the product's `bind_target_session`
+// (src-tauri/src/ipc/qa_barrier.rs) refuse every other value, including a
+// session id or a wildcard. `null` therefore means "this barrier carries no
+// targetRole": it is armed, held and released against whatever session the real
+// stage runs on (the runner binds that concrete session itself through
+// `bindBackendSession` and `<name>.bind.json`), so no role belongs in its arm
+// spec.
+//
+// `producer` is the other vocabulary in this file and a DIFFERENT field: it is
+// the component id every receipt must echo (`correlateReceipt`; the product's
+// `PRODUCER_ID`), i.e. WHO emitted a line. Mapping it into `targetRole` made
+// every pre-armed non-handover barrier throw inside `prearm()` before the
+// product was launched, and the product's own binding rule rejects it too.
 export const BARRIER_ROLES = Object.freeze({
-  'backend-write': 'producer',
-  'presentation': 'producer',
-  'attach-handshake': 'producer',
-  'held-rpc': 'producer',
+  // Non-handover stages: no side to target.
+  'backend-write': null,
+  'presentation': null,
+  'attach-handshake': null,
+  'held-rpc': null,
+  // Handover sides: the daemon's producers bind these to the session that
+  // really exported/adopted it (daemon/qa_producers.rs).
   'predecessor-export': 'predecessor',
   'successor-adopt': 'successor',
   'commit': 'predecessor',
