@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { localSplitIntent, type LocalSplitSession } from "./localSplitLifecycle";
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
 import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
@@ -11,6 +11,22 @@ import {
   sessionPersistenceKey,
   WORKSPACE_SESSION_VERSION,
 } from "./sessionPersistence";
+
+// Use a browser storage fixture rather than the execution host's storage implementation.
+beforeEach(() => {
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => { values.delete(key); },
+    setItem: (key, value) => { values.set(key, String(value)); },
+  };
+  vi.spyOn(window, "localStorage", "get").mockReturnValue(storage);
+  saveBrowserSettings({ restoreTabsOnLaunch: true });
+});
+afterEach(() => { vi.restoreAllMocks(); });
 
 function workspaceState(): WorkspaceState {
   return {
@@ -988,13 +1004,14 @@ describe("sessionPersistence v3 serialization and migration", () => {
       ...state.sessions["sess-1"],
       daemonEpoch: "epoch-OLD",
       lastOutputSequence: "500",
+      incarnation: "old-pty",
     };
 
     const serialized = serializeWorkspaceState("default", "/workspace/main", state);
 
     // Live daemon restarted with epoch-NEW, even though backend-1 ID appears in live list
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-pty" },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);
@@ -1248,6 +1265,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
       ...state.sessions["sess-1"],
       daemonEpoch: "epoch-OLD",
       lastOutputSequence: "500",
+      incarnation: "old-agent-pty",
       agentType: "claude",
       agentSessionId: "claude-session-uuid-9999",
     };
@@ -1256,7 +1274,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     // Live daemon has a new epoch, causing an epoch mismatch for backend-1
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-agent-pty" },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);

@@ -17,6 +17,14 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriCoreMocks.invoke,
   isTauri: tauriCoreMocks.isTauri,
 }));
+vi.mock("../lib/localSplitLifecycle", async (original) => ({
+  ...await original<typeof import("../lib/localSplitLifecycle")>(),
+  persistNativeBinding: async (owner: TerminalSession) => {
+    await Promise.resolve();
+    persistedBindings.set(owner.id, structuredClone(owner));
+  },
+}));
+const persistedBindings = new Map<string, TerminalSession>();
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
@@ -48,6 +56,7 @@ const PRESENTED = {
 
 describe("TerminalPane exit attach integration", () => {
   beforeEach(() => {
+    persistedBindings.clear();
     vi.useFakeTimers();
     vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(

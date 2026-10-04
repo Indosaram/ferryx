@@ -1,5 +1,5 @@
 import { hasValidProjectTarget } from "./projectIdentity";
-import { localSplitIntent, type LocalSplitIntent } from "./localSplitLifecycle";
+import { localSplitIntent } from "./localSplitLifecycle";
 import { createLayoutState, normalizeLayout } from "../state/layout";
 import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
@@ -326,7 +326,7 @@ export function serializeWorkspaceState(
       createdAt,
       incarnation: sess.incarnation ?? null,
       attachTuple: sess.attachTuple,
-      ...{ spawnIntent: localSplitIntent(sess), reconnectRequestId: sess.reconnectRequestId },
+      spawnIntent: localSplitIntent(sess),
     };
   }
 
@@ -582,7 +582,8 @@ export function deserializeWorkspaceState(
       const live = liveSessionMap.get(persistedBackendSessionId);
       const epoch = live?.daemonEpoch ?? globalLiveEpoch;
       // Absence in a new epoch cannot establish death in a draining predecessor.
-      if (!live || !sess.incarnation || !live.incarnation || epoch !== persistedEpoch) {
+      if (live?.running !== false && persistedEpoch !== null && epoch !== null && epoch !== persistedEpoch &&
+          (!live || !sess.incarnation || !live.incarnation)) {
         backendSessionId = persistedBackendSessionId;
         daemonEpoch = persistedEpoch;
         lastOutputSequence = persistedSequence;

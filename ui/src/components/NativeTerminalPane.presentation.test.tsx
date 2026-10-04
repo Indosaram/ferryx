@@ -10,9 +10,22 @@ const bridge = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: bridge.invoke,
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    const result = await bridge.invoke(command, args);
+    return command === "cmd_native_terminal_set_bounds" && result && typeof result === "object"
+      ? { attachTuple: args?.attachTuple, ...result }
+      : result;
+  },
   isTauri: () => true,
 }));
+vi.mock("../lib/localSplitLifecycle", async (original) => ({
+  ...await original<typeof import("../lib/localSplitLifecycle")>(),
+  persistNativeBinding: async (owner: TerminalSession) => {
+    await Promise.resolve();
+    persistedBindings.set(owner.id, structuredClone(owner));
+  },
+}));
+const persistedBindings = new Map<string, TerminalSession>();
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onDragDropEvent: async () => () => undefined }),
 }));
@@ -53,6 +66,7 @@ function commands(name: string) {
 }
 
 beforeEach(() => {
+  persistedBindings.clear();
   vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockReturnValue(new DOMRect(10, 20, 800, 600));

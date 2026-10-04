@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
+import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 
 const platform = vi.hoisted(() => ({ isMac: false }));
 vi.mock("../lib/shortcuts", async (original) => ({
@@ -65,9 +66,22 @@ const tauriCoreMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: tauriCoreMocks.invoke,
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    const result = await tauriCoreMocks.invoke(command, args);
+    return command === "cmd_native_terminal_set_bounds" && result && typeof result === "object"
+      ? { attachTuple: args?.attachTuple, ...result } : result;
+  },
   isTauri: tauriCoreMocks.isTauri,
 }));
+vi.mock("../lib/localSplitLifecycle", async (original) => ({
+  ...await original<typeof import("../lib/localSplitLifecycle")>(),
+  persistNativeBinding: async (owner: TerminalSession) => {
+    await Promise.resolve();
+    persistedBindings.set(owner.id, structuredClone(owner));
+  },
+}));
+const persistedBindings = new Map<string, TerminalSession>();
+beforeEach(() => { persistedBindings.clear(); resetNativeTerminalLifecycleForTest(); });
 
 // isTauri() is mocked true, so event subscriptions pass their runtime guard and
 // would reach the real bridge, which has no __TAURI_INTERNALS__ under jsdom.

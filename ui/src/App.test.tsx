@@ -194,6 +194,7 @@ vi.mock("./lib/tauri", () => ({
   unwatchDagProject: vi.fn(async () => undefined),
   discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
+  getAccountEnrollmentStatus: vi.fn(async () => ({ enrolled: false, accountOrigin: null, enrolledAt: null })),
   createWorktree: native.createWorktree,
   getWorktreeStatus: native.getWorktreeStatus,
   previewWorktreeDelete: vi.fn(),
@@ -2659,7 +2660,7 @@ describe("App project workspace flow", () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([
       { sessionId: "live-backend-1", daemonEpoch: "epoch-10" },
-      { sessionId: "live-backend-2", daemonEpoch: "epoch-10" },
+      { sessionId: "live-backend-2", daemonEpoch: "epoch-10", incarnation: "replacement-pty" },
     ]);
     native.spawnTerminal.mockClear();
 
@@ -2697,6 +2698,7 @@ describe("App project workspace flow", () => {
               localSessionId: "sess-mismatch",
               backendSessionId: "live-backend-2",
               daemonEpoch: "epoch-OLD",
+              incarnation: "old-pty",
               lastOutputSequence: "100",
               worktreePath: "/repo/main",
               cwd: "/repo/main",
@@ -3265,7 +3267,7 @@ describe("App project workspace flow", () => {
     expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
   });
 
-  it("reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted", async () => {
+  it("reconciles missing HMR sessions without automatically spawning replacements", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     const { setHmrWorkspaceState, clearHmrWorkspaceState } = await import("./state/hmrWorkspaceState");
@@ -3330,7 +3332,8 @@ describe("App project workspace flow", () => {
       render(<App />);
 
       await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
-      await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
+      expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
+      expect(native.spawnTerminal).not.toHaveBeenCalled();
       expect(native.loadSession).not.toHaveBeenCalled();
 
       const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];

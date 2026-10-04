@@ -95,7 +95,10 @@ describe("agent reconnect cross-layer contracts", () => {
         },
       },
     } as PersistedWorkspaceSession;
-    const restored = deserializeWorkspaceState("ws", persisted, { epoch: "new-daemon", sessions: [] });
+    // An explicit stopped record establishes death; absence in a successor epoch does not.
+    const restored = deserializeWorkspaceState("ws", persisted, { epoch: "new-daemon", sessions: [
+      { sessionId: "backend-old", daemonEpoch: "new-daemon", running: false },
+    ] });
     expect(restored).not.toBeNull();
     if (!restored) return;
     expect(restored.sessions["local-agent"]).toMatchObject({ backendSessionId: null, lifecycle: "exited", providerSession: { key: "session_id", id: "provider-1" } });

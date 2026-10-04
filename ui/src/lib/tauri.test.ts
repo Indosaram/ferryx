@@ -169,6 +169,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: null,
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
@@ -194,6 +197,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: "pwsh",
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });
@@ -244,6 +250,9 @@ describe("Tauri IPC wrapper contract", () => {
           providerSession: { key: "session_id", id: "provider-1" },
         },
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });

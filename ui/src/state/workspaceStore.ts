@@ -769,11 +769,6 @@ export function useWorkspaceStore({
       const readOwner = (): WorkspaceState | undefined => {
         const activeState = stateRef.current;
         if (activeState.sessions[session.id]) return activeState;
-        if (activeState.worktreeLayouts) {
-          for (const layout of Object.values(activeState.worktreeLayouts)) {
-            if (activeState.sessions[session.id]) return activeState;
-          }
-        }
         return undefined;
       };
       const updateOwner = (action: WorkspaceAction) => {
@@ -2683,6 +2678,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           const liveIncarnation = liveInfo.incarnation ?? null;
           const sessionIncarnation = session.incarnation ?? null;
           const sameIncarnationProven = sessionIncarnation && liveIncarnation && sessionIncarnation === liveIncarnation;
+          const isLegacyUnknown = !sessionIncarnation || !liveIncarnation;
           if (epochChanged && !sameIncarnationProven) {
             sessions[id] = {
               ...session,

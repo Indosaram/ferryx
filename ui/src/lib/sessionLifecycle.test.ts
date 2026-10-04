@@ -328,7 +328,7 @@ describe("sessionLifecycle", () => {
       }
     });
 
-    it("suspends when classifier and output ground truth agree on inactivity", async () => {
+    it("leaves inactivity suspension to the daemon even when classifier and output agree", async () => {
       vi.useFakeTimers();
       const restoreSettings = useIdleSettings(30);
       const spies = armSpies(Promise.resolve({
@@ -338,8 +338,8 @@ describe("sessionLifecycle", () => {
         const live = session("backend-live-1", "running");
         registerSessionSnapshot(live, "idle");
         await vi.advanceTimersByTimeAsync(31 * 60_000);
-        expect(spies.suspendSpy).toHaveBeenCalledWith("backend-live-1");
-        expect(isSessionSleeping(live.id)).toBe(true);
+        expect(spies.suspendSpy).not.toHaveBeenCalled();
+        expect(isSessionSleeping(live.id)).toBe(false);
       } finally {
         vi.useRealTimers();
         restoreSettings();

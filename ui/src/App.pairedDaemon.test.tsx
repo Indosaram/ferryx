@@ -47,6 +47,28 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   getInitialProject: async () => ({ workspaceId: "local", repoRoot: "/local", gitRoot: null }),
   detectAgents: async () => [],
   listTerminalSessions: async () => [],
+  spawnTerminalSplitOperation: async (request: import("./lib/types").SplitOperationRequest): Promise<import("./lib/types").SplitOperationResponse> => {
+    await Promise.resolve();
+    if (request.action === "prepare") return { action: "prepare", prepared: {
+      identity: { requestId: request.requestId, originEpoch: "epoch", expiresAtUnixMs: Date.now() + 60_000 },
+      workspaceId: request.request.workspaceId, worktree: request.request.worktree,
+      cwd: request.request.cwd ?? "/local", shell: request.request.shell ?? null, cols: 80, rows: 24,
+    } };
+    return { action: request.action, operation: request.action === "cancel"
+      ? { state: "cancelled" } : { state: "absent", canCreate: true } };
+  },
+  attachTerminal: async (request: string | import("./lib/tauri").AttachTerminalRequest) => {
+    const sessionId = typeof request === "string" ? request : request.sessionId;
+    const { getDurableNativeBinding, emitNativeTerminalPresentation } = await import("./lib/nativeTerminalLifecycle");
+    const attachTuple = getDurableNativeBinding(sessionId)!;
+    const saved = native.saveSession.mock.calls.at(-1)?.[0] as import("./lib/types").PersistedWorkspaceSession;
+    const persisted = Object.values(saved.workspaces).flatMap(workspace => Object.values(workspace.terminalSessions))
+      .find(owner => owner.localSessionId === attachTuple.frontendSessionId);
+    expect(persisted?.spawnIntent?.attachTuple).toEqual(attachTuple);
+    emitNativeTerminalPresentation(attachTuple);
+    return { sessionId, daemonEpoch: "epoch", historyStartSequence: null, historyEndSequence: null,
+      history: "", gap: null, attachTuple };
+  },
   ensureTerminalEvents: async () => undefined,
   onWorktreeChanged: async () => () => undefined,
   onTerminalLifecycle: async () => () => undefined,
@@ -82,7 +104,7 @@ vi.mock("./lib/sshHosts", async (importOriginal) => ({ ...await importOriginal<t
 }) }));
 const hosts = vi.hoisted(() => ({ current: [] as Array<{ id: string; label: string; hostname: string }> }));
 vi.mock("./lib/terminalEvents", async (importOriginal) => ({ ...await importOriginal<typeof import("./lib/terminalEvents")>(), ensureTerminalEvents: async () => undefined }));
-vi.mock("./lib/updater", () => ({ startUpdatePolling: () => undefined, registerWindowCloseGuard: (guard: () => Promise<void>) => { native.closeGuard = guard; return () => { native.closeGuard = null; }; } }));
+vi.mock("./lib/updater", () => ({ subscribeUpdateStatus: () => () => undefined, startUpdatePolling: () => undefined, registerWindowCloseGuard: (guard: () => Promise<void>) => { native.closeGuard = guard; return () => { native.closeGuard = null; }; } }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ isFocused: async () => true, onFocusChanged: async () => () => undefined }) }));
 vi.mock("./lib/updateToast", () => ({ initUpdateToasts: () => () => undefined }));
@@ -122,7 +144,11 @@ beforeEach(() => {
   native.loadSession.mockResolvedValue(null); native.saveSession.mockResolvedValue(undefined);
   native.watchDagProject.mockImplementation(async (projectPath: string) => ({ projectPath, runs: [] }));
   native.spawnTerminal.mockResolvedValue("backend-new");
-  native.spawnTerminalDetailed.mockImplementation(async (request: { cwd?: string }) => ({ sessionId: `backend-${native.spawnTerminalDetailed.mock.calls.length}`, daemonEpoch: "epoch", session: { cwd: request.cwd ?? remote.repoRoot } }));
+  native.spawnTerminalDetailed.mockImplementation(async (request: { cwd?: string }) => {
+    const sessionId = `backend-${native.spawnTerminalDetailed.mock.calls.length}`;
+    return { sessionId, daemonEpoch: "epoch", session: { sessionId, incarnation: `life:${sessionId}`,
+      cwd: request.cwd ?? remote.repoRoot, cols: 80, rows: 24, running: true } };
+  });
 });
 afterEach(() => { cleanup(); remoteHostStore.reset(); });
 

@@ -1191,11 +1191,15 @@ export function NativeTerminalPane({
         registerDurableNativeBinding(attachTuple, started);
       }
       const previousTuple = getDurableNativeBinding(targetId);
-      if (force && previousTuple && session && !session.spawnIntent) {
-        const attachTuple = { ...previousTuple, attemptGeneration: previousTuple.attemptGeneration + 1 };
+      if ((force || bindingChanged) && previousTuple && session && !session.spawnIntent) {
+        const attachTuple = { ...previousTuple, incarnation: session.incarnation ?? null,
+          daemonEpoch: session.daemonEpoch ?? "", bindingKey: owner.bindingKey ?? "",
+          attemptGeneration: previousTuple.attemptGeneration + 1 };
         const started = performance.now();
         await persistNativeBinding({ ...session, attachTuple });
-        if (!registerDurableNativeBinding(attachTuple, started)) throw new Error("Stale native binding");
+        if (attachmentOwnerRef.current?.sessionId !== owner.sessionId ||
+          attachmentOwnerRef.current.bindingKey !== owner.bindingKey) return;
+        if (!registerDurableNativeBinding(attachTuple, started, previousTuple)) throw new Error("Stale native binding");
       }
       await ensureStreamListenerRef.current();
       if (attachmentOwnerRef.current?.sessionId !== owner.sessionId

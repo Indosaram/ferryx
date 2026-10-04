@@ -74,7 +74,7 @@ describe("restoring a session whose PTY is still alive in the daemon", () => {
 
     expect(session?.backendSessionId).toBe("backend-alive");
     expect(session?.lifecycle).not.toBe("exited");
-    expect(session?.lastOutputSequence).toBe("42");
+    expect(session?.lastOutputSequence).toBeNull();
   });
 
   it("adopts the live epoch so the next save can detect a real daemon restart", () => {
@@ -89,14 +89,16 @@ describe("restoring a session whose PTY is still alive in the daemon", () => {
     const afterDaemonRestart = deserializeWorkspaceState("maho-workspace", resaved, [
       { sessionId: "backend-alive", daemonEpoch: "9999999999999", worktreePath: "/repo/maho" },
     ]);
-    expect(afterDaemonRestart?.sessions["session:ui-1"]?.backendSessionId).toBeNull();
+    expect(afterDaemonRestart?.sessions["session:ui-1"]).toMatchObject({
+      backendSessionId: "backend-alive", daemonEpoch: DAEMON_EPOCH,
+      remoteConnectionState: "reconnecting",
+    });
   });
 
-  it("abandons a session whose recorded epoch belongs to an older daemon", () => {
+  it("keeps a legacy session in an older epoch unconfirmed rather than declaring it dead", () => {
     const session = restore(DAEMON_EPOCH, { persistedEpoch: "1000000000000" })?.sessions["session:ui-1"];
 
-    expect(session?.backendSessionId).toBeNull();
-    expect(session?.lifecycle).toBe("exited");
+    expect(session).toMatchObject({ backendSessionId: "backend-alive", daemonEpoch: "1000000000000", remoteConnectionState: "reconnecting" });
   });
 
   it("abandons a session the daemon no longer lists", () => {

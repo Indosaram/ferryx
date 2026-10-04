@@ -4,10 +4,14 @@ import { createAttemptBudget, matchesAttachTuple, type AttemptBudget } from "./l
 
 const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget }>();
 
-export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs = performance.now()): boolean {
+export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs = performance.now(), expectedPrevious?: PaneAttachTuple): boolean {
   const current = durableBindings.get(tuple.backendSessionId);
+  if (expectedPrevious && (!current || !matchesAttachTuple(current.tuple, expectedPrevious) ||
+      tuple.frontendSessionId !== current.tuple.frontendSessionId ||
+      tuple.paneIdentity !== current.tuple.paneIdentity ||
+      tuple.attemptGeneration <= current.tuple.attemptGeneration)) return false;
   if (current && matchesAttachTuple(current.tuple, tuple)) return true;
-  if (current && (!matchesAttachTuple(
+  if (current && !expectedPrevious && (!matchesAttachTuple(
     { ...current.tuple, attemptGeneration: tuple.attemptGeneration }, tuple,
   ) || tuple.attemptGeneration <= current.tuple.attemptGeneration)) return false;
   durableBindings.set(tuple.backendSessionId, { tuple: { ...tuple }, budget: createAttemptBudget(startTimeMs) });

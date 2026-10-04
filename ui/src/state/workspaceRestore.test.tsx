@@ -704,9 +704,14 @@ describe("workspaceRestore coordinator", () => {
   it("marks session as exited without auto-respawn when daemon epoch has changed", async () => {
     const workspaceId = "ws-epoch-mismatch";
     const restoreWorkspace = vi.fn();
-    const loadSessionFn = vi.fn(async () => persistedSingleTerminal(workspaceId, "backend-1", "epoch-OLD"));
+    const persisted = persistedSingleTerminal(workspaceId, "backend-1", "epoch-OLD");
+    const loadSessionFn = vi.fn(async () => ({ ...persisted, workspaces: {
+      ...persisted.workspaces, [workspaceId]: { ...persisted.workspaces[workspaceId], terminalSessions: {
+        "sess-1": { ...persisted.workspaces[workspaceId].terminalSessions["sess-1"], incarnation: "old-pty" },
+      } },
+    } }));
     const listLiveBackendSessionIdsFn = vi.fn(async () => [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-pty" },
     ]);
     const { unmount } = renderHook(() =>
       useWorkspaceRestore({

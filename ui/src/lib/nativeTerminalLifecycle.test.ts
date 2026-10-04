@@ -49,6 +49,18 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
     expect(getDurableNativeBinding("back")).toEqual(retry);
   });
 
+  it("replaces an authoritative binding only while its persisted predecessor is current", () => {
+    const previous: PaneAttachTuple = { backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
+      frontendSessionId: "front", paneIdentity: "pane", bindingKey: "old", attemptGeneration: 3 };
+    expect(registerDurableNativeBinding(previous)).toBe(true);
+    const next = { ...previous, daemonEpoch: "9", bindingKey: "new", attemptGeneration: 4 };
+    expect(registerDurableNativeBinding(next)).toBe(false);
+    expect(registerDurableNativeBinding(next, performance.now(), previous)).toBe(true);
+    expect(getDurableNativeBinding("back")).toEqual(next);
+    expect(registerDurableNativeBinding({ ...previous, attemptGeneration: 5 }, performance.now(), previous)).toBe(false);
+    expect(getDurableNativeBinding("back")).toEqual(next);
+  });
+
   it("requires every supplied attach tuple field before becoming ready", () => {
     const tuple: NativeTerminalPresentationReceipt = {
       backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
