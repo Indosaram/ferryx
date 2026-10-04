@@ -26,6 +26,7 @@ jobs:
     runs-on: xenoci-macos
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
+      CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
