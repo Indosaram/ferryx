@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { StrictMode, useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AttentionInbox } from "./AttentionInbox";
 import type { AttentionRow } from "./attentionModel";
@@ -22,7 +22,20 @@ function row(overrides: Partial<AttentionRow> & Pick<AttentionRow, "id" | "state
 const waiting = row({ id: "w", state: "needs-you", who: "omo", text: "Auth method — Which library should we use?" });
 const finished = row({ id: "d", state: "done", who: "Codex", location: "ferryx / feat-inbox", text: "Fix login bug" });
 
-afterEach(cleanup);
+beforeEach(() => {
+  // jsdom has no intersection engine; keep the real mascot mounted but offscreen.
+  vi.stubGlobal("IntersectionObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("AttentionInbox", () => {
   it("shows the two states with who, where, and the actual question", () => {
@@ -100,9 +113,41 @@ describe("AttentionInbox", () => {
   });
 
   it("says nobody is waiting when empty, leaving the session count to the sidebar footer", () => {
-    render(<AttentionInbox rows={[]} onOpen={vi.fn()} now={NOW} />);
+    render(<AttentionInbox rows={[]} onOpen={vi.fn()} now={NOW} className="inbox-empty-fixture" />);
     const empty = screen.getByTestId("attention-inbox-empty");
     expect(empty).toHaveTextContent("Nobody is waiting on you.");
     expect(empty).not.toHaveTextContent(/\d+ (open )?sessions?/);
+    expect(within(empty).queryByText("✧")).not.toBeInTheDocument();
+    expect(within(empty).getByTestId("attention-mascot-stage")).toBeInTheDocument();
+    expect(within(empty).getByRole("button", { name: "Pause mascot animation" })).toBeInTheDocument();
+    expect(empty).toHaveClass("inbox-empty-fixture");
+  });
+
+  it("replaces the mascot immediately on incoming rows and restores it without hook errors under StrictMode", () => {
+    const consoleError = vi.spyOn(console, "error");
+    const onOpen = vi.fn();
+    const { rerender } = render(
+      <StrictMode><AttentionInbox rows={[]} onOpen={onOpen} now={NOW} /></StrictMode>,
+    );
+    const initialMascot = screen.getByTestId("attention-mascot-stage");
+    expect(screen.getByTestId("attention-inbox-empty")).toBeInTheDocument();
+
+    expect(() => rerender(
+      <StrictMode><AttentionInbox rows={[waiting]} onOpen={onOpen} now={NOW} /></StrictMode>,
+    )).not.toThrow();
+    expect(initialMascot).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-mascot-stage")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-inbox-empty")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-inbox")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-row")).toBeInTheDocument();
+
+    expect(() => rerender(
+      <StrictMode><AttentionInbox rows={[]} onOpen={onOpen} now={NOW} /></StrictMode>,
+    )).not.toThrow();
+    expect(screen.queryByTestId("attention-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-inbox-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-mascot-stage")).not.toBe(initialMascot);
+    expect(screen.getByRole("button", { name: "Pause mascot animation" })).toBeInTheDocument();
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });

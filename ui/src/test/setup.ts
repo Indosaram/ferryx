@@ -83,6 +83,27 @@ Object.defineProperty(globalThis, "ResizeObserver", {
   value: ResizeObserverStub,
 });
 
+class IntersectionObserverStub implements IntersectionObserver {
+  readonly root = null;
+  readonly rootMargin = "0px";
+  readonly thresholds: readonly number[] = [0];
+
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+}
+
+// jsdom has no intersection tracking; tests that need visibility provide their own signals.
+if (typeof globalThis.IntersectionObserver === "undefined") {
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    value: IntersectionObserverStub,
+  });
+}
+
 if (!globalThis.PointerEvent) {
   if (typeof MouseEvent !== "undefined") {
     Object.defineProperty(globalThis, "PointerEvent", {

@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "../../../lib/cn";
+import { AttentionMascot } from "./AttentionMascot";
 import {
   ATTENTION_KIND_LABEL,
   ATTENTION_STATE_LABEL,
@@ -73,9 +74,9 @@ export function AttentionInbox({
         data-testid="attention-inbox-empty"
         className={cn("flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-8 text-center", className)}
       >
-        <span aria-hidden="true" className="mb-3 text-2xl leading-none text-status-warning">✧</span>
+        <AttentionMascot />
         <p className="text-[12.5px] font-semibold text-worktree-sidebar-foreground">
-          Nobody is <span className="text-status-warning">waiting on you</span>.
+          Nobody is waiting on you.
         </p>
         <p className="mt-2 max-w-[260px] text-[10.5px] leading-relaxed text-muted-foreground/80">
           Agents show up here when they need your input or finish their work. Running sessions stay quiet.
