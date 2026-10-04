@@ -7,9 +7,11 @@
 
 import { join } from 'node:path';
 import {
+  APP_STDIO_BYTES_FAILED,
   BUDGETS,
   HarnessError,
   MonotonicBudget,
+  SPLIT_INVENTORY_READ_FAILED,
   appStdioBytes,
   requireSevenTupleReceipt,
   requireFiveTupleReceipt,
@@ -73,29 +75,115 @@ export function assertConflictWaveReported(batch, label = 'split-concurrent-batc
 // is `computeInventoryDelta`) and the always-on app-stdio sink. Neither is an
 // assertion: the split scenarios' verdicts are unchanged, and a measurement that
 // cannot be taken is recorded as a typed reason, never as a failure.
+//
+// That contract is ENFORCED here, not asserted (pass-22 audit D1/D2/D4):
+//   * every read and every sampler is wrapped, so NO throw can escape into
+//     `classifyNativeFailure` - a read that throws is a typed action
+//     (`SPLIT_INVENTORY_READ_FAILED`) carrying the thrown error's own code and
+//     message, and the scenario continues exactly as before;
+//   * both reads sit INSIDE the measured attempt window (the pre-click read is
+//     taken after the trigger budget exists, and the post-click read immediately
+//     after the click), so each is CHARGED to that budget at the small bounded
+//     cap `BUDGETS.splitInventoryReadCapMs` and reports the read's own
+//     `elapsedMs` - a window that cannot pay for a read gets a typed refusal
+//     (`INVENTORY_READ_REFUSED`) instead of a read that spends the ceiling
+//     silently. No `BUDGETS` value is changed by any of this.
 export const SPLIT_INVENTORY_ACTION = 'split-inventory-after';
 export const PRE_SPLIT_INVENTORY_ACTION = 'pane-inventory-pre-split';
 export const PANE_INVENTORY_AFTER_ACTION = 'pane-inventory-after';
 export const INVENTORY_READER_MISSING = 'INVENTORY_READER_MISSING';
+// The measurement's typed failure identities live in the shared harness module
+// (the reader emits them too); re-exported here so a caller of these adapters
+// needs one import.
+export { APP_STDIO_BYTES_FAILED, INVENTORY_READ_REFUSED, SPLIT_INVENTORY_READ_FAILED } from './common-harness.mjs';
+
+// The app-stdio byte self-check (pass-22): the sink's cheap in-memory counters at
+// ONE moment plus the delta across the click. A sink whose counters cannot be read
+// is a measurement that could not be taken: the counters are reported absent,
+// typed, and the scenario is untouched (audit D4).
+function appStdioByteSelfCheck(ctx, bytesBefore) {
+  try {
+    const after = appStdioBytes(ctx?.appStdio);
+    return {
+      appStdioBytes: {
+        before: bytesBefore,
+        after,
+        delta: bytesBefore && after
+          ? { stdout: after.stdout - bytesBefore.stdout, stderr: after.stderr - bytesBefore.stderr, total: after.total - bytesBefore.total }
+          : null,
+      },
+    };
+  } catch (error) {
+    return {
+      appStdioBytes: { before: bytesBefore, after: null, delta: null },
+      appStdioBytesError: { code: APP_STDIO_BYTES_FAILED, message: String(error?.message ?? error) },
+    };
+  }
+}
+
+// ONE read, charged and wrapped (pass-22 audit D1/D2/D4). The charge is what makes
+// the cost explicit: the read is inside the MEASURED attempt window, so it is
+// bounded by what that window has left, capped at `splitInventoryReadCapMs`, and
+// the recorded action carries the cap it was given plus the read's own
+// `elapsedMs`. The catch is the guarantee that no reader implementation - present
+// or future - can turn this measurement into the run's verdict: `snapshot` is
+// documented not to throw, and if it does anyway the action says so, typed, and
+// the scenario carries on with nothing measured.
+async function readSplitInventory(ctx, reader, label, budget, { compareToPrevious = false, extra = null } = {}) {
+  try {
+    return await reader.snapshot(label, {
+      compareToPrevious,
+      extra,
+      charge: { budget, capMs: BUDGETS.splitInventoryReadCapMs },
+    });
+  } catch (error) {
+    const sampled = typeof extra === 'function' ? (extra() ?? {}) : {};
+    ctx?.evidence?.action?.({
+      action: label,
+      ...sampled,
+      ok: false,
+      code: SPLIT_INVENTORY_READ_FAILED,
+      cause: error?.code ?? null,
+      detail: `the inventory read threw instead of reporting a result: ${error?.message ?? error}`,
+      sessionCount: null,
+      sessionIds: null,
+      delta: null,
+      baselineLabel: null,
+      elapsedMs: null,
+    });
+    return null;
+  }
+}
 
 // Called immediately BEFORE the split click: remembers the app-stdio byte
 // counters and makes sure the reader holds a PRE-SPLIT reading for the delta to be
 // measured against. The pane step's own after-read (`pane-inventory-after`) is
-// that reading whenever it was taken; when the pane binding settled on the
-// product's presentation receipt instead, no after-read happened, so one is taken
-// here - before the click - rather than letting the delta silently fold the pane
-// step's own session into the split's.
-export async function armSplitInventory(ctx) {
+// that reading whenever it was taken AND landed; when the pane binding settled on
+// the product's presentation receipt instead - or its after-read failed - no
+// usable baseline exists, so one is taken here, before the click, rather than
+// letting the delta silently fold the pane step's own session into the split's.
+//
+// `budget` is the MEASURED attempt budget this pair's reads are charged to, and it
+// travels with `armed` so the read after the click is charged by the same window
+// the read before it was (see `readSplitInventory`).
+export async function armSplitInventory(ctx, budget = null) {
   const reader = typeof ctx?.paneInventory?.snapshot === 'function' ? ctx.paneInventory : null;
-  const armed = { reader, baselineLabel: null, appStdioBytesBefore: appStdioBytes(ctx?.appStdio) };
+  let appStdioBytesBefore = null;
+  let appStdioBytesBeforeError = null;
+  try {
+    appStdioBytesBefore = appStdioBytes(ctx?.appStdio);
+  } catch (error) {
+    appStdioBytesBeforeError = { code: APP_STDIO_BYTES_FAILED, message: String(error?.message ?? error) };
+  }
+  const armed = { reader, budget, baselineLabel: null, appStdioBytesBefore, appStdioBytesBeforeError };
   if (reader === null) return armed;
   const previous = typeof reader.lastReading === 'function' ? reader.lastReading() : null;
-  if (previous?.label === PANE_INVENTORY_AFTER_ACTION) {
+  if (previous?.label === PANE_INVENTORY_AFTER_ACTION && previous.result?.ok === true) {
     armed.baselineLabel = previous.label;
     return armed;
   }
-  await reader.snapshot(PRE_SPLIT_INVENTORY_ACTION);
-  armed.baselineLabel = PRE_SPLIT_INVENTORY_ACTION;
+  const baseline = await readSplitInventory(ctx, reader, PRE_SPLIT_INVENTORY_ACTION, budget);
+  armed.baselineLabel = baseline?.ok === true ? PRE_SPLIT_INVENTORY_ACTION : null;
   return armed;
 }
 
@@ -109,16 +197,13 @@ export async function recordSplitInventory(ctx, armed, label = SPLIT_INVENTORY_A
   const reader = armed?.reader ?? null;
   const bytesBefore = armed?.appStdioBytesBefore ?? null;
   const byteSelfCheck = () => {
-    const after = appStdioBytes(ctx?.appStdio);
-    return {
-      appStdioBytes: {
-        before: bytesBefore,
-        after,
-        delta: bytesBefore && after
-          ? { stdout: after.stdout - bytesBefore.stdout, stderr: after.stderr - bytesBefore.stderr, total: after.total - bytesBefore.total }
-          : null,
-      },
-    };
+    const sampled = appStdioByteSelfCheck(ctx, bytesBefore);
+    // The ARM-time sample can fail too (the counters are read once before the
+    // click); when it did, the recorded action says so instead of leaving a null
+    // delta unexplained.
+    return armed?.appStdioBytesBeforeError === null || armed?.appStdioBytesBeforeError === undefined
+      ? sampled
+      : { ...sampled, appStdioBytesBeforeError: armed.appStdioBytesBeforeError };
   };
   if (reader === null) {
     ctx?.evidence?.action?.({
@@ -131,10 +216,11 @@ export async function recordSplitInventory(ctx, armed, label = SPLIT_INVENTORY_A
       sessionIds: null,
       delta: null,
       baselineLabel: null,
+      elapsedMs: null,
     });
     return null;
   }
-  return reader.snapshot(label, { compareToPrevious: true, extra: byteSelfCheck });
+  return readSplitInventory(ctx, reader, label, armed?.budget ?? null, { compareToPrevious: true, extra: byteSelfCheck });
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +232,7 @@ export async function runSplitHappyScenario(ctx, plan, budget = new MonotonicBud
 
   // Trigger Split Right
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
-  const splitInventory = await armSplitInventory(ctx);
+  const splitInventory = await armSplitInventory(ctx, budget);
   await driver.split(evidence, pid);
   // Immediately after the click resolved: the post-click daemon inventory (a
   // local split create adds a daemon session) and the app-stdio byte self-check.
@@ -228,7 +314,7 @@ export async function runSplitAttachStallScenario(ctx, plan, budget = new Monoto
 
   // Trigger Split Right
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
-  const splitInventory = await armSplitInventory(ctx);
+  const splitInventory = await armSplitInventory(ctx, budget);
   await driver.split(evidence, pid);
   // Immediately after the click resolved: the post-click daemon inventory (a
   // local split create adds a daemon session) and the app-stdio byte self-check.
@@ -345,7 +431,7 @@ export async function runSplitCancelScenario(ctx, plan, budget = new MonotonicBu
   // Crucial fix: Trigger split FIRST before awaiting create receipt!
   // Cancel must trigger split before waiting for held-create and not require created ID.
   if (ctx.platformPreflight !== 'win32') await driver.focus(evidence, pid);
-  const splitInventory = await armSplitInventory(ctx);
+  const splitInventory = await armSplitInventory(ctx, budget);
   await driver.split(evidence, pid);
 
   // Dispatch cancel request immediately
@@ -410,7 +496,7 @@ export async function runSplitConcurrentScenario(ctx, plan, budget = new Monoton
   evidence.action({ action: 'split-concurrent-batch', count: 16 });
 
   // 4. Trigger native split
-  const splitInventory = await armSplitInventory(ctx);
+  const splitInventory = await armSplitInventory(ctx, budget);
   await driver.split(evidence, pid);
   // Immediately after the click resolved: the post-click daemon inventory (a
   // local split create adds a daemon session) and the app-stdio byte self-check.

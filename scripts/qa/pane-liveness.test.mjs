@@ -20,6 +20,8 @@ import {
   LOCAL_SPLIT_LIFECYCLE_CAPABILITY, ATTACH_TUPLE_FIELDS,
   AppStdioSink, appStdioResult, APP_STDIO_TRUNCATION_MARKER,
   appStdioBytes, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
+  ATTEMPT_BUDGET_SPENT, INVENTORY_READ_REFUSED,
+  BARRIER_ARCHIVE_SNAPSHOT_FILE, BARRIER_ARCHIVE_SNAPSHOT_MARKER,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { assertClassifierReceipt, runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import { assertInvariants, assertSinglePty, SCENARIO_PLANS, archiveRunBarrierHub } from './pane-liveness.mjs';
@@ -36,6 +38,7 @@ import {
   SPLIT_INVENTORY_ACTION,
   PRE_SPLIT_INVENTORY_ACTION,
   INVENTORY_READER_MISSING,
+  SPLIT_INVENTORY_READ_FAILED,
 } from '../lib/qa-scenarios/split-scenarios.mjs';
 import {
   runRetainedHandoverScenario,
@@ -2995,5 +2998,186 @@ test('the run preserves the barrier hub directory into its evidence dir, bounded
     const seam = archiveRunBarrierHub({ barrierHub: { dir: hubDir }, evidence: { runDir: seamRunDir } });
     expect(seam.ok).toBe(true);
     expect(existsSync(join(seamRunDir, 'barrier-hub', 'split-create.receipt.jsonl'))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Pass-22 audit repairs: a measurement may never change a verdict (D1), may never
+// sit inside the measured window charged to nothing (D2), and may never present a
+// pre-reap snapshot as a stream that settled (D3/D4).
+
+test('a throwing inventory read is recorded as a typed action and the split scenario proceeds unchanged', async () => {
+  const root = fixtureRoot();
+  const actions = [];
+  const budget = new MonotonicBudget();
+  const charges = [];
+  // The exact failure the audit proved could flip a verdict: the reader's own
+  // `snapshot` raising the ASSERTION_FAILURE that `MonotonicBudget.consume`
+  // throws when its budget is exhausted - the code `classifyNativeFailure` maps to
+  // a FAIL verdict.
+  const throwingReader = {
+    snapshot: async (label, options) => {
+      charges.push({ label, options });
+      throw new HarnessError('ASSERTION_FAILURE', 'monotonic budget exhausted for split-inventory-after: elapsed 15001ms >= limit 15000ms');
+    },
+    lastReading: () => null,
+  };
+  const driver = { focus: async () => {}, split: async () => {} };
+  const fakeHub = {
+    command: () => {},
+    awaitReceipt: async () => ({ cancelAckMs: 5, cleanupReceipt: { authoritative: true } }),
+  };
+  try {
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: throwingReader,
+    }, { cancel: { phase: 'while-creating' } }, budget);
+    // (1) the scenario's own settlement is untouched: a measurement that throws
+    // cannot turn this scenario into an ASSERTION_FAILURE.
+    expect(result.cancelReceipt.cancelAckMs).toBe(5);
+    // (2) BOTH reads are recorded - the pre-click read and the post-click one -
+    // typed, carrying the thrown error's own code and message.
+    const recorded = actions.filter(action => action.action === PRE_SPLIT_INVENTORY_ACTION || action.action === SPLIT_INVENTORY_ACTION);
+    expect(recorded.map(action => action.action)).toEqual([PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
+    for (const action of recorded) {
+      expect([action.ok, action.code, action.cause]).toEqual([false, SPLIT_INVENTORY_READ_FAILED, 'ASSERTION_FAILURE']);
+      expect(action.detail).toContain('monotonic budget exhausted');
+      expect([action.sessionCount, action.sessionIds, action.delta]).toEqual([null, null, null]);
+    }
+    // (3) the cost the audit found charged to NOTHING is now charged to the
+    // MEASURED attempt budget, at the small bounded cap, for every read of the
+    // pair - and no BUDGETS value had to move for that.
+    expect(charges.map(charge => charge.label)).toEqual([PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
+    for (const charge of charges) {
+      expect(charge.options.charge.budget).toBe(budget);
+      expect(charge.options.charge.capMs).toBe(BUDGETS.splitInventoryReadCapMs);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a read the measured attempt window cannot pay for is refused, typed, instead of being taken', async () => {
+  const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const actions = [];
+  const reads = [];
+  const reader = createPaneInventoryReader({
+    runtimeDir: join(root, 'runtime'),
+    platform: 'darwin',
+    evidence: { action: action => actions.push(action) },
+    readInventory: async () => {
+      reads.push('read');
+      return {
+        ok: true, code: null, detail: null, transport: 'unix-socket',
+        endpoint: { transport: 'unix-socket', socketPath: join(root, 'runtime', 'daemon.sock') },
+        sessions: ['fixture-1'], epoch: 1, elapsedMs: 1,
+      };
+    },
+  });
+  // A REAL budget whose window has nothing left: `remainingMs` clamps at 0.
+  const spent = new MonotonicBudget(0);
+  const driver = { focus: async () => {}, split: async () => {} };
+  const fakeHub = {
+    command: () => {},
+    awaitReceipt: async () => ({ cancelAckMs: 7, cleanupReceipt: { authoritative: true } }),
+  };
+  try {
+    // (1) the reader refuses it: no read is taken at all, the result is typed, and
+    // the action carries the cap and the bound it was refused under.
+    const refused = await reader.snapshot(PRE_SPLIT_INVENTORY_ACTION, { charge: { budget: spent, capMs: BUDGETS.splitInventoryReadCapMs } });
+    expect([refused.ok, refused.code, refused.cause]).toEqual([false, INVENTORY_READ_REFUSED, ATTEMPT_BUDGET_SPENT]);
+    expect(reads).toEqual([]);
+    expect(actions[0].charge).toEqual({ capMs: BUDGETS.splitInventoryReadCapMs, boundMs: 0, scope: 'measured-attempt' });
+
+    // (2) the same refusal inside a real scenario: its own stages still run and
+    // its settlement is unchanged, and the measurement costs the window nothing.
+    // The window's two readings are separated here on purpose - `consume` (what
+    // the stages ask) still pays, `remainingMs` (what the charge asks) is spent -
+    // because a real `MonotonicBudget` cannot be both at once, and waiting for a
+    // real one to expire would make this test pass by timing luck.
+    const spentForMeasurement = {
+      totalMs: BUDGETS.attemptCeilingMs,
+      deadlineAt: Date.now() + BUDGETS.attemptCeilingMs,
+      consume: (cap = Infinity) => Math.min(BUDGETS.attemptCeilingMs, cap),
+      remainingMs: () => 0,
+      elapsedMs: () => BUDGETS.attemptCeilingMs,
+      isExceeded: () => false,
+    };
+    actions.length = 0;
+    const result = await runSplitCancelScenario({
+      scenario: 'split-cancel',
+      evidence: { action: action => actions.push(action) },
+      barrierHub: fakeHub,
+      pid: 1,
+      platformPreflight: 'darwin',
+      nativeDriver: driver,
+      paneInventory: reader,
+    }, { cancel: { phase: 'while-creating' } }, spentForMeasurement);
+    expect(result.cancelReceipt.cancelAckMs).toBe(7);
+    const after = actions.find(action => action.action === SPLIT_INVENTORY_ACTION);
+    expect([after.ok, after.code, after.cause, after.charge.boundMs]).toEqual([false, INVENTORY_READ_REFUSED, ATTEMPT_BUDGET_SPENT, 0]);
+    expect(reads).toEqual([]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the barrier-hub archive receipt says which moment it is, and the runner seam never throws', () => {
+  const root = fixtureRoot();
+  const hubDir = join(root, 'isolation', 'barriers');
+  const runDir = join(root, 'evidence', 'run-archive');
+  mkdirSync(hubDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(hubDir, 'split-create.receipt.jsonl'), '{"backendSessionId":"b1"}\n');
+  // A child handle that has NOT exited (`exitCode`/`signalCode` still null, which
+  // is how Node reports a live child) beside one that has.
+  const runningApp = { exitCode: null, signalCode: null };
+  const exitedApp = { exitCode: 0, signalCode: null };
+  try {
+    // (1) the copy is taken BEFORE the process reap and now says so: a stream that
+    // stops short of a settlement the product appended afterwards is no longer
+    // indistinguishable from one that never received it.
+    const archive = archiveBarrierHub(hubDir, runDir, {
+      processes: [{ pid: 111, label: 'app', child: runningApp }, { pid: 222, label: 'fixture', child: exitedApp }],
+    });
+    expect(archive.ok).toBe(true);
+    expect(archive.snapshot).toMatchObject({
+      phase: 'BEFORE_PROCESS_REAP',
+      marker: BARRIER_ARCHIVE_SNAPSHOT_MARKER,
+      takenBeforeProcessReap: true,
+      truncatedScope: 'BYTE_CAP_ONLY',
+    });
+    expect(archive.snapshot.note).toContain('BEFORE the process reap');
+    expect(archive.snapshot.note).toContain('truncated');
+    expect(archive.snapshot.appProcesses).toMatchObject({ determined: true, stillRunning: [111], exited: [222], undetermined: [] });
+    // `truncated` is the byte cap and nothing else - the capped case says so too,
+    // instead of reading as "the product stopped printing".
+    const capped = archiveBarrierHub(hubDir, join(root, 'evidence-capped'), { maxBytes: 0 });
+    expect([capped.truncated, capped.snapshot.truncatedScope]).toEqual([true, 'BYTE_CAP_ONLY']);
+    // (2) the same block travels in the copied bytes, so a reader who has the
+    // archive and nothing else can still see the moment it was taken.
+    const markerPath = join(runDir, 'barrier-hub', BARRIER_ARCHIVE_SNAPSHOT_FILE);
+    expect(archive.snapshot.markerPath).toBe(markerPath);
+    expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toMatchObject({
+      phase: 'BEFORE_PROCESS_REAP', takenBeforeProcessReap: true, truncated: false, filesCopied: ['split-create.receipt.jsonl'],
+    });
+    // A marker that cannot be written is reported, never fatal to the archive.
+    const markerFails = archiveBarrierHub(hubDir, join(root, 'evidence-marker'), { writeMarker: () => { throw new Error('boom'); } });
+    expect([markerFails.ok, markerFails.snapshot.markerPath, markerFails.snapshot.markerError]).toEqual([true, null, 'boom']);
+
+    // (3) the runner's own finalization seam: the registry's processes travel with
+    // the copy, and a throw while reading the seam's own arguments cannot escape
+    // the `finally` that would otherwise destroy the run's result.json.
+    const seam = archiveRunBarrierHub({
+      barrierHub: { dir: hubDir },
+      evidence: { runDir: join(root, 'evidence-seam') },
+      registry: { processes: [{ pid: 111, label: 'app', child: runningApp }], reaped: [] },
+    });
+    expect(seam.ok).toBe(true);
+    expect(seam.snapshot.appProcesses.stillRunning).toEqual([111]);
+    const seamFails = archiveRunBarrierHub({ barrierHub: { get dir() { throw new Error('no dir'); } }, evidence: { runDir: join(root, 'evidence-seam') } });
+    expect([seamFails.ok, seamFails.filesCopied, seamFails.reason.startsWith('ARCHIVE_SEAM_FAILED')]).toEqual([false, [], true]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -20,7 +20,7 @@ import {
   computeCleanupGate, computeSourceDigest, withDeadline,
   assertPositiveRecovery, BARRIER_ROLES, MonotonicBudget, validateFixtureSetup,
   requireSevenTupleReceipt, requireFiveTupleReceipt,
-  AppStdioSink, appStdioResult, archiveBarrierHub,
+  AppStdioSink, appStdioResult, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
 } from '../lib/qa-scenarios/common-harness.mjs';
 import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import {
@@ -378,8 +378,39 @@ async function runNativeScenario(ctx) {
 // needs a product binary, so this is the runnable entry point for the behaviour
 // (bounded copy into the run's evidence dir, never fatal). See
 // `archiveBarrierHub` in common-harness.mjs for the contract.
-export function archiveRunBarrierHub({ barrierHub, evidence } = {}) {
-  return archiveBarrierHub(barrierHub?.dir ?? null, evidence?.runDir ?? null);
+//
+// Two things this seam owes the run (pass-22 audit D3/D4):
+//   * the registry's own processes travel with the copy, so the archive receipt
+//     can say whether the app was still running when it was taken (the copy is
+//     taken BEFORE the reap, so a stream that stops short of a settlement is not
+//     evidence that the settlement never arrived);
+//   * it NEVER throws. It runs in a `finally`, where a throw would escape
+//     `main()` and destroy the run's own result.json - a diagnostic that cannot
+//     be taken must be reported, never fatal.
+export function archiveRunBarrierHub({ barrierHub, evidence, registry = null } = {}) {
+  try {
+    return archiveBarrierHub(barrierHub?.dir ?? null, evidence?.runDir ?? null, {
+      processes: (registry?.processes ?? []).map(process => ({
+        pid: process.pid,
+        label: process.label,
+        child: process.child ?? null,
+      })),
+    });
+  } catch (error) {
+    // Deliberately touches neither argument: a throw raised while reading them
+    // must not be able to throw a second time from the handler.
+    return {
+      sourceDir: null,
+      dir: null,
+      ok: false,
+      reason: `ARCHIVE_SEAM_FAILED: ${error?.message ?? error}`,
+      filesCopied: [],
+      filesSkipped: [],
+      bytes: 0,
+      truncated: false,
+      maxBytes: BARRIER_ARCHIVE_MAX_BYTES,
+    };
+  }
 }
 
 export async function main(argv) {
@@ -529,7 +560,7 @@ export async function main(argv) {
     // inference from the app's stderr instead of by reading the stream. It is
     // archived into this run's own evidence dir HERE, before the roots go:
     // bounded, skip-on-failure, and never fatal to the run.
-    const barrierArchive = archiveRunBarrierHub({ barrierHub, evidence });
+    const barrierArchive = archiveRunBarrierHub({ barrierHub, evidence, registry });
     const receipts = await registry.cleanup();
     const gate = computeCleanupGate(registry, receipts);
     // Pass-6: when an isolation root is still held after the forced reap of this

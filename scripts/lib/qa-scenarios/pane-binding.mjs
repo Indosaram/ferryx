@@ -96,7 +96,15 @@
 //     recorded as its own evidence, never substituted for a fixture.
 
 import { join } from 'node:path';
-import { BUDGETS, HarnessError, requireSevenTupleReceipt } from './common-harness.mjs';
+import {
+  APP_STDIO_BYTES_FAILED,
+  ATTEMPT_BUDGET_SPENT,
+  BUDGETS,
+  HarnessError,
+  INVENTORY_READ_REFUSED,
+  SPLIT_INVENTORY_READ_FAILED,
+  requireSevenTupleReceipt,
+} from './common-harness.mjs';
 import {
   computeInventoryDelta,
   describeInventoryRead,
@@ -130,6 +138,59 @@ export function observedSessionIds(barrierHub, receiptName = PANE_PRESENTATION_R
   return [...ids];
 }
 
+// Resolve the bound ONE inventory read is given, and whether it can be taken at
+// all (pass-22 audit D2). Two charging contexts, both explicit, and NEITHER
+// throws:
+//
+//   * no `charge` - the reader's own `budget`, which is the pane step's
+//     pre-trigger setup ceiling (that step is setup, not the measured attempt),
+//     at the reader's own default read bound: the pass-13 behaviour, except that
+//     a budget which cannot pay for the read is now a typed REFUSAL instead of
+//     the `ASSERTION_FAILURE` `MonotonicBudget.consume` raises - which
+//     `classifyNativeFailure` maps to a FAIL verdict, so an exhausted budget used
+//     to turn a measurement into the run's verdict (audit D1);
+//   * `charge` - an explicit budget and cap, used for the split step's reads,
+//     which sit INSIDE the measured attempt window: their wall clock used to
+//     count against `attemptCeilingMs` while being charged to nothing. The bound
+//     is `remainingMs(capMs)` - never `consume` - so the read can never be given
+//     more time than the window charging it has left, and a window with nothing
+//     left refuses the read instead of taking it.
+function resolveReadCharge(charge, label, budget) {
+  if (charge === null || charge === undefined) {
+    const consume = budget && typeof budget.consume === 'function' ? budget.consume : null;
+    if (consume === null) return { boundMs: undefined, charged: null, refusal: null };
+    try {
+      return { boundMs: consume(BUDGETS.daemonInventoryTotalMs, label), charged: null, refusal: null };
+    } catch (error) {
+      return {
+        boundMs: null,
+        charged: null,
+        refusal: {
+          cause: error?.code ?? null,
+          detail: `the read's own budget could not pay for it: ${error?.message ?? error}`,
+        },
+      };
+    }
+  }
+  const chargeBudget = charge.budget ?? null;
+  const capMs = charge.capMs ?? BUDGETS.splitInventoryReadCapMs;
+  const boundMs = chargeBudget && typeof chargeBudget.remainingMs === 'function'
+    ? chargeBudget.remainingMs(capMs)
+    : capMs;
+  const charged = { capMs, boundMs, scope: 'measured-attempt' };
+  if (boundMs <= 0) {
+    return {
+      boundMs: null,
+      charged,
+      refusal: {
+        cause: ATTEMPT_BUDGET_SPENT,
+        detail: `the measured attempt window has ${boundMs}ms left for a read capped at ${capMs}ms, so the read was not taken`,
+      },
+    };
+  }
+  return { boundMs, charged, refusal: null };
+}
+
 // The pane step's measured second source: a bounded, READ-ONLY reader of the
 // isolated daemon's own session inventory (`daemon-inventory.mjs`). The
 // before-read is taken BEFORE the pane click; `readAfter` is a function rather
@@ -138,6 +199,9 @@ export function observedSessionIds(barrierHub, receiptName = PANE_PRESENTATION_R
 // click created has had time to register with the daemon. Both reads are
 // recorded as their own evidence actions, and every blocking step inside them is
 // bounded, so a wedged daemon leaves a typed reason instead of a hang.
+//
+// NOTHING HERE THROWS (pass-22 audit D1/D4): this reader is a MEASUREMENT, and a
+// measurement that cannot be taken is a typed evidence action, never a verdict.
 export function createPaneInventoryReader({
   isolationRoot = null,
   platform = process.platform,
@@ -148,6 +212,9 @@ export function createPaneInventoryReader({
 } = {}) {
   const dir = runtimeDir ?? (isolationRoot === null ? null : join(isolationRoot, 'runtime'));
   if (typeof dir !== 'string' || dir.length === 0) {
+    // A caller-contract assertion, raised before any read exists - and NOT a
+    // measurement failure. The reader's own failure paths (below) are typed
+    // results; this one predates pass-22 and is deliberately unchanged.
     throw new HarnessError('ASSERTION_FAILURE', 'createPaneInventoryReader requires an isolationRoot or an explicit runtimeDir');
   }
   // The reading this reader took LAST. The split step's own post-click read
@@ -157,17 +224,36 @@ export function createPaneInventoryReader({
   // instead of being re-derived (or invented) by a caller.
   let lastReading = null;
 
-  const snapshot = async (label, { compareToPrevious = false, extra = null } = {}) => {
-    // Charged to the caller's pre-trigger setup budget (the pane step is setup,
-    // not the measured attempt), capped by whatever the reader's own default is.
-    const boundedTotalMs = budget && typeof budget.consume === 'function'
-      ? budget.consume(BUDGETS.daemonInventoryTotalMs, label)
-      : undefined;
-    const result = await readInventory({
-      runtimeDir: dir,
-      platform,
-      ...(boundedTotalMs === undefined ? {} : { totalMs: boundedTotalMs }),
-    });
+  const snapshot = async (label, { compareToPrevious = false, extra = null, charge = null } = {}) => {
+    const startedAt = Date.now();
+    const resolvedCharge = resolveReadCharge(charge, label, budget);
+    let result;
+    if (resolvedCharge.refusal !== null) {
+      result = {
+        ok: false, code: INVENTORY_READ_REFUSED, cause: resolvedCharge.refusal.cause,
+        detail: resolvedCharge.refusal.detail, transport: null, endpoint: null,
+        sessions: null, epoch: null, elapsedMs: Date.now() - startedAt,
+      };
+    } else {
+      try {
+        result = await readInventory({
+          runtimeDir: dir,
+          platform,
+          ...(resolvedCharge.boundMs === undefined ? {} : { totalMs: resolvedCharge.boundMs }),
+        });
+      } catch (error) {
+        // A read that THROWS is a measurement that could not be taken: it is
+        // typed here, and the caller continues exactly as it would have without
+        // the measurement (audit D1). Nothing below this line can be reached by a
+        // throw from the read.
+        result = {
+          ok: false, code: SPLIT_INVENTORY_READ_FAILED, cause: error?.code ?? null,
+          detail: `the inventory read threw instead of reporting a result: ${error?.message ?? error}`,
+          transport: null, endpoint: null, sessions: null, epoch: null,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+    }
     // A delta is only ever computed from two REAL reads of this daemon, with the
     // same arithmetic the pane binding uses (`computeInventoryDelta`): when
     // either read failed there is NO delta, never a zero that would read as
@@ -179,15 +265,27 @@ export function createPaneInventoryReader({
       : null;
     // Extra measurement fields are sampled HERE, after the read, so that they
     // describe the same moment as the session list - which is why a function is
-    // accepted as well as a plain object.
-    const extraFields = typeof extra === 'function' ? (extra() ?? {}) : (extra ?? {});
+    // accepted as well as a plain object. A sampler that throws is a measurement
+    // that could not be taken too: it is typed, and the read's own record
+    // survives (audit D4).
+    let extraFields = {};
+    let extraError = null;
+    if (typeof extra === 'function') {
+      try { extraFields = extra() ?? {}; }
+      catch (error) { extraError = { code: APP_STDIO_BYTES_FAILED, message: String(error?.message ?? error) }; }
+    } else if (extra !== null && extra !== undefined) {
+      extraFields = extra;
+    }
     // The daemon's bearer token is never part of this record: only its path is.
     evidence?.action?.({
       action: label,
       ...extraFields,
+      ...(resolvedCharge.charged === null ? {} : { charge: resolvedCharge.charged }),
+      ...(extraError === null ? {} : { extraError }),
       ok: result.ok === true,
       code: result.code ?? null,
       detail: result.detail ?? null,
+      ...(result.cause === undefined ? {} : { cause: result.cause }),
       transport: result.transport ?? null,
       endpoint: result.endpoint ?? null,
       sessionCount: result.ok === true ? result.sessions.length : null,
@@ -205,7 +303,10 @@ export function createPaneInventoryReader({
         },
       }),
     });
-    lastReading = { label, result };
+    // Only a read that really LANDED becomes the baseline a later delta is
+    // measured against: a failed read is never remembered as one, so no delta can
+    // ever be computed against a reading that never happened.
+    if (result.ok === true) lastReading = { label, result };
     return result;
   };
   return { runtimeDir: dir, platform, snapshot, lastReading: () => lastReading };

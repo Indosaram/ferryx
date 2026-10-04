@@ -364,11 +364,22 @@ export const BUDGETS = Object.freeze({
   // (`handshake` + `listSessions` only) before and after the pane click. Every
   // blocking step of that read is bounded here - connect, per-read, and a total
   // deadline - so a hung or wedged daemon yields a typed failure instead of a
-  // hang, and the read is charged to the pre-trigger `setupCeilingMs`, never to
-  // the frozen `attemptCeilingMs` correctness ceiling.
+  // hang, and the PANE step's reads (setup, before the trigger) are charged to
+  // the pre-trigger `setupCeilingMs`. The SPLIT step's own reads sit INSIDE the
+  // measured attempt window instead, so they are charged there, under the small
+  // bounded cap below - never by widening the ceiling.
   daemonInventoryConnectMs: 1_500,
   daemonInventoryReadMs: 2_000,
   daemonInventoryTotalMs: 3_000,
+  // Pass-22 audit D2: the split step's pre-click and post-click inventory reads
+  // happen INSIDE the measured attempt window (`attemptCeilingMs`), so their wall
+  // clock is charged to that window explicitly, capped here per read. This is NOT
+  // a relaxation of anything: the cap only bounds how much of the attempt window
+  // a MEASUREMENT may spend, and a read the window cannot pay for is refused with
+  // a typed evidence action instead of being taken. 1s is ~7% of the 15s ceiling,
+  // and it bounds a `handshake` + `listSessions` round trip on a loopback
+  // transport.
+  splitInventoryReadCapMs: 1_000,
   setupCeilingMs: 45_000,
 });
 
@@ -1023,6 +1034,33 @@ export function appStdioBytes(sink) {
 }
 
 // ---------------------------------------------------------------------------
+// Measurement failure identities (pass-22 audit D1/D4).
+//
+// The pass-22 observability - the split step's post-click daemon inventory read,
+// the app-stdio byte self-check, and the barrier-hub archive - is MEASUREMENT: it
+// may never change a verdict. Its failures are therefore RESULT codes on a
+// non-throwing path, recorded as their own evidence actions, after which the
+// scenario continues exactly as it would have without the measurement. None of
+// them is a harness verdict: nothing here is in `classifyNativeFailure`, so none
+// of them can reach a FAIL verdict or a non-zero exit code.
+
+// A read (or a sampler beside it) THREW instead of reporting a result. The action
+// carries the thrown error's own code and message beside this identity.
+export const SPLIT_INVENTORY_READ_FAILED = 'SPLIT_INVENTORY_READ_FAILED';
+
+// A read was NOT taken because the budget charging it had nothing left. The
+// action's `cause` names the budget and `detail` says what was left.
+export const INVENTORY_READ_REFUSED = 'INVENTORY_READ_REFUSED';
+
+// The refusal above was caused by the MEASURED attempt window (audit D2): the
+// read is inside it, so it may only be taken if the window can still pay.
+export const ATTEMPT_BUDGET_SPENT = 'ATTEMPT_BUDGET_SPENT';
+
+// The app-stdio byte self-check could not be sampled (a sink whose counters could
+// not be read). The counters are reported absent and the scenario is untouched.
+export const APP_STDIO_BYTES_FAILED = 'APP_STDIO_BYTES_FAILED';
+
+// ---------------------------------------------------------------------------
 // Barrier-hub preservation (task-9 pass-22 observability gap).
 
 // The barrier hub is where the product settles everything this harness reads:
@@ -1037,6 +1075,55 @@ export function appStdioBytes(sink) {
 // finalization pass, so no future pass has to remember an env var to get it.
 export const BARRIER_ARCHIVE_MAX_BYTES = 1 << 20; // 1 MiB
 
+// WHICH MOMENT the archive is (pass-22 audit D3). The runner takes it in its
+// finalization pass BEFORE the process reap, so a hub file the product appends
+// after the copy - the settlement a reader is looking for - is absent from the
+// copy in exactly the same way as a settlement that never arrived, and nothing in
+// the receipt said which case it was: `ok` only says the pass ran, and
+// `truncated` only says the byte cap bit. These markers are the archive's
+// equivalent of the app-stdio sink's own close marker (APP_STDIO_CLOSE_MARKER):
+// the artifact states the moment it was taken, in the receipt AND in its own
+// bytes, so a stream that stops short can never be read as "the product never
+// settled".
+export const BARRIER_ARCHIVE_SNAPSHOT_PHASE = 'BEFORE_PROCESS_REAP';
+export const BARRIER_ARCHIVE_SNAPSHOT_MARKER = '[barrier-hub archive: snapshot taken BEFORE the process reap]';
+export const BARRIER_ARCHIVE_TRUNCATION_SCOPE = 'BYTE_CAP_ONLY';
+export const BARRIER_ARCHIVE_SNAPSHOT_FILE = 'barrier-hub-snapshot.json';
+
+// What the archive receipt says about its own moment. `processes` is what the
+// caller knows about the run's own processes (`{ pid, label, child }`); the app's
+// still-running state is read off each child handle's `exitCode`/`signalCode`,
+// which Node sets on exit and leaves null while the process runs - a liveness
+// reading taken WITHOUT sending any process a signal. A handle that exposes
+// neither field is reported as undetermined rather than guessed at.
+function barrierArchiveSnapshot(processes) {
+  const entries = (Array.isArray(processes) ? processes : []).map(process => {
+    const child = process?.child ?? null;
+    const observable = child !== null && typeof child === 'object'
+      && (child.exitCode !== undefined || child.signalCode !== undefined);
+    return {
+      pid: process?.pid ?? null,
+      label: process?.label ?? null,
+      exited: observable ? (child.exitCode != null || child.signalCode != null) : null,
+    };
+  });
+  return {
+    phase: BARRIER_ARCHIVE_SNAPSHOT_PHASE,
+    marker: BARRIER_ARCHIVE_SNAPSHOT_MARKER,
+    takenBeforeProcessReap: true,
+    truncatedScope: BARRIER_ARCHIVE_TRUNCATION_SCOPE,
+    note: 'this copy is a snapshot taken BEFORE the process reap: anything the product appended after the copy is absent from it, so a stream that stops short of a settlement is NOT evidence that the settlement never arrived. `truncated` refers ONLY to the maxBytes byte cap. This same block is written into the copy as barrier-hub-snapshot.json.',
+    appProcesses: {
+      determined: entries.length > 0,
+      stillRunning: entries.filter(entry => entry.exited === false).map(entry => entry.pid),
+      exited: entries.filter(entry => entry.exited === true).map(entry => entry.pid),
+      undetermined: entries.filter(entry => entry.exited === null).map(entry => entry.pid),
+      processes: entries,
+    },
+    markerPath: null,
+  };
+}
+
 // Copy the barrier hub's regular files into `<evidenceRunDir>/barrier-hub/`.
 //
 // CONTRACT: this NEVER throws and is NEVER fatal to the run. A hub that cannot
@@ -1045,7 +1132,11 @@ export const BARRIER_ARCHIVE_MAX_BYTES = 1 << 20; // 1 MiB
 // bounded by `maxBytes`, and the files the cap left behind are named in
 // `filesSkipped` (never silently dropped). Files are visited in sorted order so
 // the cap bites at a deterministic point. The archive is a SNAPSHOT taken at
-// teardown - `bytes`/`filesCopied` say exactly what was preserved.
+// teardown - `bytes`/`filesCopied` say exactly what was preserved, and
+// `snapshot` says WHICH MOMENT it is (D3). BARRIER_ARCHIVE_SNAPSHOT_FILE in the
+// destination dir carries the same block for a reader who has the copied bytes
+// and nothing else; it is the archive's own record and never one of the hub's
+// files, so it is not counted in `bytes`/`filesCopied`.
 export function archiveBarrierHub(barrierDir, evidenceRunDir, {
   maxBytes = BARRIER_ARCHIVE_MAX_BYTES,
   listDir = readdirSync,
@@ -1053,6 +1144,8 @@ export function archiveBarrierHub(barrierDir, evidenceRunDir, {
   copy = copyFileSync,
   mkdir = mkdirSync,
   exists = existsSync,
+  writeMarker = writeFileSync,
+  processes = [],
 } = {}) {
   const destDir = typeof evidenceRunDir === 'string' && evidenceRunDir.length > 0
     ? join(evidenceRunDir, 'barrier-hub')
@@ -1067,6 +1160,7 @@ export function archiveBarrierHub(barrierDir, evidenceRunDir, {
     bytes: 0,
     truncated: false,
     maxBytes,
+    snapshot: barrierArchiveSnapshot(processes),
   };
   try {
     if (destDir === null) {
@@ -1111,6 +1205,25 @@ export function archiveBarrierHub(barrierDir, evidenceRunDir, {
       }
     }
     receipt.ok = true;
+    // The snapshot block travels in the copy's own bytes too, not only in the
+    // receipt that describes it. Written LAST, so its presence means the copy
+    // loop really ran. Never fatal: a marker that cannot be written is named in
+    // the receipt instead of failing the archive.
+    try {
+      const markerPath = join(destDir, BARRIER_ARCHIVE_SNAPSHOT_FILE);
+      writeMarker(markerPath, `${JSON.stringify({
+        ...receipt.snapshot,
+        sourceDir: receipt.sourceDir,
+        dir: destDir,
+        filesCopied: receipt.filesCopied,
+        bytes: receipt.bytes,
+        truncated: receipt.truncated,
+        maxBytes: receipt.maxBytes,
+      }, null, 2)}\n`, { mode: 0o600 });
+      receipt.snapshot.markerPath = markerPath;
+    } catch (error) {
+      receipt.snapshot.markerError = String(error?.message ?? error);
+    }
     return receipt;
   } catch (error) {
     // A diagnostic that cannot be taken is reported, never thrown: the verdict
