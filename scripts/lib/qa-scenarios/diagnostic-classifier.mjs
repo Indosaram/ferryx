@@ -13,7 +13,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { BUDGETS, HarnessError, assertPositiveRecovery, validateFixtureSetup, MonotonicBudget } from './common-harness.mjs';
+import { BUDGETS, HarnessError, assertPositiveRecovery, validateFixtureSetup, fixtureKindsEnvValue, MonotonicBudget } from './common-harness.mjs';
 import {
   MARKER_TEXT,
   focusWindowByPidDarwin, typeMarkerDarwin,
@@ -38,10 +38,15 @@ export function buildIsolatedEnv(context) {
     HOME: homeDir,
     FERRYX_DATA_DIR: dataDir,
     FERRYX_RUNTIME_DIR: runtimeDir,
+    // Product-facing fixture declaration: which fixture session kinds this
+    // scenario's `fixture-setup` settlement must provision and report. Derived
+    // from the single requirement map (never a second list), so the kinds the
+    // runner later validates are exactly the kinds it declared here.
+    FERRYX_QA_FIXTURE_KINDS: fixtureKindsEnvValue(context.scenario),
     ...context.barrierHub.env(),
   };
   for (const key of Object.keys(env)) {
-    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID'].includes(key)) {
+    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID', 'FERRYX_QA_FIXTURE_KINDS'].includes(key)) {
       throw new HarnessError('ASSERTION_FAILURE', `ambient FERRYX_* variable leaked into isolated env: ${key}`);
     }
   }

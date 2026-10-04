@@ -3847,6 +3847,25 @@ mod qa_split_producers {
             let dir = root.path().join("barriers");
             std::fs::create_dir_all(&dir).unwrap();
             let channel = QaBarrierChannel::new(dir.clone(), "qa-run-gui".into());
+            // The runner stamps one operation nonce into every arm AND into the
+            // private env (`FERRYX_QA_OPERATION_ID`). A channel built by hand has
+            // neither, and `read_control` refuses EVERY control while
+            // `operation_id()` is `None` - including the correlated control this
+            // test expects honored. Establishing the identity from an arm is
+            // exactly what the passing sibling
+            // `control_files_are_read_only_for_this_run` does.
+            std::fs::write(
+                dir.join(format!("{RETRY}.arm.json")),
+                serde_json::to_vec(&json!({
+                    "name": RETRY,
+                    "runId": "qa-run-gui",
+                    "operationId": "op-1",
+                    "deadlineMs": 2_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            channel.scan_and_ack_arms();
             for name in [RETRY, SPLIT_CONCURRENT_BATCH] {
                 std::fs::write(
                     dir.join(format!("{name}.request.json")),

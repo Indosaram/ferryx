@@ -208,8 +208,25 @@ export const SCENARIO_FIXTURE_REQUIREMENTS = Object.freeze({
   'stale-binding': Object.freeze(['source']),
 });
 
+// The single derivation point for "which fixture kinds does this scenario
+// need": `validateFixtureSetup` below (what the settled `fixture-setup`
+// receipt must contain) and the isolated launch env's `FERRYX_QA_FIXTURE_KINDS`
+// (what the product is told to provision) both read this helper, so the
+// declaration sent to the product and the validation applied to its receipt can
+// never drift. The `['source']` default is the default `validateFixtureSetup`
+// has always applied to a scenario with no entry in the map.
+export function fixtureKindsForScenario(scenario) {
+  return [...(SCENARIO_FIXTURE_REQUIREMENTS[scenario] ?? ['source'])];
+}
+
+// Comma-separated, lower-case kind names: the frozen wire spelling of
+// `FERRYX_QA_FIXTURE_KINDS` (the product lane consumes exactly this form).
+export function fixtureKindsEnvValue(scenario) {
+  return fixtureKindsForScenario(scenario).join(',');
+}
+
 export function validateFixtureSetup(fixture, scenario) {
-  const requiredKinds = SCENARIO_FIXTURE_REQUIREMENTS[scenario] ?? ['source'];
+  const requiredKinds = fixtureKindsForScenario(scenario);
   const sessions = Array.isArray(fixture?.sessions) ? fixture.sessions : [];
   const byKind = new Map();
   for (const session of sessions) {
