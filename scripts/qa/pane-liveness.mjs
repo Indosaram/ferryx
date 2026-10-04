@@ -26,7 +26,7 @@ import {
 import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
 import {
   MARKER_TEXT, assertAxTrustDarwin, assertNativeAutomationSupported, assertScreenCapture,
-  captureScreenshot, clickSplitRightDarwin, focusWindowByPidDarwin, typeMarkerDarwin,
+  clickSplitRightDarwin, focusWindowByPidDarwin, typeMarkerDarwin,
   awaitMarkerRecognition, focusWindowWindows, typeMarkerWindows, windowsDriver,
   awaitOwnedWindowWindows, selectNativeDriver,
 } from '../lib/qa-scenarios/native-driver.mjs';
@@ -300,6 +300,10 @@ async function runNativeScenario(ctx) {
       platform: ctx.platform,
       evidence,
       budget: setupBudget,
+      // The settled fixture sessions are excluded from EVERY delta this reader
+      // records (F2-14), so the split step's post-click delta can never report a
+      // fixture (re)created inside the click window as the split's own addition.
+      fixture,
     });
     const inventoryBefore = await inventory.snapshot('pane-inventory-before');
     await driver.newPane(evidence, pid);

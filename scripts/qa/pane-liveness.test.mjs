@@ -2844,6 +2844,10 @@ test('the split step records a post-click daemon inventory with its session delt
       removed: [],
       beforeCount: 2,
       afterCount: 3,
+      // This reader was built without a settled fixture payload, so nothing was
+      // excluded - and the field is present anyway, so a reader can tell "nothing
+      // was excluded" apart from "the guard was never wired" (F2-14).
+      fixtureExcluded: [],
       baselineLabel: 'pane-inventory-after',
       baselineSessionIds: ['fixture-1', 'pane-1'],
     });
@@ -2861,6 +2865,53 @@ test('the split step records a post-click daemon inventory with its session delt
     await sink.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('the split delta never reports a fixture session as the split\'s own addition, and says what it excluded', async () => {
+  const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+  const root = fixtureRoot();
+  const actions = [];
+  // The fixture session is (re)created INSIDE the click window: it is absent from
+  // the pre-split reading and present in the post-click one - exactly the shape
+  // that used to read as "the split created it" (F2-14). The click itself created
+  // one session, `split-1`, and the delta has to say only that.
+  const inventories = [['pane-1'], ['fixture-1', 'pane-1', 'split-1']];
+  let readIndex = 0;
+  const reader = createPaneInventoryReader({
+    runtimeDir: join(root, 'runtime'),
+    platform: 'win32',
+    fixture: { sessions: [{ kind: 'source', backendSessionId: 'fixture-1', ownershipReceipt: { owned: true } }] },
+    evidence: { action: action => actions.push(action) },
+    readInventory: async () => {
+      const sessions = inventories[Math.min(readIndex, inventories.length - 1)];
+      readIndex += 1;
+      return {
+        ok: true, code: null, detail: null, transport: 'unix-socket',
+        endpoint: { transport: 'unix-socket', socketPath: join(root, 'runtime', 'daemon.sock') },
+        sessions, epoch: 9, elapsedMs: 1,
+      };
+    },
+  });
+  try {
+    // The pane step's own pre-split baseline, then the split step's post-click read
+    // measured against it - the same two reads the runner takes.
+    const before = await reader.snapshot(PRE_SPLIT_INVENTORY_ACTION);
+    expect(before.ok).toBe(true);
+    const after = await reader.snapshot(SPLIT_INVENTORY_ACTION, { compareToPrevious: true });
+    expect(after.ok).toBe(true);
+    const action = actions.find(candidate => candidate.action === SPLIT_INVENTORY_ACTION);
+    // The measurement itself is UNCHANGED: the read really did report three
+    // sessions, the fixture among them.
+    expect(action.sessionCount).toBe(3);
+    expect(action.sessionIds).toEqual(['fixture-1', 'pane-1', 'split-1']);
+    // ... but the fixture is never part of what the click ADDED, and the action
+    // names what was excluded instead of leaving the reader to trust it.
+    expect(action.delta.added).toEqual(['split-1']);
+    expect(action.delta.fixtureExcluded).toEqual(['fixture-1']);
+    expect(action.delta.beforeCount).toBe(1);
+    expect(action.delta.afterCount).toBe(3);
+    expect(action.delta.baselineLabel).toBe(PRE_SPLIT_INVENTORY_ACTION);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('the post-split inventory falls back to a fresh pre-split read, and a run with no reader records a typed reason instead of failing', async () => {

@@ -191,6 +191,20 @@ function resolveReadCharge(charge, label, budget) {
   return { boundMs, charged, refusal: null };
 }
 
+// The settled `fixture-setup` payload names daemon sessions the product created
+// BEFORE any pane existed, so they can never be the pane or the split the step
+// under test performed - not even when one is (re)created between a baseline read
+// and the read that follows a click. ONE derivation, shared by the pane binding's
+// two sources and by the split step's delta, so no path can exclude a different
+// set than another (F2-14).
+function fixtureSessionIdsOf(fixture) {
+  return new Set(
+    (fixture?.sessions ?? [])
+      .map(session => session?.backendSessionId)
+      .filter(id => typeof id === 'string' && id.length > 0),
+  );
+}
+
 // The pane step's measured second source: a bounded, READ-ONLY reader of the
 // isolated daemon's own session inventory (`daemon-inventory.mjs`). The
 // before-read is taken BEFORE the pane click; `readAfter` is a function rather
@@ -202,12 +216,21 @@ function resolveReadCharge(charge, label, budget) {
 //
 // NOTHING HERE THROWS (pass-22 audit D1/D4): this reader is a MEASUREMENT, and a
 // measurement that cannot be taken is a typed evidence action, never a verdict.
+//
+// `fixture` is the settled `fixture-setup` payload. Its sessions are excluded from
+// every delta this reader records, and the exclusion is recorded ON the action
+// (`delta.fixtureExcluded`), so a fixture (re)created between the baseline read and
+// the read after a click can never be reported as the click's own addition - the
+// split step's question - and a reader can see what was excluded instead of having
+// to trust it (F2-14). The raw `sessionIds`/`sessionCount` of the read are
+// UNCHANGED by this: only the delta's `added` set is guarded.
 export function createPaneInventoryReader({
   isolationRoot = null,
   platform = process.platform,
   runtimeDir = null,
   evidence = null,
   budget = null,
+  fixture = null,
   readInventory = readDaemonSessionInventory,
 } = {}) {
   const dir = runtimeDir ?? (isolationRoot === null ? null : join(isolationRoot, 'runtime'));
@@ -223,6 +246,9 @@ export function createPaneInventoryReader({
   // baseline is remembered HERE, by the one reader that really took both reads,
   // instead of being re-derived (or invented) by a caller.
   let lastReading = null;
+  // Derived once, from the same payload the pane binding excludes, so the split
+  // delta and the binding agree by construction (F2-14).
+  const fixtureIds = fixtureSessionIdsOf(fixture);
 
   const snapshot = async (label, { compareToPrevious = false, extra = null, charge = null } = {}) => {
     const startedAt = Date.now();
@@ -274,7 +300,7 @@ export function createPaneInventoryReader({
     // it, so a reader can always see what the delta was measured against.
     const previous = compareToPrevious ? lastReading : null;
     const delta = previous?.result?.ok === true && result.ok === true
-      ? computeInventoryDelta({ before: previous.result, after: result })
+      ? computeInventoryDelta({ before: previous.result, after: result, fixtureSessionIds: [...fixtureIds] })
       : null;
     // Extra measurement fields are sampled HERE, after the read, so that they
     // describe the same moment as the session list - which is why a function is
@@ -311,6 +337,7 @@ export function createPaneInventoryReader({
           removed: delta.removed,
           beforeCount: delta.beforeCount,
           afterCount: delta.afterCount,
+          fixtureExcluded: delta.fixtureExcluded,
           baselineLabel: previous.label,
           baselineSessionIds: [...(previous.result.sessions ?? [])].sort(),
         },
@@ -357,11 +384,7 @@ export async function bindPaneSession({
   if (!barrierHub || typeof barrierHub.awaitReceiptMatching !== 'function') {
     throw new HarnessError('ASSERTION_FAILURE', 'bindPaneSession requires a barrier hub with awaitReceiptMatching');
   }
-  const fixtureIds = new Set(
-    (fixture?.sessions ?? [])
-      .map(session => session?.backendSessionId)
-      .filter(id => typeof id === 'string' && id.length > 0),
-  );
+  const fixtureIds = fixtureSessionIdsOf(fixture);
 
   // SOURCE 1 (preferred): the product's own presentation receipt.
   let matched = null;

@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 // its argv is unchanged. The pass-18 delegation-stall/sink suite is listed HERE,
 // in that same config, so the frozen command really executes it: a second config
 // nothing invokes would leave the retry coverage outside every gate. The frozen
-// suite (scripts/qa/pane-liveness.test.mjs) holds 75 tests after the pass-22
+// suite (scripts/qa/pane-liveness.test.mjs) holds 76 tests: 75 after the pass-22
 // audit repairs and their residuals (the throwing read, the uncharged-window
 // refusal, the archive's pre-reap markers, the instrumentation-excluded ceiling
-// and the guarded `lastReading`), and the pass-19/21 file adds
-// 20, so the one frozen command runs 95.
+// and the guarded `lastReading`) plus the F2-14 split-delta fixture-exclusion
+// case, and the pass-19/21 file adds
+// 20, so the one frozen command runs 96.
 export default defineConfig({ root: fileURLToPath(new URL("../../", import.meta.url)), test: { environment: "node", include: ["scripts/qa/pane-liveness.test.mjs", "scripts/qa/pane-liveness-delegation-retry.test.mjs"], fileParallelism: false, maxWorkers: 1, testTimeout: 10000 } });
