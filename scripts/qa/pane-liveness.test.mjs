@@ -1447,7 +1447,19 @@ test('owned-window wait PowerShell script keeps the here-string header and termi
   expect(header).toBeLessThan(footer);
   expect(lines).toContain('public class FerryxQaWin {');
   expect(lines).toContain('  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);');
-  expect(lines).toContain('  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);');
+  // The window-text imports marshal Unicode. Without a charset the default ANSI
+  // marshalling stops at the first UTF-16 NUL byte, which is how pass-7 recorded
+  // `title`/`className` as one character ('F'/'T', and the IME window as class
+  // 'I' / title 'D' for `IME` / `Default IME`). The handle/int/bool imports in
+  // the same here-string marshal no text and stay charset-free, and both text
+  // imports read into a 256-CHARACTER buffer, so declaration and call size agree.
+  expect(lines).toContain('  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);');
+  expect(lines).toContain('  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);');
+  expect(lines).toContain('  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);');
+  expect(lines.filter(line => line.includes('DllImport')).filter(line => line.includes('CharSet')).length).toBe(2);
+  expect(lines.filter(line => line.includes('New-Object System.Text.StringBuilder 256')).length).toBe(2);
   // The EnumProc delegate body is its own line per statement, including the
   // closing brace of the `if` block and the delegate's `return`.
   expect(lines).toContain('$cb = [FerryxQaWin+EnumProc]{ param($hWnd, $lParam)');
@@ -1619,6 +1631,18 @@ test('split-affordance search enumerates every owned window and searches the vis
   expect(enumLines).not.toContain('');
   expect(enumLines.filter(line => line === 'Add-Type @"')).toHaveLength(1);
   expect(enumLines[enumLines.length - 1]).toBe('Write-Output ($payload | ConvertTo-Json -Compress -Depth 6);');
+  // The enumeration carries the same charset contract as the wait probe: its two
+  // StringBuilder imports marshal Unicode (pass-7 read `title`/`className` as one
+  // character because ANSI marshalling stopped at the first UTF-16 NUL byte),
+  // its handle/int/bool imports stay charset-free, and exactly those two text
+  // imports are charset-bearing.
+  expect(enumLines).toContain('  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);');
+  expect(enumLines).toContain('  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);');
+  expect(enumLines).toContain('  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);');
+  expect(enumLines).toContain('  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);');
+  expect(enumLines).toContain('  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);');
+  expect(enumLines.filter(line => line.includes('DllImport')).filter(line => line.includes('CharSet')).length).toBe(2);
+  expect(enumLines.filter(line => line.includes('New-Object System.Text.StringBuilder 256')).length).toBe(2);
 });
 
 test('split-affordance match is multi-property and exact, never a substring or first-match heuristic', async () => {
@@ -1648,9 +1672,13 @@ test('split-affordance match is multi-property and exact, never a substring or f
   expect(powerShellScriptLines(native.buildWindowsSplitRightScript(4242, 2500, { windows: [{ hwnd: 1, title: '', className: 'T' }] })))
     .toContain('$condition = $conditionName0;');
   // A match found by AutomationId alone still classifies as a click, and the
-  // bound property set is surfaced in the evidence.
+  // bound property set the probe SEARCHED WITH is surfaced in the evidence. The
+  // probe always reports that set (`$diag.selectorAutomationIds` is part of the
+  // emitted payload on every path), so the fixture carries it exactly as the
+  // script does - the field is never re-derived from the matched element.
   const byId = native.classifyWindowsSplitRight({
     probe: 'split-right', selector: 'Split pane right', interactive: true, sessionId: 1,
+    selectorAutomationIds: ['split-pane-right'],
     mainWindowHandle: 1, windowVisible: true, visibleWindowCount: 1,
     focusedFound: true, focusSource: 'focused-element', scopeDepth: 2, scopeIsWindowRoot: false,
     windowsSearched: [{ hwnd: 1, title: '', className: 'T' }], windowsSearchedCount: 1, matchedWindowHwnd: 1,
@@ -1662,9 +1690,15 @@ test('split-affordance match is multi-property and exact, never a substring or f
   expect(byId.ok).toBe(true);
   expect(byId.matchedWindowHwnd).toBe(1);
   expect(byId.selectorAutomationIds).toEqual(['split-pane-right']);
-  // A probe that reports no bound names still records the default binding, and
-  // refusing to search for nothing is typed instead of an empty match.
-  expect(native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' }).selectorNames).toEqual(['Split pane right']);
+  // A probe that reports no bound property set at all (a probe predating the
+  // field) is classified against the module's default binding set for BOTH
+  // properties - never against a property scraped from a match. The default id
+  // set is empty today (the product exposes no AutomationId), so the recorded
+  // value is honestly "the default binding set", not a measured zero. Refusing
+  // to search for nothing stays typed instead of an empty match.
+  const legacyProbe = native.classifyWindowsSplitRight({ probe: 'split-right', failure: 'SPLIT_RIGHT_NOT_FOUND' });
+  expect(legacyProbe.selectorNames).toEqual([...native.SPLIT_AFFORDANCE_NAMES_WIN32]);
+  expect(legacyProbe.selectorAutomationIds).toEqual([...native.SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32]);
   expect(() => native.buildWindowsSplitRightScript(4242, 2500, { names: [], automationIds: [] })).toThrowError(/at least one exact accessible name/);
 });
 

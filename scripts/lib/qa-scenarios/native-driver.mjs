@@ -335,6 +335,8 @@ export async function captureOwnedWindowDarwin(evidence, path, pid) {
 }
 
 // Windows: Capture owned window only (by MainWindowHandle bounds) and return metadata.
+// Its only import (GetWindowRect) takes a handle and writes a struct - no text is
+// marshalled - so it carries no charset.
 export function buildWindowsCaptureScript(pid, path) {
   return [
     'Add-Type -AssemblyName System.Drawing,System.Windows.Forms;',
@@ -415,6 +417,13 @@ export async function captureScreenshot(evidence, path) {
 // (`classifyWindows*` below) and is replayable by the runner unit suite without
 // launching anything.
 
+// The two StringBuilder imports in the here-string below (GetWindowTextW /
+// GetClassNameW) carry `CharSet = CharSet.Unicode`: without it the default ANSI
+// marshalling stops at the first UTF-16 NUL byte, which is how pass-7 recorded
+// `title`/`className` as a single character ('F'/'T', and the IME window as
+// class 'I' / title 'D' for `IME` / `Default IME`). The other imports in that
+// here-string (EnumWindows, GetWindowThreadProcessId, IsWindowVisible) marshal
+// only handles, an out uint, and a bool - no text - so they stay charset-free.
 // Bounded wait for the app to own a VISIBLE top-level window. In Windows
 // session 0 (the SSH/service session) the app's windows are created but can
 // never be shown, so `MainWindowHandle` stays zero forever - this wait turns
@@ -432,8 +441,8 @@ export function buildWindowsWindowWaitScript(pid, budgetMs) {
     '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);',
     '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);',
     '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);',
-    '  [DllImport("user32.dll")] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);',
-    '  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);',
     '}',
     '"@;',
     `$targetPid = ${pid};`,
@@ -528,6 +537,9 @@ export async function awaitOwnedWindowWindows(evidence, pid, budgetMs = BUDGETS.
   return verdict;
 }
 
+// Same charset rule as the wait probe: the two StringBuilder imports
+// (GetWindowTextW / GetClassNameW) declare `CharSet = CharSet.Unicode` because
+// they marshal text, while the handle/int/bool imports declare none.
 // Windows: every top-level window owned by the pid, enumerated immediately (no
 // wait). The split search must never key off `MainWindowHandle` (pass-6: the
 // pid owned four top-level windows, two visible, while the search only ever
@@ -545,8 +557,8 @@ export function buildWindowsOwnedWindowsScript(pid) {
     '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);',
     '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);',
     '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);',
-    '  [DllImport("user32.dll")] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);',
-    '  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);',
     '}',
     '"@;',
     `$targetPid = ${pid};`,
@@ -692,6 +704,8 @@ function windowText(value) {
 // in-window) is returned so a blocked run records why it blocked, and the
 // not-found path additionally returns a bounded inventory of every element
 // whose name or automation id contains `Split`.
+// Its two imports (GetWindowRect into a struct, IsWindowVisible) marshal no text,
+// so neither carries a charset.
 export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitFocusWaitMs, options = {}) {
   const names = asArray(options.names ?? SPLIT_AFFORDANCE_NAMES_WIN32).map(String);
   const automationIds = asArray(options.automationIds ?? SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32).map(String);
@@ -927,7 +941,14 @@ export function buildWindowsSplitRightScript(pid, focusBudgetMs = BUDGETS.splitF
 export function classifyWindowsSplitRight(probe) {
   const candidates = asArray(probe?.candidates);
   const windowsSearched = asArray(probe?.windowsSearched);
+  // The bound property set is what the PROBE searched with, reported back from
+  // the emitted payload (`$diag.selectorNames`/`$diag.selectorAutomationIds` are
+  // part of it on every path). A probe that predates a field - or a hand-built
+  // fixture that omits it - is classified against the module's default binding
+  // set, exactly like the `selector` field below; it is never re-derived from a
+  // matched element.
   const selectorNames = asArray(probe?.selectorNames);
+  const selectorAutomationIds = asArray(probe?.selectorAutomationIds);
   // "A visible owned window was searched" - never "MainWindowHandle is the UI
   // window" - decides the window scope. A probe that predates the enumeration
   // (no `windowsSearched`/`visibleWindowCount`) still classifies from the
@@ -940,7 +961,7 @@ export function classifyWindowsSplitRight(probe) {
   const measured = {
     selector: probe?.selector ?? SPLIT_MENU_SELECTOR_WIN32.name,
     selectorNames: selectorNames.length > 0 ? selectorNames : [...SPLIT_AFFORDANCE_NAMES_WIN32],
-    selectorAutomationIds: asArray(probe?.selectorAutomationIds),
+    selectorAutomationIds: selectorAutomationIds.length > 0 ? selectorAutomationIds : [...SPLIT_AFFORDANCE_AUTOMATION_IDS_WIN32],
     interactive: probe?.interactive ?? null,
     sessionId: probe?.sessionId ?? null,
     mainWindowHandle: probe?.mainWindowHandle ?? null,
