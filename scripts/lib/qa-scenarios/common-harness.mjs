@@ -272,7 +272,26 @@ export const BUDGETS = Object.freeze({
   windowsSessionProbeMs: 5_000,
   ownedWindowReadyMs: 8_000,
   splitFocusWaitMs: 4_000,
-  interactiveRelaunchTimeoutMs: 180_000,
+  // Pass-18/19 (task-9 win-pass17 + the 12-probe burst measurement): the
+  // delegation is INTERMITTENT and BURSTY. 12 minimal probes (a bat whose first
+  // line writes a marker, 10s window each) measured p1-p8 STALLED - 8
+  // CONSECUTIVE, ~73s in total - and p9-p12 SUCCEEDED, 4 consecutive, 502-516ms
+  // each. A 6-attempt retry with fresh roots, dirs and task names landed
+  // entirely inside one burst and got nowhere, so the budget has to OUTLAST A
+  // BURST, not merely beat a rate:
+  //   * the whole retry SEQUENCE carries the budget (`interactiveRelaunchSequenceMs`),
+  //     and an individual attempt gets only the stall window plus whatever is
+  //     left of that sequence - one attempt can never spend it all;
+  //   * the stall window is 10s: ~20x the measured SUCCESS latency (0.380s in
+  //     pass-17 r1, 0.502-0.516s in the probes), and never below 5s;
+  //   * 10s x 18 = 180s, the same 180s that used to be spent on ONE stalled
+  //     attempt. A stall now costs 10s instead of 3 minutes, and the sequence
+  //     outlasts the ~73s burst that was measured. If 180s of retries inside one
+  //     burst still cannot get through, that is the measurement that decides
+  //     whether anything heavier is justified - the condition lifts on its own.
+  interactiveRelaunchSequenceMs: 180_000,
+  interactiveRelaunchEntryMarkerMs: 10_000,
+  interactiveRelaunchAttempts: 18,
   // Pass-6 cleanup defect (E/task-9/REPORT-PASS6.md §5): the app's own
   // `--daemon` descendant outlived `taskkill /T` (no `/F`), which kept the
   // isolation root held AND kept the stdio pipe it inherited open, so the
@@ -368,6 +387,11 @@ export const TYPED_ERRORS = Object.freeze(new Set([
   // identity so a blocked run says exactly which window/session/selector
   // condition blocked it instead of collapsing into NATIVE_AUTOMATION_UNSUPPORTED.
   'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+  // Pass-18: the delegation is intermittent (the task's cmd.exe is created but
+  // never runs its first line), so every attempt is detected and retried a
+  // bounded number of times. All of them stalling is its own typed condition -
+  // nonzero, fail-closed, never a pass and never a session-0 fallback.
+  'DELEGATION_STALLED',
   'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
   // Frontend-serve lane (task-9 root cause 1). Each condition keeps its own
   // typed identity so a run says exactly which part of "something must serve
@@ -784,13 +808,23 @@ export async function findIsolationRootHolders(root, {
 //     the cap is recorded IN the file as an explicit marker, with the dropped
 //     byte count carried in the receipt;
 //   * teardown closes both files through the same `registry.cleanup()` pass as
-//     every other resource and reports what it really observed.
+//     every other resource and reports what it really observed;
+//   * a file that WAS closed cleanly says so in its own bytes, and the marker
+//     is written before the stream ends, so a run killed mid-flight leaves a
+//     file that cannot be mistaken for a complete drain (pass-18).
 
 export const APP_STDIO_MAX_BYTES = 4 * 1024 * 1024;
 
 // The marker written into a file the moment its cap is reached, so a truncated
 // artifact says so in its own bytes instead of ending mid-line with no warning.
 export const APP_STDIO_TRUNCATION_MARKER = '[app-stdio truncated:';
+
+// The marker written into a file by `close()` AFTER every byte has been queued
+// and BEFORE the stream is ended/flushed (pass-18). Its absence is the only
+// thing that distinguishes a partial artifact - the file of a run killed
+// mid-flight, or of a close that never happened - from a complete drain, so a
+// reader can never read a truncated log as if the app had stopped printing.
+export const APP_STDIO_CLOSE_MARKER = '[app-stdio closed:';
 
 function defaultLogWriteStream(path) {
   return createWriteStream(path, { flags: 'a', mode: 0o600 });
@@ -925,6 +959,14 @@ export class AppStdioSink {
           'utf8',
         ));
       }
+      // Completeness marker LAST, still before the stream ends: everything above
+      // (including the truncation marker and the dropped-byte count) is already
+      // queued, so the file's final line is the drain's own statement that it
+      // finished - written only by a close that really ran.
+      this.writeRaw(entry, Buffer.from(
+        `\n${APP_STDIO_CLOSE_MARKER} ${entry.name} drained ${entry.bytes} bytes${entry.truncated ? `, capped at ${this.maxBytes} bytes with ${entry.droppedBytes} dropped` : ', not truncated'}; this file is complete]\n`,
+        'utf8',
+      ));
       outcomes.push(await endWriteStreamBounded(entry.stream, timeoutMs));
     }
     this.closedOk = outcomes.every(Boolean);
@@ -1031,7 +1073,7 @@ export class ResourceRegistry {
     // removed. Closing is bounded and the receipt re-states what was observed.
     for (const entry of this.logs) {
       const receipt = await entry.sink.close({ timeoutMs: deps.logCloseMs ?? BUDGETS.frontendCloseMs });
-      receipts.push({ kind: 'log', label: entry.label, ...receipt });
+      receipts.push({ kind: 'log', ...receipt, label: entry.label });
     }
     for (const socketPath of this.sockets) {
       let removed = false;

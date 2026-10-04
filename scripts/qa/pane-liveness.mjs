@@ -135,6 +135,11 @@ export const BLOCKED_CODES = Object.freeze([
   // Windows interactive-desktop lane (pass-4 blockers): the run could not reach
   // a state in which it owns a visible window and a unique affordance.
   'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+  // Pass-18: the delegation is intermittent (the task's cmd.exe is created but
+  // never runs the bat's own first line), so a stalled attempt is detected and
+  // retried a bounded number of times. Every attempt stalling is its own typed
+  // environment block - nonzero and fail-closed, never a pass.
+  'DELEGATION_STALLED',
   'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
   // Task-9 lane: the debug binary's devUrl was not served by this run (dist
   // missing, port held by a foreign listener, server not answering with the
@@ -396,6 +401,11 @@ export async function main(argv) {
       code: null,
       session: windowsAdmission.evidence?.verdict ?? null,
       delegated: windowsAdmission.relaunch,
+      // Pass-18: how many scheduled-task attempts the delegation needed before
+      // one executed its own first line, and what each attempt did. The full
+      // ledger is in the evidence dir (windows-interactive-delegation.json);
+      // this line is what the launcher's own log reports.
+      delegation: windowsAdmission.delegation ?? null,
     })}\n`);
     if (windowsAdmission.innerStdout) process.stdout.write(windowsAdmission.innerStdout);
     return windowsAdmission.exitCode;
