@@ -9,6 +9,19 @@ component unless it traces back to a token named here.
 All colors are CSS custom properties in `:root` (`src/index.css`), exposed to Tailwind as semantic
 utilities. Components reference the **Tailwind semantic name**, never a hex value.
 
+### Attention mascot artwork exception
+The decorative Attention Inbox mascot uses scoped CSS artwork tokens rather than semantic UI color
+utilities: `--mascot-silver-light`, `--mascot-silver-mid`, `--mascot-silver-dark`,
+`--mascot-silver-bright`, `--mascot-silver-outline`, and `--mascot-face`. These describe the silver
+facets and facial features only; they are not application surfaces or status colors. Its
+transparent drawing stage is fixed at 104 by 88 CSS pixels around an approximately 64-pixel arch.
+Define these tokens on `.attention-mascot`: light `#e2e5e9`, mid `#b6bdc7`, dark `#858d99`,
+bright `#f8fafc`, outline `#858d99`, and face `#e2e5e9`, respectively. The silver ramp stays
+fixed across themes; its medium-gray outline separates the bright facets from light surfaces
+and remains visible on charcoal surfaces. The face occupies the transparent arch opening,
+so `:root[data-theme="light"] .attention-mascot` sets only `--mascot-face: #252a32` for dark
+facial ink on the light background. Default and dark themes retain light facial ink.
+
 ### Surfaces
 | Token | Utility | Use |
 |---|---|---|
@@ -217,6 +230,8 @@ Rules:
   Ready workspaces with no tabs retain the existing empty state.
 - No hover state may change anything other than color/opacity on a non-interactive element.
 - The chat terminal drawer opens and closes with a composited opacity/transform transition only (its 45vh/85vh height change is instant, never a layout animation); the chat's looping motion (animate-ping, animate-spin) carries motion-reduce:animate-none; the scroll-to-latest affordance has no looping animation; no hover transform on non-interactive elements.
+- Narrow exception: the explicitly requested Attention Inbox mascot may use decorative character-part motion inside its fixed transparent stage. This does not alter status motion rules and must provide a static reduced-motion pose.
+- This exception is scoped only to `features/ferryx/attention/AttentionMascot`; its silver artwork tokens and fixed 104 by 88 pixel stage are documented under [Attention mascot artwork exception](#attention-mascot-artwork-exception).
 
 ## 6. Responsive Behavior
 

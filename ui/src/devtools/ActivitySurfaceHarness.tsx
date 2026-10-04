@@ -5,6 +5,7 @@ import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { AttentionMascot } from "../features/ferryx/attention/AttentionMascot";
 import { buildAttentionRows, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
@@ -333,6 +334,11 @@ export function ActivitySurfaceHarness() {
           }}
           onDismiss={(row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }])}
         />
+      </div>
+
+      <div data-testid="qa-mascot-preview" className="mt-4 flex gap-4 rounded border border-border bg-background p-3">
+        <AttentionMascot />
+        <AttentionMascot />
       </div>
 
       <pre data-testid="harness-state" className="mt-4 overflow-auto text-[10px] leading-tight text-muted-foreground">

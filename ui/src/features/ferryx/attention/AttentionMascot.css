@@ -1,0 +1,84 @@
+.attention-mascot-stage {
+  width: 104px;
+  height: 88px;
+  flex: 0 0 104px;
+  display: grid;
+  place-items: center;
+  overflow: visible;
+}
+
+.attention-mascot {
+  /* Scoped artwork palette; see DESIGN.md's Attention mascot artwork exception. */
+  --mascot-silver-light: #e2e5e9;
+  --mascot-silver-mid: #b6bdc7;
+  --mascot-silver-dark: #858d99;
+  --mascot-silver-bright: #f8fafc;
+  --mascot-silver-outline: #858d99;
+  --mascot-face: #e2e5e9;
+
+  width: 104px;
+  height: 88px;
+  overflow: visible;
+}
+
+:root[data-theme="light"] .attention-mascot {
+  --mascot-face: #252a32;
+}
+
+.mascot-arch-shell {
+  stroke: var(--mascot-silver-outline);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+.mascot-facet {
+  opacity: .72;
+}
+
+.mascot-inner {
+  fill: none;
+  stroke: var(--mascot-silver-outline);
+  stroke-width: 1.2;
+}
+
+.mascot-edge {
+  fill: none;
+  stroke: var(--mascot-silver-outline);
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mascot-eye,
+.mascot-smile {
+  fill: none;
+  stroke: var(--mascot-face);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.mascot-tooth {
+  fill: none;
+  stroke: var(--mascot-silver-outline);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.mascot-left-arm,
+.mascot-right-arm,
+.mascot-left-leg,
+.mascot-right-leg {
+  fill: var(--mascot-silver-mid);
+  stroke: var(--mascot-silver-outline);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mascot-left-elbow,
+.mascot-right-elbow,
+.mascot-left-knee,
+.mascot-right-knee {
+  fill: var(--mascot-silver-bright);
+  stroke-width: 1.2;
+}
