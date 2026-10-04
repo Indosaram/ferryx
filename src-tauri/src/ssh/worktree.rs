@@ -712,12 +712,26 @@ mod tests {
         let create_script =
             worktree_create_script(RemotePlatform::Posix, repo_root, &branch, &wt_path, None);
 
+        // Git for Windows places git.exe under cmd/, bin/ or mingw64/bin/ depending on the
+        // installation, so bash.exe is found by walking up from git.exe rather than assuming a
+        // single layout. A hosted runner image puts git.exe under mingw64/bin, where the plain
+        // `<root>/bin/bash.exe` guess does not exist and the script never runs.
         let bash = if cfg!(windows) {
             let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
                 .map(|dir| dir.join("git.exe"))
                 .find(|path| path.is_file())
                 .expect("Git for Windows on PATH");
-            git.parent().unwrap().parent().unwrap().join("bin/bash.exe")
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            let mut cursor = git.parent();
+            while let Some(dir) = cursor {
+                candidates.push(dir.join("bin").join("bash.exe"));
+                candidates.push(dir.join("usr").join("bin").join("bash.exe"));
+                cursor = dir.parent();
+            }
+            candidates
+                .into_iter()
+                .find(|candidate| candidate.is_file())
+                .expect("bash.exe inside the Git for Windows installation")
         } else {
             std::path::PathBuf::from("bash")
         };
