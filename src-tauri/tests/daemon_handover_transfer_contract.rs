@@ -635,9 +635,20 @@ async fn run_v5_handover_case(v5_flag: Option<&'static str>) {
         Some(ws_id),
         "the transferred session must retain its workspace identity"
     );
+    // The daemon answers `cwd` from the kernel's own view of the child
+    // (`PROC_PIDVNODEPATHINFO`), which resolves symlinks, while this fixture's root lives under
+    // `/tmp` (macOS resolves it to `/private/tmp`). Compare the two as directories, so the
+    // assertion still fails whenever the transferred session is in a different directory.
+    let served_cwd = post_handover
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+    let expected_cwd =
+        std::fs::canonicalize(&canonical_repo).expect("the fixture repo must resolve");
     assert_eq!(
-        post_handover.cwd.as_deref(),
-        Some(canonical_repo.to_string_lossy().as_ref()),
+        served_cwd,
+        Some(expected_cwd),
         "the transferred session must retain its working directory"
     );
     assert!(

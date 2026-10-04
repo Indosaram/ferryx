@@ -8,7 +8,8 @@ use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscripti
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
-    DaemonStreamMessage, HistorySegmentWire, TerminalStartup, DAEMON_PROTOCOL_VERSION,
+    DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire, TerminalStartup,
+    DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -56,6 +57,57 @@ where
             Some(super::handover_transaction::HandoverState::Active) => Ok(()),
             _ => Err(format!("Abort decision is unconfirmed: {response:?}; predecessor must not resume")),
         },
+    }
+}
+
+/// Installs the ownership record a predecessor exported for one session, after proving that the
+/// record agrees with the predecessor's own describe answer.
+///
+/// The successor has never spawned this session, so its own registry can never be the authority
+/// for it: the exported record is the only carrier of the workspace/worktree identity and of the
+/// client-request ownership a transferred session keeps, and installing it is what makes this
+/// daemon an authoritative owner *before* it takes the PTY master. A record that disagrees with the
+/// predecessor's declaration, or is missing, refuses the session so the predecessor keeps it.
+fn adopt_transferred_ownership(
+    metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
+    session_id: &str,
+    declared: &DaemonSessionDetails,
+    exported: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if declared.incarnation.as_deref().is_none_or(str::is_empty) {
+        return Err(format!(
+            "Predecessor declares no lifetime incarnation for '{session_id}'; source retained"
+        ));
+    }
+    let Some(workspace_id) = declared.workspace_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Err(format!("Missing authoritative workspace owner of '{session_id}'"));
+    };
+    let Some(exported) = exported else {
+        return Err(format!(
+            "Predecessor exported no authoritative owner record for '{session_id}'; source retained"
+        ));
+    };
+    let owner: StoredSessionMeta = serde_json::from_value(exported).map_err(|error| {
+        format!("Predecessor exported an unreadable owner record for '{session_id}': {error}")
+    })?;
+    if owner.workspace_id != workspace_id || owner.worktree != declared.worktree {
+        return Err(format!(
+            "Export workspace domain does not match the predecessor's declaration for '{session_id}'; source retained"
+        ));
+    }
+    metadata.write().insert(session_id.to_owned(), owner);
+    Ok(())
+}
+
+/// Drops the ownership records a successor installed for sessions it handed back to the
+/// predecessor: a relinquished session must not leave this daemon claiming its workspace.
+fn release_adopted_ownership(
+    metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
+    session_ids: &[String],
+) {
+    let mut records = metadata.write();
+    for session_id in session_ids {
+        records.remove(session_id);
     }
 }
 
@@ -115,6 +167,186 @@ mod pane_reader_rollback_tests {
         std::fs::write(path.with_extension("transaction"), serde_json::to_vec(&transaction).unwrap()).unwrap();
         rollback_transferred_readers(async { Ok(()) }, || async { Err("lost ACK".into()) },
             || async { HandoverManager::recorded_decision(&path) }).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pane_liveness_adopted_ownership_tests {
+    use super::*;
+
+    fn worktree(slug: &str) -> WorktreeIdentity {
+        WorktreeIdentity {
+            ws_id: "ws-declared".into(),
+            slug: slug.into(),
+        }
+    }
+
+    fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
+        StoredSessionMeta {
+            machine_session: None,
+            client_request_id: format!("req-{workspace_id}"),
+            workspace_id: workspace_id.to_owned(),
+            worktree: worktree.clone(),
+            cwd: PathBuf::from("/repo"),
+            provider_claim: None,
+            spawn_fingerprint: SpawnRequestFingerprint {
+                workspace_id: workspace_id.to_owned(),
+                worktree,
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                shell: None,
+                provider_claim: None,
+                startup: None,
+            },
+        }
+    }
+
+    fn declared(
+        workspace_id: Option<&str>,
+        worktree: Option<WorktreeIdentity>,
+        incarnation: Option<&str>,
+    ) -> DaemonSessionDetails {
+        let mut details = DaemonSessionDetails::new(
+            "session-owned".into(),
+            workspace_id.map(str::to_owned),
+            worktree,
+            Some("/repo".into()),
+            80,
+            24,
+            true,
+            None,
+            None,
+            None,
+            false,
+        );
+        details.incarnation = incarnation.map(str::to_owned);
+        details
+    }
+
+    fn metadata() -> RwLock<HashMap<String, StoredSessionMeta>> {
+        RwLock::new(HashMap::new())
+    }
+
+    /// The successor has no record of its own for a session it never spawned, so the record the
+    /// predecessor exports is the one that must end up owning the session here.
+    #[test]
+    fn pane_liveness_adoption_installs_the_exported_owner_record() {
+        let metadata = metadata();
+        let record = owner_record("ws-declared", None);
+        adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            Some(serde_json::to_value(&record).unwrap()),
+        )
+        .expect("an exported record that matches the declaration is adopted");
+        let installed = metadata
+            .read()
+            .get("session-owned")
+            .cloned()
+            .expect("the adopted session must have an authoritative workspace owner");
+        assert_eq!(installed.workspace_id, "ws-declared");
+        assert_eq!(installed.client_request_id, "req-ws-declared");
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_record_from_another_workspace() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            Some(serde_json::to_value(owner_record("ws-other", None)).unwrap()),
+        );
+        assert!(result.is_err(), "an export outside the declared workspace is refused");
+        assert!(
+            metadata.read().is_empty(),
+            "a refused session must not leave a workspace owner behind"
+        );
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_worktree_domain_mismatch() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(
+                Some("ws-declared"),
+                Some(worktree("main")),
+                Some("incarnation-a"),
+            ),
+            Some(
+                serde_json::to_value(owner_record("ws-declared", Some(worktree("other"))))
+                    .unwrap(),
+            ),
+        );
+        assert!(result.is_err(), "a different worktree is a different identity domain");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_missing_owner_record() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            None,
+        );
+        assert!(result.is_err(), "a session with no exported record cannot be owned");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_predecessor_without_an_incarnation() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, None),
+            Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+        );
+        assert!(result.is_err(), "an unprovable incarnation is not an identity domain");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_declaration_without_a_workspace_owner() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(None, None, Some("incarnation-a")),
+            Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+        );
+        assert!(
+            result.is_err(),
+            "a session with no declared workspace owner cannot be adopted"
+        );
+        assert!(metadata.read().is_empty());
+    }
+
+    /// Relinquishing a session hands it back to the predecessor; keeping the installed record would
+    /// leave this daemon claiming a workspace it does not own.
+    #[test]
+    fn pane_liveness_relinquished_sessions_lose_their_installed_ownership() {
+        let metadata = metadata();
+        for session in ["session-a", "session-b"] {
+            adopt_transferred_ownership(
+                &metadata,
+                session,
+                &declared(Some("ws-declared"), None, Some("incarnation-a")),
+                Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(metadata.read().len(), 2);
+        release_adopted_ownership(&metadata, &["session-a".to_string()]);
+        let remaining = metadata.read();
+        assert!(!remaining.contains_key("session-a"));
+        assert!(remaining.contains_key("session-b"));
     }
 }
 
@@ -2520,8 +2752,8 @@ impl DaemonServer {
                     // is what turns a transport hiccup into dead terminals. Surface the error
                     // instead, and let the caller decide whether the handover may proceed.
                     loop {
-                        match crate::daemon::handover_socket::recv_session(&stream) {
-                            Ok(Some(export)) => exports.push(export),
+                        match crate::daemon::handover_socket::recv_session_with_owner(&stream) {
+                            Ok(Some(frame)) => exports.push(frame),
                             Ok(None) => break,
                             Err(error) => return Err((error, exports.len())),
                         }
@@ -2557,7 +2789,7 @@ impl DaemonServer {
                         })?;
                     let accepted = exports.len();
                     let exported: std::collections::HashSet<String> =
-                        exports.iter().map(|e| e.session_id.clone()).collect();
+                        exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
                     let durable_path = self.remote_sessions_path.clone();
                     let durable = crate::ipc::run_blocking(move || {
                         if !durable_path.exists() {
@@ -2640,7 +2872,7 @@ impl DaemonServer {
                         return Err(reason);
                     }
 
-                    for export in exports {
+                    for (export, owner) in exports {
                         tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
                         let (master, snapshot) = export.into_parts();
                         let session_id = snapshot.session_id.clone();
@@ -2649,20 +2881,30 @@ impl DaemonServer {
                         if expected.incarnation.is_none() || expected.incarnation != snapshot.incarnation {
                             return Err(format!("Predecessor incarnation does not match export '{session_id}'; source retained"));
                         }
-                        let metadata = self.session_metadata.read().get(&session_id).cloned()
-                            .ok_or_else(|| format!("Missing authoritative workspace owner of '{session_id}'"))?;
-                        if expected.workspace_id.as_deref() != Some(metadata.workspace_id.as_str())
-                            || expected.worktree != metadata.worktree
-                        {
-                            return Err(format!("Export workspace domain does not match '{session_id}'"));
-                        }
+                        // This daemon has never spawned the session, so it holds no spawn record of
+                        // its own: ownership transfers only through the record the predecessor
+                        // exported, checked against the predecessor's own describe answer. Until
+                        // that record is installed here this daemon is not an authoritative owner
+                        // and must not take the PTY master.
+                        adopt_transferred_ownership(&self.session_metadata, &session_id, expected, owner)?;
                         self.terminal_service.pty_manager().expect_transferred_owner(snapshot.clone())
-                            .map_err(|error| error.to_string())?;
-                        let output_rx = self
+                            .map_err(|error| {
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
+                                error.to_string()
+                            })?;
+                        let output_rx = match self
                             .terminal_service
                             .pty_manager()
                             .adopt_transferred_session(master, snapshot)
-                            .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                        {
+                            Ok(output_rx) => output_rx,
+                            Err(error) => {
+                                // The session stays with the predecessor, so this daemon must not
+                                // keep claiming its workspace.
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
+                                return Err(format!("Failed to adopt transferred session: {error}"));
+                            }
+                        };
                         adopted_sessions.push(session_id.clone());
                         // The receiver must be held and pumped for as long as the adopted child runs.
                         // Dropping it here marks the session's output channel closed, and the lifecycle
@@ -2710,6 +2952,7 @@ impl DaemonServer {
                                 for session_id in &adopted_sessions {
                                     self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
                                         .await.map_err(|error| error.to_string())?;
+                                    release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
                                 }
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
                             }
@@ -2718,6 +2961,7 @@ impl DaemonServer {
                             for session_id in &adopted_sessions {
                                 self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
                                     .await.map_err(|failure| format!("{reason}; relinquish failed: {failure}; predecessor remains frozen"))?;
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
                             }
                             Ok(())
                         }, || async {
@@ -3920,7 +4164,23 @@ impl DaemonServer {
                                         // every casualty instead of silently skipping it.
                                         match self.terminal_service.pty_manager().export_session(&session_id) {
                                             Ok(export) => {
-                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
+                                                // The successor can only take ownership of a session
+                                                // with the record that proves who owns it, so the
+                                                // owner's own record travels with the export. A
+                                                // session exported without one is refused by the
+                                                // successor, which keeps it here instead of losing it.
+                                                let owner = {
+                                                    let metadata = self.session_metadata.read();
+                                                    metadata.get(&session_id)
+                                                        .and_then(|meta| serde_json::to_value(meta).ok())
+                                                };
+                                                if owner.is_none() {
+                                                    tracing::error!(
+                                                        session_id = %session_id,
+                                                        "No authoritative owner record for this session; the successor will refuse it"
+                                                    );
+                                                }
+                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export, owner) {
                                                     Ok(()) => {
                                                         count += 1;
                                                         seq += 1;

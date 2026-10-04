@@ -251,6 +251,13 @@ pub struct SessionTransferMetadata {
     pub session_id: String,
     pub session_snapshot: crate::terminal::session::PtySessionSnapshot,
     pub hub_snapshot: Option<crate::terminal::output_hub::SessionHubSnapshot>,
+    /// The exporting daemon's authoritative spawn record for this session, serialized verbatim
+    /// (`daemon::session_service::StoredSessionMeta`). The export snapshot carries PTY-level
+    /// identity only, so this record is the sole carrier of the workspace/worktree ownership and
+    /// of the client-request identity a transferred session keeps. `None` when the predecessor
+    /// holds no record for the session, which its successor refuses instead of inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<serde_json::Value>,
 }
 
 pub fn send_session(
@@ -258,6 +265,7 @@ pub fn send_session(
     transfer_id: &str,
     frame_sequence: u64,
     export: crate::terminal::session::PtySessionExport,
+    owner: Option<serde_json::Value>,
 ) -> Result<(), HandoverSocketError> {
     let session_id = export.session_id.clone();
     let snapshot = export.snapshot();
@@ -265,6 +273,7 @@ pub fn send_session(
         session_id,
         hub_snapshot: snapshot.hub_snapshot.clone(),
         session_snapshot: snapshot,
+        owner,
     };
     let payload = serde_json::to_value(&meta)
         .map_err(|e| HandoverWireError::InvalidPayload(e))?;
@@ -292,6 +301,20 @@ pub fn send_transfer_done(
 pub fn recv_session(
     stream: &StdUnixStream,
 ) -> Result<Option<crate::terminal::session::PtySessionExport>, HandoverSocketError> {
+    Ok(recv_session_with_owner(stream)?.map(|(export, _owner)| export))
+}
+
+/// Receives one exported session together with the owner record the predecessor sent for it.
+///
+/// The record is returned beside the export rather than merged into it: the adopting daemon must
+/// check it against the predecessor's own describe answer before it takes ownership, and must be
+/// able to refuse the session when the two disagree.
+pub fn recv_session_with_owner(
+    stream: &StdUnixStream,
+) -> Result<
+    Option<(crate::terminal::session::PtySessionExport, Option<serde_json::Value>)>,
+    HandoverSocketError,
+> {
     let mut frame = recv_frame(stream.as_raw_fd())?;
     if frame.kind == KIND_TRANSFER_DONE {
         return Ok(None);
@@ -304,9 +327,9 @@ pub fn recv_session(
     let master_fd = frame.fds.into_iter().next().ok_or(
         HandoverSocketError::MissingRequiredDescriptor("pty_master_fd"),
     )?;
-    Ok(Some(crate::terminal::session::PtySessionExport::from_parts(
-        meta.session_snapshot,
-        master_fd,
+    Ok(Some((
+        crate::terminal::session::PtySessionExport::from_parts(meta.session_snapshot, master_fd),
+        meta.owner,
     )))
 }
 
@@ -394,5 +417,49 @@ mod tests {
         drop(server_stream);
         drop(listener);
         assert!(!sock_path.exists(), "socket file unlinked on drop");
+    }
+
+    /// The owner record must survive the frame round-trip exactly as the owner serialized it: it
+    /// is the only carrier of a transferred session's workspace ownership, and a successor refuses
+    /// a session whose record it cannot read.
+    #[test]
+    fn test_session_frame_carries_the_owner_record() {
+        let (sender, receiver) = UnixStream::pair().expect("socketpair");
+        let master: OwnedFd = File::open("/dev/null").expect("open /dev/null").into();
+        let snapshot = crate::terminal::session::PtySessionSnapshot {
+            session_id: "owner-record-session".into(),
+            incarnation: Some("owner-record-incarnation".into()),
+            pid: Some(4242),
+            pgid: Some(4242),
+            cols: 80,
+            rows: 24,
+            worktree_path: None,
+            state: crate::terminal::PtySessionState::Running,
+            hub_snapshot: None,
+            suspension_receipt: None,
+        };
+        let owner = serde_json::json!({
+            "clientRequestId": "req-owner-record",
+            "workspaceId": "ws-owner-record",
+        });
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        send_session(
+            &sender,
+            &transfer_id,
+            1,
+            crate::terminal::session::PtySessionExport::from_parts(snapshot, master),
+            Some(owner.clone()),
+        )
+        .expect("send session frame");
+
+        let (export, received) = recv_session_with_owner(&receiver)
+            .expect("recv session frame")
+            .expect("a session frame");
+        assert_eq!(export.session_id, "owner-record-session");
+        assert_eq!(
+            export.incarnation.as_deref(),
+            Some("owner-record-incarnation")
+        );
+        assert_eq!(received, Some(owner));
     }
 }
