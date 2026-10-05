@@ -51,12 +51,14 @@ use super::DIRECT_GATE_TEST_MUTEX;
 /// A bindable CGNAT address for the overlay gate tests.
 ///
 /// The overlay *proof* is injected by [`OverlayProofGuard`], so this needs an address the VM
-/// actually owns, not the Tailscale CLI: CI provisions `100.64.1.2` as a loopback alias.
+/// actually owns, not the Tailscale CLI. The address must sit on a non-loopback interface: the
+/// resolver enumerates interfaces with `IFF_UP` and without `IFF_LOOPBACK`, so an `lo0` alias is
+/// invisible here. The precheck job provisions one (`ifconfig <iface> alias 100.64.1.2 up`).
 fn overlay_test_address() -> Ipv4Addr {
     test_local_cgnat_address().unwrap_or_else(|| {
         panic!(
-            "overlay gate tests need a bindable CGNAT address; \
-             provision one with: sudo ifconfig lo0 alias 100.64.1.2"
+            "overlay gate tests need a CGNAT address on a non-loopback interface; \
+             provision one with: sudo ifconfig <iface> alias 100.64.1.2 up"
         )
     })
 }
