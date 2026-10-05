@@ -1,5 +1,8 @@
 use super::*;
-use crate::remote::state::{InterfaceResolver, RemoteGatewayState, RemoteNetworkMode};
+use crate::remote::state::{
+    set_test_overlay_proof_override, InterfaceResolver, RemoteGatewayState, RemoteNetworkMode,
+    SystemInterfaceResolver,
+};
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use crate::worktree::WorkspaceRegistry;
 use std::net::Ipv4Addr;
@@ -44,6 +47,37 @@ fn create_test_state() -> Arc<RemoteGatewayState> {
 }
 
 use super::DIRECT_GATE_TEST_MUTEX;
+
+/// A bindable CGNAT address for the overlay gate tests.
+///
+/// CI provisions a loopback alias (`sudo ifconfig lo0 alias 100.64.1.2`); a workstation with an
+/// active Tailscale interface resolves its own address. The overlay *proof* is injected by
+/// [`OverlayProofGuard`], so neither path needs the Tailscale CLI on PATH.
+fn overlay_test_address() -> Ipv4Addr {
+    SystemInterfaceResolver.tailscale_address().unwrap_or_else(|error| {
+        panic!(
+            "overlay gate tests need a bindable CGNAT address ({error}); \
+             provision one with: sudo ifconfig lo0 alias 100.64.1.2"
+        )
+    })
+}
+
+/// Injects overlay proof for one gate test and restores the real probe afterwards, so a leaked
+/// override cannot flip a sibling test's classification.
+struct OverlayProofGuard;
+
+impl OverlayProofGuard {
+    fn proven() -> Self {
+        set_test_overlay_proof_override(Some(|_: &Ipv4Addr| Some(true)));
+        Self
+    }
+}
+
+impl Drop for OverlayProofGuard {
+    fn drop(&mut self) {
+        set_test_overlay_proof_override(None::<fn(&Ipv4Addr) -> Option<bool>>);
+    }
+}
 
 #[tokio::test]
 async fn test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve() {
@@ -122,10 +156,8 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
         config.port = 0;
     }
 
-    // Get active Tailscale IP from workstation
-    let tailscale_ip = crate::remote::state::SystemInterfaceResolver
-        .tailscale_address()
-        .expect("active Tailscale interface on workstation");
+    let _overlay = OverlayProofGuard::proven();
+    let tailscale_ip = overlay_test_address();
 
     let resolver = Arc::new(TailscaleInterfaceResolver { tailscale_ip });
 
@@ -247,9 +279,8 @@ async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
         config.port = 0;
     }
 
-    let tailscale_ip = crate::remote::state::SystemInterfaceResolver
-        .tailscale_address()
-        .expect("active Tailscale interface on workstation");
+    let _overlay = OverlayProofGuard::proven();
+    let tailscale_ip = overlay_test_address();
 
     let resolver = Arc::new(LanInterfaceResolver {
         lan_ip: tailscale_ip,
