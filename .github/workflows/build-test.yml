@@ -115,6 +115,17 @@ jobs:
         run: bun test scripts/native-terminal-thread-policy.test.mjs
 
       # ---- Unit and integration suites ----
+      # The P19 overlay gate suites bind a CGNAT overlay address, so the VM needs one that is
+      # actually local. Provision it here and report the outcome, so a missing capability shows
+      # up in this log instead of being inferred from a test panic.
+      - name: Provision overlay address for host-dependent suites
+        shell: bash
+        run: |
+          set -x
+          sudo -n true && echo "PROVISION sudo=available" || echo "PROVISION sudo=unavailable"
+          ls -l /usr/sbin/sshd || echo "PROVISION sshd=missing"
+          ifconfig lo0 | grep -q '100\.64\.1\.2' || sudo -n ifconfig lo0 alias 100.64.1.2 up || echo "PROVISION overlay_alias=add_failed"
+          ifconfig lo0 | grep '100\.64\.1\.2' && echo "PROVISION overlay_alias=present" || echo "PROVISION overlay_alias=missing"
       # Skips are the suites a scored CI VM cannot serve, each with the reason it was measured to
       # fail. The renderer suite builds a real WGPU device; the Tailscale-bound gateway tests and
       # the relay-bound client test need services a runner does not have; the last one needs the
