@@ -287,7 +287,7 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
   });
 
-  it("12. passes followHostSize to RemoteTerminal drawer", () => {
+  it("12. sizes the drawer to this device instead of the desktop grid", () => {
     render(
       <MobileChatWorkspace
         messages={[]}
@@ -305,9 +305,13 @@ describe("MobileChatWorkspace", () => {
       expect.objectContaining({
         sessionId: "sess-follow-1",
         token: "tok-follow-1",
-        followHostSize: true,
       })
     );
+    // Opening the drawer makes this device the size owner, so it must size the
+    // terminal to its own viewport rather than mirroring the desktop grid.
+    expect(mockRemoteTerminal.mock.calls.at(-1)?.[0]).not.toMatchObject({
+      followHostSize: true,
+    });
   });
 
   it("13. closed drawer carries inert attribute and aria-hidden true", () => {
