@@ -2082,8 +2082,10 @@ mod qa_split_producers {
 
     /// The create stage's authoritative result: the identity the runner
     /// correlates plus the created backend session, its incarnation and epoch,
-    /// exactly as the journal-confirmed create returned them.
-    pub fn record_and_emit_split_create(
+    /// exactly as the journal-confirmed create returned them. Async because the
+    /// settlement's receipt append is synchronous file I/O and is awaited
+    /// through the off-runtime wrapper.
+    pub async fn record_and_emit_split_create(
         prepared: &PreparedLocalSplit,
         session_id: &str,
         daemon_epoch: u64,
@@ -2104,7 +2106,13 @@ mod qa_split_producers {
             session,
             recorded.as_ref(),
         );
-        channel.append_receipt(SPLIT_CREATE, &operation_id, payload);
+        qa_barrier::append_receipt_off_runtime(
+            &channel,
+            SPLIT_CREATE,
+            &operation_id,
+            payload,
+        )
+        .await;
     }
 
     pub enum AttachHold {
@@ -2173,9 +2181,16 @@ mod qa_split_producers {
             .target_backend_session_id_for(ATTACH_HANDSHAKE)
             .is_none()
         {
-            if channel
-                .bind_target_session(ATTACH_HANDSHAKE, &operation_id, session_id)
-                .is_err()
+            // The arm binding writes the bound-ack file with a synchronous
+            // write, so it runs on the blocking pool.
+            if qa_barrier::bind_target_session_off_runtime(
+                &channel,
+                ATTACH_HANDSHAKE,
+                &operation_id,
+                session_id,
+            )
+            .await
+            .is_err()
             {
                 return AttachHold::NotApplicable;
             }
@@ -2184,18 +2199,21 @@ mod qa_split_producers {
         }
 
         let budget_ms = clip_stage_budget(attempt.remaining_ms, STAGE_ATTACH_OR_LISTENER_MAX_MS).max(1);
-        channel.write_held(
+        qa_barrier::write_held_off_runtime(
+            &channel,
             &spec,
             session_id,
             ATTACH_HANDSHAKE,
             attach_hold_payload(session_id, binding, attempt, budget_ms, false, "held", None),
-        );
+        )
+        .await;
 
         let mut bounded = spec.clone();
         bounded.deadline_ms = budget_ms.min(spec.deadline_ms);
         match channel.wait_for_release(&bounded).await {
             ReleaseOutcome::Released => {
-                channel.append_receipt(
+                qa_barrier::append_receipt_off_runtime(
+                    &channel,
                     ATTACH_HANDSHAKE,
                     &operation_id,
                     attach_hold_payload(
@@ -2207,7 +2225,8 @@ mod qa_split_producers {
                         ReleaseOutcome::Released.as_str(),
                         None,
                     ),
-                );
+                )
+                .await;
                 AttachHold::Released
             }
             ReleaseOutcome::DeadlineExceeded => {
@@ -2217,7 +2236,8 @@ mod qa_split_producers {
                     .describe_session_bounded_until(session_id, probe_deadline)
                     .await
                     .is_ok();
-                channel.append_receipt(
+                qa_barrier::append_receipt_off_runtime(
+                    &channel,
                     ATTACH_HANDSHAKE,
                     &operation_id,
                     attach_hold_payload(
@@ -2229,7 +2249,8 @@ mod qa_split_producers {
                         ReleaseOutcome::DeadlineExceeded.as_str(),
                         Some(alive),
                     ),
-                );
+                )
+                .await;
                 AttachHold::Failed(
                     IpcError::new(
                         IpcErrorCode::SpawnAttemptTimeout,
@@ -2966,7 +2987,8 @@ mod qa_split_producers {
                         "batch admission for '{request_id}' failed: {} ({:?})",
                         error.message, error.code
                     );
-                    channel.append_receipt(
+                    qa_barrier::append_receipt_off_runtime(
+                        channel,
                         SPLIT_CONCURRENT_BATCH,
                         &operation_id,
                         batch_payload(
@@ -2981,7 +3003,8 @@ mod qa_split_producers {
                             None,
                             Some(reason.as_str()),
                         ),
-                    );
+                    )
+                    .await;
                     return Err(reason);
                 }
             }
@@ -3018,7 +3041,8 @@ mod qa_split_producers {
         let cleanup_verified = created
             .iter()
             .all(|session_id| !inventory.contains(session_id));
-        channel.append_receipt(
+        qa_barrier::append_receipt_off_runtime(
+            channel,
             SPLIT_CONCURRENT_BATCH,
             &operation_id,
             batch_payload(
@@ -3033,7 +3057,8 @@ mod qa_split_producers {
                 Some(cleanup_verified),
                 None,
             ),
-        );
+        )
+        .await;
         Ok(())
     }
 
@@ -3207,7 +3232,8 @@ mod qa_split_producers {
             .source_backend_session_id
             .as_ref()
             .map(|id| sessions.contains(id));
-        channel.append_receipt(
+        qa_barrier::append_receipt_off_runtime(
+            channel,
             CANCEL_ACK,
             &operation_id,
             cancel_ack_payload(
@@ -3221,7 +3247,8 @@ mod qa_split_producers {
                 owned_creation_removed,
                 source_still_present,
             ),
-        );
+        )
+        .await;
         Ok(())
     }
 
@@ -4053,7 +4080,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             &result.session_id,
             result.epoch,
             &result.session,
-        );
+        )
+        .await;
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         eprintln!(
             "FERRYX_QA_SPLIT_CREATE_READY: request_id={} session_id={} daemon_epoch={}",

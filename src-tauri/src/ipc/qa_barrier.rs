@@ -1555,7 +1555,7 @@ async fn run_stale_binding_watcher<R: tauri::Runtime>(
 /// that could not be built is reported unbuilt with the daemon's own error.
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
-    channel: &QaBarrierChannel,
+    channel: &Arc<QaBarrierChannel>,
     daemon_client: &crate::daemon::DaemonClient,
     app: tauri::AppHandle<R>,
     kinds: &[QaFixtureKind],
@@ -1582,7 +1582,8 @@ pub async fn emit_gui_fixture_setup<R: tauri::Runtime>(
     for refusal in &inventory.refused {
         eprintln!("FERRYX_QA_FIXTURE_CLAIM_REFUSED: {refusal}");
     }
-    let emitted = channel.emit_fixture_setup_from_sessions(&inventory, &creation);
+    let emitted =
+        emit_fixture_setup_from_sessions_off_runtime(channel, &inventory, &creation).await;
     GuiFixtureSetupOutcome {
         emitted,
         sessions: inventory.sessions,
@@ -1779,10 +1780,21 @@ pub(crate) fn verdict_str(verdict: PaneLivenessVerdict) -> String {
     format!("{verdict:?}")
 }
 
-/// Off-runtime receipt append: the channel's append is synchronous file I/O, so
-/// it runs on the blocking pool instead of a worker of the runtime that serves
-/// the QA producer. Mirrors the private wrapper in `terminal/qa_liveness.rs`.
-async fn append_receipt_off_runtime(
+// ---------------------------------------------------------------------------
+// Off-runtime wrappers for this module's synchronous writers.
+//
+// Every writer below (`append_receipt`, `write_held`, `bind_target_session`,
+// `emit_fixture_setup_from_sessions`, `scan_and_ack_arms`) performs synchronous
+// file I/O and keeps its sync signature for its genuinely synchronous callers
+// (the render path, the GUI boot entry, the headless lane that builds its own
+// runtime). Async producers await the wrapper instead, so the write never runs
+// on a worker of the runtime that serves them. Each wrapper preserves its sync
+// sibling's own tolerances exactly: same file, same JSON, same discard shapes.
+// ---------------------------------------------------------------------------
+
+/// Off-runtime receipt append. Mirrors the private wrapper in
+/// `terminal/qa_liveness.rs`.
+pub(crate) async fn append_receipt_off_runtime(
     channel: &Arc<QaBarrierChannel>,
     name: &str,
     operation_id: &str,
@@ -1791,10 +1803,95 @@ async fn append_receipt_off_runtime(
     let channel = Arc::clone(channel);
     let name = name.to_string();
     let operation_id = operation_id.to_string();
+    // The sync append already tolerates every failure by returning without a
+    // line; a failed blocking hop is the same non-event, never a fabricated
+    // receipt.
     let _ = tokio::task::spawn_blocking(move || {
         channel.append_receipt(&name, &operation_id, settlement)
     })
     .await;
+}
+
+/// Off-runtime held-record emission (`<name>.held.json` plus the in-process
+/// broadcast). The broadcast still fires from the blocking task, so the
+/// ordering "file written, then event published" is the sync one.
+pub(crate) async fn write_held_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    spec: &ArmSpec,
+    session_id: &str,
+    stage: &str,
+    extra: Value,
+) {
+    let channel = Arc::clone(channel);
+    let spec = spec.clone();
+    let session_id = session_id.to_string();
+    let stage = stage.to_string();
+    // `write_held` returns `()` and already discards its own write error.
+    let _ = tokio::task::spawn_blocking(move || {
+        channel.write_held(&spec, &session_id, &stage, extra)
+    })
+    .await;
+}
+
+/// Off-runtime arm binding. A failed blocking hop is reported as a refusal
+/// (the sync fn's own `Err` shape for an unarmed or conflicting barrier), never
+/// as a bound ack: the caller treats `Err` as "not bound".
+pub(crate) async fn bind_target_session_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    name: &str,
+    operation_id: &str,
+    session_id: &str,
+) -> Result<QaBoundAck, String> {
+    let channel = Arc::clone(channel);
+    let name = name.to_string();
+    let operation_id = operation_id.to_string();
+    let session_id = session_id.to_string();
+    match tokio::task::spawn_blocking(move || {
+        channel.bind_target_session(&name, &operation_id, &session_id)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("bind_target_session blocking hop failed: {error}")),
+    }
+}
+
+/// Off-runtime GUI `fixture-setup` settlement. The inventory and the creation
+/// audit are cloned into the blocking task because the caller still reports
+/// both after the settlement.
+pub(crate) async fn emit_fixture_setup_from_sessions_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    inventory: &GuiFixtureInventory,
+    creation: &GuiFixtureCreation,
+) -> bool {
+    let channel = Arc::clone(channel);
+    let inventory = inventory.clone();
+    let creation = creation.clone();
+    match tokio::task::spawn_blocking(move || {
+        channel.emit_fixture_setup_from_sessions(&inventory, &creation)
+    })
+    .await
+    {
+        Ok(emitted) => emitted,
+        // A hop that cannot complete emitted no settlement: the same `false`
+        // the sync fn returns when no operation nonce correlates the line.
+        Err(_) => false,
+    }
+}
+
+/// Off-runtime startup arm scan (both a directory read and the armed-ack
+/// writes). A hop that cannot complete yields the same tuple the sync fn
+/// produces when it cannot read the control directory at all (`:663-665`):
+/// nothing acked, nothing rejected. The daemon then holds no barrier instead of
+/// assuming one was armed, which fails toward not-holding, never toward a pass.
+pub(crate) async fn scan_and_ack_arms_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+) -> (Vec<String>, Vec<String>) {
+    let channel = Arc::clone(channel);
+    match tokio::task::spawn_blocking(move || channel.scan_and_ack_arms()).await {
+        Ok(result) => result,
+        Err(_) => (Vec::new(), Vec::new()),
+    }
 }
 
 /// Hold the REAL backend-write stage: called from
@@ -1831,7 +1928,8 @@ pub(crate) async fn hold_backend_write_barrier(
         None,
     );
     let held_verdict = classify_pane_liveness(&held_snapshot);
-    channel.write_held(
+    write_held_off_runtime(
+        channel,
         &spec,
         session_id,
         "backend_write_start",
@@ -1839,7 +1937,8 @@ pub(crate) async fn hold_backend_write_barrier(
             "writePendingMs": pending_ms,
             "classifierVerdict": verdict_str(held_verdict),
         }),
-    );
+    )
+    .await;
     append_receipt_off_runtime(
         channel,
         WRITE_BARRIER,

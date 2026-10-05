@@ -63,17 +63,25 @@ pub fn barrier_dir() -> Option<PathBuf> {
 }
 
 /// The channel of THIS process, installed from the private env on first use.
-/// `None` in every normal launch.
-pub fn channel() -> Option<Arc<QaBarrierChannel>> {
+/// `None` in every normal launch. Async because building the channel stats the
+/// barrier directory and the startup scan reads and writes the control files:
+/// both are filesystem calls, so they run on the blocking pool rather than on a
+/// worker of the daemon's runtime.
+pub async fn channel() -> Option<Arc<QaBarrierChannel>> {
     if let Some(channel) = qa_barrier::active_channel() {
         return Some(channel);
     }
-    let channel = QaBarrierChannel::from_env().ok()?;
+    let channel = match crate::ipc::run_blocking(|| Ok(QaBarrierChannel::from_env())).await {
+        Ok(channel) => channel.ok()?,
+        // A blocking hop that cannot complete leaves no channel installed,
+        // exactly like an env that names no runner.
+        Err(_) => return None,
+    };
     qa_barrier::install(channel);
     let installed = qa_barrier::active_channel()?;
     // The runner arms before launching, so a daemon that boots after the arm
     // (the handover successor) must ack it as well.
-    let (acked, rejected) = installed.scan_and_ack_arms();
+    let (acked, rejected) = qa_barrier::scan_and_ack_arms_off_runtime(&installed).await;
     if !rejected.is_empty() {
         eprintln!("FERRYX_QA_ARM_REJECTED: daemon rejected prelaunch arms: {rejected:?}");
     }
@@ -82,8 +90,8 @@ pub fn channel() -> Option<Arc<QaBarrierChannel>> {
 }
 
 /// Daemon boot hook. No-op without the runner's private env.
-pub fn install_and_start(server: &Arc<super::server::DaemonServer>) {
-    let Some(channel) = channel() else {
+pub async fn install_and_start(server: &Arc<super::server::DaemonServer>) {
+    let Some(channel) = channel().await else {
         return;
     };
     let server = Arc::clone(server);
@@ -523,7 +531,8 @@ async fn hold_unrelated_remote_rpc(
         .map_err(|error| format!("remote RPC flush failed: {error}"))?;
 
     let held_at_ms = now_ms();
-    channel.write_held(
+    qa_barrier::write_held_off_runtime(
+        channel,
         &spec,
         &session_id,
         HELD_RPC,
@@ -539,7 +548,8 @@ async fn hold_unrelated_remote_rpc(
             "holdPoint": "remote-response-withheld",
             "heldAtMs": held_at_ms,
         }),
-    );
+    )
+    .await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.deadline_ms);
     let mut released = false;
@@ -594,7 +604,8 @@ async fn hold_unrelated_remote_rpc(
     let held_ms = now_ms().saturating_sub(held_at_ms);
     serve.abort();
 
-    channel.append_receipt(
+    qa_barrier::append_receipt_off_runtime(
+        channel,
         HELD_RPC,
         &operation_id,
         json!({
@@ -617,7 +628,8 @@ async fn hold_unrelated_remote_rpc(
             // settled while this remote RPC was still outstanding.
             "localSplitSettledWhileHeld": split_settled_while_held,
         }),
-    );
+    )
+    .await;
     Ok(())
 }
 

@@ -2725,7 +2725,7 @@ impl DaemonServer {
         ensure_runtime_directory(&runtime_dir)?;
 
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-        crate::daemon::qa_producers::install_and_start(&self);
+        crate::daemon::qa_producers::install_and_start(&self).await;
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
@@ -2963,7 +2963,7 @@ impl DaemonServer {
                                     &session_id,
                                 );
                             adopted_records.push(record);
-                            if let Some(channel) = crate::daemon::qa_producers::channel() {
+                            if let Some(channel) = crate::daemon::qa_producers::channel().await {
                                 crate::daemon::qa_producers::note_successor_adopt(
                                     &channel,
                                     &session_id,
@@ -3019,7 +3019,7 @@ impl DaemonServer {
                         );
                         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                         {
-                            if let Some(channel) = crate::daemon::qa_producers::channel() {
+                            if let Some(channel) = crate::daemon::qa_producers::channel().await {
                                 crate::daemon::qa_producers::observe_reader_state(
                                     &self.terminal_service,
                                     &mut adopted_records,
@@ -3062,7 +3062,7 @@ impl DaemonServer {
                                 }
                                 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                                 {
-                                    if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel().await {
                                         crate::daemon::qa_producers::observe_reader_state(
                                             &self.terminal_service,
                                             &mut adopted_records,
@@ -3103,7 +3103,7 @@ impl DaemonServer {
                                 );
                                 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                                 {
-                                    if let Some(channel) = crate::daemon::qa_producers::channel() {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel().await {
                                         crate::daemon::qa_producers::observe_reader_state(
                                             &self.terminal_service,
                                             &mut adopted_records,
