@@ -127,6 +127,7 @@ fn listing_script(environment: &RemoteEnvironment, path: &str, marker: &str) -> 
     match environment.platform {
         RemotePlatform::Posix => format!(
             r#"set -e
+if [ -n "${{ZSH_VERSION:-}}" ]; then setopt NULL_GLOB; fi
 LC_ALL=C; export LC_ALL
 cd {path}
 [ -r . ] && [ -x . ] || {{ printf '%s\n' 'Directory is not readable' >&2; exit 1; }}
@@ -344,6 +345,47 @@ mod tests {
             .output()
             .unwrap();
         assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_script_survives_zsh_nomatch_globs() {
+        // The POSIX script executes under the remote login shell, which is zsh
+        // on macOS. zsh aborts on any unmatched glob ("no matches found")
+        // where sh passes it through literally and `[ -d ] || continue` skips
+        // it; `..?*` matches nothing on real systems, so the script must opt
+        // into null glob expansion or folder browse fails on every zsh host.
+        if std::process::Command::new("zsh")
+            .arg("-c")
+            .arg("echo probe")
+            .output()
+            .is_err()
+        {
+            eprintln!("zsh not installed; skipping");
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        for name in ["nested", ".hidden"] {
+            std::fs::create_dir(fixture.path().join(name)).unwrap();
+        }
+        let env = environment();
+        let script = listing_script(&env, fixture.path().to_str().unwrap(), "ZSH_FRAME");
+        let output = std::process::Command::new("zsh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "listing script failed under zsh: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = parse_listing(&output.stdout, "ZSH_FRAME", &env).unwrap();
+        assert!(result.entries.iter().any(|entry| entry.name == "nested"));
+        assert!(result
+            .entries
+            .iter()
+            .any(|entry| entry.name == ".hidden" && entry.hidden));
     }
 
     #[test]
