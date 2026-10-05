@@ -12,6 +12,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      legacy:
+        description: 'Also run the legacy UI and Linux/Windows cargo legs'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -198,7 +203,7 @@ jobs:
   # 1. FRONTEND UI VALIDATION
   # =========================================================================
   ui-check:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.legacy == true
     name: UI Build & Typecheck
     runs-on: ubuntu-latest
     steps:
@@ -252,7 +257,7 @@ jobs:
   # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
   # =========================================================================
   rust-check:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.legacy == true
     name: Rust Check (${{ matrix.os_name }})
     runs-on: ${{ matrix.platform }}
     strategy:
