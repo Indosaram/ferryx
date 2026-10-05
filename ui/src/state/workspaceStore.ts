@@ -124,7 +124,8 @@ export type WorkspaceServices = {
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
   }) => Promise<string>;
-  /** Optional detailed spawn carrying the daemon-resolved cwd; enables the single-hop split path. */
+  /** Optional detailed spawn carrying the daemon-resolved cwd and the session identity; enables
+   *  the single-hop split path and lets a spawned pane record its incarnation immediately. */
   spawnTerminalDetailed?: (request: {
     workspaceId: string;
     worktree: WorktreeIdentity | null;
@@ -133,7 +134,7 @@ export type WorkspaceServices = {
     shell?: string | null;
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
-  }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null } | null }>;
+  }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null; incarnation?: string | null } | null }>;
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
@@ -668,14 +669,33 @@ export function useWorkspaceStore({
   const createSpawnedTab = useCallback(
     async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
       await services.ensureTerminalEvents();
-      const backendSessionId =
-        backendSessionIdOverride ??
-        (await spawnTerminalForLogicalAction(services, {
-          workspaceId,
-          worktree: worktreeIdentity(worktree),
-          cwd: worktree.path,
-          shell,
-        }));
+      // The detailed spawn is the only one that reports the session's incarnation and the daemon
+      // epoch, and a pane without an incarnation can never form the durable seven-field attach
+      // tuple, so its native surface attach fails until reconciliation happens to fill it in.
+      // Use the detailed path wherever the transport provides it (the split path already does).
+      let daemonEpoch: string | null = null;
+      let incarnation: string | null = null;
+      let backendSessionId = backendSessionIdOverride;
+      if (!backendSessionId) {
+        if (services.spawnTerminalDetailed) {
+          const detailed = await spawnDetailedForLogicalAction(services, {
+            workspaceId,
+            worktree: worktreeIdentity(worktree),
+            cwd: worktree.path,
+            shell,
+          });
+          backendSessionId = detailed.sessionId;
+          daemonEpoch = detailed.daemonEpoch ?? null;
+          incarnation = detailed.session?.incarnation ?? null;
+        } else {
+          backendSessionId = await spawnTerminalForLogicalAction(services, {
+            workspaceId,
+            worktree: worktreeIdentity(worktree),
+            cwd: worktree.path,
+            shell,
+          });
+        }
+      }
       const sessionId = createId("session");
       const tabId = createId("tab");
       const session: TerminalSession = {
@@ -685,6 +705,8 @@ export function useWorkspaceStore({
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
+        ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+        ...(incarnation !== null ? { incarnation } : {}),
         lifecycle: "working",
         ...(isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)
           ? {
