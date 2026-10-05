@@ -17,6 +17,13 @@ on:
         description: 'Also run the legacy UI and Linux/Windows cargo legs'
         type: boolean
         default: false
+      suite:
+        description: 'Test scope: full (library plus integration) or integration only'
+        type: choice
+        options:
+          - full
+          - integration
+        default: full
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -29,6 +36,10 @@ jobs:
   precheck:
     name: Lint, unit and integration tests (macOS)
     runs-on: xenoci-macos
+    # The full test step measures over 35 minutes (the library suite alone is ~8), and the
+    # platform's own job cap is 60. A slightly earlier, explicit deadline turns a cap kill into a
+    # clear "timed out" result instead of a run that ends with no logs at all.
+    timeout-minutes: 55
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
       CARGO_BUILD_JOBS: '1'
@@ -150,11 +161,21 @@ jobs:
       # the relay-bound client test need services a runner does not have; the last one needs the
       # omo agent CLI on PATH.
       - name: Cargo Test (unit and integration suites)
+        shell: bash
+        # `suite: integration` skips the library target, which alone measures ~8 minutes, so a
+        # dispatch can settle the integration targets in a fraction of the full step.
+        env:
+          TEST_SUITE: ${{ inputs.suite || 'full' }}
         run: |
+          suite_flags=(--lib)
+          if [ "$TEST_SUITE" = "integration" ]; then
+            suite_flags=()
+            echo "TEST_SUITE=integration: library target skipped"
+          fi
           cargo test --manifest-path src-tauri/Cargo.toml \
             --target aarch64-apple-darwin \
             --no-fail-fast \
-            --lib \
+            "${suite_flags[@]}" \
             --test backend_hardening \
             --test daemon_persistence_contract \
             --test e2e_agent_workflow \
