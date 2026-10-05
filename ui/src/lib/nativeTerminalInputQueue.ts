@@ -102,6 +102,11 @@ interface LaneExecutionState {
   runningRequestId: string | null;
 }
 
+interface LaneExecutionState {
+  runningSince: number | null;
+  runningRequestId: string | null;
+}
+
 interface SessionQueueState {
   items: QueuedItem[];
   allocatedBytes: number;

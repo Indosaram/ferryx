@@ -2,7 +2,7 @@
 
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::ssh::direct;
-use crate::ssh::runtime::{self, RemoteEnvironment, RemotePlatform};
+use crate::ssh::runtime::{self, RemoteEnvironment, RemoteExecutor, RemotePlatform};
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -185,6 +185,40 @@ pub fn parse_install_output(stdout: &[u8], location: &HelperLocation) -> Result<
     })))
 }
 
+/// Raw stdin-mode PowerShell invocation for Windows helper uploads.
+///
+/// [`RemoteExecutor::command`] wraps its argument as an `-EncodedCommand`
+/// script, so passing "-Command -" through it makes the remote shell decode
+/// and *execute a program named* `-Command` (exit 1: the term is not
+/// recognized). The upload script itself arrives on stdin, which is exactly
+/// what the POSIX arm's `sh -c 'sh -s'` achieves.
+fn windows_stdin_command(executor: RemoteExecutor) -> String {
+    format!(
+        "{} -NoLogo -NoProfile -NonInteractive -Command -",
+        executor.program()
+    )
+}
+
+/// Pure pairing of the upload transport command with the payload bytes for
+/// one platform, so tests can bind `install` to a stdin-mode command without
+/// touching SSH.
+fn install_invocation(
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+    binary_data: Vec<u8>,
+) -> (String, Vec<u8>) {
+    match env.platform {
+        RemotePlatform::Posix => {
+            let script = build_posix_upload_script(location, &binary_data);
+            (env.executor.command("sh -s"), script.into_bytes())
+        }
+        RemotePlatform::Windows => {
+            let script = build_windows_upload_script(location, &binary_data);
+            (windows_stdin_command(env.executor), script.into_bytes())
+        }
+    }
+}
+
 pub async fn install(
     host: &SshHost,
     env: &RemoteEnvironment,
@@ -241,16 +275,7 @@ pub async fn install(
         )
     })??;
 
-    let (cmd, input_bytes) = match env.platform {
-        RemotePlatform::Posix => {
-            let script = build_posix_upload_script(location, &binary_data);
-            (env.executor.command("sh -s"), script.into_bytes())
-        }
-        RemotePlatform::Windows => {
-            let script = build_windows_upload_script(location, &binary_data);
-            (env.executor.command("-Command -"), script.into_bytes())
-        }
-    };
+    let (cmd, input_bytes) = install_invocation(env, location, binary_data);
 
     let plan = direct::ssh_plan(host, cmd, false)?;
     let output = direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), input_bytes)
@@ -672,7 +697,12 @@ FERRYX_HELPER_PAYLOAD_EOF\n\
 }
 
 pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8]) -> String {
-    let chunked = chunk_base64(binary_bytes, 76);
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    // Delivered on stdin to `<shell> -Command -`: that mode silently discards
+    // multi-line here-strings on live Windows hosts (pwsh 7.6.6 and
+    // powershell.exe both exit 0 with no output), so the payload is assigned as
+    // one newline-free single-quoted literal instead.
+    let encoded = STANDARD.encode(binary_bytes);
     format!(
         "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; \
          [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false); \
@@ -682,9 +712,7 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              $dir = [System.IO.Path]::GetDirectoryName($dest); \
              if (-not [System.IO.Directory]::Exists($dir)) {{ [System.IO.Directory]::CreateDirectory($dir) | Out-Null }}; \
              $tmp = \"$dest.tmp.\" + [System.Guid]::NewGuid().ToString('N'); \
-             $b64 = @'\n\
-{}\
-'@;\n\
+             $b64 = '{}'; \
              [System.IO.File]::WriteAllBytes($tmp, [System.Convert]::FromBase64String($b64.Trim())); \
              $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1; \
              if ($LASTEXITCODE -ne 0) {{ throw \"Failed to set private ACL on helper binary: $aclRes\" }}; \
@@ -722,7 +750,7 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
          }}",
         runtime::powershell_data(&location.executable),
         runtime::powershell_data(&location.root),
-        chunked
+        encoded
     )
 }
 

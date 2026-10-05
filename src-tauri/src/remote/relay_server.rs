@@ -455,11 +455,36 @@ impl RelayState {
 
     /// Cache a token just issued or revalidated by this machine's gateway.
     pub fn set_account_state(&self, account: Arc<crate::account::service::AccountState>) {
-        *self.inner.account_state.lock() = Some(account);
+        let previous = {
+            let mut guard = self.inner.account_state.lock();
+            let prev = guard.take();
+            *guard = Some(account.clone());
+            prev
+        };
+        if let Some(prev) = previous {
+            if !Arc::ptr_eq(&prev, &account) {
+                prev.set_liveness_probe(None);
+            }
+        }
+        let weak_inner = Arc::downgrade(&self.inner);
+        account.set_liveness_probe(Some(Arc::new(move |machine_id: &str| {
+            let Some(inner) = weak_inner.upgrade() else {
+                return false;
+            };
+            let online = inner
+                .control_channels
+                .lock()
+                .get(machine_id)
+                .is_some_and(|ch| !ch.tx.is_closed());
+            online
+        })));
     }
 
     pub fn clear_account_state(&self) {
-        *self.inner.account_state.lock() = None;
+        let previous = self.inner.account_state.lock().take();
+        if let Some(prev) = previous {
+            prev.set_liveness_probe(None);
+        }
     }
 
     #[cfg(test)]
@@ -1812,6 +1837,7 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["direct", "offer"])
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
+            | ("GET", ["agent-history", _])
             | ("GET", ["attach"])
     )
 }
@@ -1866,6 +1892,9 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
         // Session listing is workspace-scoped; a single session is epoch-fenced.
         ["sessions"] => &["workspaceId", "daemonEpoch"],
         ["sessions", _] => &["daemonEpoch"],
+        // Chat history pages by limit/cursor. Without this the relay answers 400 and the
+        // remote chat view stays empty even though the machine serves the route.
+        ["agent-history", _] => &["limit", "cursor"],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();

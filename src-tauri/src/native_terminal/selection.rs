@@ -363,62 +363,23 @@ fn gesture_click_count(
     Ok(count)
 }
 
-/// Read the unwrapped text of a line at (col, row) without altering the active selection.
-/// Formatting preserves leading whitespace so grid columns align 1:1 with string character indices.
+/// Read one physical viewport row without altering the active selection.
 pub fn line_text_at(
     handle: NonNull<GhosttyTerminalImpl>,
     col: u16,
     row: u16,
 ) -> Result<String, NativeTerminalError> {
-    let options = GhosttyTerminalSelectLineOptions {
-        size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(),
-        grid_ref: viewport_ref(handle, col, row)?,
-        whitespace: std::ptr::null(),
-        whitespace_len: 0,
-        semantic_prompt_boundary: false,
+    let start = viewport_ref(handle, 0, row)?;
+    let _ = viewport_ref(handle, col, row)?;
+    let cols = super::queries::query_cols(handle)?;
+    let end = viewport_ref(handle, cols - 1, row)?;
+    let selection = GhosttySelection {
+        size: std::mem::size_of::<GhosttySelection>(),
+        start,
+        end,
+        rectangle: true,
     };
-    let mut selection = GhosttySelection::default();
-    // SAFETY: Category: Foreign Selection Extraction.
-    // Invariant: options contains a fresh ref from this terminal and default whitespace pointers are null with zero length.
-    let result = unsafe { ghostty_terminal_select_line(handle.as_ptr(), &options, &mut selection) };
-    NativeTerminalError::from_c_result(result, "ghostty_terminal_select_line")?;
-
-    let mut ordered = GhosttySelection::default();
-    // SAFETY: Category: Foreign Selection Ordering.
-    // Invariant: selection is a fresh snapshot from this terminal and no mutation has occurred.
-    let result = unsafe {
-        ghostty_terminal_selection_ordered(
-            handle.as_ptr(),
-            &selection,
-            GHOSTTY_SELECTION_ORDER_FORWARD,
-            &mut ordered,
-        )
-    };
-    NativeTerminalError::from_c_result(result, "ghostty_terminal_selection_ordered")?;
-
-    let mut start = GhosttyPointCoordinate::default();
-    // SAFETY: Category: Foreign Grid Coordinate Conversion.
-    // Invariant: ordered endpoints are fresh refs from this terminal; output is writable stack storage.
-    let start_result = unsafe {
-        ghostty_terminal_point_from_grid_ref(
-            handle.as_ptr(),
-            &ordered.start,
-            GHOSTTY_POINT_TAG_VIEWPORT,
-            &mut start,
-        )
-    };
-    NativeTerminalError::from_c_result(
-        start_result,
-        "ghostty_terminal_point_from_grid_ref(Start)",
-    )?;
-
-    let text = format_selection(handle, Some(&selection), true)?.unwrap_or_default();
-    let start_col = start.x as usize;
-    if start_col > 0 {
-        Ok(format!("{}{}", " ".repeat(start_col), text))
-    } else {
-        Ok(text)
-    }
+    Ok(format_selection(handle, Some(&selection), false)?.unwrap_or_default())
 }
 
 /// Returns the OSC 8 hyperlink URI associated with the cell at (col, row) in viewport coordinates, if any.

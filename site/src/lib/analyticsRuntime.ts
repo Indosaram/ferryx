@@ -23,13 +23,25 @@ const BUTTON_CLASS = 'ferryx-consent__button';
 
 export interface ConsentMarkupOptions {
   readonly privacyHref: string;
+  readonly language?: 'en' | 'zh-cn';
 }
 
 /**
  * Static markup for the consent choice. It ships in the HTML so the control exists without
  * JavaScript having to build a dialog, and the same string backs the DOM contract tests.
  */
-export function consentMarkup({ privacyHref }: ConsentMarkupOptions): string {
+export function consentMarkup({ privacyHref, language = 'en' }: ConsentMarkupOptions): string {
+  if (language === 'zh-cn') {
+    return `<div class="ferryx-consent__panel" role="dialog" aria-labelledby="${TITLE_ID}" aria-describedby="${DESCRIPTION_ID}" data-consent-panel hidden>
+  <h2 class="ferryx-consent__title" id="${TITLE_ID}">网站分析</h2>
+  <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx 使用 Google Analytics 了解本网站的页面访问和下载情况。在您作出选择之前，不会加载或存储任何分析数据。无论您如何选择，Ferryx 桌面应用都不发送遥测数据，网站功能也不会改变。<a class="ferryx-consent__link" href="${privacyHref}">隐私声明（英文）</a></p>
+  <div class="ferryx-consent__actions">
+    <button class="${BUTTON_CLASS}" type="button" data-consent-action="granted">允许分析</button>
+    <button class="${BUTTON_CLASS}" type="button" data-consent-action="denied">拒绝分析</button>
+  </div>
+</div>
+<button class="ferryx-consent__reopen" type="button" data-consent-action="reopen" hidden>分析设置</button>`;
+  }
   return `<div class="ferryx-consent__panel" role="dialog" aria-labelledby="${TITLE_ID}" aria-describedby="${DESCRIPTION_ID}" data-consent-panel hidden>
   <h2 class="ferryx-consent__title" id="${TITLE_ID}">Website analytics</h2>
   <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx can measure which pages and downloads this site sends people to, using Google Analytics. Nothing is loaded or stored until you choose. The Ferryx desktop app sends no telemetry either way, and the site works the same whichever you pick. <a class="ferryx-consent__link" href="${privacyHref}">Privacy declaration</a></p>

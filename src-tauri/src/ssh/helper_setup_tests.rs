@@ -958,3 +958,81 @@ fn ssh_helper_setup_qualified_runtime_root_fits_unix_socket_limit() {
     assert_ne!(roots[0], roots[2]);
     assert_ne!(roots[1], roots[2]);
 }
+
+#[test]
+fn windows_upload_script_avoids_here_strings_on_stdin() {
+    // The script is piped to `<shell> -Command -`, and that stdin mode silently
+    // discards multi-line here-strings (exit 0, no output, no marker), so the
+    // payload has to be a single newline-free single-quoted literal.
+    let location = HelperLocation {
+        executable: "C:\\u\\.ferryx\\versions\\v\\bin\\ferryx-remote-helper.exe".into(),
+        root: "C:\\u\\.ferryx\\r\\v\\digest".into(),
+    };
+    let script = build_windows_upload_script(&location, b"payload-bytes");
+
+    assert!(
+        !script.contains("@'"),
+        "windows upload must not open a here-string: {script}"
+    );
+    assert!(
+        !script.contains("'@"),
+        "windows upload must not close a here-string: {script}"
+    );
+    let literal_start = script
+        .find("$b64 = '")
+        .expect("payload assignment present")
+        + "$b64 = '".len();
+    let literal_end = literal_start
+        + script[literal_start..]
+            .find('\'')
+            .expect("payload literal terminated");
+    let literal = &script[literal_start..literal_end];
+    assert!(
+        !literal.contains('\n'),
+        "the payload literal cannot span lines"
+    );
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    assert_eq!(literal, STANDARD.encode(b"payload-bytes"));
+}
+
+#[test]
+fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
+    // Regression (live maho-win 2026-10-04): the Windows arm used to pass
+    // "-Command -" through `RemoteExecutor::command`, which encodes it as an
+    // `-EncodedCommand` script. The remote pwsh then decoded and executed a
+    // program literally named `-Command` (exit 1), so every helper install on
+    // Windows failed and no qualified helper could ever be provisioned there.
+    let host = sample_host("ssh-maho-win");
+    for executor in [RemoteExecutor::Powershell, RemoteExecutor::Pwsh] {
+        let mut env = sample_windows_env("C:\\Users\\sook");
+        env.executor = executor;
+        let location =
+            qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
+        let (cmd, input) = install_invocation(&env, &location, b"BINARY".to_vec());
+
+        assert_eq!(
+            cmd,
+            format!(
+                "{} -NoLogo -NoProfile -NonInteractive -Command -",
+                executor.program()
+            ),
+            "windows upload must run in raw stdin mode for {}",
+            executor.program()
+        );
+        assert!(
+            !cmd.contains("-EncodedCommand"),
+            "upload transport must not wrap the stdin marker as a script, got: {cmd}"
+        );
+        assert!(!input.is_empty(), "upload payload must stay attached to stdin");
+    }
+
+    // Document why the raw path exists: `command` is script-encoding by design,
+    // so the stdin-mode helper must bypass it.
+    for executor in [RemoteExecutor::Powershell, RemoteExecutor::Pwsh] {
+        let encoded = executor.command("-Command -");
+        assert!(
+            encoded.contains("-EncodedCommand"),
+            "executor.command is expected to wrap scripts: {encoded}"
+        );
+    }
+}

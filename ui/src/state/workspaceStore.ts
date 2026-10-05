@@ -513,6 +513,13 @@ export function useWorkspaceStore({
     const fallbackProbesByAgent = new Map<string, { inFlight: boolean; startedAt: number }>();
     let subscribed = true;
 
+    // Keystroke-rate, so it only touches the module-level clocks (no dispatch, no re-render).
+    const onSessionInteractedForAttention = (event: Event) => {
+      const sessionId = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (sessionId) markSessionEngagementForAttention(sessionId);
+    };
+    window.addEventListener("ferryx:session-interacted", onSessionInteractedForAttention);
+
     void onNativeTerminalTitle((payload) => {
       const resolved = resolveSession(payload.sessionId);
       if (!resolved) {
@@ -648,6 +655,7 @@ export function useWorkspaceStore({
 
     return () => {
       subscribed = false;
+      window.removeEventListener("ferryx:session-interacted", onSessionInteractedForAttention);
       unsubscribeLifecycle();
       unlistenTitle?.();
       unlistenBell?.();
@@ -3033,6 +3041,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
     }
     case "MARK_SESSION_ACTIVITY_SEEN": {
+      // Acknowledging is user engagement: production acks ride pane clicks/focus that also fire
+      // `ferryx:session-interacted`, so record the clock here too — the completion after fresh
+      // post-ack work is user-attended, not an automation turn. Map write is idempotent.
+      lastSessionEngagementAtBySession.set(action.sessionId, Date.now());
       const activity = state.activityBySessionId?.[action.sessionId];
       if (
         !activity ||
@@ -3049,6 +3061,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "RESET_AGENT_STATE": {
       let nextState = state;
+      lastAttentionEpisodeAtBySession.delete(action.sessionId);
+      lastSessionEngagementAtBySession.delete(action.sessionId);
       if (state.activityBySessionId?.[action.sessionId]) {
         const activityBySessionId = { ...(nextState.activityBySessionId ?? {}) };
         delete activityBySessionId[action.sessionId];
@@ -3181,6 +3195,9 @@ function acknowledgeTabCompletions(state: WorkspaceState, tabId: string): Worksp
       continue;
     }
     next[sessionId] = { ...activity, seen: true };
+    // Reading the completion is engagement: the completion after fresh post-ack work is
+    // user-attended, not an automation turn re-driving itself.
+    lastSessionEngagementAtBySession.set(sessionId, Date.now());
     changed = true;
   }
 
@@ -3244,6 +3261,30 @@ function isSessionBackendDead(state: WorkspaceState, sessionId: string): boolean
   return session.backendSessionId === null || session.lifecycle === "exited" || session.lifecycle === "failed";
 }
 
+/**
+ * Engagement and attention-episode clocks, keyed by frontend session id.
+ *
+ * `ferryx:session-interacted` (input, paste, pane focus, navigation) records the last moment the
+ * user was part of a session's loop; every fresh attention episode records when it began. A
+ * `done` that starts without any engagement after the previous episode is an automation turn
+ * re-driving itself, so it is stored quietly instead of re-arming attention. Module-level rather
+ * than store state: keystroke-rate updates must not dispatch reducer actions, and losing the
+ * clocks on reload only re-arms one benign completion.
+ */
+const lastSessionEngagementAtBySession = new Map<string, number>();
+const lastAttentionEpisodeAtBySession = new Map<string, number>();
+
+/** Record that the user just engaged with a session (input, paste, pane focus, navigation). */
+export function markSessionEngagementForAttention(sessionId: string): void {
+  lastSessionEngagementAtBySession.set(sessionId, Date.now());
+}
+
+/** Test hook: clears the engagement/episode clocks. */
+export function resetAttentionEngagementClocksForTests(): void {
+  lastSessionEngagementAtBySession.clear();
+  lastAttentionEpisodeAtBySession.clear();
+}
+
 function applySessionActivity(
   state: WorkspaceState,
   tabId: string,
@@ -3291,11 +3332,27 @@ function applySessionActivity(
     suppressionAgeMs <= ATTENTION_SUPPRESSION_WINDOW_MS &&
     isAttentionState;
   const hasSuppressionFlag = suppressionAgeMs !== null;
+  // An automation loop re-drives its own turns: a fresh `done` that lands without any user
+  // engagement (input, focus, navigation) since the previous attention episode means the user
+  // was never part of this round-trip, so it is stored quietly (seen + suppressed) instead of
+  // re-arming the pane frame, tab dots and the notification center. `waiting` is never quieted
+  // — an agent asking for input is a real request regardless of who drove the run — and the
+  // armed resume-blip suppression keeps its own, narrower contract alongside this one.
+  const previousAttentionAt = lastAttentionEpisodeAtBySession.get(sessionId);
+  const lastEngagementAt = lastSessionEngagementAtBySession.get(sessionId);
+  const freshAttentionEpisode = isAttentionState && (!wasAttentionState || previous?.state !== activity.state);
+  const automationQuietDone =
+    freshAttentionEpisode &&
+    activity.state === "done" &&
+    !suppression &&
+    previousAttentionAt !== undefined &&
+    (lastEngagementAt === undefined || lastEngagementAt < previousAttentionAt);
   const acknowledged =
     isAttentionState &&
     (activity.seen === true ||
       (isSameAttentionState && previous?.seen === true) ||
       suppression ||
+      automationQuietDone ||
       (observed && isSessionActivelyObserved(state, tabId, sessionId)));
   const stored: TerminalActivity = {
     ...activity,
@@ -3305,10 +3362,12 @@ function applySessionActivity(
           notificationSuppressed:
             activity.notificationSuppressed === true ||
             suppression ||
+            automationQuietDone ||
             (isSameAttentionState && previous?.notificationSuppressed === true),
         }
       : {}),
   };
+  if (freshAttentionEpisode) lastAttentionEpisodeAtBySession.set(sessionId, Date.now());
 
   // The flag is consumed by the first attention transition either way: an effective
   // suppression eats the resume blip, an expired one lets the genuine completion through.
@@ -3324,10 +3383,7 @@ function applySessionActivity(
       : {}),
   };
 
-  const isNewAttentionTransition =
-    isAttentionState && (!wasAttentionState || previous?.state !== activity.state);
-
-  if (isNewAttentionTransition && !stored.notificationSuppressed && (!observed || !isTabVisible(state, tabId))) {
+  if (freshAttentionEpisode && !stored.notificationSuppressed && (!observed || !isTabVisible(state, tabId))) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

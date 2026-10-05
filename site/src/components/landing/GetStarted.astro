@@ -1,0 +1,184 @@
+---
+import CopyCommand from './CopyCommand';
+
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const macUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg';
+const windowsUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe';
+const appImageUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage';
+const debUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb';
+const releasesUrl = 'https://github.com/Indosaram/ferryx/releases/latest';
+
+const primaryLink =
+  'mt-auto inline-flex h-11 items-center justify-center rounded-full bg-ink px-5 text-[14px] font-medium text-page transition-colors duration-150 hover:bg-ink-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30';
+const textLink =
+  'inline-flex items-center text-[14px] font-medium text-ink transition-colors duration-150 hover:text-ink-soft';
+---
+
+<section id="install" class="py-24 sm:py-28 border-t border-line bg-page-raised">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6">
+    <div class="max-w-2xl mb-12 sm:mb-16">
+      <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+        Get started
+      </p>
+      <h2 class="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+        Install in a minute
+      </h2>
+      <p class="mt-4 text-[15px] sm:text-[17px] leading-relaxed text-ink-soft">
+        Pick your platform. Every link resolves to the latest release.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <!-- macOS -->
+      <div class="flex flex-col rounded-2xl border border-line bg-surface p-6 shadow-card">
+        <div class="flex items-center gap-2.5">
+          <svg viewBox="0 0 24 24" class="h-5 w-5 shrink-0 text-ink-soft" fill="currentColor" aria-hidden="true" focusable="false">
+            <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.038 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701" />
+          </svg>
+          <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">macOS</h3>
+        </div>
+        <p class="mt-2 text-[13px] text-ink-faint">Universal DMG</p>
+        <ul class="mt-4 flex flex-col gap-2">
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            macOS 10.15 or later
+          </li>
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            Apple Silicon + Intel, one universal app
+          </li>
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            Signed and notarised
+          </li>
+        </ul>
+        <div class="mt-auto flex flex-col pt-6">
+          <a href={macUrl} data-ferryx-location="install_section" class={primaryLink}>Download for macOS</a>
+        </div>
+      </div>
+
+      <!-- Windows -->
+      <div class="flex flex-col rounded-2xl border border-line bg-surface p-6 shadow-card">
+        <div class="flex items-center gap-2.5">
+          <svg viewBox="0 0 24 24" class="h-5 w-5 shrink-0 text-ink-soft" fill="currentColor" aria-hidden="true" focusable="false">
+            <rect x="3" y="3" width="8" height="8" rx="0.5"></rect>
+            <rect x="13" y="3" width="8" height="8" rx="0.5"></rect>
+            <rect x="3" y="13" width="8" height="8" rx="0.5"></rect>
+            <rect x="13" y="13" width="8" height="8" rx="0.5"></rect>
+          </svg>
+          <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Windows</h3>
+        </div>
+        <p class="mt-2 text-[13px] text-ink-faint">x64 installer (.exe)</p>
+        <ul class="mt-4 flex flex-col gap-2">
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            Windows 10 or 11, 64-bit
+          </li>
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            WebView2 runtime
+          </li>
+        </ul>
+        <p class="mt-4 text-[13px] leading-relaxed text-ink-faint">
+          Not code-signed yet, so Windows SmartScreen warns on first run.
+        </p>
+        <div class="mt-auto flex flex-col pt-6">
+          <a href={windowsUrl} data-ferryx-location="install_section" class={primaryLink}>Download for Windows</a>
+        </div>
+      </div>
+
+      <!-- Linux -->
+      <div class="flex flex-col rounded-2xl border border-line bg-surface p-6 shadow-card">
+        <div class="flex items-center gap-2.5">
+          <svg
+            viewBox="0 0 24 24"
+            class="h-5 w-5 shrink-0 text-ink-soft"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.75"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" x2="20" y1="19" y2="19"></line>
+          </svg>
+          <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Linux</h3>
+        </div>
+        <p class="mt-2 text-[13px] text-ink-faint">AppImage + .deb</p>
+        <ul class="mt-4 flex flex-col gap-2">
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            x86_64
+          </li>
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            glibc 2.31 or newer
+          </li>
+          <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+            <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+            WebKitGTK 4.0 / 4.1 + GTK 3
+          </li>
+        </ul>
+        <div class="mt-auto flex flex-col gap-3 pt-6">
+          <a
+            href={appImageUrl}
+            data-ferryx-location="install_section"
+            class={primaryLink}
+          >
+            Download AppImage
+          </a>
+          <a
+            href={debUrl}
+            data-ferryx-location="install_section"
+            class="text-[14px] font-medium text-ink underline underline-offset-4 transition-colors duration-150 hover:text-ink-soft"
+          >
+            Get the .deb
+          </a>
+        </div>
+      </div>
+
+      <!-- Headless Linux server -->
+      <div class="flex flex-col rounded-2xl border border-line bg-surface p-6 shadow-card">
+        <div class="flex items-center gap-2.5">
+          <svg
+            viewBox="0 0 24 24"
+            class="h-5 w-5 shrink-0 text-ink-soft"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.75"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <rect width="20" height="8" x="2" y="2" rx="2"></rect>
+            <rect width="20" height="8" x="2" y="14" rx="2"></rect>
+            <line x1="6" x2="6.01" y1="6" y2="6"></line>
+            <line x1="6" x2="6.01" y1="18" y2="18"></line>
+          </svg>
+          <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Headless Linux server</h3>
+        </div>
+        <p class="mt-2 text-[13px] text-ink-faint">daemon + CLI</p>
+        <p class="mt-4 text-[14px] leading-relaxed text-ink-soft">
+          No GUI needed. Pair it from your desktop.
+        </p>
+        <CopyCommand client:visible command="curl -fsSL https://relay.ferryx.dev/install.sh | bash" />
+      </div>
+    </div>
+
+    <div class="mt-10 flex flex-col gap-4 border-t border-line pt-6 sm:flex-row sm:items-center sm:justify-between">
+      <p class="font-mono text-[13px] text-ink-faint">
+        Verify downloads: <span class="text-ink-soft">sha256sum -c SHA256SUMS.txt</span>
+      </p>
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <a href={releasesUrl} class={`group ${textLink}`}>All releases <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span></a>
+        <a href={`${baseUrl}docs/introduction/`} class={`group ${textLink}`}>First session guide <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span></a>
+      </div>
+    </div>
+  </div>
+</section>

@@ -141,3 +141,50 @@ async fn machine_event_snapshot_recovers_when_commit_overlaps_inventory() {
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn desktop_focus_change_is_published_to_machine_subscribers_once() {
+    // Given: a machine-scoped gateway and a subscriber on its own event domain.
+    let (root, owner) = crate::ipc::run_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        let owner = DaemonServer::new_with_paths(
+            Some(root.path().join("config")),
+            Some(root.path().join("auth")),
+        );
+        Ok((root, owner))
+    })
+    .await
+    .unwrap();
+    let state = owner.remote_state().clone();
+    let mut events = state
+        .machine_services
+        .as_ref()
+        .unwrap()
+        .workspaces
+        .machine_events
+        .subscribe();
+    let focus = |session: &str| crate::remote::RemoteActiveDesktopSelection {
+        workspace_id: Some("ws".into()),
+        session_id: Some(session.into()),
+        ..Default::default()
+    };
+    // When: the desktop focuses a session, republishes the identical focus, then moves.
+    state.set_active_selection(focus("s1"));
+    state.set_active_selection(focus("s1"));
+    state.set_active_selection(focus("s2"));
+    // Then: only real focus changes reach machine clients, as a bare pointer.
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        assert_eq!(event["type"], "desktopSelectionChanged");
+        assert_eq!(event["payload"], json!({"workspaceId": "ws", "worktreeSlug": null}));
+        seen.push(event["sessionId"].as_str().unwrap().to_string());
+    }
+    assert_eq!(seen, ["s1", "s2"]);
+    drop((state, owner));
+    crate::ipc::run_blocking(move || {
+        root.close().unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

@@ -1342,6 +1342,55 @@ mod tests {
     }
 
     #[test]
+    fn test_line_text_at_returns_physical_wrapped_rows_with_full_width() {
+        let mut terminal = NativeTerminal::new(20, 5).expect("create native terminal");
+        let before = "keep selection";
+        terminal
+            .feed(format!("{before}\r\n").as_bytes())
+            .expect("feed prior selection text");
+        terminal
+            .select_word_at(1, 0)
+            .expect("select a known word before wrapped output");
+
+        terminal
+            .feed(b"abcdefghijklmnopqrsZ0123456789")
+            .expect("feed wrapped path and final-column marker");
+        let selection_before = terminal.selection_text().expect("read selection before");
+
+        let first = terminal.line_text_at(4, 1).expect("read first physical row");
+        let second = terminal.line_text_at(4, 2).expect("read second physical row");
+
+        assert_eq!(first, "abcdefghijklmnopqrsZ");
+        assert_eq!(first.chars().nth(19), Some('Z'));
+        assert_eq!(second.trim_end(), "0123456789");
+        assert_eq!(
+            terminal.selection_text().expect("read selection after"),
+            selection_before,
+            "reading physical rows must not modify the active selection"
+        );
+    }
+
+    #[test]
+    fn test_line_text_at_uses_scrolled_viewport_row() {
+        let mut terminal = NativeTerminal::new(20, 2).expect("create native terminal");
+        terminal
+            .feed(b"history row marker\r\n")
+            .expect("feed oldest history row");
+        for line in ["middle row", "bottom row", "live row", "newest row"] {
+            terminal
+                .feed(format!("{line}\r\n").as_bytes())
+                .expect("feed terminal history");
+        }
+
+        terminal
+            .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
+            .expect("scroll viewport to top");
+
+        let row = terminal.line_text_at(0, 0).expect("read top viewport row");
+        assert_eq!(row.trim_end(), "history row marker");
+    }
+
+    #[test]
     fn top_anchored_scroll_region_creates_scrollback() {
         // Reference parity: xterm's BufferService.scroll creates history whenever
         // scrollTop === 0, whatever the bottom margin. A bottom-anchored TUI that

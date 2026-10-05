@@ -1,0 +1,69 @@
+---
+// Section links resolve against BASE_URL (the site can deploy under a base path).
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const comparisons = [
+  {
+    title: 'Only one agent, from one vendor?',
+    body: "Use claude --worktree or Codex Worktree mode — the vendor's own flag is the shortest path. Ferryx is for mixing vendors and watching them in one window.",
+    href: `${baseUrl}use-cases/parallel-ai-agents/`,
+  },
+  {
+    title: 'Happy with tmux + git worktree?',
+    body: 'It works. The comparison lays out what you wire yourself — worktrees, naming, cleanup, status — against what Ferryx manages for you.',
+    href: `${baseUrl}compare/tmux-git-worktree/`,
+  },
+  {
+    title: 'Looking at Conductor?',
+    body: "Platform availability, local worktrees, and session survival. Conductor's own docs say it is not available for Windows or Linux yet.",
+    href: `${baseUrl}compare/conductor/`,
+  },
+  {
+    title: 'Looking at Warp?',
+    body: 'Warp open-sourced its client under AGPL-3.0 and sells a commercial agent platform; Ferryx is an early source-available tool.',
+    href: `${baseUrl}compare/warp/`,
+  },
+];
+---
+
+<section id="compare" class="py-24 sm:py-28 border-t border-line bg-page-raised">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6">
+    <div class="text-center max-w-2xl mx-auto mb-16">
+      <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+        Honest comparison
+      </p>
+      <h2 class="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+        When to use something else
+      </h2>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+      {
+        comparisons.map((item) => (
+          <a
+            href={item.href}
+            class="group flex flex-col rounded-2xl border border-line bg-surface p-6 sm:p-8 shadow-card transition-colors hover:border-line-strong"
+          >
+            <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">{item.title}</h3>
+            <p class="mt-3 text-[15px] leading-relaxed text-ink-soft">{item.body}</p>
+            <span class="mt-auto pt-5 inline-flex items-center text-[14px] font-medium text-ink">
+              Read the comparison <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span>
+            </span>
+          </a>
+        ))
+      }
+    </div>
+
+    <div class="mt-14 text-center">
+      <p class="text-[13px] text-ink-faint">No performance claims without shared measurements.</p>
+      <a
+        href={`${baseUrl}compare/`}
+        class="group mt-3 inline-flex items-center font-medium text-ink hover:text-ink-soft transition-colors"
+      >
+        All comparisons <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span>
+      </a>
+    </div>
+  </div>
+</section>

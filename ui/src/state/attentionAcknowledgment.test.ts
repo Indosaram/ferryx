@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { summarizeActivities } from "../lib/activity";
 import { createLayoutState } from "./layout";
-import { workspaceReducer, type WorkspaceState } from "./workspaceStore";
+import { resetAttentionEngagementClocksForTests, workspaceReducer, type WorkspaceState } from "./workspaceStore";
+
+// The engagement/episode clocks are module-level; tests reuse session ids, so reset per test.
+beforeEach(() => resetAttentionEngagementClocksForTests());
 
 function fixture(): WorkspaceState {
   let state: WorkspaceState = {

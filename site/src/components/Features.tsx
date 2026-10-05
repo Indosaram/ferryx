@@ -6,73 +6,29 @@ import {
   SplitVisual,
   ZeroElectronVisual,
 } from "@/components/FeatureVisuals";
+import type { LandingLocale } from "@/lib/locale";
 
-const basePath = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
-
-export function Features() {
-  const features = [
-    {
-      visual: GhosttyVisual,
-      eyebrow: "Rendering",
-      title: "Native Ghostty & wgpu Engine",
-      description: "Desktop terminal panes render directly via native libghostty and a GPU-accelerated wgpu pipeline for crisp font rasterization and low-latency throughput.",
-      points: ["libghostty terminal core", "wgpu GPU pipeline", "50-frame offscreen p50 3.10 ms on M4 Max"],
-    },
-    {
-      visual: AgentsVisual,
-      eyebrow: "Agents",
-      title: "Multi-Agent Workspaces",
-      description: "Orchestrate parallel AI coding agents (Claude, Codex, Gemini Flash) in isolated split-panes with real-time status indicators.",
-      points: ["Isolated worktree per agent", "Live status indicators", "Launch from the tab bar"],
-    },
-    {
-      visual: SplitVisual,
-      eyebrow: "Layout",
-      title: "Flexible Split-Pane Tiling",
-      description: "Arbitrary vertical and horizontal terminal splits with responsive pointer drag resizing and smooth layout transitions.",
-      points: ["Vertical & horizontal splits", "Pointer drag resizing", "Drag tabs into any pane"],
-    },
-    {
-      visual: MobileVisual,
-      eyebrow: "Remote",
-      title: "Mobile Web Pairing",
-      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output through a dependency-free DOM grid and steer agent workflows on the go.",
-      points: ["6-digit PIN pairing", "Streamed terminal grid", "Steer agents from a phone"],
-    },
-    {
-      visual: ZeroElectronVisual,
-      eyebrow: "Architecture",
-      title: "Zero Electron Overhead",
-      description: "Built on Tauri v2 and native WebView2/WebKit engines paired with a headless Rust PTY daemon. The core is cross-platform; selected OS integrations remain macOS-first.",
-      points: ["Tauri v2 shell", "Headless Rust PTY daemon", "Cross-platform core, macOS-first integrations"],
-    },
-    {
-      visual: PersistenceVisual,
-      eyebrow: "Reliability",
-      title: "Resilient Persistence",
-      description: "Automatic workspace state snapshotting and background daemon reattachment guarantee you never lose work on crash or exit.",
-      points: ["Layout snapshots", "Daemon survives the GUI", "Reattach with replay"],
-    },
-  ];
+export function Features({ locale, basePath }: { locale: LandingLocale; basePath: string }) {
+  const visuals = [GhosttyVisual, AgentsVisual, SplitVisual, MobileVisual, ZeroElectronVisual, PersistenceVisual];
 
   return (
     <section id="features" className="py-24 sm:py-28 border-t border-line bg-page-raised relative">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="text-center max-w-2xl mx-auto mb-16 sm:mb-20">
           <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
-            Why Ferryx
+            {locale.features.eyebrow}
           </p>
           <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
-            Speed. Isolation. Total control.
+            {locale.features.title}
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
-            Ferryx combines a measured WGPU terminal path, a leak-checked libghostty-vt boundary, and a headless Rust daemon for parallel agent collaboration.
+            {locale.features.intro}
           </p>
         </div>
 
         <div className="flex flex-col gap-4">
-          {features.map((feature, idx) => {
-            const Visual = feature.visual;
+          {locale.features.cards.map((feature, idx) => {
+            const Visual = visuals[idx];
             const flip = idx % 2 === 1;
             return (
               <div
@@ -89,8 +45,8 @@ export function Features() {
                   <p className="mt-4 text-[16px] leading-relaxed text-ink-soft">
                     {feature.description}
                   </p>
-                  {feature.eyebrow === 'Architecture' && (
-                    <a href={`${basePath}docs/architecture/`} className="mt-4 inline-flex items-center text-[14px] font-medium text-ink hover:text-ink-soft transition-colors">Read the architecture deep dive →</a>
+                  {feature.link && (
+                    <a href={`${basePath}docs/architecture/`} className="mt-4 inline-flex items-center text-[14px] font-medium text-ink hover:text-ink-soft transition-colors">{feature.link}</a>
                   )}
                   <ul className="mt-6 flex flex-col gap-2.5">
                     {feature.points.map((point) => (

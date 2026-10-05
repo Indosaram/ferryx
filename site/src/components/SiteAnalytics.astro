@@ -10,7 +10,8 @@ import { consentMarkup, CONSENT_TEMPLATE_ID } from '../lib/analyticsRuntime';
 
 const config = resolveSiteAnalyticsConfig(import.meta.env);
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
-const consentHtml = config.measurementId ? consentMarkup({ privacyHref: `${base}privacy/` }) : '';
+const language = Astro.url.pathname.includes('/zh-cn/') ? 'zh-cn' : 'en';
+const consentHtml = config.measurementId ? consentMarkup({ privacyHref: `${base}privacy/`, language }) : '';
 
 // Written as a raw string rather than an Astro <style> block: a <style> element inside a
 // conditional expression is emitted verbatim as text instead of being compiled, and hoisting

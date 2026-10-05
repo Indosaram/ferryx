@@ -1954,7 +1954,6 @@ where
         state.detail.clone(),
     );
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
-
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
     // exceeds the 1024-byte control slot, fallback to sending the essential provider identity
@@ -2008,6 +2007,11 @@ async fn handle_machine_terminal_socket(
     let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
         return;
     };
+
+    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
+    // so no racing agent state update or initial conversation identity is lost.
+    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
+
     let (mut sender, mut receiver) = socket.split();
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
@@ -2015,10 +2019,6 @@ async fn handle_machine_terminal_socket(
     } = attachment;
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
-
-    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
-    // so no racing agent state update or initial conversation identity is lost.
-    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
 
     let gap = snapshot
         .gap
@@ -2089,6 +2089,18 @@ async fn handle_machine_terminal_socket(
         }
     }
     drop(charged_snapshot);
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
@@ -4672,7 +4684,7 @@ pub struct RemoteServerHandle {
 
 impl RemoteServerHandle {
     /// Prepare a replacement without changing the active listener or relay publication.
-    pub async fn prepare_relay(
+    pub(crate) async fn prepare_relay(
         state: Arc<RemoteGatewayState>,
         relay_url: Option<&str>,
         address: SocketAddr,

@@ -34,6 +34,8 @@ export interface NavbarProbe {
   documentHorizontalOverflow: number;
   downloadReachable: boolean;
   themeToggleReachable: boolean;
+  languageSwitchReachable: boolean;
+  languageSwitch: { href: string; lang: string } | null;
   versionBadgeText: string[];
 }
 

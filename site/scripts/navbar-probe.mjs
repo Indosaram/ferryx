@@ -111,8 +111,10 @@ export const NAVBAR_PROBE = `(() => {
     controlsOutsideViewport: controls.filter((c) => c.rect.x < -0.5 || c.rect.right > window.innerWidth + 0.5),
     controlsBelowMinTapTarget: controls.filter((c) => c.rect.w < 24 || c.rect.h < 24).map((c) => ({ label: c.label, w: c.rect.w, h: c.rect.h })),
     documentHorizontalOverflow: round(document.documentElement.scrollWidth - window.innerWidth),
-    downloadReachable: controls.some((c) => /download/i.test(c.label)),
-    themeToggleReachable: controls.some((c) => /theme/i.test(c.label)),
+    downloadReachable: [...header.querySelectorAll('[data-ferryx-location="navbar_primary"]')].some((el) => el.getClientRects().length > 0),
+    themeToggleReachable: !!header.querySelector('[data-ferryx-theme]'),
+    languageSwitchReachable: !!header.querySelector('[data-ferryx-language]'),
+    languageSwitch: (() => { const link = header.querySelector('[data-ferryx-language]'); return link ? { href: new URL(link.href).pathname, lang: link.getAttribute('lang') } : null; })(),
     versionBadgeText: [...header.querySelectorAll("*")].map((el) => (el.children.length === 0 ? (el.textContent || "").trim() : "")).filter((t) => /^v\\d+\\.\\d+\\.\\d+/.test(t)),
   };
 })()`;
@@ -144,10 +146,14 @@ export const DEFAULT_VIEWPORTS = [
   { name: "1440", width: 1440, height: 900 },
 ];
 
+/** @typedef {{ viewportWidth: number; groups: unknown[]; overlaps: unknown[]; paintedOverlaps: unknown[]; clippedText: unknown[]; pill: object; header: object; contentWidth: number; childrenWidth: number; contentOverflow: number; pillScrollOverflow: number; controlsOutsideViewport: unknown[]; controlsBelowMinTapTarget: unknown[]; documentHorizontalOverflow: number; downloadReachable: boolean; themeToggleReachable: boolean; languageSwitchReachable: boolean; languageSwitch: {href: string; lang: string} | null; versionBadgeText: string[] }} NavbarProbe */
+/** @typedef {{ name: string; width: number; height: number; locale?: 'en' | 'zh-cn'; probe: NavbarProbe; menuState: object; consoleErrors: string[]; screenshots: object }} NavbarViewportResult */
+
 /**
  * Loads the built landing page in the locally installed Google Chrome at each viewport and
  * returns navbar geometry, download-menu state, and page errors. No browser is downloaded.
  */
+/** @returns {Promise<{label: string; origin: string; dist: string; viewports: NavbarViewportResult[]}>} */
 export async function measureNavbar({ dist, viewports = DEFAULT_VIEWPORTS, evidenceDir, label = "run" }) {
   const playwright = await loadPlaywright();
   if (!playwright) throw new Error("playwright not resolvable; set PLAYWRIGHT_MODULE");
@@ -171,9 +177,10 @@ export async function measureNavbar({ dist, viewports = DEFAULT_VIEWPORTS, evide
       page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
       page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(`console: ${m.text()}`); });
 
-      await page.goto(origin, { waitUntil: "load" });
+      const localizedPath = vp.locale === "zh-cn" ? "zh-cn/" : "";
+      await page.goto(`${origin}${localizedPath}`, { waitUntil: "load" });
       // Hydration signal, not a timer: the toggle exists only once the island mounts.
-      await page.waitForSelector("header button[aria-label*='theme']", { state: "attached" });
+      await page.waitForSelector("header button[data-ferryx-theme]", { state: "attached" });
 
       const probe = await page.evaluate(NAVBAR_PROBE);
       const screenshots = {};

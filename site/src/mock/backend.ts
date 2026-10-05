@@ -76,6 +76,8 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_browser_focus': return undefined;
     case 'cmd_browser_close': browsers.delete(a.browserId); return undefined;
     case 'cmd_browser_open_external': return undefined;
+    case 'cmd_browser_download_list': return [];
+    case 'cmd_browser_download_cancel': return false;
     case 'cmd_remote_status': return { enabled: false, mode: 'off', port: 43821, boundAddress: null, localIp: null, tailscale: { installed: false, running: false, tailnetName: null, selfDns: null, serveActive: false } };
     case 'cmd_remote_enable': case 'cmd_remote_disable': return invoke('cmd_remote_status');
     case 'cmd_remote_pairing_create': return { code: '4F2A-91', expiresInSeconds: 300 };

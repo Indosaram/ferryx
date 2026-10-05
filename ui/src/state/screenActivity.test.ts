@@ -1,13 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { resolveActivityIndicator } from "../lib/activity";
 import type { Worktree } from "../lib/types";
 import {
+  markSessionEngagementForAttention,
+  resetAttentionEngagementClocksForTests,
   selectTabActivitySummaries,
   selectWorktreeActivitySummaries,
   workspaceReducer,
   type WorkspaceState,
 } from "./workspaceStore";
+
+// The engagement/episode clocks are module-level; tests reuse session ids, so reset per test.
+beforeEach(() => resetAttentionEngagementClocksForTests());
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -301,7 +306,9 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
     expect(resolveActivityIndicator(selectTabActivitySummaries(state)["tab-a"])).toBeNull();
 
-    // The user submits a real turn and switches away before it finishes.
+    // The user submits a real turn and switches away before it finishes. Submitting a turn
+    // means typing into the pane, which records engagement in production.
+    markSessionEngagementForAttention("session-a");
     state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
     expect(resolveActivityIndicator(selectTabActivitySummaries(state)["tab-a"])).toBe("working");
 

@@ -34,7 +34,7 @@ describe("navbar responsive layout", () => {
       ]);
       if (code !== 0) throw new Error(`astro build failed (exit ${code}):\n${out}\n${err}`);
     }
-    report = await measureNavbar({ dist: DIST });
+    report = await measureNavbar({ dist: DIST, viewports: (["en", "zh-cn"] as const).flatMap((locale) => [320, 390, 768, 1440].map((width) => ({ name: `${locale}-${width}`, width, height: 900, locale }))) });
   }, BUILD_TIMEOUT_MS);
 
   test(
@@ -70,7 +70,11 @@ describe("navbar responsive layout", () => {
         width: vp.width,
         download: vp.probe.downloadReachable,
         theme: vp.probe.themeToggleReachable,
-      }).toEqual({ width: vp.width, download: true, theme: true });
+        language: vp.probe.languageSwitchReachable,
+      }).toEqual({ width: vp.width, download: true, theme: true, language: true });
+      expect(vp.probe.languageSwitch).toEqual(vp.name.startsWith("zh-cn-")
+        ? { href: "/", lang: "en" }
+        : { href: "/zh-cn/", lang: "zh-CN" });
     }
   });
 

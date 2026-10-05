@@ -694,6 +694,13 @@ impl SessionRouter {
         self.workspace_ids.write().remove(session_id);
     }
 
+    /// The workspace a session was registered under. The machine layer needs this to
+    /// describe sessions this daemon owns but did not create through the machine spawn
+    /// path (GUI-created local terminals, restored PTYs), which have no stored metadata.
+    pub(crate) fn workspace_for(&self, session_id: &str) -> Option<(String, Option<PathBuf>)> {
+        self.workspace_ids.read().get(session_id).cloned()
+    }
+
     async fn validate_ssh_workspace(&self, session_id: &str) -> Result<(), String> {
         let target = self.workspace_ids.read().get(session_id).cloned();
         if let Some((id, Some(path))) = target {
