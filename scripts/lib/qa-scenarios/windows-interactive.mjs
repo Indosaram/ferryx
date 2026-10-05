@@ -650,6 +650,12 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
     report: { ...record, outPath: plan.outPath, errPath: plan.errPath, exitPath: plan.exitPath, ...(detail ? { detail } : {}) },
     ledger,
   });
+  // Task ownership, tracked so the `finally` below deletes ONLY a scheduled task
+  // this attempt created itself and only when its own teardown has not already
+  // deleted it. `schtasks /delete` matches by task NAME, which is not an ownership
+  // proof, so it may never run on a path where this attempt created nothing.
+  let taskCreated = false;
+  let taskDeleted = false;
   try {
     writeFileSync(plan.batPath, plan.batBody, { encoding: 'ascii', mode: 0o600 });
     writeFileSync(plan.recordPath, JSON.stringify(record, null, 2), { mode: 0o600 });
@@ -673,6 +679,9 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
       return done({ outcome: 'CREATE_FAILED', stalled: false, code: 'INTERACTIVE_RELAUNCH_FAILED', exitCode: null, innerStdout: null, innerStderr: null },
         `schtasks /create exited ${created.code}: ${(created.stderr || created.stdout).trim()}`);
     }
+    // From here this attempt owns a scheduled task of its own name, and the
+    // `finally` may delete it.
+    taskCreated = true;
     const started = await runToolFn('schtasks', plan.runArgs);
     ledger.runCode = started.code ?? null;
     if (started.code !== 0) {
@@ -707,6 +716,9 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
       // be identified, and report the attempt as stalled.
       ledger.taskQuery = await queryDelegationTaskState(plan, runToolFn);
       ledger.teardown = await endStalledDelegationAttempt({ plan, deps });
+      // `endStalledDelegationAttempt` has already ended AND deleted this
+      // attempt's own task, so the `finally` must not delete it a second time.
+      taskDeleted = true;
       ledger.outcome = 'STALLED';
       return done({ outcome: 'STALLED', stalled: true, code: null, exitCode: null, innerStdout: null, innerStderr: null },
         `attempt ${index} stalled before the bat's first line: no entry marker at ${plan.entryMarkerPath} within ${markerWindowMs}ms (task ${taskName} ended; its own cmd.exe was killed by exact PID where it could be identified)`);
@@ -738,7 +750,14 @@ export async function runDelegationAttempt({ index, token, context, rawArgv, pro
     ledger.exitCode = exitCode;
     return done({ outcome: 'COMPLETED', stalled: false, code: null, exitCode, innerStdout, innerStderr }, null);
   } finally {
-    try { await runToolFn('schtasks', plan.deleteArgs); } catch { /* task teardown must never mask the verdict */ }
+    // Delete ONLY the task this attempt created, and only when this attempt has
+    // not already deleted it: the refusal path (a pre-existing entry marker) and a
+    // failed `/create` created NO task, and the stalled path's own
+    // identity-checked teardown has already ended and deleted this attempt's task.
+    // Deleting by name on those paths could remove a task this run does not own.
+    if (taskCreated && !taskDeleted) {
+      try { await runToolFn('schtasks', plan.deleteArgs); } catch { /* task teardown must never mask the verdict */ }
+    }
   }
 }
 

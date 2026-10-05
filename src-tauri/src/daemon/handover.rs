@@ -488,7 +488,12 @@ mod spawn_owner_tests {
         let manager = Arc::new(HandoverManager::new(canonical.clone()));
         let terminals = Arc::new(TerminalService::default());
         let owner = manager.retain_spawn_owner().unwrap();
-        assert_eq!(manager.prepare_handover(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        // F2-1 (`ecf80277`) made every spawn-gate refusal a typed, retryable busy token that
+        // ALSO names the guard, so the bare-token equality this test predates is stale:
+        // assert the token and the guard it names, as the F2 contract states.
+        let refusal = manager.prepare_handover(&terminals).unwrap_err();
+        assert!(is_spawn_gate_busy(&refusal), "{refusal}");
+        assert!(refusal.contains("1 in-flight spawn"), "{refusal}");
         assert_eq!(manager.status(), HandoverStatus::Active);
         drop(owner);
         // `prepare_handover` allocates the legacy socket inside the daemon runtime directory
@@ -520,10 +525,22 @@ mod spawn_owner_tests {
         let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
         let owner = manager.retain_spawn_owner().unwrap();
         let terminals = Arc::new(TerminalService::default());
-        assert_eq!(manager.commit_handover_v5(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        // F2-1 (`ecf80277`): the refusal is the typed, retryable busy token naming the
+        // in-flight spawn, not the bare `HANDOVER_BUSY` this test predates.
+        let refusal = manager.commit_handover_v5(&terminals).unwrap_err();
+        assert!(is_spawn_gate_busy(&refusal), "{refusal}");
+        assert!(refusal.contains("1 in-flight spawn"), "{refusal}");
         drop(owner);
         *manager.status.write() = HandoverStatus::Prepared;
-        assert!(manager.retain_spawn_owner().is_err());
+        // The same typed token covers the other guard: a prepared handover refuses a new
+        // spawn, and the refusal names the status it is in. (`SpawnOwnerGuard` is not
+        // `Debug`, so this matches rather than calling `unwrap_err`.)
+        let prepared_refusal = match manager.retain_spawn_owner() {
+            Ok(_) => panic!("a prepared handover must not admit a new spawn owner"),
+            Err(refusal) => refusal,
+        };
+        assert!(is_spawn_gate_busy(&prepared_refusal), "{prepared_refusal}");
+        assert!(prepared_refusal.contains("Prepared"), "{prepared_refusal}");
         manager.abort_handover().unwrap();
         assert!(manager.retain_spawn_owner().is_ok());
     }

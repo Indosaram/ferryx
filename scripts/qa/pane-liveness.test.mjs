@@ -2430,22 +2430,45 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     // the socket's ownership and mode are the credential. The runtime dir name is
     // deliberately one character: a Unix socket path is capped at 104 bytes on
     // macOS, and this temp root is already long.
+    //
+    // The unix-socket transport is asserted where a filesystem Unix socket is
+    // REAL. On Windows there is none: `net.Server.listen` on a path carrying a
+    // drive letter fails `EACCES` (measured on the gate host - `listen EACCES:
+    // permission denied C:\...\u\daemon.sock`), so the listener callback never ran
+    // and this test hung to its 10s deadline without asserting anything. The
+    // Windows lane therefore asserts what the same client really does with a
+    // unix-socket endpoint there - refuses it, typed and bounded, and never
+    // invents a reading from it - while the loopback-port transport a Windows
+    // host does have is exercised end to end below.
     const unixRuntime = join(root, 'u');
     mkdirSync(unixRuntime, { recursive: true });
-    const unixFake = fakeDaemon({ sessions: ['s-fixture', 's-pane'], epoch: 11 });
-    await new Promise(resolvePromise => unixFake.server.listen(join(unixRuntime, 'daemon.sock'), resolvePromise));
-    try {
-      const read = await inventoryModule.readDaemonSessionInventory({ runtimeDir: unixRuntime, platform: 'linux', totalMs: 3_000 });
-      expect(read.ok).toBe(true);
-      expect(read.sessions).toEqual(['s-fixture', 's-pane']);
-      expect(read.epoch).toBe(11);
-      expect(read.transport).toBe('unix-socket');
-      // READ-ONLY: the only requests on the wire are the two read verbs.
-      expect(unixFake.received.map(frame => frame.type)).toEqual(['handshake', 'listSessions']);
-      expect(unixFake.received.every(frame => inventoryModule.READ_ONLY_REQUEST_TYPES.includes(frame.type))).toBe(true);
-      expect(unixFake.received[0].version).toBe(inventoryModule.DAEMON_PROTOCOL_VERSION);
-      expect(unixFake.received[0].token).toBeUndefined();
-    } finally { await new Promise(resolvePromise => unixFake.server.close(resolvePromise)); }
+    if (process.platform === 'win32') {
+      const noUnixSocket = await inventoryModule.readDaemonSessionInventory({ runtimeDir: unixRuntime, platform: 'linux', totalMs: 3_000 });
+      expect(noUnixSocket.ok).toBe(false);
+      expect(noUnixSocket.code).toBe('DAEMON_RUNTIME_MISSING');
+      expect(noUnixSocket.sessions).toBeNull();
+      expect(noUnixSocket.transport).toBe('unix-socket');
+    } else {
+      const unixFake = fakeDaemon({ sessions: ['s-fixture', 's-pane'], epoch: 11 });
+      // A listen that fails must be a NAMED failure: an un-settled listen promise is
+      // how this test hung instead of asserting (the same shape that hid the EACCES).
+      await new Promise((resolvePromise, rejectPromise) => {
+        unixFake.server.once('error', rejectPromise);
+        unixFake.server.listen(join(unixRuntime, 'daemon.sock'), resolvePromise);
+      });
+      try {
+        const read = await inventoryModule.readDaemonSessionInventory({ runtimeDir: unixRuntime, platform: 'linux', totalMs: 3_000 });
+        expect(read.ok).toBe(true);
+        expect(read.sessions).toEqual(['s-fixture', 's-pane']);
+        expect(read.epoch).toBe(11);
+        expect(read.transport).toBe('unix-socket');
+        // READ-ONLY: the only requests on the wire are the two read verbs.
+        expect(unixFake.received.map(frame => frame.type)).toEqual(['handshake', 'listSessions']);
+        expect(unixFake.received.every(frame => inventoryModule.READ_ONLY_REQUEST_TYPES.includes(frame.type))).toBe(true);
+        expect(unixFake.received[0].version).toBe(inventoryModule.DAEMON_PROTOCOL_VERSION);
+        expect(unixFake.received[0].token).toBeUndefined();
+      } finally { await new Promise(resolvePromise => unixFake.server.close(resolvePromise)); }
+    }
 
     // Windows: the endpoint file holds the loopback port, and the first frame
     // must carry this boot's token (trimmed) as a top-level field.

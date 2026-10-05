@@ -377,12 +377,24 @@ test('the entry-marker window, the attempt cap and the sequence budget stay boun
   expect(BUDGETS.interactiveRelaunchEntryMarkerMs).toBe(10_000);
   expect(BUDGETS.interactiveRelaunchEntryMarkerMs).toBeGreaterThanOrEqual(5_000);
   expect(BUDGETS.interactiveRelaunchEntryMarkerMs / 516).toBeGreaterThan(15);
-  // 10s x 18 = the 180s the whole SEQUENCE gets - the same 180s that used to be
-  // spent on ONE stalled attempt, and enough to outlast the ~73s measured burst.
-  expect(BUDGETS.interactiveRelaunchAttempts).toBe(18);
-  expect(BUDGETS.interactiveRelaunchSequenceMs).toBe(180_000);
+  // The sequence is sized to OUTLAST A BURST, not to beat a stall rate. The
+  // measured burst distribution on the gate host is 1 attempt (pass-17 r1), 15
+  // attempts back-to-back for ~153s (pass-19) and 26+ attempts for ~260s and
+  // still stalling when its sequence ran out - so `cfb4374b` ("raise the
+  // delegation retry sequence to outlast the measured 153s burst") raised the
+  // sequence to 15 minutes (10s x 90). These are the CURRENT deliberate values,
+  // not a re-derived ideal: the budget is not changed here, only asserted.
+  expect(BUDGETS.interactiveRelaunchAttempts).toBe(90);
+  expect(BUDGETS.interactiveRelaunchSequenceMs).toBe(900_000);
   expect(BUDGETS.interactiveRelaunchAttempts * BUDGETS.interactiveRelaunchEntryMarkerMs)
     .toBe(BUDGETS.interactiveRelaunchSequenceMs);
+  // The budget must stay ABOVE the longest MEASURED burst: 26 attempts at the 10s
+  // window is the ~260s lower bound that was still stalling when its sequence ran
+  // out, so lowering either lever back under it is the regression this catches.
+  const MEASURED_BURST_ATTEMPTS = 26;
+  expect(BUDGETS.interactiveRelaunchAttempts).toBeGreaterThan(MEASURED_BURST_ATTEMPTS);
+  expect(BUDGETS.interactiveRelaunchSequenceMs)
+    .toBeGreaterThan(MEASURED_BURST_ATTEMPTS * BUDGETS.interactiveRelaunchEntryMarkerMs);
   // The old single-attempt budget name is gone: one attempt must never be able
   // to spend the whole sequence on its own.
   expect(BUDGETS.interactiveRelaunchTimeoutMs).toBeUndefined();
