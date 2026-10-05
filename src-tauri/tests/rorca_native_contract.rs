@@ -185,7 +185,13 @@ async fn spawn_test_daemon() -> TestDaemon {
     let dir = TempDir::new().expect("daemon tempdir");
     let socket_path = dir.path().join("test_daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
-    let server = Arc::new(DaemonServer::new());
+    // Integration tests are compiled without `cfg(test)`, so `DaemonServer::new()` would fall back
+    // to the machine's canonical identity directory and share one workspace catalog with every
+    // other test in the job. Explicit paths keep this fixture's catalog inside its own tempdir.
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config.json")),
+        Some(dir.path().join("auth.json")),
+    ));
     let server_clone = Arc::clone(&server);
     let task = tokio::spawn(async move {
         loop {
@@ -326,22 +332,24 @@ async fn initial_project_is_the_single_canonical_checkout_without_a_default_alia
         .expect("initial project");
     println!("initial project: {initial:?}");
 
-    assert_eq!(initial.workspace_id, "orca-lite");
-    assert_eq!(
-        initial.repo_root,
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repository root")
-            .canonicalize()
-            .expect("canonical repository root")
-    );
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repository root")
+        .canonicalize()
+        .expect("canonical repository root");
+    // The canonical checkout is identified by its folder name, so the expectation is derived the
+    // same way the product derives it. Hardcoding the project's former folder name made this fail
+    // wherever the repository is checked out under a different name.
+    let expected_workspace_id = derive_workspace_id(&repo_root);
+    assert_eq!(initial.workspace_id, expected_workspace_id);
+    assert_eq!(initial.repo_root, repo_root);
 
     let registered_ids = registry_state
         .list()
         .into_iter()
         .map(|(workspace_id, _)| workspace_id)
         .collect::<Vec<_>>();
-    assert_eq!(registered_ids, vec!["orca-lite".to_string()]);
+    assert_eq!(registered_ids, vec![expected_workspace_id]);
     assert!(
         !registry_state.contains(LEGACY_DEFAULT_WORKSPACE_ID),
         "the startup root must not be registered under a second `default` alias"
