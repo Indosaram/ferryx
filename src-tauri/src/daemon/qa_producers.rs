@@ -499,7 +499,7 @@ async fn run_held_rpc_watcher(
         tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
         // The command read is synchronous filesystem I/O; it runs on the blocking
         // pool so this poll cadence never stalls a worker of the runtime serving it.
-        let Some(request) = {
+        let Some(request) = ({
             let polled_dir = dir.clone();
             let polled_channel = Arc::clone(&channel);
             match crate::ipc::run_blocking(move || {
@@ -511,7 +511,7 @@ async fn run_held_rpc_watcher(
                 // A blocking read that cannot complete is "no evidence observed yet", never a pass.
                 Err(_) => None,
             }
-        } else {
+        }) else {
             continue;
         };
         let issued = request

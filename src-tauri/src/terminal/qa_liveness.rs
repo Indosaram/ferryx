@@ -878,7 +878,7 @@ async fn exercise_eof_watch_in(
         if tokio::time::Instant::now() >= deadline {
             return;
         }
-        let Some(request) = {
+        let Some(request) = ({
             // Same rule as the frame-side read above: this poll runs on the runtime that serves
             // the 25 ms cadence, so the synchronous sidecar read goes to the blocking pool.
             let polled_dir = dir.clone();
@@ -892,7 +892,7 @@ async fn exercise_eof_watch_in(
                 // A blocking read that cannot complete is "no control observed yet", never a pass.
                 Err(_) => None,
             }
-        } else {
+        }) else {
             continue;
         };
         let issued = request
