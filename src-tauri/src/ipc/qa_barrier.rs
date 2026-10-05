@@ -1856,6 +1856,23 @@ pub(crate) async fn bind_target_session_off_runtime(
     }
 }
 
+/// Off-runtime runner-bind adoption. The sync fn reads the runner's
+/// `<name>.bind.json` with a synchronous read and then writes the bound-ack file
+/// through `bind_target_session`; both run on the blocking pool here. A hop that
+/// cannot complete is reported as a refusal (the same `Err` shape the sync fn
+/// returns for an uncorrelated or conflicting bind), never as an adopted bind.
+pub(crate) async fn adopt_runner_bind_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    name: &str,
+) -> Result<String, String> {
+    let channel = Arc::clone(channel);
+    let name = name.to_string();
+    match tokio::task::spawn_blocking(move || channel.adopt_runner_bind(&name)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("adopt_runner_bind blocking hop failed: {error}")),
+    }
+}
+
 /// Off-runtime GUI `fixture-setup` settlement. The inventory and the creation
 /// audit are cloned into the blocking task because the caller still reports
 /// both after the settlement.
