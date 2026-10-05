@@ -381,9 +381,11 @@ pub(crate) async fn owner_mutation(
                 }
                 // Local registry keys and branch namespaces are independent identities.
                 // Machine HTTP requests retain their stricter identity() contract.
-                if let Err(error) = WorktreeManager::format_branch_name(&id.ws_id, &id.slug) {
-                    return Ok(typed(error));
-                }
+                let expected_branch = match WorktreeManager::format_branch_name(&id.ws_id, &id.slug)
+                {
+                    Ok(branch) => branch,
+                    Err(error) => return Ok(typed(error)),
+                };
                 if !service.catalog()?.workspaces.contains_key(&workspace) {
                     return Ok(typed(WorktreeError::WorkspaceNotFound {
                         workspace_id: workspace,
@@ -407,7 +409,21 @@ pub(crate) async fn owner_mutation(
                             }))
                         }
                         Err(error) => return Ok(typed(error)),
-                        Ok(_) => {}
+                        Ok(record) => {
+                            // A record at this path is not enough: the checkout must still be
+                            // the branch this identity owns. Otherwise a slot whose branch was
+                            // swapped with another slot's authorizes deleting the wrong
+                            // worktree and branch. This mirrors `resolve_deletion_worktree`,
+                            // which the deletion preview already uses, so preview and delete
+                            // agree on what a stale identity is.
+                            if record.branch_short_name() != Some(expected_branch.as_str()) {
+                                return Ok(typed(WorktreeError::WorktreeIdentityNotFound {
+                                    workspace_id: workspace,
+                                    ws_id: id.ws_id,
+                                    slug: id.slug,
+                                }));
+                            }
+                        }
                     }
                     // Porcelain listing retains lock/prunable metadata that inspecting
                     // the worktree's HEAD alone does not provide.
