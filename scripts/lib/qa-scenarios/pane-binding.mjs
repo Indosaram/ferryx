@@ -157,10 +157,15 @@ export function observedSessionIds(barrierHub, receiptName = PANE_PRESENTATION_R
 //     left refuses the read instead of taking it.
 function resolveReadCharge(charge, label, budget) {
   if (charge === null || charge === undefined) {
-    const consume = budget && typeof budget.consume === 'function' ? budget.consume : null;
-    if (consume === null) return { boundMs: undefined, charged: null, refusal: null };
+    // The method is called ON the budget, never extracted and called bare: `consume`
+    // reaches `this.remainingMs`, so an unbound call throws
+    // `Cannot read properties of undefined (reading 'remainingMs')`, which the catch
+    // below would report as a budget refusal and silently skip the read. That is how
+    // this path first broke in the real runner (pane binding came back UNBOUND with
+    // INVENTORY_READ_REFUSED on both reads) while the frozen gate stayed green.
+    if (!budget || typeof budget.consume !== 'function') return { boundMs: undefined, charged: null, refusal: null };
     try {
-      return { boundMs: consume(BUDGETS.daemonInventoryTotalMs, label), charged: null, refusal: null };
+      return { boundMs: budget.consume(BUDGETS.daemonInventoryTotalMs, label), charged: null, refusal: null };
     } catch (error) {
       return {
         boundMs: null,

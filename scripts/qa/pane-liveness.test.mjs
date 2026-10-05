@@ -3462,3 +3462,28 @@ test('a reader whose lastReading throws is recorded as a typed action and the sp
       .toEqual([SPLIT_INVENTORY_LAST_READING_ACTION, PRE_SPLIT_INVENTORY_ACTION, SPLIT_INVENTORY_ACTION]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('a reader given a real MonotonicBudget takes its read instead of refusing it', async () => {
+  // The reader's own budget path calls `consume` ON the budget, because
+  // `MonotonicBudget.consume` reaches `this.remainingMs`. A stub whose `consume`
+  // is an arrow function cannot express that requirement, which is why the frozen
+  // gate stayed green while the real runner refused BOTH pane reads with
+  // INVENTORY_READ_REFUSED ("Cannot read properties of undefined (reading
+  // 'remainingMs')") and the pane binding came back UNBOUND. This case uses the
+  // real class, so an unbound call throws and surfaces as the refusal it became.
+  const root = fixtureRoot();
+  try {
+    const { createPaneInventoryReader } = await import('../lib/qa-scenarios/pane-binding.mjs');
+    const reader = createPaneInventoryReader({
+      runtimeDir: join(root, 'runtime'),
+      platform: 'linux',
+      budget: new MonotonicBudget(),
+    });
+    const read = await reader.snapshot('pane-inventory-before');
+    // The read really ran: with no daemon socket at that runtime dir it fails for
+    // THAT reason, which is only reachable if the budget handed it a bound.
+    expect(read.code).toBe('DAEMON_RUNTIME_MISSING');
+    expect(read.code).not.toBe('INVENTORY_READ_REFUSED');
+    expect(read.ok).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
