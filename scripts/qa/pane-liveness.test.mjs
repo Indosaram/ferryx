@@ -2210,7 +2210,7 @@ test('a frontend that does not answer with the app root document blocks typed an
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('pane binding reads the app\'s own presentation receipt and excludes the fixture sessions', async () => {
+test('pane binding binds the pane the app itself presented and excludes the fixture sessions', async () => {
   const { bindPaneSession, PANE_PRESENTATION_RECEIPT } = await import('../lib/qa-scenarios/pane-binding.mjs');
   const root = fixtureRoot();
   const hub = new BarrierHub(root, { runId: 'run-pane', operationId: 'op-pane' });
@@ -2389,17 +2389,82 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     expect(preferred.settledBy).toBe('presentation-tuple');
     expect(preferred.backendSessionId).toBe('b-pane');
     expect(unusedAfterReads).toBe(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
-    // -----------------------------------------------------------------------
-    // The client itself, against a fake daemon that speaks the product's own
-    // framing (newline-delimited JSON; `handshake`/`handshakeOk` then
-    // `listSessions`/`listSessionsOk`), over BOTH transports.
-    // -----------------------------------------------------------------------
-    const inventoryModule = await import('../lib/qa-scenarios/daemon-inventory.mjs');
-    const { createServer: createNetServer } = await import('node:net');
+// ---------------------------------------------------------------------------
+// The inventory CLIENT itself, against fake daemons that speak the product's own
+// framing (newline-delimited JSON; `handshake`/`handshakeOk` then
+// `listSessions`/`listSessionsOk`), over BOTH transports.
+//
+// Split out of the binding test above, and given an explicit socket timeout. That
+// test's NAME promises the fixture-exclusion property, and bundling real sockets
+// into the same budget let one platform-specific transport hang mask the property
+// entirely: on the gate host the whole test died at 10020ms without ever asserting
+// the binding it is named for. Here a transport failure names the transport.
+
+// A real socket server whose LISTEN and CLOSE can never stay pending - both are
+// hazard points measured in this file:
+//   * `listen` with no 'error' handler neither resolves nor rejects when the bind
+//     fails (measured on Windows: a Unix-socket path carrying a drive letter fails
+//     EACCES and the listen callback never runs at all);
+//   * `server.close()` completes only once every connection has ENDED, and a
+//     connection whose peer half-closed stays open FOREVER when the server side
+//     never reads it - which is exactly the silent-listener case below, whose
+//     handler answers nothing. That `close()` sat in a `finally` and hung the test
+//     to its deadline with no error to show for it.
+// So every server here is opened through `startNetServer`, which tracks its own
+// connections and absorbs their reset (a peer tearing its own connection down is
+// not a failure of the server under test), and closed through `closeNetServer`,
+// which destroys the tracked connections, asks the server to drop any remaining
+// ones where the runtime supports it, BOUNDS the wait, and records the outcome in
+// `receipts` for the test to assert - instead of swallowing it, and instead of
+// throwing from a `finally` where a leaked server would mask a transport failure.
+function startNetServer(createNetServer, handler) {
+  const connections = new Set();
+  const server = createNetServer(socket => {
+    connections.add(socket);
+    socket.on('close', () => connections.delete(socket));
+    socket.on('error', () => { /* the peer closed it: this test asserts the FRAMES, not the teardown */ });
+    handler(socket);
+  });
+  return { server, connections };
+}
+
+async function listenNetServer(entry, ...args) {
+  await new Promise((resolve, reject) => {
+    entry.server.once('error', reject);
+    entry.server.listen(...args, () => { entry.server.off('error', reject); resolve(); });
+  });
+  return entry;
+}
+
+async function closeNetServer(entry, label, receipts, { timeoutMs = 2_000 } = {}) {
+  const destroyed = entry.connections.size;
+  for (const socket of entry.connections) { try { socket.destroy(); } catch { /* already gone */ } }
+  entry.server.closeAllConnections?.();
+  const outcome = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve({ closed: false, timedOut: true }), timeoutMs);
+    timer.unref?.();
+    entry.server.close(() => { clearTimeout(timer); resolve({ closed: true, timedOut: false }); });
+  });
+  const receipt = { label, destroyed, ...outcome };
+  receipts.push(receipt);
+  return receipt;
+}
+
+test('the daemon inventory client speaks the product framing over every real transport and types every failure', async () => {
+  const inventoryModule = await import('../lib/qa-scenarios/daemon-inventory.mjs');
+  const { createServer: createNetServer } = await import('node:net');
+  const root = fixtureRoot();
+  // Teardown receipts, asserted at the END of the body: a server that could not be
+  // closed inside its bound is a LEAK and says so, but a leak can never mask a
+  // transport assertion the way a throw from a `finally` would.
+  const teardowns = [];
+  try {
     const fakeDaemon = ({ sessions, epoch = 7, token = null }) => {
       const received = [];
-      const server = createNetServer(socket => {
+      const entry = startNetServer(createNetServer, socket => {
         socket.setEncoding('utf8');
         let buffered = '';
         socket.on('data', chunk => {
@@ -2423,7 +2488,7 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
           }
         });
       });
-      return { server, received };
+      return { ...entry, received };
     };
 
     // POSIX: the endpoint IS the Unix socket, and no token is presented because
@@ -2450,12 +2515,7 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
       expect(noUnixSocket.transport).toBe('unix-socket');
     } else {
       const unixFake = fakeDaemon({ sessions: ['s-fixture', 's-pane'], epoch: 11 });
-      // A listen that fails must be a NAMED failure: an un-settled listen promise is
-      // how this test hung instead of asserting (the same shape that hid the EACCES).
-      await new Promise((resolvePromise, rejectPromise) => {
-        unixFake.server.once('error', rejectPromise);
-        unixFake.server.listen(join(unixRuntime, 'daemon.sock'), resolvePromise);
-      });
+      await listenNetServer(unixFake, join(unixRuntime, 'daemon.sock'));
       try {
         const read = await inventoryModule.readDaemonSessionInventory({ runtimeDir: unixRuntime, platform: 'linux', totalMs: 3_000 });
         expect(read.ok).toBe(true);
@@ -2467,7 +2527,7 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
         expect(unixFake.received.every(frame => inventoryModule.READ_ONLY_REQUEST_TYPES.includes(frame.type))).toBe(true);
         expect(unixFake.received[0].version).toBe(inventoryModule.DAEMON_PROTOCOL_VERSION);
         expect(unixFake.received[0].token).toBeUndefined();
-      } finally { await new Promise(resolvePromise => unixFake.server.close(resolvePromise)); }
+      } finally { await closeNetServer(unixFake, 'unix-fake-daemon', teardowns); }
     }
 
     // Windows: the endpoint file holds the loopback port, and the first frame
@@ -2475,7 +2535,7 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
     const winRuntime = join(root, 'runtime-win');
     mkdirSync(winRuntime, { recursive: true });
     const winFake = fakeDaemon({ sessions: ['s-a'], epoch: 3, token: 'tok-abc' });
-    await new Promise(resolvePromise => winFake.server.listen(0, '127.0.0.1', resolvePromise));
+    await listenNetServer(winFake, 0, '127.0.0.1');
     const winPort = winFake.server.address().port;
     writeFileSync(join(winRuntime, 'daemon.port'), `${winPort}\n`);
     writeFileSync(join(winRuntime, 'daemon.token'), '  tok-abc \n');
@@ -2507,23 +2567,28 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
       rmSync(join(winRuntime, 'daemon.token'));
       const noToken = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 500 });
       expect(noToken.code).toBe('DAEMON_TOKEN_MISSING');
-      // A listener that accepts and never answers is bounded: typed, never a hang.
+      // The token is restored before the silent listener: this case is about the
+      // ANSWER never arriving, not about the credential (the case above removed it).
       writeFileSync(join(winRuntime, 'daemon.token'), 'tok-abc\n');
-      const silent = createNetServer(() => {});
-      await new Promise(resolvePromise => silent.listen(0, '127.0.0.1', resolvePromise));
+      // A listener that ACCEPTS and never answers: the client must fail typed, never
+      // hang. Its connection is destroyed by `closeNetServer` - a handler that answers
+      // nothing never reads its socket, so the peer's half-close would otherwise leave
+      // this connection open forever and `close()` pending with it.
+      const silent = startNetServer(createNetServer, () => {});
+      await listenNetServer(silent, 0, '127.0.0.1');
       try {
-        writeFileSync(join(winRuntime, 'daemon.port'), `${silent.address().port}\n`);
+        writeFileSync(join(winRuntime, 'daemon.port'), `${silent.server.address().port}\n`);
         const timedOut = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', readTimeoutMs: 300, totalMs: 900 });
         expect(timedOut.ok).toBe(false);
         expect(timedOut.code).toBe('DAEMON_READ_TIMEOUT');
-      } finally { await new Promise(resolvePromise => silent.close(resolvePromise)); }
+      } finally { await closeNetServer(silent, 'silent-listener', teardowns); }
       // An already-expired total deadline is the same kind of typed refusal.
       writeFileSync(join(winRuntime, 'daemon.port'), `${winPort}\n`);
       const expired = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 0 });
       expect(expired.code).toBe('DAEMON_DEADLINE');
       // A protocol the harness does not speak is refused by the daemon and
       // reported as such rather than parsed as a session list.
-      const mismatchFake = createNetServer(socket => {
+      const mismatchFake = startNetServer(createNetServer, socket => {
         socket.setEncoding('utf8');
         let buffered = '';
         socket.on('data', chunk => {
@@ -2531,12 +2596,12 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
           if (buffered.includes('\n')) socket.write(`${JSON.stringify({ type: 'protocolMismatch', expectedVersion: 6, receivedVersion: 5 })}\n`);
         });
       });
-      await new Promise(resolvePromise => mismatchFake.listen(0, '127.0.0.1', resolvePromise));
+      await listenNetServer(mismatchFake, 0, '127.0.0.1');
       try {
-        writeFileSync(join(winRuntime, 'daemon.port'), `${mismatchFake.address().port}\n`);
+        writeFileSync(join(winRuntime, 'daemon.port'), `${mismatchFake.server.address().port}\n`);
         const mismatch = await inventoryModule.readDaemonSessionInventory({ runtimeDir: winRuntime, platform: 'win32', totalMs: 1_000 });
         expect(mismatch.code).toBe('DAEMON_PROTOCOL_MISMATCH');
-      } finally { await new Promise(resolvePromise => mismatchFake.close(resolvePromise)); }
+      } finally { await closeNetServer(mismatchFake, 'protocol-mismatch-daemon', teardowns); }
       // The measured delta is pure arithmetic over the two inventories, and the
       // fixture sessions are excluded from the added set.
       expect(inventoryModule.computeInventoryDelta({
@@ -2545,7 +2610,7 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
       expect(inventoryModule.computeInventoryDelta({
         before: { sessions: ['f'] }, after: { sessions: ['f', 'n1', 'n2'] }, fixtureSessionIds: ['f'],
       }).added).toEqual(['n1', 'n2']);
-    } finally { await new Promise(resolvePromise => winFake.server.close(resolvePromise)); }
+    } finally { await closeNetServer(winFake, 'loopback-fake-daemon', teardowns); }
 
     // The reader factory wires the runtime dir, consumes the pre-trigger setup
     // budget, and records the read as evidence without the token.
@@ -2575,8 +2640,15 @@ test('pane binding reads the app\'s own presentation receipt and excludes the fi
       sessionCount: 2, sessionIds: ['s1', 's2'], epoch: 5, elapsedMs: 2,
     }]);
     expect(JSON.stringify(readerActions)).not.toContain('tok-abc');
+    // Every server this test opened was closed inside its bound (the sockets the
+    // silent listener never read are destroyed by `closeNetServer` first). Asserted
+    // here, last, so it is reported without ever hiding the transport result.
+    expect({ leaked: teardowns.filter(receipt => receipt.closed !== true) }).toEqual({ leaked: [] });
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+  // An explicit budget for a test that exercises real sockets on purpose. Every
+  // await inside it is still bounded on its own; this only stops a slow host from
+  // reading as a transport defect.
+}, 30_000);
 
 test('marker receipts are addressed by session, so another pane cannot satisfy the assertion', async () => {
   const { awaitMarkerReceiptForSession } = await import('../lib/qa-scenarios/pane-binding.mjs');
