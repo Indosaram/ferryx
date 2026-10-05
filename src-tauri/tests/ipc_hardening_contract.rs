@@ -28,7 +28,15 @@ async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHa
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("test_daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
-    let server = Arc::new(DaemonServer::new());
+    // Integration tests are compiled without `cfg(test)`, so `DaemonServer::new()` would fall
+    // back to the machine's canonical identity directory. Every test in this file registers the
+    // same workspace id against a different temporary repository, and a shared catalog rejects
+    // the second registration with "Workspace already registered". Explicit paths give each test
+    // its own catalog and remote-session store.
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config.json")),
+        Some(dir.path().join("auth.json")),
+    ));
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
         loop {

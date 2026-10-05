@@ -709,10 +709,20 @@ async fn native_terminal_daemon_pump_emits_scrollbar_only_for_scrollback_state_c
     .expect("send replay gap");
     let hidden = tokio::time::timeout(std::time::Duration::from_secs(2), scrollbar_rx.recv())
         .await
-        .expect("reset scrollbar event arrives")
+        .expect("scrollbar event after the gap arrives")
         .expect("scrollbar sender remains live");
-    assert_eq!(hidden.total, hidden.len);
-    assert_eq!(hidden.offset, 0);
+    // A gap does not clear the screen: the pump sanitizes the parser state, injects a visible
+    // notice and keeps the scrollback (see `gap_message_preserves_grid_scrollback_and_injects_notice`
+    // in surface_host.rs). The published metrics must therefore still describe scrollback rather
+    // than a reset viewport.
+    assert!(
+        hidden.total > hidden.len,
+        "a gap must preserve scrollback instead of clearing it: {hidden:?}"
+    );
+    assert!(
+        hidden.offset + hidden.len <= hidden.total,
+        "gap metrics must describe a valid viewport: {hidden:?}"
+    );
 }
 
 #[tokio::test]
