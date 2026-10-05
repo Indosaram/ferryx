@@ -1,0 +1,94 @@
+$ vitest run --maxWorkers=1 src/remote/resolveAccountOriginRetention.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042002) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/resolveAccountOriginRetention.test.ts (11 tests | 11 failed) 15ms
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 1: Confirmed 404 falls back to DEFAULT_ACCOUNT_ORIGIN and caches the fallback 9ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 2: Transient network error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 401 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 403 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 429 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 500 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 502 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 503 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 4: Previously cached fallback != candidate re-probes safely, calls fetch exactly once, and recovers to candidate when healthy 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 5: 200 OK probe caches candidate and subsequent lookups remain fast without refetching 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveAccountOrigin Contract & Session Retention Regressions > Scenario 6: Module integration login store and restore under transient candidate health error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 11 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 1: Confirmed 404 falls back to DEFAULT_ACCOUNT_ORIGIN and caches the fallback
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 2: Transient network error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 401 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 403 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 429 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 500 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 502 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 503 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 4: Previously cached fallback != candidate re-probes safely, calls fetch exactly once, and recovers to candidate when healthy
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 5: 200 OK probe caches candidate and subsequent lookups remain fast without refetching
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 6: Module integration login store and restore under transient candidate health error
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/resolveAccountOriginRetention.test.ts:15:18
+     13|   beforeEach(() => {
+     14|     sessionStorage.clear();
+     15|     localStorage.clear();
+       |                  ^
+     16|     vi.restoreAllMocks();
+     17|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/22]⎯
+
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 1: Confirmed 404 falls back to DEFAULT_ACCOUNT_ORIGIN and caches the fallback
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 2: Transient network error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 401 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 403 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 429 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 500 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 502 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 3: Transient HTTP 503 error preserves candidate origin, does NOT cache fallback, and subsequent 200 recovers
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 4: Previously cached fallback != candidate re-probes safely, calls fetch exactly once, and recovers to candidate when healthy
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 5: 200 OK probe caches candidate and subsequent lookups remain fast without refetching
+ FAIL  src/remote/resolveAccountOriginRetention.test.ts > resolveAccountOrigin Contract & Session Retention Regressions > Scenario 6: Module integration login store and restore under transient candidate health error
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/resolveAccountOriginRetention.test.ts:22:18
+     20|     globalThis.fetch = originalFetch;
+     21|     sessionStorage.clear();
+     22|     localStorage.clear();
+       |                  ^
+     23|     vi.restoreAllMocks();
+     24|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/22]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  11 failed (11)
+   Start at  10:10:42
+   Duration  842ms (transform 177ms, setup 108ms, collect 178ms, tests 15ms, environment 225ms, prepare 51ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.sortableIdentity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040684) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.sortableIdentity.test.tsx (3 tests | 3 failed) 6ms
+   × registers same-path grouped members with distinct context IDs and nonnegative indexes 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × keyboard reorders the intended same-path member, displaces its sibling and reloads qualified order 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × reads legacy path-only ordering without losing equal-path workspace members 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > registers same-path grouped members with distinct context IDs and nonnegative indexes
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > keyboard reorders the intended same-path member, displaces its sibling and reloads qualified order
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > reads legacy path-only ordering without losing equal-path workspace members
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.sortableIdentity.test.tsx:77:16
+     75| 
+     76| beforeEach(() => {
+     77|   localStorage.clear();
+       |                ^
+     78|   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImpleme…
+     79|     const row = this.closest('[data-sidebar-dnd-type="worktree"][role=…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > registers same-path grouped members with distinct context IDs and nonnegative indexes
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > keyboard reorders the intended same-path member, displaces its sibling and reloads qualified order
+ FAIL  src/components/Sidebar.sortableIdentity.test.tsx > reads legacy path-only ordering without losing equal-path workspace members
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.sortableIdentity.test.tsx:89:43
+     87|   });
+     88| });
+     89| afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(…
+       |                                           ^
+     90| 
+     91| it("registers same-path grouped members with distinct context IDs and …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  10:10:24
+   Duration  1.40s (transform 254ms, setup 134ms, collect 663ms, tests 6ms, environment 276ms, prepare 49ms)
+
+error: script "test" exited with code 1

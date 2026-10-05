@@ -1,0 +1,10 @@
+HOST=linux COMMIT=e57685ec START=2026-10-04T10:02:06Z
+SECTION four-surface-host-tests
+GATE linux sh-bounds_ipc_presents_when_browser_child_is_open native=101 selected=0 | 
+GATE linux sh-deferred_bounds_retry_does_not_restore_obsolete_width native=101 selected=0 | 
+GATE linux sh-synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end native=101 selected=0 | 
+GATE linux sh-synchronized_output_bounds_ipc_waits_for_actual_presentation native=101 selected=0 | 
+SECTION pane_liveness_filter
+GATE linux pane-list native=101 selected=0 | 
+GATE linux pane native=101 selected=0 | 
+SECTION ipc-attach-pair

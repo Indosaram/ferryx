@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.sshActivity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044044) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.sshActivity.test.tsx (4 tests | 4 failed) 5ms
+   × keeps SSH working visible on the root and collapsed header for /srv/repo 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × keeps SSH working visible on the root and collapsed header for C:\work\repo 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × shows unseen waiting on the SSH root instead of a stale spinner 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × shows unseen done on the SSH root instead of a stale spinner 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.sshActivity.test.tsx > keeps SSH working visible on the root and collapsed header for /srv/repo
+ FAIL  src/components/Sidebar.sshActivity.test.tsx > keeps SSH working visible on the root and collapsed header for C:\work\repo
+ FAIL  src/components/Sidebar.sshActivity.test.tsx > shows unseen waiting on the SSH root instead of a stale spinner
+ FAIL  src/components/Sidebar.sshActivity.test.tsx > shows unseen done on the SSH root instead of a stale spinner
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.sshActivity.test.tsx:13:31
+     11| }));
+     12| 
+     13| beforeEach(() => localStorage.clear());
+       |                               ^
+     14| afterEach(cleanup);
+     15| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  10:11:11
+   Duration  1.18s (transform 235ms, setup 104ms, collect 654ms, tests 5ms, environment 243ms, prepare 47ms)
+
+error: script "test" exited with code 1

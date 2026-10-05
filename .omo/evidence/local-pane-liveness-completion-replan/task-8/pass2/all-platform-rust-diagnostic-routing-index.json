@@ -1,0 +1,3288 @@
+[
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:1:5",
+    "error": "error[E0432]: unresolved import `fs2`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:102:24",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:116:24",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:2704:33",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:2726:62",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:3135:59",
+    "error": "error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/agents_reset_event_tests.rs:103:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/service.rs:570:55",
+    "error": "error[E0283]: type annotations needed",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4500:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4584:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4672:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4820:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4906:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4956:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5098:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5289:27",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5366:27",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5701:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5813:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/protocol.rs:1814:13",
+    "error": "error[E0027]: pattern does not mention field `local_split`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:6735:13",
+    "error": "error[E0027]: pattern does not mention fields `capabilities`, `admission_time_unix_ms`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:172:19",
+    "error": "error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/file_link_tests.rs:11:5",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/file_link_tests.rs:554:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:119:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:199:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:261:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:462:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:540:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:600:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:806:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:850:26",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:890:25",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:961:31",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1076:64",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1087:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1188:19",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1259:19",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1434:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1594:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1770:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1922:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2089:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2264:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2436:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2576:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2714:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2847:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2958:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3105:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3264:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3425:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3558:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3656:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/workspace_api/worktree_authority_tests.rs:350:13",
+    "error": "error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/workspace_api/worktree_authority_tests.rs:589:35",
+    "error": "error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:3883:50",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:3939:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:4205:50",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:4258:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:192:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:196:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 70 previous errors; 47 warnings emitted",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "all-targets",
+      "full-lib",
+      "unix-suspension-list",
+      "unix-suspension",
+      "journal-list",
+      "journal"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:651:13",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for reference `&std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:706:29",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:728:25",
+    "error": "error[E0599]: no method named `try_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:778:31",
+    "error": "error[E0599]: no method named `release_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 74 previous errors; 49 warnings emitted",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `DaemonSessionDetails`",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "linux",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib) due to 10 previous errors; 24 warnings emitted",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/handover.rs:517:20",
+    "error": "error[E0432]: unresolved import `super::handover_transaction`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/handover.rs:533:20",
+    "error": "error[E0432]: unresolved import `super::handover_transaction`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:1:5",
+    "error": "error[E0432]: unresolved import `fs2`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/handover.rs:516:80",
+    "error": "error[E0433]: cannot find `handover_transaction` in `super`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:49:58",
+    "error": "error[E0433]: cannot find `handover_transaction` in `super`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:55:25",
+    "error": "error[E0433]: cannot find `handover_transaction` in `super`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:111:45",
+    "error": "error[E0433]: cannot find `handover_transaction` in `super`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:102:24",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:116:24",
+    "error": "error[E0433]: cannot find type `HandoverManager` in this scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:3135:59",
+    "error": "error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/service.rs:570:55",
+    "error": "error[E0283]: type annotations needed",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/protocol.rs:1814:13",
+    "error": "error[E0027]: pattern does not mention field `local_split`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:172:19",
+    "error": "error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/ipc/file_link_tests.rs:11:5",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/remote/workspace_api/worktree_authority_tests.rs:350:13",
+    "error": "error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:192:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:196:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 25 previous errors; 42 warnings emitted",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:651:13",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for reference `&std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:706:29",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:728:25",
+    "error": "error[E0599]: no method named `try_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:778:31",
+    "error": "error[E0599]: no method named `release_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 29 previous errors; 44 warnings emitted",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `DaemonSessionDetails`",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib) due to 13 previous errors; 14 warnings emitted",
+    "gates": [
+      "handover-list",
+      "handover"
+    ]
+  },
+  {
+    "host": "windows",
+    "owner": "native",
+    "source": "src/native_terminal/input.rs:372:13",
+    "error": "error: could not compile `ferryx` (lib) due to 13 previous errors; 14 warnings emitted",
+    "gates": [
+      "all-targets"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:1:5",
+    "error": "error[E0432]: unresolved import `fs2`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:102:24",
+    "error": "error[E0433]: failed to resolve: use of undeclared type `HandoverManager`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:116:24",
+    "error": "error[E0433]: failed to resolve: use of undeclared type `HandoverManager`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:2704:33",
+    "error": "error[E0433]: failed to resolve: use of undeclared type `HandoverManager`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:2726:62",
+    "error": "error[E0433]: failed to resolve: use of undeclared type `HandoverManager`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:3135:59",
+    "error": "error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/agents_reset_event_tests.rs:103:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/service.rs:570:55",
+    "error": "error[E0283]: type annotations needed",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4500:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4584:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4672:37",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4820:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4906:25",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:4956:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5098:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5289:27",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5366:27",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5701:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/client.rs:5813:29",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/protocol.rs:1814:13",
+    "error": "error[E0027]: pattern does not mention field `local_split`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:100:13",
+    "error": "error[E0282]: type annotations needed",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:115:9",
+    "error": "error[E0282]: type annotations needed",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/server.rs:6735:13",
+    "error": "error[E0027]: pattern does not mention fields `capabilities`, `admission_time_unix_ms`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/split_journal.rs:172:19",
+    "error": "error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "handover-list",
+      "handover",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/file_link_tests.rs:11:5",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/file_link_tests.rs:554:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:119:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:199:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:261:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:462:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:540:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:600:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:806:9",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:850:26",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:890:25",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:961:31",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1076:64",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1087:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1188:19",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1259:19",
+    "error": "error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1434:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1594:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1770:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:1922:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2089:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2264:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2436:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2576:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2714:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2847:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:2958:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3105:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3264:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3425:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3558:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/tests.rs:3656:60",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/workspace_api/worktree_authority_tests.rs:350:13",
+    "error": "error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/workspace_api/worktree_authority_tests.rs:589:35",
+    "error": "error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:3883:50",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:3939:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:4205:50",
+    "error": "error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/remote/tests.rs:4258:42",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:192:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/pty.rs:196:9",
+    "error": "error[E0277]: can't compare `&str` with `std::path::PathBuf`",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:647:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `Fn` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/terminal/shell.rs:653:13",
+    "error": "error: implementation of `FnOnce` is not general enough",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "qa_barrier-list",
+      "qa_barrier",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+    "gates": [
+      "local_split_reliability_-list",
+      "local_split_reliability_",
+      "pane_liveness_-list",
+      "pane_liveness_",
+      "all-targets",
+      "full-lib"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:651:13",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for reference `&std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:706:29",
+    "error": "error[E0599]: no method named `schedule_cancellation_receipt` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:728:25",
+    "error": "error[E0599]: no method named `try_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:778:31",
+    "error": "error[E0599]: no method named `release_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib test) due to 76 previous errors; 54 warnings emitted",
+    "gates": [
+      "qa_barrier-list",
+      "qa_barrier"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/ipc/terminal.rs:2410:22",
+    "error": "error[E0063]: missing field `incarnation` in initializer of `DaemonSessionDetails`",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:971:38",
+    "error": "error[E0599]: no method named `active_presentation_generation` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "native",
+    "source": "src/native_terminal/surface_host.rs:972:45",
+    "error": "error[E0599]: no method named `active_presentation_epoch` found for reference `&NativeTerminalSurfaceHost` in the current scope",
+    "gates": [
+      "handover-list",
+      "handover",
+      "all-targets"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": null,
+    "error": "error: could not compile `ferryx` (lib) due to 10 previous errors; 32 warnings emitted",
+    "gates": [
+      "handover-list",
+      "handover"
+    ]
+  },
+  {
+    "host": "mac",
+    "owner": "backend",
+    "source": "src/daemon/handover_socket.rs:316:9",
+    "error": "error: could not compile `ferryx` (lib) due to 10 previous errors; 32 warnings emitted",
+    "gates": [
+      "all-targets"
+    ]
+  }
+]

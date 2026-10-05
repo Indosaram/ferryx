@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/components/settings/AgentsSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039866) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/AgentsSection.test.tsx (12 tests | 12 failed) 7ms
+   × AgentsSection > surfaces agent detection failure with an alert message 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > probes every built-in candidate command on mount, including omo 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > lists omo as a configurable agent row 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > renders the real bundled brand logo for agents that have one 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > renders a real logo for every probed agent, with no terminal fallback 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > falls back to the terminal icon for a custom agent with no bundled logo 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > selects the default agent through a dropdown and persists it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > only offers detected agents as default agent options 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > marks a detected agent and counts it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > registers a custom agent, persists it, and re-probes its command 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > blocks a custom agent that collides with a built-in name 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsSection > removes a registered custom agent 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 12 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > surfaces agent detection failure with an alert message
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > probes every built-in candidate command on mount, including omo
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > lists omo as a configurable agent row
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > renders the real bundled brand logo for agents that have one
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > renders a real logo for every probed agent, with no terminal fallback
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > falls back to the terminal icon for a custom agent with no bundled logo
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > selects the default agent through a dropdown and persists it
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > only offers detected agents as default agent options
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > marks a detected agent and counts it
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > registers a custom agent, persists it, and re-probes its command
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > blocks a custom agent that collides with a built-in name
+ FAIL  src/components/settings/AgentsSection.test.tsx > AgentsSection > removes a registered custom agent
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/AgentsSection.test.tsx:18:18
+     16|   beforeEach(() => {
+     17|     vi.clearAllMocks();
+     18|     localStorage.clear();
+       |                  ^
+     19|     native.detectAgents.mockResolvedValue([]);
+     20|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  12 failed (12)
+   Start at  10:10:13
+   Duration  1.04s (transform 134ms, setup 107ms, collect 529ms, tests 7ms, environment 225ms, prepare 48ms)
+
+error: script "test" exited with code 1

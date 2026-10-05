@@ -1,0 +1,5 @@
+﻿04:29:33  RUN 1 tag=profileiso classifierSha=BBBA381F573FF528
+04:29:50    -> verdict=BLOCKED code=PANE_BINDING_UNBOUND elapsedMs=15875 maxCount=2 dumps=new-pane hostBefore=2026-10-05T04:25:48.9747346+09:00 hostAfter=2026-10-05T04:25:48.9747346+09:00 isoStateExists=False
+04:29:50  RUN 2 tag=profileiso classifierSha=BBBA381F573FF528
+04:30:05    -> verdict=BLOCKED code=PANE_BINDING_UNBOUND elapsedMs=14146 maxCount=2 dumps=new-pane hostBefore=2026-10-05T04:25:48.9747346+09:00 hostAfter=2026-10-05T04:25:48.9747346+09:00 isoStateExists=False
+04:30:05  RESTORED classifier to original

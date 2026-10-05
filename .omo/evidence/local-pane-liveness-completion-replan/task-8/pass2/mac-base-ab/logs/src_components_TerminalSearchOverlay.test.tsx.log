@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/components/TerminalSearchOverlay.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ❯ src/components/TerminalSearchOverlay.test.tsx (11 tests | 1 failed) 235ms
+   ✓ TerminalSearchOverlay native session search > renders search input, navigation buttons, and close button 92ms
+   ✓ TerminalSearchOverlay native session search > triggers native search on query input and parses camelCase Rust DTO object 15ms
+   ✓ TerminalSearchOverlay native session search > triggers native search on query input and displays match counter 9ms
+   ✓ TerminalSearchOverlay native session search > handles zero matches DTO object cleanly with 0/0 24ms
+   ✓ TerminalSearchOverlay native session search > handles invoke rejection gracefully by showing 0/0 18ms
+   ✓ TerminalSearchOverlay native session search > parses snake_case DTO matches gracefully 12ms
+   ✓ TerminalSearchOverlay native session search > navigates matches with Enter, Shift+Enter, and arrow buttons 14ms
+   ✓ TerminalSearchOverlay native session search > ignores an out-of-order stale search result and keeps the newest query's counts 8ms
+   ✓ TerminalSearchOverlay native session search > does not let a stale rejection overwrite a newer successful result 9ms
+   × TerminalSearchOverlay native session search > resets stale counts and re-searches the new session on sessionId change 14ms
+     → expected [ …(3) ] to have a length of 2 but got 3
+   ✓ TerminalSearchOverlay native session search > closes on Escape and close button, triggering onFocusTerminal 17ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TerminalSearchOverlay.test.tsx > TerminalSearchOverlay native session search > resets stale counts and re-searches the new session on sessionId change
+AssertionError: expected [ …(3) ] to have a length of 2 but got 3
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 3[39m
+
+ ❯ src/components/TerminalSearchOverlay.test.tsx:332:19
+    330|     expect(screen.queryByText("1/2")).not.toBeInTheDocument();
+    331|     // A fresh search must be issued for session-b using the retained …
+    332|     expect(calls).toHaveLength(2);
+       |                   ^
+    333|     expect(calls[1].args?.sessionId).toBe("session-b");
+    334|     expect(calls[1].args?.query).toBe("err");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 passed (11)
+   Start at  10:44:10
+   Duration  4.34s (transform 244ms, setup 499ms, collect 1.80s, tests 235ms, environment 846ms, prepare 105ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/components/NativeTerminalPane.presentation.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [32m✓[39m src/components/NativeTerminalPane.presentation.test.tsx [2m([22m[2m14 tests[22m[2m)[22m[32m 97[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m14 passed[39m[22m[90m (14)[39m
+[2m   Start at [22m 10:10:46
+[2m   Duration [22m 1.49s[2m (transform 233ms, setup 204ms, collect 329ms, tests 97ms, environment 400ms, prepare 66ms)[22m
+
+NATIVE_EXIT=0

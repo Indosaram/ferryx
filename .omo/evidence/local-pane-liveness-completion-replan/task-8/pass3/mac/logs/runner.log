@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-21dea3c0
+
+ ✓ scripts/qa/pane-liveness.test.mjs (28 tests) 463ms
+
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+   Start at  15:24:22
+   Duration  757ms (transform 87ms, setup 0ms, collect 149ms, tests 463ms, environment 0ms, prepare 45ms)
+

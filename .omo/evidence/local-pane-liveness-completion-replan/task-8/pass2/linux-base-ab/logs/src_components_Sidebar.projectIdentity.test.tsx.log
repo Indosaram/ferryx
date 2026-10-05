@@ -1,0 +1,34 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.projectIdentity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044705) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.projectIdentity.test.tsx (2 tests | 2 failed) 5ms
+   × Sidebar Git project identity > keeps every grouped checkout visible and routes its click to its owning workspace 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar Git project identity > groups differently named remote checkouts but preserves each SSH target on click 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.projectIdentity.test.tsx > Sidebar Git project identity > keeps every grouped checkout visible and routes its click to its owning workspace
+ FAIL  src/components/Sidebar.projectIdentity.test.tsx > Sidebar Git project identity > groups differently named remote checkouts but preserves each SSH target on click
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.projectIdentity.test.tsx:7:16
+      5| 
+      6| beforeEach(() => {
+      7|   localStorage.clear();
+       |                ^
+      8|   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+      9| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:11:20
+   Duration  1.11s (transform 211ms, setup 97ms, collect 619ms, tests 5ms, environment 223ms, prepare 49ms)
+
+error: script "test" exited with code 1

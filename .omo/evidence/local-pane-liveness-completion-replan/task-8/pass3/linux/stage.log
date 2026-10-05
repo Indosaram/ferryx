@@ -1,0 +1,94 @@
+PROBE_OK
+indo
+indo
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+1.4.0
+v26.8.1
+/dev/mapper/root  930G  399G  508G  44% /home
+Cloning into '/home/indo/ferryx-pane-completion/ghostty-21dea3c0'...
+Note: switching to '6a508fd5e34c7e222c052a6d00bb3891ff3feace'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 6a508fd5e macos: translate physical menu shortcuts (#13888)
+6a508fd5e34c7e222c052a6d00bb3891ff3feace
+e1ea8bd6875a15fdfc5205ae5f4e1ba21194c0163f6fecf4bfa821a0443fbd53  /home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri/Cargo.lock
+d84cde8a0f35abd85835bf2fa17ebb7945604f7579bfde7d1e14a28155d13137  /home/indo/ferryx-pane-completion/source-21dea3c0/ui/bun.lock
+bun install v1.4.0 (34cbb9a40)
+
++ @testing-library/jest-dom@6.10.0
++ @testing-library/react@16.3.3
++ @types/node@22.20.1
++ @types/react@18.3.31
++ @types/react-dom@18.3.7
++ @vitejs/plugin-react@4.7.0
++ @vitest/coverage-v8@3.2.7
++ autoprefixer@10.5.5
++ bun-types@1.4.2
++ clsx@2.1.1
++ jsdom@26.1.0
++ postcss@8.5.28
++ react-doctor@0.9.14
++ react-grab@0.2.0
++ react-scan@0.5.7
++ tailwind-merge@3.6.0
++ tailwindcss@3.4.19
++ typescript@5.9.3
++ vite@6.4.3
++ vitest@3.2.7
++ @dnd-kit/core@6.3.1
++ @dnd-kit/sortable@10.0.0
++ @dnd-kit/utilities@3.2.2
++ @noble/ciphers@2.4.0
++ @noble/hashes@2.4.0
++ @radix-ui/react-label@2.1.15
++ @radix-ui/react-progress@1.1.16
++ @radix-ui/react-select@2.3.7
++ @radix-ui/react-separator@1.1.15
++ @radix-ui/react-slider@1.4.7
++ @radix-ui/react-slot@1.3.3
++ @radix-ui/react-switch@1.3.7
++ @tauri-apps/api@2.11.1
++ @tauri-apps/plugin-dialog@2.7.3
++ @tauri-apps/plugin-process@2.3.1
++ @tauri-apps/plugin-updater@2.11.0
++ @types/qrcode@1.5.6
++ class-variance-authority@0.7.1
++ highlight.js@11.11.1
++ lucide-react@0.475.0
++ qrcode@1.5.4
++ react@18.3.1
++ react-dom@18.3.1
++ react-markdown@10.1.0
++ remark-gfm@4.0.1
++ sonner@2.0.8
++ tailwindcss-animate@1.0.7
+
+629 packages installed [1.85s]
+GATE_DONE linux ui-build native=0 count=null status=RAN_PASSED
+✓ built in 5.15s
+GATE_DONE linux ui-split native=0 count=19 status=RAN_PASSED
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+GATE_DONE linux ui-lifecycle native=0 count=112 status=RAN_PASSED
+      at collectTests [90m(file:///home/indo/ferryx-pane-completion/source-21dea3c0/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1179:25[90m)[39m
+      at startTests [90m(file:///home/indo/ferryx-pane-completion/source-21dea3c0/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1817:17[90m)[39m
+ Test Files  4 passed (4)
+      Tests  112 passed (112)
+GATE_DONE linux runner native=0 count=28 status=RAN_PASSED
+ Test Files  1 passed (1)
+      Tests  28 passed (28)

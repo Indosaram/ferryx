@@ -1,0 +1,195 @@
+diff --git a/src-tauri/src/ipc/terminal.rs b/src-tauri/src/ipc/terminal.rs
+index d42488c..b9d8006 100644
+--- a/src-tauri/src/ipc/terminal.rs
++++ b/src-tauri/src/ipc/terminal.rs
+@@ -3914,10 +3914,24 @@ pub async fn cmd_terminal_spawn_operation(
+     use crate::daemon::protocol::*;
+     match request {
+         SplitOperationRequest::Prepare { request_id, request, remaining_ms } => {
++            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++            eprintln!(
++                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=prepare request_id={request_id} workspace_id={}",
++                request.workspace_id
++            );
+             if request_id.trim().is_empty() || request.startup.is_some()
+                 || crate::ssh::projects::is_remote(&request.workspace_id)
+                 || request.workspace_id.starts_with("daemon:")
+             {
++                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++                eprintln!(
++                    "FERRYX_QA_SPLIT_OP_REFUSED: request_id={request_id} workspace_id={} blank_request_id={} startup_present={} remote_workspace={} paired_workspace={}",
++                    request.workspace_id,
++                    request_id.trim().is_empty(),
++                    request.startup.is_some(),
++                    crate::ssh::projects::is_remote(&request.workspace_id),
++                    request.workspace_id.starts_with("daemon:")
++                );
+                 return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepare requires a local shell workspace and request identity"));
+             }
+             let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
+@@ -3945,6 +3959,14 @@ pub async fn cmd_terminal_spawn_operation(
+             })).await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split preparation timed out"))??;
+             tokio::time::timeout_at(deadline, daemon_client.register_workspace(&request.workspace_id, &repo_root))
+                 .await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split workspace registration timed out"))??;
++            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++            eprintln!(
++                "FERRYX_QA_SPLIT_OP_PREPARED: request_id={} origin_epoch={} workspace_id={} cwd={}",
++                identity.request_id,
++                identity.origin_epoch,
++                request.workspace_id,
++                cwd.display()
++            );
+             Ok(SplitOperationResponse::Prepare { prepared: PreparedLocalSplit {
+                 identity, workspace_id: request.workspace_id, worktree: request.worktree,
+                 cwd: cwd.to_string_lossy().into_owned(), shell: request.shell.or(default_shell),
+@@ -3952,11 +3974,21 @@ pub async fn cmd_terminal_spawn_operation(
+             } })
+         }
+         SplitOperationRequest::Status { identity, remaining_ms } => {
++            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++            eprintln!(
++                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=status request_id={} origin_epoch={}",
++                identity.request_id, identity.origin_epoch
++            );
+             let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
+             Ok(SplitOperationResponse::Status { operation: split_wire_epoch(
+                 daemon_client.local_split_status_until(&identity, deadline).await?) })
+         }
+         SplitOperationRequest::Cancel { identity, remaining_ms } => {
++            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++            eprintln!(
++                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=cancel request_id={} origin_epoch={}",
++                identity.request_id, identity.origin_epoch
++            );
+             let deadline = split_stage_deadline(remaining_ms, CANCEL_ACK_MAX_MS)?;
+             Ok(SplitOperationResponse::Cancel { operation: split_wire_epoch(
+                 daemon_client.cancel_local_split_until(&identity, deadline).await?) })
+@@ -3972,11 +4004,30 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
+     request: SpawnTerminalRequest,
+ ) -> Result<SpawnTerminalResponse, IpcError> {
+     if request.create_only == Some(true) || request.prepared_local_split.is_some() {
++        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++        eprintln!(
++            "FERRYX_QA_SPLIT_CREATE_RECEIVED: create_only={} prepared_local_split={} request_id={} workspace_id={}",
++            request.create_only == Some(true),
++            request.prepared_local_split.is_some(),
++            request.prepared_local_split.as_ref()
++                .map(|prepared| prepared.identity.request_id.as_str())
++                .unwrap_or("-"),
++            request.workspace_id
++        );
+         let prepared = request.prepared_local_split.as_ref().ok_or_else(||
+             IpcError::new(IpcErrorCode::InvalidArgument, "Create-only requires preparedLocalSplit"))?;
+         if request.create_only != Some(true) || prepared.workspace_id != request.workspace_id
+             || prepared.worktree != request.worktree || request.startup.is_some()
+         {
++            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++            eprintln!(
++                "FERRYX_QA_SPLIT_CREATE_REFUSED: request_id={} create_only_not_true={} workspace_mismatch={} worktree_mismatch={} startup_present={}",
++                prepared.identity.request_id,
++                request.create_only != Some(true),
++                prepared.workspace_id != request.workspace_id,
++                prepared.worktree != request.worktree,
++                request.startup.is_some()
++            );
+             return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepared split identity does not match create request"));
+         }
+         let deadline = split_stage_deadline(request.remaining_ms.unwrap_or(0),
+@@ -3989,6 +4040,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
+             result.epoch,
+             &result.session,
+         );
++        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
++        eprintln!(
++            "FERRYX_QA_SPLIT_CREATE_READY: request_id={} session_id={} daemon_epoch={}",
++            prepared.identity.request_id, result.session_id, result.epoch
++        );
+         return Ok(SpawnTerminalResponse { session_id: result.session_id,
+             daemon_epoch: result.epoch.to_string(), session: result.session });
+     }
+diff --git a/ui/src/App.tsx b/ui/src/App.tsx
+index 7fc17c0..59d2127 100644
+--- a/ui/src/App.tsx
++++ b/ui/src/App.tsx
+@@ -2319,13 +2319,32 @@ function WorkspaceApp({
+ 
+   const handleSplitActive = useCallback(
+     (direction: PaneDirection) => {
+-      if (activeRemoteHostRef.current) return;
+-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
++      if (activeRemoteHostRef.current) {
++        switchDebug("split.active.refused.remote-host", { reason: `direction=${direction}` });
++        return;
++      }
++      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
++        switchDebug("split.active.refused.paired-feature-gated", { reason: `direction=${direction}` });
++        return;
++      }
+       const currentState = stateRef.current;
+       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
+-      if (!activeTab || activeTab.kind === "browser") return;
++      if (!activeTab || activeTab.kind === "browser") {
++        switchDebug("split.active.refused.no-terminal-tab", {
++          reason: activeTab ? `tab-kind=${activeTab.kind}` : "no-active-tab",
++        });
++        return;
++      }
+       const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
++      if (!activeLayout) {
++        switchDebug("split.active.fallback.leaf-default.layout-missing", { reason: `tabId=${activeTab.id}` });
++      } else if (!activeLayout.activeLeafId) {
++        switchDebug("split.active.fallback.leaf-default.active-leaf-missing", { reason: `tabId=${activeTab.id}` });
++      }
+       const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
++      switchDebug("split.active.requested", {
++        reason: `direction=${direction} targetLeafId=${targetLeafId}`,
++      });
+       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
+     },
+     [reportRuntimeError, splitPane],
+diff --git a/ui/src/state/workspaceStore.ts b/ui/src/state/workspaceStore.ts
+index 6f02a75..c5d7294 100644
+--- a/ui/src/state/workspaceStore.ts
++++ b/ui/src/state/workspaceStore.ts
+@@ -1086,13 +1086,28 @@ export function useWorkspaceStore({
+     ) => {
+       const snapshot = stateRef.current;
+       const targetTab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
+-      if (!targetTab || !isTerminalTab(targetTab)) return;
++      if (!targetTab || !isTerminalTab(targetTab)) {
++        switchDebug("split.pane.refused.non-terminal-tab", {
++          reason: targetTab ? `tab-kind=${targetTab.kind}` : `tab-not-found:${tabId}`,
++        });
++        return;
++      }
+       const targetLayout = snapshot.layout.layoutsByTabId?.[targetTab.id];
+-      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) return;
++      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) {
++        switchDebug("split.pane.refused.target-leaf-not-in-layout", {
++          reason: `targetLeafId=${targetLeafId} layoutPresent=${targetLayout !== undefined} layoutLeaves=${targetLayout ? collectLeafIds(targetLayout.root).join("|") : "-"}`,
++        });
++        return;
++      }
+ 
+       const sourceLocalSessionId = targetLayout.sessionIdsByLeafId[targetLeafId] ?? targetTab.sessionId;
+       const sourceSession = snapshot.sessions[sourceLocalSessionId];
+-      if (!sourceSession) return;
++      if (!sourceSession) {
++        switchDebug("split.pane.refused.source-session-missing", {
++          reason: `sourceLocalSessionId=${sourceLocalSessionId} tabSessionId=${targetTab.sessionId}`,
++        });
++        return;
++      }
+ 
+       const localSessionId = createId("session");
+       const newLeafId = createId("leaf");
+@@ -1130,6 +1145,9 @@ export function useWorkspaceStore({
+         content: options.content,
+         session,
+       });
++      switchDebug("split.pane.dispatched", {
++        reason: `tabId=${targetTab.id} targetLeafId=${targetLeafId} direction=${direction} newLeafId=${newLeafId}`,
++      });
+ 
+       if (options.content && options.content.kind !== "terminal") {
+         return;

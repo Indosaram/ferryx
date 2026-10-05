@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/lib/browserWorktreeRestore.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039340) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/browserWorktreeRestore.test.ts (6 tests | 6 failed) 7ms
+   × browser tab restore per worktree with scroll positions > identifies private profile IDs correctly 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser tab restore per worktree with scroll positions > records and retrieves scroll positions in browserHistory 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser tab restore per worktree with scroll positions > persists and restores browser tabs per worktree with scroll positions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser tab restore per worktree with scroll positions > strictly excludes private-profile tabs from serialization and deserialization 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser tab restore per worktree with scroll positions > is backward-compatible with legacy stored payloads missing scroll positions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser tab restore per worktree with scroll positions > skips stale tabs whose worktree was deleted or whose URL is unnavigable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > identifies private profile IDs correctly
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > records and retrieves scroll positions in browserHistory
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > persists and restores browser tabs per worktree with scroll positions
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > strictly excludes private-profile tabs from serialization and deserialization
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > is backward-compatible with legacy stored payloads missing scroll positions
+ FAIL  src/lib/browserWorktreeRestore.test.ts > browser tab restore per worktree with scroll positions > skips stale tabs whose worktree was deleted or whose URL is unnavigable
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/browserWorktreeRestore.test.ts:55:18
+     53| describe("browser tab restore per worktree with scroll positions", () …
+     54|   beforeEach(() => {
+     55|     localStorage.clear();
+       |                  ^
+     56|     clearBrowserScroll();
+     57|     clearBrowserHistory();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  10:10:05
+   Duration  686ms (transform 186ms, setup 100ms, collect 185ms, tests 7ms, environment 229ms, prepare 47ms)
+
+error: script "test" exited with code 1

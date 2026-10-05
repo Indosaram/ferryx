@@ -1,0 +1,8 @@
+{
+  "name": "attach-handshake",
+  "operationId": "qa-op-c5f82297-f654-4754-88c2-11134bc79c3b",
+  "producer": "ipc-qa-barrier",
+  "producerPid": 25888,
+  "registeredAtMs": 1791131850785,
+  "runId": "qa-run-73f69e58-6ab9-427a-a68c-a7b44509c2cd"
+}

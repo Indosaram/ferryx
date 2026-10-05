@@ -1,0 +1,39 @@
+{
+  "registered": {
+    "processes": [
+      {
+        "pid": 26856,
+        "label": ""
+      }
+    ],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-attach-stall"
+    ]
+  },
+  "reaped": [
+    26856
+  ],
+  "receipts": [
+    {
+      "kind": "process",
+      "pid": 26856,
+      "label": "",
+      "exited": true,
+      "alreadyTerminated": true,
+      "code": 1,
+      "signal": null
+    },
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-attach-stall",
+      "removed": true
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true
+  }
+}

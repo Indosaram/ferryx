@@ -1,0 +1,110 @@
+$ vitest run --maxWorkers=1 src/App.remote.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+[90mstderr[2m | src/App.remote.test.tsx[2m > [22m[2mApp SSH project lifecycle[2m > [22m[2mreattaches remote sessions after native startup without replacement and preserves their target and identity in the next save
+[22m[39mError: Uncaught [Error: [vitest] No "subscribeUpdateStatus" export is defined on the "./lib/updater" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+]
+    at reportException (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\helpers\runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\events\EventTarget-impl.js:353:9)
+    at invokeEventListeners (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\events\EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\events\EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\events\EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\jsdom\lib\jsdom\living\generated\EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\src\test\setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\react-dom\cjs\react-dom.development.js:4213:16)
+    at invokeGuardedCallback (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\react-dom\cjs\react-dom.development.js:4277:31)
+    at reportUncaughtErrorInDEV (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\node_modules\react-dom\cjs\react-dom.development.js:22877:5) Error: [vitest] No "subscribeUpdateStatus" export is defined on the "./lib/updater" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+    at VitestMocker.createError [90m(file:///C:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:284:17[90m)[39m
+    at Object.get [90m(file:///C:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:330:16[90m)[39m
+    at startWhatsNewRecorder [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39msrc\lib\whatsNew.ts:65:10[90m)[39m
+    at [90mC:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39msrc\App.tsx:2540:12
+    at commitHookEffectListMount [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:23189:26[90m)[39m
+    at commitPassiveMountOnFiber [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:24970:11[90m)[39m
+    at commitPassiveMountEffects_complete [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:24930:9[90m)[39m
+    at commitPassiveMountEffects_begin [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:24917:7[90m)[39m
+    at commitPassiveMountEffects [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:24905:3[90m)[39m
+    at flushPassiveEffectsImpl [90m(C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\[39mnode_modules\[4mreact-dom[24m\cjs\react-dom.development.js:27078:3[90m)[39m {
+  codeFrame: [32m'vi\x1B[33m.\x1B[39m\x1B[34mmock\x1B[39m(\x1B[35mimport\x1B[39m(\x1B[32m"./lib/updater"\x1B[39m)\x1B[33m,\x1B[39m \x1B[35masync\x1B[39m (importOriginal) \x1B[33m=>\x1B[39m {\n'[39m +
+    [32m'  \x1B[35mconst\x1B[39m actual \x1B[33m=\x1B[39m \x1B[35mawait\x1B[39m \x1B[34mimportOriginal\x1B[39m()\n'[39m +
+    [32m'  \x1B[35mreturn\x1B[39m {\n'[39m +
+    [32m'    \x1B[33m...\x1B[39mactual\x1B[33m,\x1B[39m\n'[39m +
+    [32m'    \x1B[90m// your mocked methods\x1B[39m\n'[39m +
+    [32m'  }\n'[39m +
+    [32m'})'[39m
+}
+The above error occurred in the <WorkspaceApp> component:
+
+    at WorkspaceApp (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\src\App.tsx:545:3)
+    at App (C:\Users\sook\ferryx-pane-completion\base-pass2-d82b35e4\ui\src\App.tsx:327:56)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+ [31m❯[39m src/App.remote.test.tsx [2m([22m[2m20 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 970[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mshows progress throughout registration, restore, and first SSH tab creation[32m 190[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mshows progress for manual first-tab creation and allows retry after failure[32m 47[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mreplaces registration failure with progress on explicit retry[32m 35[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mdoes not leak a late SSH failure into the selected local workspace[32m 42[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mfocuses the existing SSH terminal addressed by its backend identity[32m 56[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mloads a stored remote target without registering its path locally[32m 31[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mreturns from a local project to the requested existing SSH session[32m 65[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mopens the registered SSH project from remote without a preexisting terminal[32m 39[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mopens an SSH folder inside a parent Git repository without selecting the local project[32m 65[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mhandles the chooser's registered remote project through actual App registration[32m 63[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mroutes the chooser Settings CTA to SSH machines, not inbound Remote Access[32m 26[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22madopts the server's canonical host-qualified ID and path before new tabs and splits[32m 65[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mselects inactive remote roots by workspace identity even when a local root has the same path[32m 95[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mleaves a rejected host unavailable instead of spawning locally[32m 50[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mignores remote registration that resolves after switching to a local project[32m 31[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mrejects malformed stored targets without converting them to local: {"kind":"ssh"}[32m 12[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mrejects malformed stored targets without converting them to local: {"kind":"ssh","hostId":""}[32m 18[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mrejects malformed stored targets without converting them to local: null[32m 10[2mms[22m[39m
+   [32m✓[39m App SSH project lifecycle[2m > [22mrejects malformed stored targets without converting them to local: {"kind":"unknown"}[32m 10[2mms[22m[39m
+[31m   [31m×[31m App SSH project lifecycle[2m > [22mreattaches remote sessions after native startup without replacement and preserves their target and identity in the next save[39m[32m 19[2mms[22m[39m
+[31m     → [vitest] No "subscribeUpdateStatus" export is defined on the "./lib/updater" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/App.remote.test.tsx[2m > [22mApp SSH project lifecycle[2m > [22mreattaches remote sessions after native startup without replacement and preserves their target and identity in the next save
+[31m[1mError[22m: [vitest] No "subscribeUpdateStatus" export is defined on the "./lib/updater" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+[39m
+vi[33m.[39m[34mmock[39m([35mimport[39m([32m"./lib/updater"[39m)[33m,[39m [35masync[39m (importOriginal) [33m=>[39m {
+  [35mconst[39m actual [33m=[39m [35mawait[39m [34mimportOriginal[39m()
+  [35mreturn[39m {
+    [33m...[39mactual[33m,[39m
+    [90m// your mocked methods[39m
+  }
+})
+
+[36m [2m❯[22m startWhatsNewRecorder src/lib/whatsNew.ts:[2m65:10[22m[39m
+    [90m 63| [39m
+    [90m 64| [39mexport function startWhatsNewRecorder(storage: Storage | null = browse…
+    [90m 65| [39m  [35mreturn[39m [34msubscribeUpdateStatus[39m((status) [33m=>[39m {
+    [90m   | [39m         [31m^[39m
+    [90m 66| [39m    [35mif[39m (status[33m.[39mstate [33m!==[39m [32m"downloaded"[39m) [35mreturn[39m[33m;[39m
+    [90m 67| [39m    if (status.version === undefined || status.releaseNotes === undefi…
+[90m [2m❯[22m src/App.tsx:[2m2540:12[22m[39m
+[90m [2m❯[22m commitHookEffectListMount node_modules/react-dom/cjs/react-dom.development.js:[2m23189:26[22m[39m
+[90m [2m❯[22m commitPassiveMountOnFiber node_modules/react-dom/cjs/react-dom.development.js:[2m24970:11[22m[39m
+[90m [2m❯[22m commitPassiveMountEffects_complete node_modules/react-dom/cjs/react-dom.development.js:[2m24930:9[22m[39m
+[90m [2m❯[22m commitPassiveMountEffects_begin node_modules/react-dom/cjs/react-dom.development.js:[2m24917:7[22m[39m
+[90m [2m❯[22m commitPassiveMountEffects node_modules/react-dom/cjs/react-dom.development.js:[2m24905:3[22m[39m
+[90m [2m❯[22m flushPassiveEffectsImpl node_modules/react-dom/cjs/react-dom.development.js:[2m27078:3[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m19 passed[39m[22m[90m (20)[39m
+[2m   Start at [22m 10:10:37
+[2m   Duration [22m 4.06s[2m (transform 906ms, setup 211ms, collect 2.23s, tests 970ms, environment 422ms, prepare 78ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

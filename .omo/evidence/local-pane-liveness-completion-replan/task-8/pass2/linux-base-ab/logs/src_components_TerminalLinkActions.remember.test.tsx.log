@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/components/TerminalLinkActions.remember.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043520) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/TerminalLinkActions.remember.test.tsx (5 tests | 5 failed) 9ms
+   × remember terminal link destination > remembers 'external' and bypasses the chooser on the next link 5ms
+     → Cannot read properties of undefined (reading 'clear')
+     → unregister is not a function
+   × remember terminal link destination > remembers 'builtin' and bypasses the chooser on the next link 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → unregister is not a function
+   × remember terminal link destination > does not remember an unchecked one-time choice 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → unregister is not a function
+   × remember terminal link destination > does not save when checked but dismissed 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → unregister is not a function
+   × remember terminal link destination > still opens externally with Shift after remembering the built-in browser 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → unregister is not a function
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > remembers 'external' and bypasses the chooser on the next link
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > remembers 'builtin' and bypasses the chooser on the next link
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > does not remember an unchecked one-time choice
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > does not save when checked but dismissed
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > still opens externally with Shift after remembering the built-in browser
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TerminalLinkActions.remember.test.tsx:32:16
+     30| 
+     31| beforeEach(() => {
+     32|   localStorage.clear();
+       |                ^
+     33|   vi.clearAllMocks();
+     34|   toasts.render = null;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > remembers 'external' and bypasses the chooser on the next link
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > remembers 'builtin' and bypasses the chooser on the next link
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > does not remember an unchecked one-time choice
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > does not save when checked but dismissed
+ FAIL  src/components/TerminalLinkActions.remember.test.tsx > remember terminal link destination > still opens externally with Shift after remembering the built-in browser
+TypeError: unregister is not a function
+ ❯ src/components/TerminalLinkActions.remember.test.tsx:40:3
+     38| afterEach(() => {
+     39|   cleanup();
+     40|   unregister();
+       |   ^
+     41|   localStorage.clear();
+     42| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:11:04
+   Duration  1.23s (transform 159ms, setup 151ms, collect 551ms, tests 9ms, environment 311ms, prepare 61ms)
+
+error: script "test" exited with code 1

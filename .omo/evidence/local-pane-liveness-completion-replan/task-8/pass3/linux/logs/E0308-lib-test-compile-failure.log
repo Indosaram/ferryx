@@ -1,0 +1,362 @@
+   Compiling ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri)
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src/browser/snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:442:9
+    |
+442 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:21:5
+   |
+21 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:3254:13
+     |
+3254 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:3278:13
+     |
+3278 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src/ipc/pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/native_terminal/renderer/color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src/remote/machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncBufReadExt`
+    --> src/ssh/bridge_tests.rs:1968:9
+     |
+1968 |     use tokio::io::AsyncBufReadExt;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/ipc/tests.rs:309:22
+    |
+309 |           incarnation: spawned
+    |  ______________________^
+310 | |             .session
+311 | |             .incarnation
+312 | |             .clone()
+313 | |             .expect("spawn response reports the session's PTY incarnation"),
+    | |___________________________________________________________________________^ expected `Option<String>`, found `String`
+    |
+    = note: expected enum `std::option::Option<std::string::String>`
+             found struct `std::string::String`
+help: try wrapping the expression in `Some`
+    |
+309 ~         incarnation: Some(spawned
+310 |             .session
+311 |             .incarnation
+312 |             .clone()
+313 ~             .expect("spawn response reports the session's PTY incarnation")),
+    |
+
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:316:9
+    |
+316 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^ this value is reassigned later and never used
+...
+198 |         sent = n as usize;
+    |         ----------------- `sent` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^ this value is reassigned later and never used
+...
+222 |             written_total = n as usize;
+    |             -------------------------- `written_total` is overwritten here before the previous value is read
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:529:9
+    |
+529 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:543:26
+    |
+543 |         let mut cursor = 0usize;
+    |                          ^^^^^^ this value is reassigned later and never used
+...
+548 |         cursor = header.len();
+    |         --------------------- `cursor` is overwritten here before the previous value is read
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:569:14
+    |
+569 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:594:22
+    |
+594 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:671:41
+    |
+671 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:6636:13
+     |
+6636 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:6687:13
+     |
+6687 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src/native_terminal/surface_host.rs:9363:13
+     |
+9363 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src/native_terminal/surface_host.rs:9373:13
+     |
+9373 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1333:9
+     |
+1333 |     let mut child = spawn_cat_child();
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1347:9
+     |
+1347 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1364:9
+     |
+1364 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src/lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `ferryx` (lib test) generated 47 warnings
+error: could not compile `ferryx` (lib test) due to 1 previous error; 47 warnings emitted

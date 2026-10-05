@@ -1,0 +1,49 @@
+$ vitest run --maxWorkers=1 src/components/notification/NotificationCenterButton.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042933) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/notification/NotificationCenterButton.test.tsx (7 tests | 7 failed) 6ms
+   × NotificationCenterButton > renders bell IconButton with no-drag class, data-testid, and data-shortcut 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > shows no badge when unread count is 0 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > shows unread badge count matching the store 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > stops propagation on pointerdown and click 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > toggles the popover when clicked 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > clears the badge when mark all read is clicked 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterButton > supports controlled open and onOpenChange 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > renders bell IconButton with no-drag class, data-testid, and data-shortcut
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > shows no badge when unread count is 0
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > shows unread badge count matching the store
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > stops propagation on pointerdown and click
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > toggles the popover when clicked
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > clears the badge when mark all read is clicked
+ FAIL  src/components/notification/NotificationCenterButton.test.tsx > NotificationCenterButton > supports controlled open and onOpenChange
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/notification/NotificationCenterButton.test.tsx:10:18
+      8| 
+      9|   beforeEach(() => {
+     10|     localStorage.clear();
+       |                  ^
+     11|     store = createNotificationCenterStore({ storage: null });
+     12|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  10:10:55
+   Duration  1.01s (transform 133ms, setup 110ms, collect 480ms, tests 6ms, environment 235ms, prepare 52ms)
+
+error: script "test" exited with code 1

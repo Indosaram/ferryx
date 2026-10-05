@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scenario": "split-attach-stall",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-attach-stall",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-120bc965\\evidence\\split-attach-stall",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-120bc965\\runtime\\split-attach-stall"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "5c53505e4b1e6245f19397fd5f52111f2f35d7992c234ad9f3098a369dc25925",
+  "runId": "qa-run-f21b5d5f-78ec-454a-befb-f7754a9baf92",
+  "operationId": "qa-op-060deacc-1f75-4720-9a50-a99f331e19a8",
+  "verdict": "FAIL",
+  "nativeEvidence": null,
+  "error": {
+    "code": "SPLIT_RIGHT_NOT_FOUND",
+    "message": "SPLIT_RIGHT_NOT_FOUND: the \"Split pane right\" affordance of the focused pane could not be identified: {\"selector\":\"Split pane right\",\"interactive\":true,\"sessionId\":1,\"mainWindowHandle\":4787552,\"windowVisible\":true,\"focusedFound\":true,\"focusSource\":null,\"scopeDepth\":10,\"scopeIsWindowRoot\":false,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false,
+    "gateFailed": true
+  },
+  "barriers": [
+    {
+      "name": "attach-handshake",
+      "armedAt": "2026-10-04T17:21:04.795Z",
+      "heldAt": null,
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "split-attach-stall"
+    }
+  ]
+}

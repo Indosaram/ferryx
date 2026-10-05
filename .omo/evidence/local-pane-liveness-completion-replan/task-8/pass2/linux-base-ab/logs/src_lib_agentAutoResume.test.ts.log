@@ -1,0 +1,104 @@
+$ vitest run --maxWorkers=1 src/lib/agentAutoResume.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038876) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/agentAutoResume.test.ts (13 tests | 13 failed) 12ms
+   × agentAutoResume > collectAutoResumeCandidates > collects exited agent sessions and ignores live and plain-shell sessions 5ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > collectAutoResumeCandidates > skips unsupported agents and missing resume references 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > collectAutoResumeCandidates > prioritizes the active tab, then open tabs, then remaining sessions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > collectAutoResumeCandidates > caps candidates when limit is provided, but returns all when limit is omitted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > does not eagerly resume any agent under the default Lazy policy 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > resumes only the previously active tab under Active Only 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > Active Only resumes only the focused group's active tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > keeps legacy Eager behavior and staggers multiple resumes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > fires only once for the same restore token 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > never auto-resumes HMR-restored sessions 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > continues the batch when one reconnect fails 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > cleanup cancels pending timers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × agentAutoResume > scheduleAgentAutoResume restore policies > schedules auto-resume when ignorePolicy is true even under Lazy policy 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > collects exited agent sessions and ignores live and plain-shell sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > skips unsupported agents and missing resume references
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > prioritizes the active tab, then open tabs, then remaining sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > caps candidates when limit is provided, but returns all when limit is omitted
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > does not eagerly resume any agent under the default Lazy policy
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > resumes only the previously active tab under Active Only
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > Active Only resumes only the focused group's active tab
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > keeps legacy Eager behavior and staggers multiple resumes
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > fires only once for the same restore token
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > never auto-resumes HMR-restored sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > continues the batch when one reconnect fails
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > cleanup cancels pending timers
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > schedules auto-resume when ignorePolicy is true even under Lazy policy
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/agentAutoResume.test.ts:60:18
+     58|   beforeEach(() => {
+     59|     vi.useFakeTimers();
+     60|     localStorage.clear();
+       |                  ^
+     61|     resetAgentAutoResumeGuard();
+     62|     clearPendingAutoResumes();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/26]⎯
+
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > collects exited agent sessions and ignores live and plain-shell sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > skips unsupported agents and missing resume references
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > prioritizes the active tab, then open tabs, then remaining sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > collectAutoResumeCandidates > caps candidates when limit is provided, but returns all when limit is omitted
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > does not eagerly resume any agent under the default Lazy policy
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > resumes only the previously active tab under Active Only
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > Active Only resumes only the focused group's active tab
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > keeps legacy Eager behavior and staggers multiple resumes
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > fires only once for the same restore token
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > never auto-resumes HMR-restored sessions
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > continues the batch when one reconnect fails
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > cleanup cancels pending timers
+ FAIL  src/lib/agentAutoResume.test.ts > agentAutoResume > scheduleAgentAutoResume restore policies > schedules auto-resume when ignorePolicy is true even under Lazy policy
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/agentAutoResume.test.ts:70:18
+     68|     resetAgentAutoResumeGuard();
+     69|     resetGeneralSettings();
+     70|     localStorage.clear();
+       |                  ^
+     71|     vi.useRealTimers();
+     72|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/26]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed (13)
+   Start at  10:09:58
+   Duration  828ms (transform 151ms, setup 109ms, collect 144ms, tests 12ms, environment 244ms, prepare 50ms)
+
+error: script "test" exited with code 1

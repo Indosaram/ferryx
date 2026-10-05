@@ -1,0 +1,15 @@
+HOST=mac HEAD=39e722ce SCOPE=lib-only-reusing-built-test-binary DISK=4.3Gi START=2026-10-04T10:37:20Z
+GATE mac sh-bounds_ipc_presents_when_browser_child_is_open native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.30s
+GATE mac sh-deferred_bounds_retry_does_not_restore_obsolete_width native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.14s
+GATE mac sh-synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.10s
+GATE mac sh-synchronized_output_bounds_ipc_waits_for_actual_presentation native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.13s
+GATE mac new-paired-incarnation native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.00s
+GATE mac new-paired-describe native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.01s
+GATE mac ipc-hist native=101 selected=0 errors=1 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 61.12s
+GATE mac ipc-p13 native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 0.05s
+GATE mac pane-list native=0 selected=47 errors=0 | 
+GATE mac pane native=0 selected=0 errors=0 | test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 2646 filtered out; finished in 62.96s
+GATE mac split-list native=0 selected=15 errors=0 | 
+GATE mac split native=0 selected=0 errors=0 | test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2678 filtered out; finished in 0.43s
+GATE mac full-lib native=143 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2692 filtered out; finished in 1.17s
+RUSTI_DONE mac DISK=3.3Gi

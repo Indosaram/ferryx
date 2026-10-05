@@ -1,0 +1,634 @@
+﻿{
+    "route":  "withui",
+    "startedAt":  "2026-10-05T02:53:52.5356741+09:00",
+    "mySession":  1,
+    "interactive":  true,
+    "binSha":  "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042",
+    "binBytes":  106915840,
+    "hostLoad":  25,
+    "freeGb":  20.7,
+    "isolationRoot":  "C:\\Users\\sook\\ferryx-pane-completion\\exp-withui",
+    "extraEnv":  {
+
+                 },
+    "appPid":  4032,
+    "launchedAt":  "2026-10-05T02:53:53.8345951+09:00",
+    "visibleWindowCountAtLaunch":  3,
+    "firstVisibleWindowMs":  549,
+    "waitedMs":  550,
+    "driverProbeRaw":  "{\"pid\":4032,\"steps\":[{\"step\":\"owned-windows-enumerated\",\"ok\":true,\"visibleWindowCount\":3,\"searchOrder\":[{\"hwnd\":11865304,\"title\":\"F\",\"className\":\"T\"},{\"hwnd\":1838302,\"title\":\"\",\"className\":\"P\"},{\"hwnd\":34540026,\"title\":\"\",\"className\":\"T\"}]},{\"step\":\"split-right-probe\",\"ok\":true,\"failure\":\"SPLIT_RIGHT_NOT_FOUND\",\"candidateCount\":0,\"inventoryMatchCount\":0}],\"visibleWindowCount\":3,\"mainWindowHandle\":11865304,\"windows\":[{\"hwnd\":11865304,\"visible\":true,\"className\":\"T\",\"title\":\"F\"},{\"hwnd\":34540026,\"visible\":true,\"className\":\"T\",\"title\":\"\"},{\"hwnd\":1838302,\"visible\":true,\"className\":\"P\",\"title\":\"\"},{\"hwnd\":19335458,\"visible\":false,\"className\":\"M\",\"title\":\"M\"},{\"hwnd\":2690228,\"visible\":false,\"className\":\"I\",\"title\":\"D\"}],\"searchOrder\":[{\"hwnd\":11865304,\"title\":\"F\",\"className\":\"T\"},{\"hwnd\":1838302,\"title\":\"\",\"className\":\"P\"},{\"hwnd\":34540026,\"title\":\"\",\"className\":\"T\"}],\"splitProbeExit\":0,\"splitProbeStderr\":\"\",\"splitProbeParsed\":true,\"inventory\":{\"windows\":[{\"hwnd\":11865304,\"title\":\"F\",\"className\":\"T\",\"inspectedCount\":23,\"matchCount\":0,\"truncated\":false,\"matches\":[]},{\"hwnd\":1838302,\"title\":\"\",\"className\":\"P\",\"inspectedCount\":0,\"matchCount\":0,\"truncated\":false,\"matches\":[]},{\"hwnd\":34540026,\"title\":\"\",\"className\":\"T\",\"inspectedCount\":0,\"matchCount\":0,\"truncated\":false,\"matches\":[]}],\"inspectedCount\":23,\"matchCount\":0,\"truncated\":false,\"inspectCap\":4000,\"matchCap\":40,\"filter\":\"name or automationId contains \\\"split\\\" (case-insensitive)\"},\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"scopeDepth\":10,\"focusedFound\":true,\"focusSource\":null,\"psFailure\":\"SPLIT_RIGHT_NOT_FOUND\",\"matchedWindowHwnd\":null,\"result\":null}",
+    "driverProbe":  {
+                        "pid":  4032,
+                        "steps":  [
+                                      {
+                                          "step":  "owned-windows-enumerated",
+                                          "ok":  true,
+                                          "visibleWindowCount":  3,
+                                          "searchOrder":  [
+                                                              {
+                                                                  "hwnd":  11865304,
+                                                                  "title":  "F",
+                                                                  "className":  "T"
+                                                              },
+                                                              {
+                                                                  "hwnd":  1838302,
+                                                                  "title":  "",
+                                                                  "className":  "P"
+                                                              },
+                                                              {
+                                                                  "hwnd":  34540026,
+                                                                  "title":  "",
+                                                                  "className":  "T"
+                                                              }
+                                                          ]
+                                      },
+                                      {
+                                          "step":  "split-right-probe",
+                                          "ok":  true,
+                                          "failure":  "SPLIT_RIGHT_NOT_FOUND",
+                                          "candidateCount":  0,
+                                          "inventoryMatchCount":  0
+                                      }
+                                  ],
+                        "visibleWindowCount":  3,
+                        "mainWindowHandle":  11865304,
+                        "windows":  [
+                                        {
+                                            "hwnd":  11865304,
+                                            "visible":  true,
+                                            "className":  "T",
+                                            "title":  "F"
+                                        },
+                                        {
+                                            "hwnd":  34540026,
+                                            "visible":  true,
+                                            "className":  "T",
+                                            "title":  ""
+                                        },
+                                        {
+                                            "hwnd":  1838302,
+                                            "visible":  true,
+                                            "className":  "P",
+                                            "title":  ""
+                                        },
+                                        {
+                                            "hwnd":  19335458,
+                                            "visible":  false,
+                                            "className":  "M",
+                                            "title":  "M"
+                                        },
+                                        {
+                                            "hwnd":  2690228,
+                                            "visible":  false,
+                                            "className":  "I",
+                                            "title":  "D"
+                                        }
+                                    ],
+                        "searchOrder":  [
+                                            {
+                                                "hwnd":  11865304,
+                                                "title":  "F",
+                                                "className":  "T"
+                                            },
+                                            {
+                                                "hwnd":  1838302,
+                                                "title":  "",
+                                                "className":  "P"
+                                            },
+                                            {
+                                                "hwnd":  34540026,
+                                                "title":  "",
+                                                "className":  "T"
+                                            }
+                                        ],
+                        "splitProbeExit":  0,
+                        "splitProbeStderr":  "",
+                        "splitProbeParsed":  true,
+                        "inventory":  {
+                                          "windows":  [
+                                                          {
+                                                              "hwnd":  11865304,
+                                                              "title":  "F",
+                                                              "className":  "T",
+                                                              "inspectedCount":  23,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          },
+                                                          {
+                                                              "hwnd":  1838302,
+                                                              "title":  "",
+                                                              "className":  "P",
+                                                              "inspectedCount":  0,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          },
+                                                          {
+                                                              "hwnd":  34540026,
+                                                              "title":  "",
+                                                              "className":  "T",
+                                                              "inspectedCount":  0,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          }
+                                                      ],
+                                          "inspectedCount":  23,
+                                          "matchCount":  0,
+                                          "truncated":  false,
+                                          "inspectCap":  4000,
+                                          "matchCap":  40,
+                                          "filter":  "name or automationId contains \"split\" (case-insensitive)"
+                                      },
+                        "candidateCount":  0,
+                        "actionableCount":  0,
+                        "candidates":  [
+
+                                       ],
+                        "scopeDepth":  10,
+                        "focusedFound":  true,
+                        "focusSource":  null,
+                        "psFailure":  "SPLIT_RIGHT_NOT_FOUND",
+                        "matchedWindowHwnd":  null,
+                        "result":  null
+                    },
+    "treeDumpRaw":  "{\"probe\":\"tree-dump\",\"pid\":4032,\"visibleWindows\":3,\"cap\":120,\"windows\":[{\"hwnd\":11865304,\"rootNull\":false,\"total\":72,\"shown\":72,\"items\":[{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"WRY_WEBVIEW\"},{\"name\":\"Ferryx\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"Chrome_WidgetWin_1\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"Intermediate D3D Window\"},{\"name\":\"Ferryx - 웹 콘텐츠\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"BrowserRootView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"NonClientView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserFrameView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"BrowserView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"TopContainerView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"SidebarContentsSplitView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"SidebarContentsSplitView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"MultiContentsView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"View\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"View\"},{\"name\":\"Ferryx\",\"controlType\":\"ControlType.Document\",\"automationId\":\"RootWebArea\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"bg-background text-foreground antialiased\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"root\",\"className\":\"\"},{\"name\":\"Notifications alt+T\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.List\",\"automationId\":\"\",\"className\":\"toaster group\"},{\"name\":\"Ferryx for Windows is moving to the Microsoft StoreThis installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.Got it\",\"controlType\":\"ControlType.ListItem\",\"automationId\":\"\",\"className\":\"font-sans text-sm\"},{\"name\":\"Close toast\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-info size-4\"},{\"name\":\"Ferryx for Windows is moving to the Microsoft Store\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"This installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"Got it\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"Dismiss all notifications\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"toast-clear-all transition hover:brightness-110 active:brightness-95\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground\"},{\"name\":\"Hide sidebar\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-panel-left-close size-3.5\"},{\"name\":\"Add project\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-plus size-3.5\"},{\"name\":\"Inbox\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag relative\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-inbox size-3.5\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"min-w-0 select-none\"},{\"name\":\"Expand Strawberry\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none\"},{\"name\":\"Strawberry\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-folder size-3.5 shrink-0\"},{\"name\":\"Past conversations\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-history size-3\"},{\"name\":\"Remove project Strawberry\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-trash2 size-3\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"min-w-0 select-none\"},{\"name\":\"Expand System32\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none\"},{\"name\":\"System32\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-folder size-3.5 shrink-0\"},{\"name\":\"Past conversations\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-history size-3\"},{\"name\":\"Remove project System32\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-trash2 size-3\"},{\"name\":\"0\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\" \",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"sessions\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\" watched\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"Settings\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-settings2 size-3.5\"},{\"name\":\"Resize sidebar\",\"controlType\":\"ControlType.Separator\",\"automationId\":\"\",\"className\":\"no-drag absolute inset-y-0 right-0 z-30 w-1.5 cursor-col-resize touch-none\"},{\"name\":\"\",\"controlType\":\"ControlType.StatusBar\",\"automationId\":\"DndLiveRegion-1\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background\"},{\"name\":\"No open tabs\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"Open a terminal or browser tab to get started.\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"New Terminal\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium hover:bg-accent/80\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-terminal size-4\"},{\"name\":\"New Browser Tab\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/50\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"lucide lucide-globe size-4\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Group\",\"automationId\":\"\",\"className\":\"fixed left-0 top-0 font-sans text-[13px] antialiased select-none cursor-grab transition-[transform,opacity] duration-400 ease-drawer pointer-events-auto\"},{\"name\":\"Copy element\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"group contain-layout flex items-center justify-center cursor-pointer interactive-scale a11y-hitbox\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"Collapse toolbar\",\"controlType\":\"ControlType.Button\",\"automationId\":\"\",\"className\":\"group contain-layout shrink-0 flex items-center justify-center cursor-pointer interactive-scale a11y-hitbox\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"text-[var(--rg-text-secondary)] group-hover:text-[var(--rg-text-primary)] transition-[transform,color] duration-150 ease-drawer -m-0.5 rotate-90\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserDownloadView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserTabRootView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"TopContainerOverlayView\"}]},{\"hwnd\":34540026,\"rootNull\":false,\"total\":0,\"shown\":0,\"items\":[]},{\"hwnd\":1838302,\"rootNull\":false,\"total\":0,\"shown\":0,\"items\":[]}]}",
+    "treeDump":  {
+                     "probe":  "tree-dump",
+                     "pid":  4032,
+                     "visibleWindows":  3,
+                     "cap":  120,
+                     "windows":  [
+                                     {
+                                         "hwnd":  11865304,
+                                         "rootNull":  false,
+                                         "total":  72,
+                                         "shown":  72,
+                                         "items":  [
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "WRY_WEBVIEW"
+                                                       },
+                                                       {
+                                                           "name":  "Ferryx",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "Chrome_WidgetWin_1"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "Intermediate D3D Window"
+                                                       },
+                                                       {
+                                                           "name":  "Ferryx - 웹 콘텐츠",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "BrowserRootView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "NonClientView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserFrameView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "BrowserView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "TopContainerView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "SidebarContentsSplitView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "SidebarContentsSplitView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "MultiContentsView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "View"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "View"
+                                                       },
+                                                       {
+                                                           "name":  "Ferryx",
+                                                           "controlType":  "ControlType.Document",
+                                                           "automationId":  "RootWebArea",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "bg-background text-foreground antialiased"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "root",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Notifications alt+T",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.List",
+                                                           "automationId":  "",
+                                                           "className":  "toaster group"
+                                                       },
+                                                       {
+                                                           "name":  "Ferryx for Windows is moving to the Microsoft StoreThis installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.Got it",
+                                                           "controlType":  "ControlType.ListItem",
+                                                           "automationId":  "",
+                                                           "className":  "font-sans text-sm"
+                                                       },
+                                                       {
+                                                           "name":  "Close toast",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-info size-4"
+                                                       },
+                                                       {
+                                                           "name":  "Ferryx for Windows is moving to the Microsoft Store",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "This installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Got it",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Dismiss all notifications",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "toast-clear-all transition hover:brightness-110 active:brightness-95"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
+                                                       },
+                                                       {
+                                                           "name":  "Hide sidebar",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-panel-left-close size-3.5"
+                                                       },
+                                                       {
+                                                           "name":  "Add project",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-plus size-3.5"
+                                                       },
+                                                       {
+                                                           "name":  "Inbox",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag relative"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-inbox size-3.5"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "min-w-0 select-none"
+                                                       },
+                                                       {
+                                                           "name":  "Expand Strawberry",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                                                       },
+                                                       {
+                                                           "name":  "Strawberry",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-folder size-3.5 shrink-0"
+                                                       },
+                                                       {
+                                                           "name":  "Past conversations",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-history size-3"
+                                                       },
+                                                       {
+                                                           "name":  "Remove project Strawberry",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-trash2 size-3"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "min-w-0 select-none"
+                                                       },
+                                                       {
+                                                           "name":  "Expand System32",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                                                       },
+                                                       {
+                                                           "name":  "System32",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-folder size-3.5 shrink-0"
+                                                       },
+                                                       {
+                                                           "name":  "Past conversations",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-history size-3"
+                                                       },
+                                                       {
+                                                           "name":  "Remove project System32",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-trash2 size-3"
+                                                       },
+                                                       {
+                                                           "name":  "0",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  " ",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "sessions",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  " watched",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Settings",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-settings2 size-3.5"
+                                                       },
+                                                       {
+                                                           "name":  "Resize sidebar",
+                                                           "controlType":  "ControlType.Separator",
+                                                           "automationId":  "",
+                                                           "className":  "no-drag absolute inset-y-0 right-0 z-30 w-1.5 cursor-col-resize touch-none"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.StatusBar",
+                                                           "automationId":  "DndLiveRegion-1",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+                                                       },
+                                                       {
+                                                           "name":  "No open tabs",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Open a terminal or browser tab to get started.",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "New Terminal",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium hover:bg-accent/80"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-terminal size-4"
+                                                       },
+                                                       {
+                                                           "name":  "New Browser Tab",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/50"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "lucide lucide-globe size-4"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Group",
+                                                           "automationId":  "",
+                                                           "className":  "fixed left-0 top-0 font-sans text-[13px] antialiased select-none cursor-grab transition-[transform,opacity] duration-400 ease-drawer pointer-events-auto"
+                                                       },
+                                                       {
+                                                           "name":  "Copy element",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "group contain-layout flex items-center justify-center cursor-pointer interactive-scale a11y-hitbox"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "Collapse toolbar",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "",
+                                                           "className":  "group contain-layout shrink-0 flex items-center justify-center cursor-pointer interactive-scale a11y-hitbox"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "text-[var(--rg-text-secondary)] group-hover:text-[var(--rg-text-primary)] transition-[transform,color] duration-150 ease-drawer -m-0.5 rotate-90"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserDownloadView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserTabRootView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "TopContainerOverlayView"
+                                                       }
+                                                   ]
+                                     },
+                                     {
+                                         "hwnd":  34540026,
+                                         "rootNull":  false,
+                                         "total":  0,
+                                         "shown":  0,
+                                         "items":  [
+
+                                                   ]
+                                     },
+                                     {
+                                         "hwnd":  1838302,
+                                         "rootNull":  false,
+                                         "total":  0,
+                                         "shown":  0,
+                                         "items":  [
+
+                                                   ]
+                                     }
+                                 ]
+                 },
+    "nameFoundAnywhere":  false,
+    "nameFoundWhere":  [
+
+                       ],
+    "outcome":  "MEASURED"
+}

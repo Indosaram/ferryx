@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "runId": "task-1-remote-verification-r3",
+  "timestamp": "2026-10-03T15:03:41.887Z",
+  "candidateWorktree": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation",
+  "baseCommit": "d82b35e43f208b53adf6310f4e3c89cbde8814f4",
+  "manifestProvenance": {
+    "manifestFile": "manifest-r3.json",
+    "measuredBytes": 23970,
+    "measuredSha256": "987e27388d1cc0ddbdcf64b57610b157217ff68907d59f292f64b1ae5dbc633e",
+    "selectedFilesCount": 27,
+    "allFilesHashVerified": true,
+    "frontendInputsIdenticalToR2": true
+  },
+  "disposableFixtureApplyCheck": {
+    "command": "git apply --check mismatch.patch",
+    "fixturePath": "/tmp/disposable-mismatch-fixture-task1-01a10211",
+    "exitCode": 1,
+    "rejectionVerified": true,
+    "baselineSha256": "15958392d9dc73885c809786982a543f790ead97b2bef0cc5a66a70e22d79e1f",
+    "afterSha256": "15958392d9dc73885c809786982a543f790ead97b2bef0cc5a66a70e22d79e1f",
+    "candidateUnchanged": true,
+    "teardownVerified": true
+  },
+  "remoteStaging": {
+    "mahoWin": {
+      "host": "sook@100.126.171.58",
+      "sourcePath": "C:\\Users\\sook\\ferryx-pane-completion\\source",
+      "ghosttyJunction": "C:\\Users\\sook\\ferryx-pane-completion\\source\\src-tauri\\vendor\\ghostty -> C:\\Users\\sook\\task2-ghostty-6a508fd5",
+      "ghosttySha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "totalFilesStaged": 27,
+      "pairedFixturesStaged": true
+    },
+    "mahoMac": {
+      "host": "I552267@100.65.239.35",
+      "sourcePath": "/Users/I552267/ferryx-pane-completion/source",
+      "ghosttySymlink": "/Users/I552267/ferryx-pane-completion/source/src-tauri/vendor/ghostty -> /Users/I552267/ferryx-ghostty",
+      "ghosttySha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "totalFilesStaged": 27,
+      "uiDistStaged": true,
+      "pairedFixturesStaged": true
+    }
+  },
+  "executionGates": {
+    "remoteUiBuild": {
+      "platform": "win32",
+      "command": "bun run --cwd ui build",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "duration": "6.45s",
+      "modulesTransformed": 2227,
+      "logPath": "ui-build-r2.log",
+      "provenance": "retained from R2 (frontend inputs identical)"
+    },
+    "scopedFrontendVitest": {
+      "platform": "win32",
+      "command": "bun run test src/lib/switchDebug.test.ts src/lib/paneDebugInfo.test.ts src/lib/paneLiveness.test.ts src/lib/nativeTerminalInputQueue.test.ts",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "filesPassed": 4,
+      "testsPassed": 42,
+      "testsFailed": 0,
+      "duration": "2.93s",
+      "logPath": "scoped-vitest-r2.log",
+      "breakdown": {
+        "switchDebug": 9,
+        "paneDebugInfo": 3,
+        "paneLiveness": 13,
+        "nativeTerminalInputQueue": 17
+      },
+      "provenance": "retained from R2 (frontend inputs identical)"
+    },
+    "canonicalRunnerVitest": {
+      "platform": "win32",
+      "command": "bun ui/node_modules/vitest/vitest.mjs run --config scripts/qa/pane-liveness-vitest.config.mjs scripts/qa/pane-liveness.test.mjs",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "filesPassed": 1,
+      "testsPassed": 19,
+      "testsFailed": 0,
+      "duration": "541ms",
+      "logPath": "canonical-runner-vitest.log",
+      "provenance": "retained from R2 (frontend inputs identical)"
+    },
+    "rustPaneLivenessDiagnostics": {
+      "platform": "win32",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib pane_liveness_diagnostics -- --nocapture --test-threads=1",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "testsPassed": 9,
+      "testsFailed": 0,
+      "filteredOut": 2192,
+      "duration": "0.05s",
+      "logPath": "rust-diag-r3.log",
+      "exitFile": "rust-diag-r3.exit"
+    },
+    "rustQaBarrier": {
+      "platform": "win32",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features local-split-qa qa_barrier -- --nocapture --test-threads=1",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "testsPassed": 10,
+      "testsFailed": 0,
+      "filteredOut": 2201,
+      "duration": "0.18s",
+      "logPath": "rust-qa-barrier-r3.log",
+      "exitFile": "rust-qa-barrier-r3.exit"
+    },
+    "macTestList": {
+      "platform": "darwin",
+      "command": "set -o pipefail; cargo test --lib --features local-split-qa -- --list",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "logPath": "task-1-mac-list-r3.log",
+      "exitFile": "task-1-mac-list-r3.exit"
+    },
+    "macCoordinatorTest": {
+      "platform": "darwin",
+      "command": "set -o pipefail; cargo test --lib --features local-split-qa native_terminal::surface_host::liveness_tests::qa_barrier_presentation_tests::real_coordinator_frame_holds_and_recovers_through_private_barrier -- --exact --nocapture",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "filteredOut": 2627,
+      "duration": "0.17s",
+      "logPath": "mac-coordinator-test.log",
+      "exitFile": "mac-coordinator-test.exit"
+    },
+    "headlessDiagnosticClassifierSmoke": {
+      "platform": "auxiliary",
+      "status": "NOT_RUN",
+      "note": "Marked NOT_RUN pending execution against task-owned remote binary/data"
+    }
+  },
+  "cleanup": {
+    "temporaryScriptsRemoved": [
+      "run-ui-build.ps1",
+      "run-ui-build-r2.ps1",
+      "run-scoped-vitest-r2.ps1",
+      "run-rust-diagnostics.ps1",
+      "run-rust-diagnostics-r3.ps1",
+      "run-rust-qa-barrier-r3.ps1",
+      "run-canonical-runner-vitest.ps1",
+      "verify-19-files.ps1"
+    ],
+    "verifiedGone": true,
+    "retainedDirsForConsumers": [
+      "C:\\Users\\sook\\ferryx-pane-completion",
+      "/Users/I552267/ferryx-pane-completion"
+    ]
+  }
+}

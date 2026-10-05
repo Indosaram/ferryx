@@ -1,0 +1,205 @@
+{
+  "mac": {
+    "timedOut": false,
+    "tests": {
+      "failed": 192,
+      "passed": 6329,
+      "total": 6521
+    },
+    "testFiles": {
+      "failed": 7,
+      "passed": 365,
+      "total": 372
+    },
+    "failedFileCount": 7,
+    "knownFromPass2": [
+      "src/App.test.tsx",
+      "src/components/NativeTerminalPane.test.tsx",
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/lib/pairedDaemonRollout.test.ts",
+      "src/lib/updater.test.ts"
+    ],
+    "NEW_IN_PASS3": [
+      "src/lib/terminalTransport/terminalTransport.test.ts"
+    ],
+    "pass2HadButPass3DoesNot": [
+      "src/App.remote.test.tsx",
+      "src/App.pairedDaemon.test.tsx",
+      "src/components/NativeTerminalPane.presentation.test.tsx",
+      "src/components/SettingsDialog.cli.test.tsx"
+    ],
+    "protectedStillFailing": [
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/lib/updater.test.ts"
+    ],
+    "mandatoryStillFailing": [
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/lib/pairedDaemonRollout.test.ts"
+    ]
+  },
+  "linux": {
+    "timedOut": false,
+    "tests": {
+      "failed": 1224,
+      "passed": 5297,
+      "total": 6521
+    },
+    "testFiles": {
+      "failed": 99,
+      "passed": 273,
+      "total": 372
+    },
+    "failedFileCount": 99,
+    "knownFromPass2": [
+      "src/App.notifications.test.tsx",
+      "src/App.pairedDaemon.test.tsx",
+      "src/App.pairedProjectContracts.test.ts",
+      "src/App.remote.test.tsx",
+      "src/App.remoteHostShortcuts.test.tsx",
+      "src/App.test.tsx",
+      "src/components/BrowserPane.displayError.test.tsx",
+      "src/components/BrowserPane.findError.test.tsx",
+      "src/components/BrowserPane.findRace.test.tsx",
+      "src/components/BrowserPane.masking.test.tsx",
+      "src/components/BrowserPane.parity.test.tsx",
+      "src/components/BrowserPane.privateHistory.test.tsx",
+      "src/components/BrowserPane.test.tsx",
+      "src/components/BrowserToolbar.devtools.test.tsx",
+      "src/components/BrowserToolbar.omnibox.test.tsx",
+      "src/components/BrowserToolbar.test.tsx",
+      "src/components/FilePreviewText.readingControls.test.tsx",
+      "src/components/NativeTerminalPane.test.tsx",
+      "src/components/SettingsDialog.cli.test.tsx",
+      "src/components/SettingsDialog.escape.test.tsx",
+      "src/components/SettingsDialog.ssh.test.tsx",
+      "src/components/SettingsDialog.test.tsx",
+      "src/components/Sidebar.activity.test.tsx",
+      "src/components/Sidebar.dnd.test.tsx",
+      "src/components/Sidebar.paired.test.tsx",
+      "src/components/Sidebar.projectIdentity.test.tsx",
+      "src/components/Sidebar.remote.test.tsx",
+      "src/components/Sidebar.sortableIdentity.test.tsx",
+      "src/components/Sidebar.sshActivity.test.tsx",
+      "src/components/Sidebar.test.tsx",
+      "src/components/TabBar.browserTab.runtime.test.tsx",
+      "src/components/TabBar.lifecycle.test.tsx",
+      "src/components/TabBar.test.tsx",
+      "src/components/TerminalLinkActions.remember.test.tsx",
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/components/TerminalSplitView.test.tsx",
+      "src/components/notification/AttentionCountUnification.test.tsx",
+      "src/components/notification/NotificationCenterButton.test.tsx",
+      "src/components/notification/NotificationCenterPopover.test.tsx",
+      "src/components/onboarding/AgentsCliStep.test.tsx",
+      "src/components/settings/AgentsSection.test.tsx",
+      "src/components/settings/BrowserSection.silentFailures.test.tsx",
+      "src/components/settings/BrowserSection.test.tsx",
+      "src/components/settings/NotificationsSection.test.tsx",
+      "src/components/settings/PairedMachinesSection.test.tsx",
+      "src/components/settings/PermissionsSection.test.tsx",
+      "src/components/settings/RemoteSection.test.tsx",
+      "src/components/settings/RemoteSectionSignOut.test.tsx",
+      "src/components/settings/SshSection.test.tsx",
+      "src/components/ui/sonner.test.tsx",
+      "src/features/ferryx/chat/ManagedChat.test.tsx",
+      "src/features/ferryx/chat/drafts.test.ts",
+      "src/lib/agentAutoResume.test.ts",
+      "src/lib/agentReconnect.integration.test.ts",
+      "src/lib/agentsSettings.test.ts",
+      "src/lib/browserPopup.test.ts",
+      "src/lib/browserRestoreSettings.test.ts",
+      "src/lib/browserSettings.test.ts",
+      "src/lib/browserWorktreeRestore.test.ts",
+      "src/lib/fileOpenTargets.test.ts",
+      "src/lib/generalSettings.test.ts",
+      "src/lib/linkRouting.fileRouting.test.ts",
+      "src/lib/linkRouting.test.ts",
+      "src/lib/notificationCenter/notificationCenter.test.ts",
+      "src/lib/notificationSettings.test.ts",
+      "src/lib/pairedDaemonRollout.test.ts",
+      "src/lib/pairedHostInventory.test.ts",
+      "src/lib/pushSubscription.test.ts",
+      "src/lib/remoteClient.test.ts",
+      "src/lib/settingsRuntime.test.ts",
+      "src/lib/shellReplacement.test.ts",
+      "src/lib/storageKeys.test.ts",
+      "src/lib/terminalSettings.test.tsx",
+      "src/lib/updater.test.ts",
+      "src/remote/AccountLoginPage.test.tsx",
+      "src/remote/RemoteApp.accountSession.test.tsx",
+      "src/remote/RemoteApp.threadsEntry.test.tsx",
+      "src/remote/RemoteAppWorktreeRestore.test.tsx",
+      "src/remote/RemoteAttention.test.tsx",
+      "src/remote/RemotePreferences.contract.test.tsx",
+      "src/remote/RemoteReconnect.test.tsx",
+      "src/remote/RemoteRouting.test.tsx",
+      "src/remote/RemoteSsh.test.tsx",
+      "src/remote/RemoteUI.test.tsx",
+      "src/remote/accountSession.test.ts",
+      "src/remote/accountSessionFollowups.test.ts",
+      "src/remote/accountSessionRetention.test.tsx",
+      "src/remote/deviceIdentity.opera.test.ts",
+      "src/remote/deviceIdentity.test.tsx",
+      "src/remote/remoteAppChatFrames.test.tsx",
+      "src/remote/resolveAccountOriginRetention.test.ts",
+      "src/remote/zeroConfigSecurityProbe.test.tsx",
+      "src/state/activityRenderChain.test.tsx",
+      "src/state/browserSessionHydration.test.ts",
+      "src/state/remoteHostStore.native.test.ts",
+      "src/state/sshActivity.integration.test.tsx",
+      "src/state/workspaceRestore.test.tsx"
+    ],
+    "NEW_IN_PASS3": [
+      "src/lib/terminalTransport/terminalTransport.test.ts"
+    ],
+    "pass2HadButPass3DoesNot": [
+      "src/components/NativeTerminalPane.presentation.test.tsx"
+    ],
+    "protectedStillFailing": [
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/lib/updater.test.ts"
+    ],
+    "mandatoryStillFailing": [
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/lib/pairedDaemonRollout.test.ts"
+    ]
+  },
+  "windows": {
+    "timedOut": false,
+    "tests": null,
+    "testFiles": {
+      "failed": 9,
+      "passed": 363,
+      "total": 372
+    },
+    "failedFileCount": 9,
+    "knownFromPass2": [
+      "src/App.test.tsx",
+      "src/components/NativeTerminalPane.test.tsx",
+      "src/components/SettingsDialog.test.tsx",
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/lib/agentStateExtension.test.ts",
+      "src/lib/pairedDaemonRollout.test.ts",
+      "src/lib/updater.test.ts"
+    ],
+    "NEW_IN_PASS3": [
+      "src/lib/terminalTransport/terminalTransport.test.ts"
+    ],
+    "pass2HadButPass3DoesNot": [
+      "src/App.pairedDaemon.test.tsx",
+      "src/App.remote.test.tsx",
+      "src/components/NativeTerminalPane.presentation.test.tsx"
+    ],
+    "protectedStillFailing": [
+      "src/components/TerminalSearchOverlay.test.tsx",
+      "src/lib/updater.test.ts"
+    ],
+    "mandatoryStillFailing": [
+      "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "src/lib/pairedDaemonRollout.test.ts"
+    ]
+  }
+}

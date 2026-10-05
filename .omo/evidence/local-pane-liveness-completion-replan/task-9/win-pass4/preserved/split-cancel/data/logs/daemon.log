@@ -1,0 +1,3 @@
+2026-10-04T16:37:36.400624Z  INFO ferryx_lib::daemon::server: rorca daemon listening on C:\Users\sook\ferryx-pane-completion\task9-91d447e1\runtime\split-cancel\runtime\daemon.port
+2026-10-04T16:37:36.403090Z  INFO ferryx_lib::daemon::server: Agent state ingress listening on loopback port=58952
+2026-10-04T16:37:36.472875Z  INFO ferryx_lib::cli: Registered startup workspace for headless daemon workspace_id=source-21dea3c0 repo_root=\\?\C:\Users\sook\ferryx-pane-completion\source-21dea3c0

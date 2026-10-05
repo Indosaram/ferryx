@@ -1,0 +1,37 @@
+{
+  "at": "2026-10-04T19:25:45.330Z",
+  "taskName": "ferryx-qa-split-happy-3924-06hp6w",
+  "mechanism": "schtasks /create /it + /run bound to the interactive console user",
+  "outerProbe": {
+    "probe": "windows-session",
+    "interactive": false,
+    "sessionId": 0,
+    "processId": 20452,
+    "activeConsoleSessionId": 1,
+    "explorerSessions": [
+      1
+    ],
+    "computerName": "DESKTOP-1LAPJMP",
+    "userName": "sook",
+    "qwinsta": [
+      " ���� �̸�         ����� �̸�              ID  ����    ����        ��ġ ",
+      ">services                                            0  ��ũ                      ",
+      " console                   sook                      1  Ȱ��                        "
+    ]
+  },
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+    "--scenario",
+    "split-happy",
+    "--binary",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "--evidence-dir",
+    "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\control-run2",
+    "--isolation-root",
+    "C:\\Users\\sook\\ferryx-pane-completion\\pd12-iso\\split-happy\\control-run2"
+  ],
+  "cwd": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0",
+  "batPath": "C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-qa-relaunch-aOfKVL\\ferryx-qa-split-happy-3924-06hp6w.bat",
+  "evidenceDir": "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\control-run2"
+}

@@ -1,0 +1,39 @@
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri)
+error: failed to run custom build command for `ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-6e2f8650207c5e55/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rustc-link-search=native=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/ghostty_vt/lib
+  cargo:rustc-link-lib=static=ghostty-vt
+  cargo:include=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/ghostty_vt/include
+  cargo:ghostty_lib_dir=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/ghostty_vt/lib
+  cargo:ghostty_include_dir=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/ghostty_vt/include
+  cargo:ghostty_sha=6a508fd5e34c7e222c052a6d00bb3891ff3feace
+  cargo:ghostty_zig_version=0.16.0
+  cargo:ghostty_target=aarch64-apple-darwin
+  cargo:ghostty_zig_target=aarch64-macos
+  cargo:ghostty_artifact=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/ghostty_vt/lib/libghostty-vt.a
+  cargo:rerun-if-changed=native_terminal/build_ghostty.rs
+  cargo:rerun-if-changed=native_terminal/ghostty_source_lock.json
+  cargo:rerun-if-changed=vendor/ghostty/build.zig
+  cargo:rerun-if-changed=vendor/ghostty/src
+  cargo:rerun-if-changed=vendor/ghostty/include
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=HOST
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.conf.json
+  cargo:rerun-if-changed=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.macos.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-ccb7ffd23bd9f9df/out/app-manifest/__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin
+  resource path `../ui/dist` doesn't exist

@@ -1,0 +1,58 @@
+[
+  {
+    "host": "linux",
+    "name": "paneHandleReach",
+    "assertions": [
+      "     → expect(element).toHaveClass(\"h-3\")",
+      "  h-3",
+      "  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "Error: expect(element).toHaveClass(\"h-3\")",
+      "  h-3",
+      "  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0",
+      "     83|     expect(handle).toHaveClass(\"h-3\");",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed (1)"
+    ]
+  },
+  {
+    "host": "linux",
+    "name": "pairedDaemonRollout",
+    "assertions": [
+      "     → promise resolved \"{ apiVersion: 1, …(7) }\" instead of rejecting",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "AssertionError: promise resolved \"{ apiVersion: 1, …(7) }\" instead of rejecting",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed | 4 passed (5)"
+    ]
+  },
+  {
+    "host": "windows",
+    "name": "paneHandleReach",
+    "assertions": [
+      "     → expect(element).toHaveClass(\"h-3\")",
+      "  h-3",
+      "  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "Error: expect(element).toHaveClass(\"h-3\")",
+      "  h-3",
+      "  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0",
+      "     83|     expect(handle).toHaveClass(\"h-3\");",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed (1)",
+      "NATIVE_EXIT=1\r"
+    ]
+  },
+  {
+    "host": "windows",
+    "name": "pairedDaemonRollout",
+    "assertions": [
+      "     → promise resolved \"{ apiVersion: 1, …(7) }\" instead of rejecting",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "AssertionError: promise resolved \"{ apiVersion: 1, …(7) }\" instead of rejecting",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed | 4 passed (5)",
+      "NATIVE_EXIT=1\r"
+    ]
+  }
+]

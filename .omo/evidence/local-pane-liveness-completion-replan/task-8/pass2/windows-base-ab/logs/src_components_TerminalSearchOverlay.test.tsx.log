@@ -1,0 +1,47 @@
+$ vitest run --maxWorkers=1 src/components/TerminalSearchOverlay.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/components/TerminalSearchOverlay.test.tsx [2m([22m[2m11 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 218[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mrenders search input, navigation buttons, and close button[32m 74[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mtriggers native search on query input and parses camelCase Rust DTO object[32m 14[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mtriggers native search on query input and displays match counter[32m 13[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mhandles zero matches DTO object cleanly with 0/0[32m 31[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mhandles invoke rejection gracefully by showing 0/0[32m 15[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mparses snake_case DTO matches gracefully[32m 16[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mnavigates matches with Enter, Shift+Enter, and arrow buttons[32m 22[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mignores an out-of-order stale search result and keeps the newest query's counts[32m 8[2mms[22m[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mdoes not let a stale rejection overwrite a newer successful result[32m 6[2mms[22m[39m
+[31m   [31m×[31m TerminalSearchOverlay native session search[2m > [22mresets stale counts and re-searches the new session on sessionId change[39m[32m 13[2mms[22m[39m
+[31m     → expected [ …(3) ] to have a length of 2 but got 3[39m
+   [32m✓[39m TerminalSearchOverlay native session search[2m > [22mcloses on Escape and close button, triggering onFocusTerminal[32m 5[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/components/TerminalSearchOverlay.test.tsx[2m > [22mTerminalSearchOverlay native session search[2m > [22mresets stale counts and re-searches the new session on sessionId change
+[31m[1mAssertionError[22m: expected [ …(3) ] to have a length of 2 but got 3[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 2[39m
+[31m+ 3[39m
+
+[36m [2m❯[22m src/components/TerminalSearchOverlay.test.tsx:[2m332:19[22m[39m
+    [90m330| [39m    [34mexpect[39m(screen[33m.[39m[34mqueryByText[39m([32m"1/2"[39m))[33m.[39mnot[33m.[39m[34mtoBeInTheDocument[39m()[33m;[39m
+    [90m331| [39m    // A fresh search must be issued for session-b using the retained …
+    [90m332| [39m    [34mexpect[39m(calls)[33m.[39m[34mtoHaveLength[39m([34m2[39m)[33m;[39m
+    [90m   | [39m                  [31m^[39m
+    [90m333| [39m    [34mexpect[39m(calls[[34m1[39m][33m.[39margs[33m?.[39msessionId)[33m.[39m[34mtoBe[39m([32m"session-b"[39m)[33m;[39m
+    [90m334| [39m    [34mexpect[39m(calls[[34m1[39m][33m.[39margs[33m?.[39mquery)[33m.[39m[34mtoBe[39m([32m"err"[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m10 passed[39m[22m[90m (11)[39m
+[2m   Start at [22m 10:10:49
+[2m   Duration [22m 2.37s[2m (transform 172ms, setup 223ms, collect 1.35s, tests 218ms, environment 374ms, prepare 64ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

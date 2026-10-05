@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/lib/browserSettings.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042726) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/browserSettings.test.ts (8 tests | 8 failed) 6ms
+   × browser settings > normalizes and validates the default home page 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > persists the home page and uses blank when unset 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > keeps the history preference independent from partial browser-settings writes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > uses one search helper for Google, Bing, DuckDuckGo, and Brave Search 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > exposes every required default zoom level 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > shows a worktree label only for localhost URLs while enabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > keeps the built-in default profile and falls back deterministically when the selected default is missing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser settings > creates stable collision-free persisted profile ids 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browserSettings.test.ts > browser settings > normalizes and validates the default home page
+ FAIL  src/lib/browserSettings.test.ts > browser settings > persists the home page and uses blank when unset
+ FAIL  src/lib/browserSettings.test.ts > browser settings > keeps the history preference independent from partial browser-settings writes
+ FAIL  src/lib/browserSettings.test.ts > browser settings > uses one search helper for Google, Bing, DuckDuckGo, and Brave Search
+ FAIL  src/lib/browserSettings.test.ts > browser settings > exposes every required default zoom level
+ FAIL  src/lib/browserSettings.test.ts > browser settings > shows a worktree label only for localhost URLs while enabled
+ FAIL  src/lib/browserSettings.test.ts > browser settings > keeps the built-in default profile and falls back deterministically when the selected default is missing
+ FAIL  src/lib/browserSettings.test.ts > browser settings > creates stable collision-free persisted profile ids
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/browserSettings.test.ts:19:16
+     17| 
+     18| beforeEach(() => {
+     19|   localStorage.clear();
+       |                ^
+     20| });
+     21| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  8 failed (8)
+   Start at  10:10:53
+   Duration  540ms (transform 68ms, setup 106ms, collect 32ms, tests 6ms, environment 230ms, prepare 47ms)
+
+error: script "test" exited with code 1

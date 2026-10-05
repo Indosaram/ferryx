@@ -1,0 +1,376 @@
+﻿{
+    "route":  "baseline",
+    "startedAt":  "2026-10-05T02:48:41.1791629+09:00",
+    "mySession":  1,
+    "interactive":  true,
+    "binSha":  "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042",
+    "binBytes":  106915840,
+    "hostLoad":  12,
+    "freeGb":  20.81,
+    "isolationRoot":  "C:\\Users\\sook\\ferryx-pane-completion\\exp-baseline",
+    "extraEnv":  {
+
+                 },
+    "appPid":  24948,
+    "launchedAt":  "2026-10-05T02:48:42.4804651+09:00",
+    "visibleWindowCountAtLaunch":  3,
+    "firstVisibleWindowMs":  611,
+    "waitedMs":  612,
+    "driverProbeRaw":  "{\"pid\":24948,\"steps\":[{\"step\":\"owned-windows-enumerated\",\"ok\":true,\"visibleWindowCount\":3,\"searchOrder\":[{\"hwnd\":20056656,\"title\":\"F\",\"className\":\"T\"},{\"hwnd\":25561412,\"title\":\"\",\"className\":\"T\"},{\"hwnd\":39453078,\"title\":\"\",\"className\":\"P\"}]},{\"step\":\"split-right-probe\",\"ok\":true,\"failure\":\"SPLIT_RIGHT_NOT_FOUND\",\"candidateCount\":0,\"inventoryMatchCount\":0}],\"visibleWindowCount\":3,\"mainWindowHandle\":20056656,\"windows\":[{\"hwnd\":20056656,\"visible\":true,\"className\":\"T\",\"title\":\"F\"},{\"hwnd\":25561412,\"visible\":true,\"className\":\"T\",\"title\":\"\"},{\"hwnd\":39453078,\"visible\":true,\"className\":\"P\",\"title\":\"\"},{\"hwnd\":59312488,\"visible\":false,\"className\":\"M\",\"title\":\"M\"},{\"hwnd\":23595380,\"visible\":false,\"className\":\"I\",\"title\":\"D\"}],\"searchOrder\":[{\"hwnd\":20056656,\"title\":\"F\",\"className\":\"T\"},{\"hwnd\":25561412,\"title\":\"\",\"className\":\"T\"},{\"hwnd\":39453078,\"title\":\"\",\"className\":\"P\"}],\"splitProbeExit\":0,\"splitProbeStderr\":\"\",\"splitProbeParsed\":true,\"inventory\":{\"windows\":[{\"hwnd\":20056656,\"title\":\"F\",\"className\":\"T\",\"inspectedCount\":29,\"matchCount\":0,\"truncated\":false,\"matches\":[]},{\"hwnd\":25561412,\"title\":\"\",\"className\":\"T\",\"inspectedCount\":0,\"matchCount\":0,\"truncated\":false,\"matches\":[]},{\"hwnd\":39453078,\"title\":\"\",\"className\":\"P\",\"inspectedCount\":0,\"matchCount\":0,\"truncated\":false,\"matches\":[]}],\"inspectedCount\":29,\"matchCount\":0,\"truncated\":false,\"inspectCap\":4000,\"matchCap\":40,\"filter\":\"name or automationId contains \\\"split\\\" (case-insensitive)\"},\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"scopeDepth\":10,\"focusedFound\":true,\"focusSource\":null,\"psFailure\":\"SPLIT_RIGHT_NOT_FOUND\",\"matchedWindowHwnd\":null,\"result\":null}",
+    "driverProbe":  {
+                        "pid":  24948,
+                        "steps":  [
+                                      {
+                                          "step":  "owned-windows-enumerated",
+                                          "ok":  true,
+                                          "visibleWindowCount":  3,
+                                          "searchOrder":  [
+                                                              {
+                                                                  "hwnd":  20056656,
+                                                                  "title":  "F",
+                                                                  "className":  "T"
+                                                              },
+                                                              {
+                                                                  "hwnd":  25561412,
+                                                                  "title":  "",
+                                                                  "className":  "T"
+                                                              },
+                                                              {
+                                                                  "hwnd":  39453078,
+                                                                  "title":  "",
+                                                                  "className":  "P"
+                                                              }
+                                                          ]
+                                      },
+                                      {
+                                          "step":  "split-right-probe",
+                                          "ok":  true,
+                                          "failure":  "SPLIT_RIGHT_NOT_FOUND",
+                                          "candidateCount":  0,
+                                          "inventoryMatchCount":  0
+                                      }
+                                  ],
+                        "visibleWindowCount":  3,
+                        "mainWindowHandle":  20056656,
+                        "windows":  [
+                                        {
+                                            "hwnd":  20056656,
+                                            "visible":  true,
+                                            "className":  "T",
+                                            "title":  "F"
+                                        },
+                                        {
+                                            "hwnd":  25561412,
+                                            "visible":  true,
+                                            "className":  "T",
+                                            "title":  ""
+                                        },
+                                        {
+                                            "hwnd":  39453078,
+                                            "visible":  true,
+                                            "className":  "P",
+                                            "title":  ""
+                                        },
+                                        {
+                                            "hwnd":  59312488,
+                                            "visible":  false,
+                                            "className":  "M",
+                                            "title":  "M"
+                                        },
+                                        {
+                                            "hwnd":  23595380,
+                                            "visible":  false,
+                                            "className":  "I",
+                                            "title":  "D"
+                                        }
+                                    ],
+                        "searchOrder":  [
+                                            {
+                                                "hwnd":  20056656,
+                                                "title":  "F",
+                                                "className":  "T"
+                                            },
+                                            {
+                                                "hwnd":  25561412,
+                                                "title":  "",
+                                                "className":  "T"
+                                            },
+                                            {
+                                                "hwnd":  39453078,
+                                                "title":  "",
+                                                "className":  "P"
+                                            }
+                                        ],
+                        "splitProbeExit":  0,
+                        "splitProbeStderr":  "",
+                        "splitProbeParsed":  true,
+                        "inventory":  {
+                                          "windows":  [
+                                                          {
+                                                              "hwnd":  20056656,
+                                                              "title":  "F",
+                                                              "className":  "T",
+                                                              "inspectedCount":  29,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          },
+                                                          {
+                                                              "hwnd":  25561412,
+                                                              "title":  "",
+                                                              "className":  "T",
+                                                              "inspectedCount":  0,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          },
+                                                          {
+                                                              "hwnd":  39453078,
+                                                              "title":  "",
+                                                              "className":  "P",
+                                                              "inspectedCount":  0,
+                                                              "matchCount":  0,
+                                                              "truncated":  false,
+                                                              "matches":  [
+
+                                                                          ]
+                                                          }
+                                                      ],
+                                          "inspectedCount":  29,
+                                          "matchCount":  0,
+                                          "truncated":  false,
+                                          "inspectCap":  4000,
+                                          "matchCap":  40,
+                                          "filter":  "name or automationId contains \"split\" (case-insensitive)"
+                                      },
+                        "candidateCount":  0,
+                        "actionableCount":  0,
+                        "candidates":  [
+
+                                       ],
+                        "scopeDepth":  10,
+                        "focusedFound":  true,
+                        "focusSource":  null,
+                        "psFailure":  "SPLIT_RIGHT_NOT_FOUND",
+                        "matchedWindowHwnd":  null,
+                        "result":  null
+                    },
+    "treeDumpRaw":  "{\"probe\":\"tree-dump\",\"pid\":24948,\"visibleWindows\":3,\"cap\":120,\"windows\":[{\"hwnd\":20056656,\"rootNull\":false,\"total\":29,\"shown\":29,\"items\":[{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"WRY_WEBVIEW\"},{\"name\":\"127.0.0.1\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"Chrome_WidgetWin_1\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"Intermediate D3D Window\"},{\"name\":\"127.0.0.1 - 네트워크 오류 - 웹 콘텐츠\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"BrowserRootView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"NonClientView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserFrameView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"BrowserView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"TopContainerView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"SidebarContentsSplitView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"SidebarContentsSplitView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"MultiContentsView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"View\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"View\"},{\"name\":\"127.0.0.1\",\"controlType\":\"ControlType.Document\",\"automationId\":\"RootWebArea\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Image\",\"automationId\":\"\",\"className\":\"icon icon-elixir-thinking\"},{\"name\":\"흠… 이 페이지에 연결할 수 없습니다.\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"127.0.0.1\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\" 연결을 거부했습니다.\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"다음을 시도해 보세요.\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.List\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"?연결을 확인하는 중\",\"controlType\":\"ControlType.ListItem\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"?프록시 및 방화벽 점검 중\",\"controlType\":\"ControlType.ListItem\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"프록시 및 방화벽 점검 중\",\"controlType\":\"ControlType.Hyperlink\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"ERR_CONNECTION_REFUSED\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"새로 고침\",\"controlType\":\"ControlType.Button\",\"automationId\":\"reload-button\",\"className\":\"blue-button text-button\"},{\"name\":\"Microsoft Edge\",\"controlType\":\"ControlType.Text\",\"automationId\":\"\",\"className\":\"\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserDownloadView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"EmbeddedBrowserTabRootView\"},{\"name\":\"\",\"controlType\":\"ControlType.Pane\",\"automationId\":\"\",\"className\":\"TopContainerOverlayView\"}]},{\"hwnd\":25561412,\"rootNull\":false,\"total\":0,\"shown\":0,\"items\":[]},{\"hwnd\":39453078,\"rootNull\":false,\"total\":0,\"shown\":0,\"items\":[]}]}",
+    "treeDump":  {
+                     "probe":  "tree-dump",
+                     "pid":  24948,
+                     "visibleWindows":  3,
+                     "cap":  120,
+                     "windows":  [
+                                     {
+                                         "hwnd":  20056656,
+                                         "rootNull":  false,
+                                         "total":  29,
+                                         "shown":  29,
+                                         "items":  [
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "WRY_WEBVIEW"
+                                                       },
+                                                       {
+                                                           "name":  "127.0.0.1",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "Chrome_WidgetWin_1"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "Intermediate D3D Window"
+                                                       },
+                                                       {
+                                                           "name":  "127.0.0.1 - 네트워크 오류 - 웹 콘텐츠",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "BrowserRootView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "NonClientView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserFrameView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "BrowserView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "TopContainerView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "SidebarContentsSplitView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "SidebarContentsSplitView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "MultiContentsView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "View"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "View"
+                                                       },
+                                                       {
+                                                           "name":  "127.0.0.1",
+                                                           "controlType":  "ControlType.Document",
+                                                           "automationId":  "RootWebArea",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Image",
+                                                           "automationId":  "",
+                                                           "className":  "icon icon-elixir-thinking"
+                                                       },
+                                                       {
+                                                           "name":  "흠… 이 페이지에 연결할 수 없습니다.",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "127.0.0.1",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  " 연결을 거부했습니다.",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "다음을 시도해 보세요.",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.List",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "?연결을 확인하는 중",
+                                                           "controlType":  "ControlType.ListItem",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "?프록시 및 방화벽 점검 중",
+                                                           "controlType":  "ControlType.ListItem",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "프록시 및 방화벽 점검 중",
+                                                           "controlType":  "ControlType.Hyperlink",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "ERR_CONNECTION_REFUSED",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "새로 고침",
+                                                           "controlType":  "ControlType.Button",
+                                                           "automationId":  "reload-button",
+                                                           "className":  "blue-button text-button"
+                                                       },
+                                                       {
+                                                           "name":  "Microsoft Edge",
+                                                           "controlType":  "ControlType.Text",
+                                                           "automationId":  "",
+                                                           "className":  ""
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserDownloadView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "EmbeddedBrowserTabRootView"
+                                                       },
+                                                       {
+                                                           "name":  "",
+                                                           "controlType":  "ControlType.Pane",
+                                                           "automationId":  "",
+                                                           "className":  "TopContainerOverlayView"
+                                                       }
+                                                   ]
+                                     },
+                                     {
+                                         "hwnd":  25561412,
+                                         "rootNull":  false,
+                                         "total":  0,
+                                         "shown":  0,
+                                         "items":  [
+
+                                                   ]
+                                     },
+                                     {
+                                         "hwnd":  39453078,
+                                         "rootNull":  false,
+                                         "total":  0,
+                                         "shown":  0,
+                                         "items":  [
+
+                                                   ]
+                                     }
+                                 ]
+                 },
+    "nameFoundAnywhere":  false,
+    "nameFoundWhere":  [
+
+                       ],
+    "outcome":  "MEASURED"
+}

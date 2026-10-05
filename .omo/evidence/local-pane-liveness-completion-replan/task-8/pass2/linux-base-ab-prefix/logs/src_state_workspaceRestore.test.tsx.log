@@ -1,0 +1,58 @@
+$ vitest run --maxWorkers=1 src/state/workspaceRestore.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1035856) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable
+Remote restore deferred daemon reconciliation: Error: offline
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/state/workspaceRestore.test.tsx:92:101
+    at Module.preloadWorkspaceSnapshots [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/state/workspaceRestore.ts:172:32[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/state/workspaceRestore.test.tsx:92:5
+    at [90mfile:///home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:20
+
+ ❯ src/state/workspaceRestore.test.tsx (20 tests | 1 failed) 54ms
+   ✓ workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable 10ms
+   ✓ workspaceRestore coordinator > preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true 10ms
+   ✓ workspaceRestore coordinator > preloads every persisted workspace snapshot before project switching 4ms
+   ✓ workspaceRestore coordinator > exposes preloaded tabs on the first render of a project switch 6ms
+   ✓ workspaceRestore coordinator > transitions from idle -> loading -> restored on successful disk restore 3ms
+   ✓ workspaceRestore coordinator > does not start restore when enabled is false, and runs restore when enabled becomes true 2ms
+   ✓ workspaceRestore coordinator > safely cancels in-flight restore on StrictMode unmount and allows second mount to complete 2ms
+   ✓ workspaceRestore coordinator > marks workspace as restored immediately on HMR recovery without disk read when no HMR state is registered 1ms
+   ✓ workspaceRestore coordinator > reconciles stale session to null backendId on HMR recovery when live daemon session list is empty 2ms
+   ✓ workspaceRestore coordinator > preserves live backendId on HMR recovery when daemon session remains live 2ms
+   ✓ workspaceRestore coordinator > restores again after the workspace was switched away and back 2ms
+   ✓ workspaceRestore coordinator > isolates restore status per workspace 0ms
+   ✓ workspaceRestore coordinator > transitions to failed status if loadSession throws an unhandled error 1ms
+   ✓ workspaceRestore coordinator > propagates daemon list failure instead of treating it as an empty live-session set 1ms
+   ✓ workspaceRestore coordinator > restores SSH pane identity while the daemon list is temporarily unavailable 1ms
+   ✓ workspaceRestore coordinator > keeps persisted backend mappings untouched and fails restore when daemon listing fails 1ms
+   ✓ workspaceRestore coordinator > reconciles sessions with daemon epoch and backend ID matching from live session query 1ms
+   ✓ workspaceRestore coordinator > marks session as exited without auto-respawn when daemon epoch has changed 1ms
+   ✓ workspaceRestore coordinator > preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal 2ms
+   × workspaceRestore coordinator > under Active Only policy, puts non-active tab missing sessions into standby while leaving active tab session eager 1ms
+     → Cannot read properties of undefined (reading 'setItem')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > under Active Only policy, puts non-active tab missing sessions into standby while leaving active tab session eager
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/state/workspaceRestore.test.tsx:862:18
+    860| 
+    861|   it("under Active Only policy, puts non-active tab missing sessions i…
+    862|     localStorage.setItem(
+       |                  ^
+    863|       "ferryx.settings.general",
+    864|       JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 19 passed (20)
+   Start at  10:09:08
+   Duration  994ms (transform 348ms, setup 108ms, collect 435ms, tests 54ms, environment 230ms, prepare 47ms)
+
+error: script "test" exited with code 1

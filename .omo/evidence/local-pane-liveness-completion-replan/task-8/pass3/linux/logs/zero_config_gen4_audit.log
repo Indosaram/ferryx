@@ -1,0 +1,638 @@
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src/browser/snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:21:5
+   |
+21 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src/remote/session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src/remote/server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^ this value is reassigned later and never used
+...
+198 |         sent = n as usize;
+    |         ----------------- `sent` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^ this value is reassigned later and never used
+...
+222 |             written_total = n as usize;
+    |             -------------------------- `written_total` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:671:41
+    |
+671 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src/lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: type `DaemonLockFiles` is more private than the item `adopt_authority`
+   --> src/daemon/handover_socket.rs:227:1
+    |
+227 | / pub fn adopt_authority(
+228 | |     authority: TransferredAuthority,
+229 | | ) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
+    | |_____________________________________________________________________________________^ function `adopt_authority` is reachable at visibility `pub`
+    |
+note: but type `DaemonLockFiles` is only usable at visibility `pub(crate)`
+   --> src/daemon/server.rs:813:1
+    |
+813 | pub(crate) struct DaemonLockFiles {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src/terminal/output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src/terminal/machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src/terminal/paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemon::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src/terminal/paired_runtime.rs:289:5
+    |
+289 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src/terminal/paired_runtime.rs:711:5
+    |
+711 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src/terminal/paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::live_import`
+   --> src/terminal/remote.rs:819:5
+    |
+819 | /     pub fn live_import(
+820 | |         &self,
+821 | |         state: RemoteExportState,
+822 | |         transport: Option<Arc<dyn Transport>>,
+823 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::import_transferred`
+   --> src/terminal/remote.rs:840:5
+    |
+840 | /     pub fn import_transferred(
+841 | |         &self,
+842 | |         state: RemoteExportState,
+843 | |         transport: Option<Arc<dyn Transport>>,
+844 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sink`
+   --> src/terminal/service.rs:69:5
+    |
+ 69 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `app` and `timeout` are never read
+   --> src/browser/snapshot_source.rs:339:5
+    |
+338 | pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    |            -------------------------- fields in this struct
+339 |     app: AppHandle<R>,
+    |     ^^^
+340 |     timeout: Duration,
+    |     ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `UpgradeAction` is never used
+  --> src/daemon/handover.rs:14:17
+   |
+14 | pub(crate) enum UpgradeAction {
+   |                 ^^^^^^^^^^^^^
+
+warning: method `is_proceed` is never used
+  --> src/daemon/handover.rs:22:19
+   |
+21 | impl UpgradeAction {
+   | ------------------ method in this implementation
+22 |     pub(crate) fn is_proceed(self) -> bool {
+   |                   ^^^^^^^^^^
+
+warning: function `idle_upgrade_enabled` is never used
+  --> src/daemon/handover.rs:29:15
+   |
+29 | pub(crate) fn idle_upgrade_enabled(value: Option<&str>) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `idle_upgrade_requested` is never used
+  --> src/daemon/handover.rs:33:15
+   |
+33 | pub(crate) fn idle_upgrade_requested() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upgrade_action` is never used
+  --> src/daemon/handover.rs:57:15
+   |
+57 | pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: bool) -> UpgradeAction {
+   |               ^^^^^^^^^^^^^^
+
+warning: struct `SpawnOwnerGuard` is never constructed
+   --> src/daemon/handover.rs:450:19
+    |
+450 | pub(crate) struct SpawnOwnerGuard {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `retain_spawn_owner` is never used
+   --> src/daemon/handover.rs:574:19
+    |
+528 | impl HandoverManager {
+    | -------------------- method in this implementation
+...
+574 |     pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_spawn_relative_path` is never used
+    --> src/daemon/server.rs:5047:4
+     |
+5047 | fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:975:19
+    |
+361 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+975 |     pub(crate) fn machine_sessions(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: field `workspace_queues` is never read
+  --> src/daemon/workspace_service.rs:25:5
+   |
+19 | pub struct DaemonWorkspaceService {
+   |            ---------------------- field in this struct
+...
+25 |     workspace_queues: parking_lot::Mutex<
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `spawn_queue` is never used
+  --> src/daemon/workspace_service.rs:42:19
+   |
+41 | impl DaemonWorkspaceService {
+   | --------------------------- method in this implementation
+42 |     pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+   |                   ^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src/ipc/file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/ipc/file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: constant `INPUT_OUTPUT` is never used
+  --> src/native_terminal/platform/linux.rs:40:7
+   |
+40 | const INPUT_OUTPUT: u32 = 1;
+   |       ^^^^^^^^^^^^
+
+warning: method `begin_owned_render` is never used
+   --> src/native_terminal/surface_host.rs:326:8
+    |
+217 | impl RenderScheduleCoordinator {
+    | ------------------------------ method in this implementation
+...
+326 |     fn begin_owned_render(&self) -> Option<u64> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: method `presentation_tuple` is never used
+   --> src/native_terminal/surface_host.rs:567:8
+    |
+560 | impl NativeTerminalSession {
+    | -------------------------- method in this implementation
+...
+567 |     fn presentation_tuple(&self) -> Option<&crate::daemon::protocol::PaneAttachTuple> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `authorization_wait` is never used
+  --> src/notification/permission.rs:14:15
+   |
+14 | pub(crate) fn authorization_wait() -> Duration {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `request_authorization_with` is never used
+  --> src/notification/permission.rs:24:15
+   |
+24 | pub(crate) fn request_authorization_with(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wait_for_authorization` is never used
+  --> src/notification/permission.rs:48:15
+   |
+48 | pub(crate) fn wait_for_authorization(
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/remote/auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: method `disarm` is never used
+   --> src/remote/relay_server.rs:241:12
+    |
+216 | impl PairingClaimGuard {
+    | ---------------------- method in this implementation
+...
+241 |     pub fn disarm(&mut self) {
+    |            ^^^^^^
+
+warning: function `inspect` is never used
+   --> src/terminal/foreground.rs:226:15
+    |
+226 | pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
+    |               ^^^^^^^
+
+warning: struct `ResolvedSpawnContext` is never constructed
+   --> src/terminal/pty.rs:155:19
+    |
+155 | pub(crate) struct ResolvedSpawnContext {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `apply` is never used
+   --> src/terminal/pty.rs:162:8
+    |
+161 | impl ResolvedSpawnContext {
+    | ------------------------- method in this implementation
+162 |     fn apply(&self, command: &mut CommandBuilder, session_id: &str) {
+    |        ^^^^^
+
+warning: variant `Inherited` is never constructed
+   --> src/terminal/pty.rs:216:5
+    |
+214 | enum SpawnPathPolicy {
+    |      --------------- variant in this enum
+215 |     LegacyDiscovery,
+216 |     Inherited,
+    |     ^^^^^^^^^
+    |
+    = note: `SpawnPathPolicy` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `spawn_resolved_with_id` and `try_acquire_cwd_probe` are never used
+   --> src/terminal/pty.rs:342:19
+    |
+235 | impl PtyManager {
+    | --------------- methods in this implementation
+...
+342 |     pub(crate) fn spawn_resolved_with_id(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+826 |     pub(crate) fn try_acquire_cwd_probe(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PumpToken` is never constructed
+  --> src/terminal/service.rs:21:19
+   |
+21 | pub(crate) struct PumpToken(u64);
+   |                   ^^^^^^^^^
+
+warning: struct `PumpTokenFence` is never constructed
+  --> src/terminal/service.rs:24:19
+   |
+24 | pub(crate) struct PumpTokenFence {
+   |                   ^^^^^^^^^^^^^^
+
+warning: methods `install`, `is_active`, and `remove` are never used
+  --> src/terminal/service.rs:30:19
+   |
+29 | impl PumpTokenFence {
+   | ------------------- methods in this implementation
+30 |     pub(crate) fn install(&self) -> PumpToken {
+   |                   ^^^^^^^
+...
+36 |     pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
+   |                   ^^^^^^^^^
+37 |
+38 |     pub(crate) fn remove(&self, token: PumpToken) -> bool {
+   |                   ^^^^^^
+
+warning: methods `try_acquire_cwd_probe` and `spawn_resolved_with_id` are never used
+   --> src/terminal/service.rs:172:19
+    |
+ 53 | impl TerminalService {
+    | -------------------- methods in this implementation
+...
+172 |     pub(crate) fn try_acquire_cwd_probe(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+226 |     pub(crate) fn spawn_resolved_with_id(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+    --> src/terminal/session.rs:1128:19
+     |
+ 446 | impl PtySession {
+     | --------------- method in this implementation
+...
+1128 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `resolve_ordinary_shell_command` is never used
+   --> src/terminal/shell.rs:441:15
+    |
+441 | pub(crate) fn resolve_ordinary_shell_command(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ordinary_shell_command_with_env` is never used
+   --> src/terminal/shell.rs:450:4
+    |
+450 | fn ordinary_shell_command_with_env<E>(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inherited_executable` is never used
+   --> src/terminal/shell.rs:486:4
+    |
+486 | fn inherited_executable(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inherited_candidate_is_executable` is never used
+   --> src/terminal/shell.rs:518:4
+    |
+518 | fn inherited_candidate_is_executable(path: &std::path::Path, platform: TargetPlatform) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `with_preparation_git_budget` is never used
+   --> src/worktree/git.rs:143:15
+    |
+143 | pub(crate) fn with_preparation_git_budget<T>(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 75 warnings (run `cargo fix --lib -p ferryx` to apply 19 suggestions)
+   Compiling ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.76s
+     Running tests/zero_config_gen4_audit.rs (target/debug/deps/zero_config_gen4_audit-54dd088fa061610f)
+
+running 3 tests
+test observes_cli_daemon_error_starts_competing_relay_owner ... ignored, defect-presence observation; launches isolated CLI; use --ignored --test-threads=1
+test observes_daemon_view_pairing_mints_control_through_real_relay_and_gateway ... ignored, defect-presence observation; use --ignored --test-threads=1
+test observes_stopped_relay_coordinator_breaks_local_daemon_pairing ... ignored, defect-presence observation; use --ignored --test-threads=1
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

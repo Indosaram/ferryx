@@ -1,0 +1,39 @@
+{
+  "registered": {
+    "processes": [
+      {
+        "pid": 27432,
+        "label": ""
+      }
+    ],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-cancel"
+    ]
+  },
+  "reaped": [
+    27432
+  ],
+  "receipts": [
+    {
+      "kind": "process",
+      "pid": 27432,
+      "label": "",
+      "exited": true,
+      "alreadyTerminated": true,
+      "code": 1,
+      "signal": null
+    },
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-cancel",
+      "removed": true
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true
+  }
+}

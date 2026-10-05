@@ -1,0 +1,116 @@
+bun : $ vitest run --maxWorkers=1 src/lib/switchDebug.test.ts src/lib/paneDebugInfo.test.ts src/lib/paneLiveness.test.t
+s
+At line:1 char:62
++ ... \source\ui; bun run test src/lib/switchDebug.test.ts src/lib/paneDebu ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ($ vitest run --...iveness.test.ts:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+ RUN  v3.2.7 C:/Users/sook/ferryx-pane-completion/source/ui
+
+ ❯ src/lib/paneLiveness.test.ts (13 tests | 3 failed) 8ms
+   ✓ classifyPaneLiveness > returns UNKNOWN when telemetry is not available 1ms
+   ✓ classifyPaneLiveness > never returns IDLE when session identity is missing 0ms
+   ✓ classifyPaneLiveness > returns IDLE only when session identity and all negative states are positively confirmed 0ms
+   ✓ classifyPaneLiveness > does not classify normal in-flight dispatch under threshold as blocked 0ms
+   ✓ classifyPaneLiveness > classifies in-flight execution over 250ms threshold as BLOCKED_IN_IPC_WRITE 0ms
+   ✓ classifyPaneLiveness > fences sequence comparison by session identity in addition to epoch 0ms
+   ✓ classifyPaneLiveness > prioritizes BLOCKED_IN_READER_PAUSED when reader is explicitly paused 0ms
+   ✓ classifyPaneLiveness > treats reader_paused=false as not paused, continuing to check backlog 0ms
+   ✓ classifyPaneLiveness > returns UNKNOWN for unverified registry suspension without verified actuation receipt 0ms
+   ✓ classifyPaneLiveness > returns BLOCKED_IN_ATTRIBUTED_SUSPENSION only when actuation receipt is verified 0ms
+   × classifyPaneLiveness > observePaneLiveness queries real input queue state 3ms
+     → terminalInputQueue.getQueuedHeadAgeMs is not a function
+   × classifyPaneLiveness > observePaneLiveness tracks real in-flight execution barrier 0ms
+     → terminalInputQueue.getQueuedHeadAgeMs is not a function
+   × classifyPaneLiveness > prioritizes held execution over queue backlog and asserts explicit ages with controlled clock 1ms
+     → terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ✓ src/lib/switchDebug.test.ts (9 tests) 5ms
+ ❯ src/lib/paneDebugInfo.test.ts (3 tests | 2 failed) 6ms
+   × formatPaneDebugInfo > emits one JSON line carrying the identity triad and daemon binding 4ms
+     → terminalInputQueue.getQueuedHeadAgeMs is not a function
+   ✓ formatPaneDebugInfo > reports a missing backend binding as null instead of dropping the key 1ms
+   × formatPaneDebugInfo > formats pane debug info asynchronously awaiting native observation 0ms
+     → terminalInputQueue.getQueuedHeadAgeMs is not a function
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/paneDebugInfo.test.ts > formatPaneDebugInfo > emits one JSON line c
+arrying the identity triad and daemon binding
+TypeError: terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ❯ observePaneLiveness src/lib/paneLiveness.ts:176:46
+    174|   }
+    175| 
+    176|   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessio…
+       |                                              ^
+    177|   const executingRunningAgeMs = terminalInputQueue.getRunningAgeMs(ses…
+    178|   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId…
+ ❯ formatPaneDebugInfo src/lib/paneDebugInfo.ts:37:7
+ ❯ src/lib/paneDebugInfo.test.ts:19:18
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  src/lib/paneDebugInfo.test.ts > formatPaneDebugInfo > formats pane debug in
+fo asynchronously awaiting native observation
+TypeError: terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ❯ observePaneLivenessAsync src/lib/paneLiveness.ts:216:46
+    214|   }
+    215| 
+    216|   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessio…
+       |                                              ^
+    217|   const executingRunningAgeMs = terminalInputQueue.getRunningAgeMs(ses…
+    218|   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId…
+ ❯ formatPaneDebugInfoAsync src/lib/paneDebugInfo.ts:10:13
+ ❯ src/lib/paneDebugInfo.test.ts:58:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  src/lib/paneLiveness.test.ts > classifyPaneLiveness > observePaneLiveness q
+ueries real input queue state
+TypeError: terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ❯ observePaneLiveness src/lib/paneLiveness.ts:176:46
+    174|   }
+    175| 
+    176|   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessio…
+       |                                              ^
+    177|   const executingRunningAgeMs = terminalInputQueue.getRunningAgeMs(ses…
+    178|   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId…
+ ❯ src/lib/paneLiveness.test.ts:142:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  src/lib/paneLiveness.test.ts > classifyPaneLiveness > observePaneLiveness t
+racks real in-flight execution barrier
+TypeError: terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ❯ observePaneLiveness src/lib/paneLiveness.ts:176:46
+    174|   }
+    175| 
+    176|   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessio…
+       |                                              ^
+    177|   const executingRunningAgeMs = terminalInputQueue.getRunningAgeMs(ses…
+    178|   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId…
+ ❯ src/lib/paneLiveness.test.ts:165:27
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ FAIL  src/lib/paneLiveness.test.ts > classifyPaneLiveness > prioritizes held exec
+ution over queue backlog and asserts explicit ages with controlled clock
+TypeError: terminalInputQueue.getQueuedHeadAgeMs is not a function
+ ❯ src/lib/paneLiveness.test.ts:206:48
+    204| 
+    205|       const runningAge = terminalInputQueue.getRunningAgeMs("sess-prec…
+    206|       const queuedHeadAge = terminalInputQueue.getQueuedHeadAgeMs("ses…
+       |                                                ^
+    207| 
+    208|       expect(runningAge).toBe(310);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯
+
+
+ Test Files  2 failed | 1 passed (3)
+      Tests  5 failed | 20 passed (25)
+   Start at  23:23:56
+   Duration  2.85s (transform 98ms, setup 617ms, collect 88ms, tests 18ms, environment 1.27s, prepare 209ms)
+
+error: script "test" exited with code 1

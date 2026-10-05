@@ -1,0 +1,10 @@
+{
+  "status": "PARTIAL_MAC_PENDING",
+  "rows": 197,
+  "pass1Preserved": 49,
+  "completedPlatformsCandidateRows": 34,
+  "baselineABRows": 110,
+  "earlyMacRows": 4,
+  "duplicateKeys": [],
+  "missingCompletedPlatformKeys": []
+}

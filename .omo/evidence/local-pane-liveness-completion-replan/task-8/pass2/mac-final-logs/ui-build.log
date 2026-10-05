@@ -1,0 +1,36 @@
+$ tsc && vite build
+fatal: not a git repository (or any of the parent directories): .git
+vite v6.4.3 building for production...
+transforming...
+✓ 2229 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                   3.39 kB │ gzip:   1.22 kB
+dist/assets/crush-DHElXcRZ.png                    5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                    6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg              7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                     22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2        69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png            805.82 kB
+dist/assets/App-V8Wj_Bb0.css                      0.59 kB │ gzip:   0.31 kB
+dist/assets/index-DC4Y-Gu7.css                  110.10 kB │ gzip:  19.09 kB
+dist/assets/arrow-up-CV7fvIdb.js                  0.91 kB │ gzip:   0.37 kB
+dist/assets/WhatsNewDialog-CCUEn-CB.js            2.77 kB │ gzip:   1.12 kB
+dist/assets/AccountSignIn-BgYoMp01.js             7.20 kB │ gzip:   2.71 kB
+dist/assets/pairedHostInventory-B2G69hSE.js      14.40 kB │ gzip:   4.96 kB
+dist/assets/browserProtocol-C3Z3Psyc.js          16.25 kB │ gzip:   4.08 kB
+dist/assets/RemoteTerminal-CU7VIKNl.js           29.53 kB │ gzip:  10.41 kB
+dist/assets/WelcomeWizard-J0gWTr_N.js            32.62 kB │ gzip:   9.57 kB
+dist/assets/MobileChatWorkspace-BLLcDQnM.js      35.20 kB │ gzip:   9.71 kB
+dist/assets/RemoteBrowserWorkspace-DPeOHMF3.js   46.30 kB │ gzip:  13.09 kB
+dist/assets/index-i_xlyL6P.js                   160.40 kB │ gzip:  48.66 kB
+dist/assets/index-DpgOsO2i.js                   202.41 kB │ gzip:  64.26 kB
+dist/assets/SettingsDialog-5dD5blrx.js          243.61 kB │ gzip:  69.27 kB
+dist/assets/RemoteApp-BldYUoa2.js               244.74 kB │ gzip:  77.93 kB
+dist/assets/App-T0sg35Kq.js                     917.30 kB │ gzip: 266.26 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 55.79s

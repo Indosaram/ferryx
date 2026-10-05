@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-happy",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-happy",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\evidence\\split-happy",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\runtime\\split-happy"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "5f1f4f1be536abba5a0379a09745dfc92620ea379316fb9a8a875c4c64afe047",
+  "runId": "qa-run-eb643c65-4889-4f18-ab10-f03e603d40f5",
+  "operationId": "qa-op-cf9dcb92-1a4a-4383-a899-aa2c18ef4fbf",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "PANE_AFFORDANCE_NOT_FOUND",
+    "message": "PANE_AFFORDANCE_NOT_FOUND: the \"New Terminal\" affordance could not be identified by its exact accessible name: {\"selectorNames\":[\"New Terminal\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"windowsSearched\":[{\"hwnd\":7408664,\"title\":\"Ferryx\",\"className\":\"Tauri Window\",\"rootOffscreen\":false},{\"hwnd\":2493534,\"title\":\"\",\"className\":\"Tao Thread Event Target\",\"rootOffscreen\":false}],\"windowsSearchedCount\":2,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": []
+}

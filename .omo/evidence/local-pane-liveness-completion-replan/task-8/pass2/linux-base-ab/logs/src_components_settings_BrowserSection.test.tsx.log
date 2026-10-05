@@ -1,0 +1,55 @@
+$ vitest run --maxWorkers=1 src/components/settings/BrowserSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040072) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/BrowserSection.test.tsx (9 tests | 9 failed) 7ms
+   × BrowserSection installed cookie import > clicking Import from Chrome invokes importInstalledBrowserCookies with profileId and chrome source 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > clicking Import from Edge invokes importInstalledBrowserCookies with profileId and edge source 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > surfaces structured reason and actionable message when importInstalledBrowserCookies rejects with keychain-denied 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > surfaces structured reason and actionable message when importInstalledBrowserCookies rejects with no-tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > preserves error code semantics when error payload lacks structured reason 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > falls back to UNKNOWN_ERROR when error payload is empty or null 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > renders skipped count when skippedCount > 0 and omits skipped text when skippedCount is 0 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > renders no import buttons on Windows platform and shows muted unsupported note 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserSection installed cookie import > renders macOS Keychain access hint on macOS platform 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 9 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > clicking Import from Chrome invokes importInstalledBrowserCookies with profileId and chrome source
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > clicking Import from Edge invokes importInstalledBrowserCookies with profileId and edge source
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > surfaces structured reason and actionable message when importInstalledBrowserCookies rejects with keychain-denied
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > surfaces structured reason and actionable message when importInstalledBrowserCookies rejects with no-tab
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > preserves error code semantics when error payload lacks structured reason
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > falls back to UNKNOWN_ERROR when error payload is empty or null
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > renders skipped count when skippedCount > 0 and omits skipped text when skippedCount is 0
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > renders no import buttons on Windows platform and shows muted unsupported note
+ FAIL  src/components/settings/BrowserSection.test.tsx > BrowserSection installed cookie import > renders macOS Keychain access hint on macOS platform
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/BrowserSection.test.tsx:42:18
+     40| describe("BrowserSection installed cookie import", () => {
+     41|   beforeEach(() => {
+     42|     localStorage.clear();
+       |                  ^
+     43|     vi.mocked(platform.isInstalledBrowserCookieImportSupported).mockRe…
+     44|     vi.mocked(platform.isMacHost).mockReturnValue(true);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/9]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  9 failed (9)
+   Start at  10:10:16
+   Duration  1.05s (transform 135ms, setup 100ms, collect 529ms, tests 7ms, environment 232ms, prepare 47ms)
+
+error: script "test" exited with code 1

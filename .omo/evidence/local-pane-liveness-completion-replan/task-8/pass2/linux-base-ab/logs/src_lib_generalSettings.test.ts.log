@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/lib/generalSettings.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043043) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/generalSettings.test.ts (8 tests | 8 failed) 6ms
+   × generalSettings > loads default settings when storage is empty 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > normalizes malformed persisted settings 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > normalizes restore policy and clamps the idle timeout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > saves and persists general settings update 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > resets settings back to default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > migrates legacy settings key upon loading and fills lifecycle defaults 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > loads and persists sidebar open startup preference 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generalSettings > migrates legacy sidebar open key upon loading startup preference 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > loads default settings when storage is empty
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > normalizes malformed persisted settings
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > normalizes restore policy and clamps the idle timeout
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > saves and persists general settings update
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > resets settings back to default
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > migrates legacy settings key upon loading and fills lifecycle defaults
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > loads and persists sidebar open startup preference
+ FAIL  src/lib/generalSettings.test.ts > generalSettings > migrates legacy sidebar open key upon loading startup preference
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/generalSettings.test.ts:16:18
+     14| describe("generalSettings", () => {
+     15|   beforeEach(() => {
+     16|     localStorage.clear();
+       |                  ^
+     17|   });
+     18| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  8 failed (8)
+   Start at  10:10:57
+   Duration  674ms (transform 54ms, setup 98ms, collect 25ms, tests 6ms, environment 236ms, prepare 45ms)
+
+error: script "test" exited with code 1

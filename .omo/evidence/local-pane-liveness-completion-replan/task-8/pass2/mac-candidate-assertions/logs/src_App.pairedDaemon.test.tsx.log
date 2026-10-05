@@ -1,0 +1,63 @@
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-172baa87/ui
+
+ ❯ src/App.pairedDaemon.test.tsx (8 tests | 1 failed) 946ms
+   ✓ App paired desktop shell > routes deletion of an inactive paired project's worktree through its owning project  320ms
+   ✓ App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 26ms
+   ✓ App paired desktop shell > refreshes unavailable paired inventory when selecting its project without refocusing the window 49ms
+   ✓ App paired desktop shell > refreshes unavailable inventory when selecting a different worktree in the active paired project 36ms
+   × App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 183ms
+     → expected last "spy" call to have been called with [ ObjectContaining{…} ]
+   ✓ App paired desktop shell > selects a worktree on a paired machine and requests terminal spawn with worktree path and identity 108ms
+   ✓ App paired desktop shell > routes two different paired worktree selections to distinct backend spawn paths 92ms
+   ✓ App paired desktop shell > switches to paired project and preserves pending worktree when selected from another project 131ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes
+AssertionError: expected last "spy" call to have been called with [ ObjectContaining{…} ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    ObjectContaining {[22m
+[2m      "workspaceId": "local",[22m
+[2m    },[22m
+[31m+   {[39m
+[31m+     "createOnly": true,[39m
+[31m+     "preparedLocalSplit": {[39m
+[31m+       "cols": 80,[39m
+[31m+       "cwd": "/local",[39m
+[31m+       "identity": {[39m
+[31m+         "expiresAtUnixMs": 1791078568922,[39m
+[31m+         "originEpoch": "epoch",[39m
+[31m+         "requestId": "0e4ddf3d-b55c-4eab-8622-02244ad6aabb",[39m
+[31m+       },[39m
+[31m+       "rows": 24,[39m
+[31m+       "shell": null,[39m
+[31m+       "workspaceId": "local",[39m
+[31m+       "worktree": null,[39m
+[31m+     },[39m
+[31m+     "remainingMs": 8992.277166000002,[39m
+[31m+   },[39m
+[2m  ][22m
+
+ ❯ src/App.pairedDaemon.test.tsx:252:42
+    250|     await act(async () => { native.split!(); });
+    251|     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    252|     expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expe…
+       |                                          ^
+    253|     await act(async () => { fireEvent.keyDown(window, { key: "Escape",…
+    254|     await act(async () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 7 passed (8)
+   Start at  10:48:11
+   Duration  17.81s (transform 3.01s, setup 1.48s, collect 10.47s, tests 946ms, environment 2.26s, prepare 215ms)
+
+error: script "test" exited with code 1

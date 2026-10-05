@@ -1,0 +1,189 @@
+$ vitest run --maxWorkers=1 src/App.notifications.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033626) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/App.notifications.test.tsx (50 tests | 50 failed) 20ms
+   × App notification coordinator wiring > manual reset outcome store rejection propagates (grouped=false) 5ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome store rejection propagates (grouped=true) 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes tab notifications (1 sessions, 0 failures) 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes tab notifications (1 sessions, 1 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 1 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 3 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 0 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes worktree notifications (1 sessions, 0 failures) 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes worktree notifications (1 sessions, 1 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 1 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 3 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 0 failures) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > CRITERION 2: clicking the bell button while the window is UNFOCUSED calls dispatchNotification with source: 'terminal-bell' and marks tab and worktree unread 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > starts DAG subscriptions when the registered project list is remote-only 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca (Build machine)' at '/srv/Orca/' 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca (Build machine)' at 'C:\work\Orca\' 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: '/ (build)' at '/' 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca' at '/srv/Orca' 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > CRITERION 2b: clicking the bell button while the window is FOCUSED calls dispatchNotification ZERO times 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > CRITERION 1: a background agent transitioning working -> done calls dispatchNotification with source: 'agent-task-complete' while unfocused 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > uses native background focus when the DOM incorrectly reports focused 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > CRITERION 1b: a background agent transitioning working -> done while FOCUSED dispatches nothing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > records focused observed done as seen despite the focus gate 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > records unfocused done as unread independently of desktop dispatch outcome 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > records focused background tabs as unread and rejects suppressed baseline events 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > records focused bells with fallback workspace identity and filters throttled bells 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > acknowledges the clicked revision only after focusing a live target 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > does not acknowledge a newer occurrence when a stale revision is clicked 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target ghost/sess-1 is gone instead of navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target default/closed is gone instead of navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target other/closed is gone instead of navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > acknowledges a cross-project click after the target workspace mounts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > handles newer occurrence while a cross-project target is mounting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > handles closed target while a cross-project target is mounting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > lists the unread completion in the sidebar inbox and removes it once the row is opened 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > dismisses a row from the inbox without navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > keeps the worktree list as the default and toggles the inbox with the notifications shortcut 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > shows the attention count on the collapsed sidebar and reopens the inbox from it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > preserves unread history across unmount and restart from persisted storage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > notification center recording and seen bridge > marks inbox entry read when session is interacted via custom event 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > recovers a startup click and focuses the active project's target 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > navigates on a live click by draining the same queue 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > rejects a stale click 'ghost-project'/'sess-1' without navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > rejects a stale click 'default'/'ghost-session' without navigating 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > switches to a parked project and focuses its target after the workspace mounts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > does not switch projects for a closed target in another project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > clears inbox entry on user interaction even when session has no agent activity 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > does not clear inbox entry of another session or background pane when interaction happens in focused pane 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > uses frontend workspaceId rather than remote session.workspaceId when acknowledging 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App notification coordinator wiring > activation navigation > does not acknowledge newer revision if a later notification arrives after interaction 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 50 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome store rejection propagates (grouped=false)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome store rejection propagates (grouped=true)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes tab notifications (1 sessions, 0 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes tab notifications (1 sessions, 1 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 1 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 3 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes tab notifications (3 sessions, 0 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes worktree notifications (1 sessions, 0 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes worktree notifications (1 sessions, 1 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 1 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 3 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > manual reset outcome routes worktree notifications (3 sessions, 0 failures)
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > CRITERION 2: clicking the bell button while the window is UNFOCUSED calls dispatchNotification with source: 'terminal-bell' and marks tab and worktree unread
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > starts DAG subscriptions when the registered project list is remote-only
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca (Build machine)' at '/srv/Orca/'
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca (Build machine)' at 'C:\work\Orca\'
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: '/ (build)' at '/'
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > forwards SSH labels for agent completion and both bell paths: 'Orca' at '/srv/Orca'
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > CRITERION 2b: clicking the bell button while the window is FOCUSED calls dispatchNotification ZERO times
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > CRITERION 1: a background agent transitioning working -> done calls dispatchNotification with source: 'agent-task-complete' while unfocused
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > uses native background focus when the DOM incorrectly reports focused
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > CRITERION 1b: a background agent transitioning working -> done while FOCUSED dispatches nothing
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.notifications.test.tsx:400:18
+    398|     resetWorkspaceRestore();
+    399|     inbox.dispose();
+    400|     localStorage.clear();
+       |                  ^
+    401|     inbox = inboxModule.createNotificationCenterStore();
+    402|     inboxBox.current = inbox;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/50]⎯
+
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > records focused observed done as seen despite the focus gate
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > records unfocused done as unread independently of desktop dispatch outcome
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > records focused background tabs as unread and rejects suppressed baseline events
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > records focused bells with fallback workspace identity and filters throttled bells
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > acknowledges the clicked revision only after focusing a live target
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > does not acknowledge a newer occurrence when a stale revision is clicked
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target ghost/sess-1 is gone instead of navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target default/closed is gone instead of navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > drops a row whose target other/closed is gone instead of navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > acknowledges a cross-project click after the target workspace mounts
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > handles newer occurrence while a cross-project target is mounting
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > handles closed target while a cross-project target is mounting
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > lists the unread completion in the sidebar inbox and removes it once the row is opened
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > dismisses a row from the inbox without navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > keeps the worktree list as the default and toggles the inbox with the notifications shortcut
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > shows the attention count on the collapsed sidebar and reopens the inbox from it
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > preserves unread history across unmount and restart from persisted storage
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > notification center recording and seen bridge > marks inbox entry read when session is interacted via custom event
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > recovers a startup click and focuses the active project's target
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > navigates on a live click by draining the same queue
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > rejects a stale click 'ghost-project'/'sess-1' without navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > rejects a stale click 'default'/'ghost-session' without navigating
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > switches to a parked project and focuses its target after the workspace mounts
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > does not switch projects for a closed target in another project
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > clears inbox entry on user interaction even when session has no agent activity
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > does not clear inbox entry of another session or background pane when interaction happens in focused pane
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > uses frontend workspaceId rather than remote session.workspaceId when acknowledging
+ FAIL  src/App.notifications.test.tsx > App notification coordinator wiring > activation navigation > does not acknowledge newer revision if a later notification arrives after interaction
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.notifications.test.tsx:400:18
+    398|     resetWorkspaceRestore();
+    399|     inbox.dispose();
+    400|     localStorage.clear();
+       |                  ^
+    401|     inbox = inboxModule.createNotificationCenterStore();
+    402|     inboxBox.current = inbox;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/50]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  50 failed (50)
+   Start at  10:08:52
+   Duration  2.02s (transform 849ms, setup 96ms, collect 1.49s, tests 20ms, environment 234ms, prepare 46ms)
+
+error: script "test" exited with code 1

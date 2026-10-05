@@ -1,0 +1,145 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1034141) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.test.tsx (39 tests | 39 failed) 12ms
+   × Sidebar navigation > starts a tabless active workspace collapsed even when saved as expanded 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > expands a tabless workspace and reveals worktrees after clicking its chevron 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > expands a tabless workspace and reveals worktrees after clicking its project name 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > reveals the primary worktree when expanding an empty workspace that has only a primary root 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > collapses when the final tab closes and restores rows after a tab opens without clicks 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > toggles expansion when clicked while empty and auto-collapses when the final tab closes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders cached worktrees for a newly active project while active store rows are temporarily empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders local worktrees for an inactive project immediately when opened while active project is empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > lists an inactive project's own rows so index-based selection can reach them 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders the folder row for an active non-Git project even before the store lists it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > attributes a branch-less root worktree to the project that owns its path, not the active project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > collapses and expands a project from its name button, not just the chevron 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > does not highlight an inactive project's row when the active path is stale 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > highlights the active worktree only inside the project that owns it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > lists inactive project worktrees instead of the empty-state message 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > uses the 236px parity width by default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > keeps only global actions in the sidebar titlebar 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > gives every project row its own add-worktree action bound to that exact project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > nests each project's worktrees inside that project's own tree group 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > selects a project from its tree row and a worktree from inside the nested group 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > keeps each project's open state independent when toggling default or rorca-qa 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > toggling a project does not change which project is active 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > persists collapsed projects across remounts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > routes each worktree under the project that owns its branch 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > hooks worktree creation and deletion into the owning project group 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > drops the per-worktree status refresh control 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders no empty-state row or message for a project with no worktrees 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > marks the active worktree inside the nested group as current 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > keeps all titlebar actions out of the Tauri drag region 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > restores, drags, clamps, and persists sidebar width 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders exactly one visible sidebar divider without redundant aside border 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > calls onToggle or onHide when Hide sidebar button is clicked 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders null when open is false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > initializes knownProjectsRef lazily without allocating a new Set on every render (F-shell-03) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > hides add-worktree button when project gitRoot is null and shows it when gitRoot is set 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > triggers onRemoveProject from project native context menu Remove Project action 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > triggers onRemoveProject from project row trash icon button 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > shows the worktree tree by default and swaps to the inbox only through the inbox icon 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar navigation > renders emptyState hint text when a project has zero worktrees 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 39 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > starts a tabless active workspace collapsed even when saved as expanded
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > expands a tabless workspace and reveals worktrees after clicking its chevron
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > expands a tabless workspace and reveals worktrees after clicking its project name
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > reveals the primary worktree when expanding an empty workspace that has only a primary root
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > collapses when the final tab closes and restores rows after a tab opens without clicks
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > toggles expansion when clicked while empty and auto-collapses when the final tab closes
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders cached worktrees for a newly active project while active store rows are temporarily empty
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders local worktrees for an inactive project immediately when opened while active project is empty
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > lists an inactive project's own rows so index-based selection can reach them
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders the folder row for an active non-Git project even before the store lists it
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > attributes a branch-less root worktree to the project that owns its path, not the active project
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > collapses and expands a project from its name button, not just the chevron
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > does not highlight an inactive project's row when the active path is stale
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > highlights the active worktree only inside the project that owns it
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > lists inactive project worktrees instead of the empty-state message
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > uses the 236px parity width by default
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > keeps only global actions in the sidebar titlebar
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > gives every project row its own add-worktree action bound to that exact project
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > nests each project's worktrees inside that project's own tree group
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > selects a project from its tree row and a worktree from inside the nested group
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > keeps each project's open state independent when toggling default or rorca-qa
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > toggling a project does not change which project is active
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > persists collapsed projects across remounts
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > routes each worktree under the project that owns its branch
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > hooks worktree creation and deletion into the owning project group
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > drops the per-worktree status refresh control
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders no empty-state row or message for a project with no worktrees
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > marks the active worktree inside the nested group as current
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > keeps all titlebar actions out of the Tauri drag region
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > restores, drags, clamps, and persists sidebar width
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders exactly one visible sidebar divider without redundant aside border
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > calls onToggle or onHide when Hide sidebar button is clicked
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders null when open is false
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > initializes knownProjectsRef lazily without allocating a new Set on every render (F-shell-03)
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > hides add-worktree button when project gitRoot is null and shows it when gitRoot is set
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > triggers onRemoveProject from project native context menu Remove Project action
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > triggers onRemoveProject from project row trash icon button
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > shows the worktree tree by default and swaps to the inbox only through the inbox icon
+ FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > renders emptyState hint text when a project has zero worktrees
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.test.tsx:68:16
+     66| 
+     67| beforeEach(() => {
+     68|   localStorage.clear();
+       |                ^
+     69|   notificationCenterStore.clearAll();
+     70| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/39]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  39 failed (39)
+   Start at  10:09:02
+   Duration  1.19s (transform 239ms, setup 98ms, collect 674ms, tests 12ms, environment 227ms, prepare 47ms)
+
+error: script "test" exited with code 1

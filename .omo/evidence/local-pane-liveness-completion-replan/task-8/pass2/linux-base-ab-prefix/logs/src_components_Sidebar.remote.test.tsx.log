@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.remote.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037443) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.remote.test.tsx (12 tests | 12 failed) 7ms
+   × renders a host-labelled remote root and selects its explicit backend workspace identity 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × renders remote worktree branch name on the left and machine badge on the right 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × renders a host-labelled remote root for a Windows path with backslashes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × renders clean project name without host label for multi-machine remote project group 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × shows an enabled Add Worktree menu item for an SSH project with gitRoot and triggers creation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × disables Add Worktree for a remote project without gitRoot 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × falls back to the configured host ID rather than a workspace hash when the host is missing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × groups matching remote project under existing local project as a remote worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × groups remote project under local project when git remote matches even if folder names differ 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × preserves local worktrees in the sidebar and accurately highlights remote worktree when active 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × preserves local worktrees in unified group when local project is active and active worktrees are loading 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × preserves stale/offline hostSummary for pairedDaemon project through grouping 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 12 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.remote.test.tsx > renders a host-labelled remote root and selects its explicit backend workspace identity
+ FAIL  src/components/Sidebar.remote.test.tsx > renders remote worktree branch name on the left and machine badge on the right
+ FAIL  src/components/Sidebar.remote.test.tsx > renders a host-labelled remote root for a Windows path with backslashes
+ FAIL  src/components/Sidebar.remote.test.tsx > renders clean project name without host label for multi-machine remote project group
+ FAIL  src/components/Sidebar.remote.test.tsx > shows an enabled Add Worktree menu item for an SSH project with gitRoot and triggers creation
+ FAIL  src/components/Sidebar.remote.test.tsx > disables Add Worktree for a remote project without gitRoot
+ FAIL  src/components/Sidebar.remote.test.tsx > falls back to the configured host ID rather than a workspace hash when the host is missing
+ FAIL  src/components/Sidebar.remote.test.tsx > groups matching remote project under existing local project as a remote worktree
+ FAIL  src/components/Sidebar.remote.test.tsx > groups remote project under local project when git remote matches even if folder names differ
+ FAIL  src/components/Sidebar.remote.test.tsx > preserves local worktrees in the sidebar and accurately highlights remote worktree when active
+ FAIL  src/components/Sidebar.remote.test.tsx > preserves local worktrees in unified group when local project is active and active worktrees are loading
+ FAIL  src/components/Sidebar.remote.test.tsx > preserves stale/offline hostSummary for pairedDaemon project through grouping
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.remote.test.tsx:15:33
+     13| }));
+     14| const project: RegisteredProject = { workspaceId: "ssh:opaque-hash", r…
+     15| beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); native.op…
+       |                                 ^
+     16| afterEach(cleanup);
+     17| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  12 failed (12)
+   Start at  10:09:38
+   Duration  1.11s (transform 216ms, setup 92ms, collect 614ms, tests 7ms, environment 222ms, prepare 46ms)
+
+error: script "test" exited with code 1

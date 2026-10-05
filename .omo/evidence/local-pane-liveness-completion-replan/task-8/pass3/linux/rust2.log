@@ -1,0 +1,64 @@
+RGATE_DONE linux local_split_reliability_-list native=0 count=15 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 52s
+RGATE_DONE linux local_split_reliability_ native=0 count=15 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2657 filtered out; finished in 0.01s
+RGATE_DONE linux pane_liveness_ native=0 count=47 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+running 47 tests
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 2625 filtered out; finished in 1.40s
+RGATE_DONE linux all-targets native=101 count=null status=RAN_FAILED
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `DaemonResponse`
+error: could not compile `ferryx` (test "zero_config_gen5_regression") due to 1 previous error
+RGATE_DONE linux full-lib native=101 count=1 status=RAN_FAILED
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2671 filtered out; finished in 1.16s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2671 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2671 filtered out; finished in 0.15s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2671 filtered out; finished in 0.64s
+Error: build ferryx-cli before the owner fixture
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2671 filtered out; finished in 1.35s
+test result: FAILED. 2629 passed; 37 failed; 6 ignored; 0 measured; 0 filtered out; finished in 451.09s
+error: test failed, to rerun pass `--lib`
+RGATE_DONE linux qa_barrier-list native=0 count=11 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 20s
+RGATE_DONE linux qa_barrier native=0 count=11 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+running 11 tests
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 2672 filtered out; finished in 0.06s
+RGATE_DONE linux handover-list native=101 count=null status=RAN_FAILED
+error[E0063]: missing field `local_split` in initializer of `DaemonRequest`
+error: could not compile `ferryx` (test "daemon_handover_transfer_contract") due to 1 previous error
+RGATE_NOT_RUN_BLOCKED linux handover cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/handover-list.log
+RGATE_DONE linux daemon_handover_contract-list native=0 count=5 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.86s
+RGATE_DONE linux daemon_handover_contract native=0 count=5 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.94s
+RGATE_DONE linux daemon_persistence_contract-list native=0 count=15 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.55s
+RGATE_DONE linux daemon_persistence_contract native=101 count=null status=RAN_FAILED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+running 15 tests
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.97s
+error: test failed, to rerun pass `--test daemon_persistence_contract`
+RGATE_DONE linux zero_config_gen4_audit-list native=0 count=3 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.60s
+RGATE_DONE linux zero_config_gen4_audit native=0 count=0 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+running 3 tests
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+RGATE_DONE linux unix-suspension-list native=0 count=12 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+RGATE_DONE linux unix-suspension native=0 count=12 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 2660 filtered out; finished in 0.05s
+RGATE_DONE linux journal-list native=0 count=6 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+RGATE_DONE linux journal native=0 count=6 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2666 filtered out; finished in 0.02s
+ALL_RUST_GATES_DONE linux

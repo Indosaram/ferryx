@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scenario": "split-attach-stall",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-attach-stall",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-91d447e1\\evidence\\split-attach-stall",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-91d447e1\\runtime\\split-attach-stall"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "b7e41eae405984f48d31618fa1bd11a392ba0491ffccdef9d15a94e24fcb4cbe",
+  "runId": "qa-run-73f69e58-6ab9-427a-a68c-a7b44509c2cd",
+  "operationId": "qa-op-c5f82297-f654-4754-88c2-11134bc79c3b",
+  "verdict": "FAIL",
+  "nativeEvidence": null,
+  "error": {
+    "code": "NATIVE_AUTOMATION_UNSUPPORTED",
+    "message": "NATIVE_AUTOMATION_UNSUPPORTED: powershell exited 1: \"1\"���� �μ��� �ִ� \"FromHandle\"��(��) ȣ���ϴ� ���� ���ܰ� �߻��߽��ϴ�. \"hwnd�� IntPtr.Zero �Ǵ� null�� �� �� ������\r\n��.\"\r\n��ġ ��:1 ����:112\r\n+ ... ction Stop; $root = [System.Windows.Automation.AutomationElement]::Fr ...\r\n+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException\r\n    + FullyQualifiedErrorId : ArgumentException\r\n \r\nNO_OWNED_WINDOW\r\n��ġ ��:1 ����:221\r\n+ ... .MainWindowHandle); if (-not $root) { throw \"NO_OWNED_WINDOW\" } $cond ...\r\n+                                           ~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : OperationStopped: (NO_OWNED_WINDOW:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : NO_OWNED_WINDOW"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false,
+    "gateFailed": true
+  },
+  "barriers": [
+    {
+      "name": "attach-handshake",
+      "armedAt": "2026-10-04T16:37:30.294Z",
+      "heldAt": null,
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "split-attach-stall"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "baseAB": {
+    "host": "maho-mac",
+    "path": "/Users/I552267/ferryx-pane-completion/base-d82b35e4",
+    "receipt": "BASE_CLEANUP_OK sourceAbsent=true",
+    "nativeExit": 0,
+    "monitor": "mon_AQMB99MNZWH2KB83"
+  },
+  "candidateMac": "CLEANUP_OK sourceAbsent=true ghosttyLinkDetached=true; mon_JKZ2BPEC07XKF4Q1 exit 0",
+  "candidateWindows": "CLEANUP_OK sourceAbsent=True ghosttyPreserved=True; mon_2D695VFJSHPXHN12 exit 0",
+  "candidateLinux": "CLEANUP_OK sourceAbsent=true ghosttyLinkDetached=true; PRIVATE_GHOSTTY_CLEANUP_OK sharedBundlePreserved=true; mon_7396GPQNC12H0HRV exit 0",
+  "sharedGhostty": "Preserved; cleanup detaches links/junction before any owned source deletion",
+  "finalWindowsProcesses": "FINAL_RESOURCE_OK ownedProcesses=0 sourceArchiveAbsent=true sharedGhosttyPreserved=true; mon_6DT9EDK2PNKWTE59 exit 0",
+  "localSourceArchive": "Removed; absence verified"
+}

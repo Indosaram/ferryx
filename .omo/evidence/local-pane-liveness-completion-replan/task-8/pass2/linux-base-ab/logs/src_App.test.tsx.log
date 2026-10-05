@@ -1,0 +1,512 @@
+$ vitest run --maxWorkers=1 src/App.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033311) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/App.test.tsx (154 tests | 154 failed) 72ms
+   × App project workspace flow > awaits the local registration heal before publishing the bootstrap in both boot branches 9ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > dedupes repeated local registration heals and skips placeholder projects 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > shows a retryable error when a stored project fails to register at startup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for nested content 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for flat content 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for top-level content 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for terminal content 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for missing-content content 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=true 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused working agent pane in a split without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused waiting agent pane in a split without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > does not ask for confirmation for an untagged pane's busy sibling 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=false even with a layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=true even with a layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > ignores a nonexistent active tab even with a leftover layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused working agent pane in a split without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused waiting agent pane in a split without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > does not ask for confirmation for an untagged pane's busy sibling 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=false even with a layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=true even with a layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > ignores a nonexistent active tab even with a leftover layout 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > passes live tabless workspace state to the sidebar 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > does not select tabless workspace rows through Cmd+digit 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > skips tabless background worktrees when indexing Cmd+N targets 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > returns reconnect failure to the pane instead of discarding its promise 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes the native Cmd+T menu accelerator through the normal new-terminal callback 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes the native Cmd+W menu accelerator to close the active tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes web Cmd+W on a leaf-root terminal tab to its pane when focus is unset 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > confirms closing a single-pane tab with a working agent as a tab close 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > confirms closing a single-pane tab with a waiting agent as a tab close 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > closes a single pane in a split view with a working agent without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > closes a single pane in a split view with a waiting agent without confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > confirms tab close for a working agent even with confirmCloseTab disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > confirms tab close for a waiting agent even with confirmCloseTab disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > closes an idle focused pane through native Cmd+W without confirming for a busy sibling 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes the web Cmd+W shortcut to close the focused pane in a split terminal tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes the native Cmd+W menu accelerator to close an active browser tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > routes http links to a built-in browser tab through the app-registered opener 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > uses the canonical folder-derived project on an empty native startup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > falls back to stored projects and initializes bootstrap when getInitialProject rejects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > starts update polling on native mount and stops it on unmount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > checks for a signed update when the native app starts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > restores projects lost from WebView storage using the native session catalog 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > restores multi-project native session catalog when single persisted project differs from startup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > does not restore historical projects into an existing multi-project catalog 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > keeps the native shell initializing until persisted workspace tabs are preloaded 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > migrates the legacy default placeholder to the canonical native project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > removes a project via RemoveProjectDialog and switches active project when removing the active one 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > shows a genuine empty state and does not re-register the default project after removing the last project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > heals a legacy project entry (no gitRoot) into a git-backed project on startup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > re-registers the active persisted project before refreshing its worktrees 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > opens a registered project's real branch-dropdown worktree flow 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > opens worktree creation for the clicked non-active project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > switches to the non-active project before opening its created worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > switches the active project when selecting a project row in the nested tree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > shows the original project's worktrees again after switching away and clicking back 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > adopts the canonical workspaceId the backend returns for an already-registered root 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > retries registration on window focus after a transient failure instead of gating forever 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > persists the outgoing project's session when switching away 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > discards a parked worktree selection that belongs to a project no longer active 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > surfaces a genuine same-id different-root registration conflict instead of silently listing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > switches project instead of activating when the worktree belongs to another project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > switches project for a branch-less worktree nested under another project's root 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > activates a worktree directly when it belongs to the active project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > walks visible worktrees top to bottom across expanded projects with Cmd+1.. 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > skips a collapsed project's rows when counting Cmd+N positions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > selects a worktree when macOS forwards Cmd+N through the native key monitor 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > targets the synthesized root row of a visible non-Git project via native Cmd+digit 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > keeps out-of-range Cmd+N presses a no-op 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > toggles sidebar visibility with Cmd+B and persists state across mounts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > keeps restored missing sessions in standby under the default Lazy policy 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > waits until registration and worktree refresh complete before restoring Lazy standby sessions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > restores persisted terminal sessions only once when restored state changes effect dependencies 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > preserves live backend sessions when restoring during dev/HMR 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > reconciles live and missing sessions across split panes without auto-respawning dead sessions 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > toggles the settings dialog with Cmd+, 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > activates in-terminal search on active pane with Cmd+F 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[ 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > detects agents on mount and launches agent via spawnTerminal and writeTerminal 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > surfaces the stored defaultAgentId first with a Default label in the New Tab agent list 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > opens a browser tab at the configured homepage from the new-tab menu 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > opens a blank browser tab from the new-tab menu when no homepage is set 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > preserves every registered workspace when saving session instead of clobbering inactive workspaces 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > conditionally mounts SettingsDialog and CommandPalette only when open 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > lazy-loads SettingsDialog via React.lazy with Suspense 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > does not list state in registerWindowCloseGuard effect dependencies 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > does not pass inline arrow functions for onOpenSettings or onCloseSearch 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > successfully completes session restore under React StrictMode double-mount without skipping 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes terminal tabs from every worktree with safe labels 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes the primary worktree with no managed slug 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane when a remote selection names a leaf-addressed entry 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > exposes every split pane of a tab as its own remote entry addressed by leaf 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps a single-pane tab addressed by its plain tab id 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives per-tab activityState and agentType when present in activityBySessionId 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps publishing the terminal inventory with an empty focus when a browser tab is active 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > returns null only when the desktop has no terminal tab at all 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > does not republish unchanged terminal inventory on unrelated workspace renders 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes focused terminal to native IPC on mount and layout changes 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes per-tab agent activity state and agent type to native IPC 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes real backendSessionId after session backend is bound or rebound 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > routes publishFocusedTerminal rejection to reportRuntimeError 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > creates a new remote terminal through openTab instead of reusing an existing worktree tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles native remote_selection_requested and activates requested worktree context 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles same-worktree tab selection request and activates exact tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles primary worktree selection within current project when on secondary worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-worktree selection with tabId activating tab after worktree switch 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-project remote selection by switching project and then activating worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > drops a queued remote slug when the user switches to a third project first 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane after a queued cross-project selection names a leaf entry 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > badge count synchronization > synchronizes badge count from unique true unreadTabIds in workspace state 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > badge count synchronization > routes native badge synchronization errors to reportRuntimeError 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Automatic agent session resume on workspace restore > does not crash and degrades silently when auto-resume spawn fails 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (1) when a remote host is active, calls toast.warning exactly once and adoptBrowserSession zero times 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (2) when no remote host is active and adoptBrowserSession returns null, calls the second toast warning exactly once 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (3) when no remote host is active and adoptBrowserSession returns a tab id, no toast warning fires 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with remote-host-active when a remote host owns the window 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with adopt-failed when the session could not be adopted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=true when the tab was shown 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the tab owning the browserId, not the tab at the CLI index 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the terminal tab that hosts the browser in a pane 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > T9 browser_tab_switch activates the owning layout tab > warns instead of staying silent when no tab owns the browserId 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Wave 3a Onboarding and Welcome > does not auto-open WelcomeWizard for platform web 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Wave 3a Onboarding and Welcome > renders GettingStartedChecklist with 'No projects' and 'Add Project' button when projects list is empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App project workspace flow > Wave 3a Onboarding and Welcome > renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 154 ⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > awaits the local registration heal before publishing the bootstrap in both boot branches
+ FAIL  src/App.test.tsx > App project workspace flow > dedupes repeated local registration heals and skips placeholder projects
+ FAIL  src/App.test.tsx > App project workspace flow > shows a retryable error when a stored project fails to register at startup
+ FAIL  src/App.test.tsx > App project workspace flow > passes live tabless workspace state to the sidebar
+ FAIL  src/App.test.tsx > App project workspace flow > does not select tabless workspace rows through Cmd+digit
+ FAIL  src/App.test.tsx > App project workspace flow > skips tabless background worktrees when indexing Cmd+N targets
+ FAIL  src/App.test.tsx > App project workspace flow > returns reconnect failure to the pane instead of discarding its promise
+ FAIL  src/App.test.tsx > App project workspace flow > routes the native Cmd+T menu accelerator through the normal new-terminal callback
+ FAIL  src/App.test.tsx > App project workspace flow > routes the native Cmd+W menu accelerator to close the active tab
+ FAIL  src/App.test.tsx > App project workspace flow > routes web Cmd+W on a leaf-root terminal tab to its pane when focus is unset
+ FAIL  src/App.test.tsx > App project workspace flow > confirms closing a single-pane tab with a working agent as a tab close
+ FAIL  src/App.test.tsx > App project workspace flow > confirms closing a single-pane tab with a waiting agent as a tab close
+ FAIL  src/App.test.tsx > App project workspace flow > closes a single pane in a split view with a working agent without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > closes a single pane in a split view with a waiting agent without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > confirms tab close for a working agent even with confirmCloseTab disabled
+ FAIL  src/App.test.tsx > App project workspace flow > confirms tab close for a waiting agent even with confirmCloseTab disabled
+ FAIL  src/App.test.tsx > App project workspace flow > closes an idle focused pane through native Cmd+W without confirming for a busy sibling
+ FAIL  src/App.test.tsx > App project workspace flow > routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab
+ FAIL  src/App.test.tsx > App project workspace flow > routes the web Cmd+W shortcut to close the focused pane in a split terminal tab
+ FAIL  src/App.test.tsx > App project workspace flow > routes the native Cmd+W menu accelerator to close an active browser tab
+ FAIL  src/App.test.tsx > App project workspace flow > routes http links to a built-in browser tab through the app-registered opener
+ FAIL  src/App.test.tsx > App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm
+ FAIL  src/App.test.tsx > App project workspace flow > uses the canonical folder-derived project on an empty native startup
+ FAIL  src/App.test.tsx > App project workspace flow > falls back to stored projects and initializes bootstrap when getInitialProject rejects
+ FAIL  src/App.test.tsx > App project workspace flow > starts update polling on native mount and stops it on unmount
+ FAIL  src/App.test.tsx > App project workspace flow > renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects
+ FAIL  src/App.test.tsx > App project workspace flow > checks for a signed update when the native app starts
+ FAIL  src/App.test.tsx > App project workspace flow > restores projects lost from WebView storage using the native session catalog
+ FAIL  src/App.test.tsx > App project workspace flow > restores multi-project native session catalog when single persisted project differs from startup
+ FAIL  src/App.test.tsx > App project workspace flow > does not restore historical projects into an existing multi-project catalog
+ FAIL  src/App.test.tsx > App project workspace flow > keeps the native shell initializing until persisted workspace tabs are preloaded
+ FAIL  src/App.test.tsx > App project workspace flow > migrates the legacy default placeholder to the canonical native project
+ FAIL  src/App.test.tsx > App project workspace flow > removes a project via RemoveProjectDialog and switches active project when removing the active one
+ FAIL  src/App.test.tsx > App project workspace flow > shows a genuine empty state and does not re-register the default project after removing the last project
+ FAIL  src/App.test.tsx > App project workspace flow > scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree
+ FAIL  src/App.test.tsx > App project workspace flow > migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)
+ FAIL  src/App.test.tsx > App project workspace flow > heals a legacy project entry (no gitRoot) into a git-backed project on startup
+ FAIL  src/App.test.tsx > App project workspace flow > re-registers the active persisted project before refreshing its worktrees
+ FAIL  src/App.test.tsx > App project workspace flow > opens a registered project's real branch-dropdown worktree flow
+ FAIL  src/App.test.tsx > App project workspace flow > opens worktree creation for the clicked non-active project
+ FAIL  src/App.test.tsx > App project workspace flow > switches to the non-active project before opening its created worktree
+ FAIL  src/App.test.tsx > App project workspace flow > switches the active project when selecting a project row in the nested tree
+ FAIL  src/App.test.tsx > App project workspace flow > shows the original project's worktrees again after switching away and clicking back
+ FAIL  src/App.test.tsx > App project workspace flow > adopts the canonical workspaceId the backend returns for an already-registered root
+ FAIL  src/App.test.tsx > App project workspace flow > retries registration on window focus after a transient failure instead of gating forever
+ FAIL  src/App.test.tsx > App project workspace flow > persists the outgoing project's session when switching away
+ FAIL  src/App.test.tsx > App project workspace flow > discards a parked worktree selection that belongs to a project no longer active
+ FAIL  src/App.test.tsx > App project workspace flow > surfaces a genuine same-id different-root registration conflict instead of silently listing
+ FAIL  src/App.test.tsx > App project workspace flow > switches project instead of activating when the worktree belongs to another project
+ FAIL  src/App.test.tsx > App project workspace flow > switches project for a branch-less worktree nested under another project's root
+ FAIL  src/App.test.tsx > App project workspace flow > activates a worktree directly when it belongs to the active project
+ FAIL  src/App.test.tsx > App project workspace flow > walks visible worktrees top to bottom across expanded projects with Cmd+1..
+ FAIL  src/App.test.tsx > App project workspace flow > skips a collapsed project's rows when counting Cmd+N positions
+ FAIL  src/App.test.tsx > App project workspace flow > selects a worktree when macOS forwards Cmd+N through the native key monitor
+ FAIL  src/App.test.tsx > App project workspace flow > targets the synthesized root row of a visible non-Git project via native Cmd+digit
+ FAIL  src/App.test.tsx > App project workspace flow > targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit
+ FAIL  src/App.test.tsx > App project workspace flow > keeps out-of-range Cmd+N presses a no-op
+ FAIL  src/App.test.tsx > App project workspace flow > navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys
+ FAIL  src/App.test.tsx > App project workspace flow > toggles sidebar visibility with Cmd+B and persists state across mounts
+ FAIL  src/App.test.tsx > App project workspace flow > keeps restored missing sessions in standby under the default Lazy policy
+ FAIL  src/App.test.tsx > App project workspace flow > waits until registration and worktree refresh complete before restoring Lazy standby sessions
+ FAIL  src/App.test.tsx > App project workspace flow > restores persisted terminal sessions only once when restored state changes effect dependencies
+ FAIL  src/App.test.tsx > App project workspace flow > preserves live backend sessions when restoring during dev/HMR
+ FAIL  src/App.test.tsx > App project workspace flow > reconciles live and missing sessions across split panes without auto-respawning dead sessions
+ FAIL  src/App.test.tsx > App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited
+ FAIL  src/App.test.tsx > App project workspace flow > toggles the settings dialog with Cmd+,
+ FAIL  src/App.test.tsx > App project workspace flow > activates in-terminal search on active pane with Cmd+F
+ FAIL  src/App.test.tsx > App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[
+ FAIL  src/App.test.tsx > App project workspace flow > detects agents on mount and launches agent via spawnTerminal and writeTerminal
+ FAIL  src/App.test.tsx > App project workspace flow > surfaces the stored defaultAgentId first with a Default label in the New Tab agent list
+ FAIL  src/App.test.tsx > App project workspace flow > opens a browser tab at the configured homepage from the new-tab menu
+ FAIL  src/App.test.tsx > App project workspace flow > opens a blank browser tab from the new-tab menu when no homepage is set
+ FAIL  src/App.test.tsx > App project workspace flow > preserves every registered workspace when saving session instead of clobbering inactive workspaces
+ FAIL  src/App.test.tsx > App project workspace flow > conditionally mounts SettingsDialog and CommandPalette only when open
+ FAIL  src/App.test.tsx > App project workspace flow > lazy-loads SettingsDialog via React.lazy with Suspense
+ FAIL  src/App.test.tsx > App project workspace flow > does not list state in registerWindowCloseGuard effect dependencies
+ FAIL  src/App.test.tsx > App project workspace flow > does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval
+ FAIL  src/App.test.tsx > App project workspace flow > does not pass inline arrow functions for onOpenSettings or onCloseSearch
+ FAIL  src/App.test.tsx > App project workspace flow > preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning
+ FAIL  src/App.test.tsx > App project workspace flow > successfully completes session restore under React StrictMode double-mount without skipping
+ FAIL  src/App.test.tsx > App project workspace flow > skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists
+ FAIL  src/App.test.tsx > App project workspace flow > reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.test.tsx:505:18
+    503|       subscribeActivityNotification: () => () => undefined,
+    504|     })) as any);
+    505|     localStorage.clear();
+       |                  ^
+    506|     native.createWorktree.mockReset();
+    507|     native.getWorktreeStatus.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/154]⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for nested content
+ FAIL  src/App.test.tsx > App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for flat content
+ FAIL  src/App.test.tsx > App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for top-level content
+ FAIL  src/App.test.tsx > App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for terminal content
+ FAIL  src/App.test.tsx > App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for missing-content content
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes terminal tabs from every worktree with safe labels
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes the primary worktree with no managed slug
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane when a remote selection names a leaf-addressed entry
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > exposes every split pane of a tab as its own remote entry addressed by leaf
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps a single-pane tab addressed by its plain tab id
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives per-tab activityState and agentType when present in activityBySessionId
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps publishing the terminal inventory with an empty focus when a browser tab is active
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > returns null only when the desktop has no terminal tab at all
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > does not republish unchanged terminal inventory on unrelated workspace renders
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes focused terminal to native IPC on mount and layout changes
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes per-tab agent activity state and agent type to native IPC
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes real backendSessionId after session backend is bound or rebound
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > routes publishFocusedTerminal rejection to reportRuntimeError
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > creates a new remote terminal through openTab instead of reusing an existing worktree tab
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles native remote_selection_requested and activates requested worktree context
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles same-worktree tab selection request and activates exact tab
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles primary worktree selection within current project when on secondary worktree
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-worktree selection with tabId activating tab after worktree switch
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-project remote selection by switching project and then activating worktree
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > drops a queued remote slug when the user switches to a third project first
+ FAIL  src/App.test.tsx > App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane after a queued cross-project selection names a leaf entry
+ FAIL  src/App.test.tsx > App project workspace flow > badge count synchronization > synchronizes badge count from unique true unreadTabIds in workspace state
+ FAIL  src/App.test.tsx > App project workspace flow > badge count synchronization > routes native badge synchronization errors to reportRuntimeError
+ FAIL  src/App.test.tsx > App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed
+ FAIL  src/App.test.tsx > App project workspace flow > Automatic agent session resume on workspace restore > does not crash and degrades silently when auto-resume spawn fails
+ FAIL  src/App.test.tsx > App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (1) when a remote host is active, calls toast.warning exactly once and adoptBrowserSession zero times
+ FAIL  src/App.test.tsx > App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (2) when no remote host is active and adoptBrowserSession returns null, calls the second toast warning exactly once
+ FAIL  src/App.test.tsx > App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (3) when no remote host is active and adoptBrowserSession returns a tab id, no toast warning fires
+ FAIL  src/App.test.tsx > App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with remote-host-active when a remote host owns the window
+ FAIL  src/App.test.tsx > App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with adopt-failed when the session could not be adopted
+ FAIL  src/App.test.tsx > App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=true when the tab was shown
+ FAIL  src/App.test.tsx > App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the tab owning the browserId, not the tab at the CLI index
+ FAIL  src/App.test.tsx > App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the terminal tab that hosts the browser in a pane
+ FAIL  src/App.test.tsx > App project workspace flow > T9 browser_tab_switch activates the owning layout tab > warns instead of staying silent when no tab owns the browserId
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > does not auto-open WelcomeWizard for platform web
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > renders GettingStartedChecklist with 'No projects' and 'Add Project' button when projects list is empty
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.test.tsx:505:18
+    503|       subscribeActivityNotification: () => () => undefined,
+    504|     })) as any);
+    505|     localStorage.clear();
+       |                  ^
+    506|     native.createWorktree.mockReset();
+    507|     native.getWorktreeStatus.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/154]⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused working agent pane in a split without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused waiting agent pane in a split without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > does not ask for confirmation for an untagged pane's busy sibling
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=false even with a layout
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=true even with a layout
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > ignores a nonexistent active tab even with a leftover layout
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=true
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=false
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused working agent pane in a split without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused waiting agent pane in a split without confirmation
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > does not ask for confirmation for an untagged pane's busy sibling
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=false even with a layout
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=true even with a layout
+ FAIL  src/App.test.tsx > App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > ignores a nonexistent active tab even with a leftover layout
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.test.tsx:505:18
+    503|       subscribeActivityNotification: () => () => undefined,
+    504|     })) as any);
+    505|     localStorage.clear();
+       |                  ^
+    506|     native.createWorktree.mockReset();
+    507|     native.getWorktreeStatus.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/154]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  154 failed (154)
+   Start at  10:08:47
+   Duration  2.17s (transform 950ms, setup 103ms, collect 1.58s, tests 72ms, environment 226ms, prepare 47ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/components/TerminalSplitView.paneHandleReach.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/components/TerminalSplitView.paneHandleReach.test.tsx [2m([22m[2m1 test[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 67[2mms[22m[39m
+[31m   [31m×[31m pane handle reachability over a native terminal[2m > [22moverlays the handle only inside the narrow hotspot without shrinking the terminal[39m[32m 66[2mms[22m[39m
+[31m     → [2mexpect([22m[31melement[31m[2m).toHaveClass([22m[32m[32m"h-3"[32m[31m[2m)[22m
+
+Expected the element to have class:
+[32m  h-3[31m
+Received:
+[31m  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0[31m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/components/TerminalSplitView.paneHandleReach.test.tsx[2m > [22mpane handle reachability over a native terminal[2m > [22moverlays the handle only inside the narrow hotspot without shrinking the terminal
+[31m[1mError[22m: [2mexpect([22m[31melement[31m[2m).toHaveClass([22m[32m[32m"h-3"[32m[31m[2m)[22m
+
+Expected the element to have class:
+[32m  h-3[31m
+Received:
+[31m  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0[31m[39m
+[36m [2m❯[22m src/components/TerminalSplitView.paneHandleReach.test.tsx:[2m83:20[22m[39m
+    [90m 81| [39m    [35mconst[39m leaf [33m=[39m screen[33m.[39m[34mgetByTestId[39m([32m"pane-leaf"[39m)[33m;[39m
+    [90m 82| [39m
+    [90m 83| [39m    [34mexpect[39m(handle)[33m.[39m[34mtoHaveClass[39m([32m"h-3"[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m 84| [39m    [34mexpect[39m(handle)[33m.[39m[34mtoHaveClass[39m([32m"opacity-0"[39m[33m,[39m [32m"pointer-events-none"[39m)[33m;[39m
+    [90m 85| [39m    [34mexpect[39m(terminal[33m.[39mstyle[33m.[39mmarginTop)[33m.[39m[34mtoBe[39m([32m""[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m   Start at [22m 10:08:12
+[2m   Duration [22m 3.72s[2m (transform 804ms, setup 290ms, collect 2.55s, tests 67ms, environment 549ms, prepare 96ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

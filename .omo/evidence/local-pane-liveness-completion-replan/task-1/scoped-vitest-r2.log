@@ -1,0 +1,1301 @@
+$ vitest run --maxWorkers=1 src/lib/switchDebug.test.ts src/lib/paneDebugInfo.test.ts src/lib/paneLiveness.test.ts src/lib/nativeTerminalInputQueue.test.ts
+
+ RUN  v3.2.7 C:/Users/sook/ferryx-pane-completion/source/ui
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > executes tasks strictly in FIFO order per session without concurrent overlap
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 1,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924072,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924072
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 2,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924072,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924072
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 3,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924072,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924072
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 4,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924072,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924072
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > executes tasks strictly in FIFO order per session without concurrent overlap
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 5,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924073,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924073
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > executes tasks strictly in FIFO order per session without concurrent overlap
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 6,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924073,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924073
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > isolates queues across different sessions without head-of-line blocking
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 7,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924074
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 8,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924074
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 9,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-2-2',
+    backendSessionId: 'session-2',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924074
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 10,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-2-2',
+    backendSessionId: 'session-2',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924074
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces byte-bounded queue limit and explicitly rejects with overflow error
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 11,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 600,
+    queuedAt: 1791037924074
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 12,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924074
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 13,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924074,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 400,
+    queuedAt: 1791037924074
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces byte-bounded queue limit and explicitly rejects with overflow error
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 14,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924075,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924075
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces byte-bounded queue limit and explicitly rejects with overflow error
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 15,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924075,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 200,
+    queuedAt: 1791037924075
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 16,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924075,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924075
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces entry-bounded queue limit and rejects when entries exceed maxQueueEntries
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 17,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924075,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924075
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 18,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924075,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924075
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 19,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924075
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 20,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924076
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 21,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-4',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924076
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces entry-bounded queue limit and rejects when entries exceed maxQueueEntries
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 22,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924076
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces entry-bounded queue limit and rejects when entries exceed maxQueueEntries
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 23,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924076
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > enforces entry-bounded queue limit and rejects when entries exceed maxQueueEntries
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 24,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-4',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924076
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > preserves original structured error object unchanged without stringifying
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 25,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924076
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 26,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924076,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924076
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > explicitly rejects queued old-generation operations when generation advances
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 27,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924077
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 28,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924077
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 29,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924077
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > clearing a session cancels pending admissions without corrupting in-flight completion accounting
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 30,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924077
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 31,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924077
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 32,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924077,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 20,
+    queuedAt: 1791037924077
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > delivers a preedit update enqueued while input send is in flight strictly after that input
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 33,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924078,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924078
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 34,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924078,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924078
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 35,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924078,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924078
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > delivers a preedit update enqueued while input send is in flight strictly after that input
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 36,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924078,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924078
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > coalesces consecutive preedit updates into one delivered call
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 37,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924079
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 38,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924079
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 39,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924079
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 40,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-3',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924079
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 41,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-4',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924079
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > coalesces consecutive preedit updates into one delivered call
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 42,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924079,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-4',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924079
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > does not dispatch a committed input until the unresolved preedit settles
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 43,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924080,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924080
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 44,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924080,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924080
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 45,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924080,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924080
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > does not dispatch a committed input until the unresolved preedit settles
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 46,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924080,
+  details: {
+    operationId: 'req-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924080
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > explicitly settles displaced preedit and records drop when replacement preedit exceeds queue capacity
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 47,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924081,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924081
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 48,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924081,
+  details: {
+    operationId: 'req-a9003118-session-1-1',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924081
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 49,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924081,
+  details: {
+    operationId: 'req-preedit-a9003118-session-1-2',
+    backendSessionId: 'session-1',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924081
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > maintains isolated per-lane in-flight request ID and running age when input and preedit overlap
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 50,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924082,
+  details: {
+    operationId: 'req-a9003118-session-concurrent-1',
+    backendSessionId: 'session-concurrent',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924081
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 51,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924082,
+  details: {
+    operationId: 'req-a9003118-session-concurrent-1',
+    backendSessionId: 'session-concurrent',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924081
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 52,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924082,
+  details: {
+    operationId: 'req-preedit-a9003118-session-concurrent-2',
+    backendSessionId: 'session-concurrent',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924131
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > maintains isolated per-lane in-flight request ID and running age when input and preedit overlap
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 53,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924082,
+  details: {
+    operationId: 'req-preedit-a9003118-session-concurrent-2',
+    backendSessionId: 'session-concurrent',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924156
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > propagates custom requestId and operationName through enqueue and reports custom ID during in-flight execution
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 54,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'custom-req-mouse-down-1',
+    backendSessionId: 'session-custom',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 64,
+    queuedAt: 1791037924083
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 55,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'custom-req-mouse-down-1',
+    backendSessionId: 'session-custom',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924083
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > resets in-flight request ID and running age to null when in-flight operation rejects and proceeds to next queued operation
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 56,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'req-a9003118-session-fail-1',
+    backendSessionId: 'session-fail',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924083
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 57,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'req-a9003118-session-fail-1',
+    backendSessionId: 'session-fail',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924083
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 58,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'req-a9003118-session-fail-2',
+    backendSessionId: 'session-fail',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924083
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > resets in-flight request ID and running age to null when in-flight operation rejects and proceeds to next queued operation
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 59,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924083,
+  details: {
+    operationId: 'req-a9003118-session-fail-2',
+    backendSessionId: 'session-fail',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924083
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > preserves independent in-flight tracking across distinct sessions during concurrent progress and adversarial stale generation rejection
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 60,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924084,
+  details: {
+    operationId: 'req-a9003118-session-A-1',
+    backendSessionId: 'session-A',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924084
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 61,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924084,
+  details: {
+    operationId: 'req-a9003118-session-A-1',
+    backendSessionId: 'session-A',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924084
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 62,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924084,
+  details: {
+    operationId: 'req-a9003118-session-A-2',
+    backendSessionId: 'session-A',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924084
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 63,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924084,
+  details: {
+    operationId: 'req-a9003118-session-B-3',
+    backendSessionId: 'session-B',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924084
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 64,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924084,
+  details: {
+    operationId: 'req-a9003118-session-B-3',
+    backendSessionId: 'session-B',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924084
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > distinguishes in-flight execution age from waiting queued head age
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 65,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924085,
+  details: {
+    operationId: 'req-a9003118-sess-queue-age-1',
+    backendSessionId: 'sess-queue-age',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924085
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 66,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924085,
+  details: {
+    operationId: 'req-a9003118-sess-queue-age-1',
+    backendSessionId: 'sess-queue-age',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924085
+  }
+}
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 67,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924085,
+  details: {
+    operationId: 'req-a9003118-sess-queue-age-2',
+    backendSessionId: 'sess-queue-age',
+    paneIdentity: 'pane-1',
+    bindingKey: 'bk-1',
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924105
+  }
+}
+
+stdout | src/lib/nativeTerminalInputQueue.test.ts > NativeTerminalInputQueueManager > distinguishes in-flight execution age from waiting queued head age
+[ferryx:switch] {
+  runId: '0082a734-073b-406d-91ae-dc2d09a9d941',
+  sequence: 68,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924085,
+  details: {
+    operationId: 'req-a9003118-sess-queue-age-2',
+    backendSessionId: 'sess-queue-age',
+    paneIdentity: 'pane-1',
+    bindingKey: 'bk-1',
+    attemptGeneration: 1,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924155
+  }
+}
+
+ ??[39m src/lib/nativeTerminalInputQueue.test.ts (17 tests) 15ms
+stdout | src/lib/paneLiveness.test.ts > classifyPaneLiveness > observePaneLiveness tracks real in-flight execution barrier
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 1,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924844,
+  details: {
+    operationId: 'req-7bc886bd-session-real-barrier-1',
+    backendSessionId: 'session-real-barrier',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924844
+  }
+}
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 2,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924845,
+  details: {
+    operationId: 'req-7bc886bd-session-real-barrier-1',
+    backendSessionId: 'session-real-barrier',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924845
+  }
+}
+
+stdout | src/lib/paneLiveness.test.ts > classifyPaneLiveness > prioritizes held execution over queue backlog and asserts explicit ages with controlled clock
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 3,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924846,
+  details: {
+    operationId: 'req-7bc886bd-sess-precedence-2',
+    backendSessionId: 'sess-precedence',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924846
+  }
+}
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 4,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924846,
+  details: {
+    operationId: 'req-7bc886bd-sess-precedence-2',
+    backendSessionId: 'sess-precedence',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037924846
+  }
+}
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 5,
+  event: 'terminal.surface.input.accepted',
+  wallTimeMs: 1791037924847,
+  details: {
+    operationId: 'req-7bc886bd-sess-precedence-3',
+    backendSessionId: 'sess-precedence',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    payloadBytes: 10,
+    queuedAt: 1791037924856
+  }
+}
+
+stdout | src/lib/paneLiveness.test.ts > classifyPaneLiveness > prioritizes held execution over queue backlog and asserts explicit ages with controlled clock
+[ferryx:switch] {
+  runId: 'babf3392-b6df-4a08-b337-dffa7bd33166',
+  sequence: 6,
+  event: 'terminal.surface.input.dispatch',
+  wallTimeMs: 1791037924847,
+  details: {
+    operationId: 'req-7bc886bd-sess-precedence-3',
+    backendSessionId: 'sess-precedence',
+    paneIdentity: null,
+    bindingKey: null,
+    attemptGeneration: null,
+    daemonEpoch: null,
+    incarnation: null,
+    dispatchedAt: 1791037925156
+  }
+}
+
+ ??[39m src/lib/paneLiveness.test.ts (13 tests) 5ms
+ ??[39m src/lib/paneDebugInfo.test.ts (3 tests) 3ms
+ ??[39m src/lib/switchDebug.test.ts (9 tests) 4ms
+
+ Test Files  4 passed (4)
+      Tests  42 passed (42)
+   Start at  23:32:03
+   Duration  2.93s (transform 83ms, setup 711ms, collect 95ms, tests 27ms, environment 1.44s, prepare 245ms)

@@ -1,0 +1,254 @@
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-21dea3c0/src-tauri)
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:21:5
+   |
+21 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:22:24
+   |
+22 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src/remote/session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src/remote/server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ffi::OsString`
+ --> src/ssh/../ferryx_scope/ssh/process.rs:5:5
+  |
+5 |     ffi::OsString,
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:671:41
+    |
+671 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+    --> src/native_terminal/surface_host.rs:989:90
+     |
+ 952 |                 let completion_window = surface_window.clone();
+     |                     ----------------- binding `completion_window` declared here
+...
+ 989 |                     if let Err(err) = dispatch_render_on_main_thread(&completion_window, move || {
+     |                                       ------------------------------ ------------------  ^^^^^^^ move out of `completion_window` occurs here
+     |                                       |                              |
+     |                                       |                              borrow of `completion_window` occurs here
+     |                                       borrow later used by call
+...
+1050 |                                     if let Err(error) = completion_window.emit(
+     |                                                         ----------------- move occurs due to use in closure
+     |
+help: consider cloning the value before moving it into the closure
+     |
+ 989 ~                     if let Err(err) = dispatch_render_on_main_thread(&completion_window, {
+ 990 +                     let value = completion_window.clone();
+ 991 ~                     move || {
+ 992 |                         if discard_retired_completion(&completion_slot) {
+ ...
+1051 |                                 {
+1052 ~                                     if let Err(error) = value.emit(
+1053 |                                         crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT,
+ ...
+1087 |                         }
+1088 ~                     }
+1089 ~                     }) {
+     |
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |             let mut desired_size: Option<(u16, u16)> = None;
+     |                                                        ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+For more information about this error, try `rustc --explain E0505`.
+warning: `ferryx` (lib) generated 32 warnings
+error: could not compile `ferryx` (lib) due to 1 previous error; 32 warnings emitted

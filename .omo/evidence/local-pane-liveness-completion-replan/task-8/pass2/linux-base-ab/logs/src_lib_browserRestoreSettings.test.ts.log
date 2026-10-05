@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/lib/browserRestoreSettings.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041658) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/browserRestoreSettings.test.ts (4 tests | 4 failed) 6ms
+   × browser restore setting persistence policy > omits browser tabs from session persistence when restore is disabled 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser restore setting persistence policy > preserves profile and worktree metadata when restore is enabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser restore setting persistence policy > falls a persisted tab back to the current default when its profile was deleted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser restore setting persistence policy > honors the current restore preference when reading an older session 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browserRestoreSettings.test.ts > browser restore setting persistence policy > omits browser tabs from session persistence when restore is disabled
+ FAIL  src/lib/browserRestoreSettings.test.ts > browser restore setting persistence policy > preserves profile and worktree metadata when restore is enabled
+ FAIL  src/lib/browserRestoreSettings.test.ts > browser restore setting persistence policy > falls a persisted tab back to the current default when its profile was deleted
+ FAIL  src/lib/browserRestoreSettings.test.ts > browser restore setting persistence policy > honors the current restore preference when reading an older session
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/browserRestoreSettings.test.ts:74:31
+     72| }
+     73| 
+     74| beforeEach(() => localStorage.clear());
+       |                               ^
+     75| 
+     76| describe("browser restore setting persistence policy", () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  10:10:39
+   Duration  715ms (transform 210ms, setup 106ms, collect 208ms, tests 6ms, environment 232ms, prepare 49ms)
+
+error: script "test" exited with code 1

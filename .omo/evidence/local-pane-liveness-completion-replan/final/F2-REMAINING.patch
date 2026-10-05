@@ -1,0 +1,324 @@
+diff --git a/src-tauri/src/daemon/server.rs b/src-tauri/src/daemon/server.rs
+index 4e83e03..ebf237f 100644
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -2921,8 +2921,12 @@ impl DaemonServer {
+                             Ok(output_rx) => output_rx,
+                             Err(error) => {
+                                 // The session stays with the predecessor, so this daemon must not
+-                                // keep claiming its workspace.
++                                // keep claiming its workspace, nor keep the predecessor identity it
++                                // installed just above: only a successful adopt removes that entry,
++                                // so leaving it would hold the moved snapshot for the daemon's
++                                // lifetime.
+                                 release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
++                                self.terminal_service.pty_manager().forget_transferred_owner(&session_id);
+                                 return Err(format!("Failed to adopt transferred session: {error}"));
+                             }
+                         };
+@@ -4376,7 +4380,13 @@ impl DaemonServer {
+                     }
+                 }
+                 Ok(DaemonRequest::AbortHandover) => {
+-                    match self.handover_manager.abort_handover() {
++                    // `abort_handover` writes the decision transaction with create_new + fsync +
++                    // rename + parent-directory fsync, so it is offloaded exactly like the commit
++                    // path above instead of stalling a worker of the runtime that serves this loop.
++                    let manager = Arc::clone(&self.handover_manager);
++                    match crate::ipc::run_blocking(move || {
++                        manager.abort_handover().map_err(crate::ipc::IpcError::internal)
++                    }).await {
+                         Ok(()) => {
+                             let resumed = self
+                                 .terminal_service
+@@ -4388,7 +4398,7 @@ impl DaemonServer {
+                             );
+                             DaemonResponse::AbortHandoverOk
+                         }
+-                        Err(e) => daemon_error(e),
++                        Err(e) => daemon_error(e.to_string()),
+                     }
+                 }
+                 Ok(DaemonRequest::UploadClipboardImage { file_name, data }) => {
+diff --git a/src-tauri/src/ipc/terminal.rs b/src-tauri/src/ipc/terminal.rs
+index d42488c..70d1ca3 100644
+--- a/src-tauri/src/ipc/terminal.rs
++++ b/src-tauri/src/ipc/terminal.rs
+@@ -1868,6 +1868,19 @@ mod qa_split_producers {
+         qa_barrier::active_channel()
+     }
+ 
++    /// Async control read: the file read itself is blocking filesystem I/O, so it runs on the
++    /// blocking pool while the watcher keeps its exact 25 ms tick.
++    async fn read_control(dir: &Path, name: &str, channel: &Arc<QaBarrierChannel>) -> Option<Value> {
++        let dir = dir.to_owned();
++        let name = name.to_owned();
++        let channel = Arc::clone(channel);
++        match crate::ipc::run_blocking(move || Ok(read_control_in(&dir, &name, &channel))).await {
++            Ok(control) => control,
++            // A read that cannot complete is "no control observed yet", never an armed control.
++            Err(_) => None,
++        }
++    }
++
+     fn barrier_dir() -> Option<PathBuf> {
+         std::env::var("FERRYX_QA_BARRIER_DIR")
+             .ok()
+@@ -1875,8 +1888,9 @@ mod qa_split_producers {
+             .map(PathBuf::from)
+     }
+ 
+-    /// A control that does not echo this run's nonces is never honored.
+-    fn read_control(dir: &Path, name: &str, channel: &QaBarrierChannel) -> Option<Value> {
++    /// Synchronous half of the control read: a control that does not echo this run's nonces is
++    /// never honored. Callers on the async watchers run this through `run_blocking`.
++    fn read_control_in(dir: &Path, name: &str, channel: &QaBarrierChannel) -> Option<Value> {
+         let text = std::fs::read_to_string(dir.join(format!("{name}.request.json"))).ok()?;
+         let value: Value = serde_json::from_str(&text).ok()?;
+         if value.get("runId").and_then(Value::as_str) != Some(channel.run_id()) {
+@@ -2573,7 +2587,7 @@ mod qa_split_producers {
+         let mut unserviced_reported = false;
+         loop {
+             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+-            let Some(request) = read_control(&dir, RETRY, &channel) else {
++            let Some(request) = read_control(&dir, RETRY, &channel).await else {
+                 continue;
+             };
+             let issued_at = request
+@@ -3037,7 +3051,7 @@ mod qa_split_producers {
+         let mut unserviced_reported = false;
+         loop {
+             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+-            let Some(request) = read_control(&dir, SPLIT_CONCURRENT_BATCH, &channel) else {
++            let Some(request) = read_control(&dir, SPLIT_CONCURRENT_BATCH, &channel).await else {
+                 continue;
+             };
+             let issued_at = request
+@@ -3109,7 +3123,7 @@ mod qa_split_producers {
+         let mut handled: Vec<String> = Vec::new();
+         loop {
+             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
+-            let Some(request) = read_control(&dir, SPLIT_CANCEL, &channel) else {
++            let Some(request) = read_control(&dir, SPLIT_CANCEL, &channel).await else {
+                 continue;
+             };
+             let issued_at = request
+@@ -3228,9 +3242,9 @@ mod qa_split_producers {
+             if triggered {
+                 continue;
+             }
+-            if read_control(&dir, TRIGGER_HANDOVER, &channel).is_none()
+-                && read_control(&dir, TRIGGER_HANDOVER_ABORT, &channel).is_none()
+-            {
++            let handover_armed = read_control(&dir, TRIGGER_HANDOVER, &channel).await;
++            let handover_abort_armed = read_control(&dir, TRIGGER_HANDOVER_ABORT, &channel).await;
++            if handover_armed.is_none() && handover_abort_armed.is_none() {
+                 continue;
+             }
+             triggered = true;
+@@ -3471,7 +3485,7 @@ mod qa_split_producers {
+                 .unwrap(),
+             )
+             .unwrap();
+-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
++            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_none());
+             std::fs::write(
+                 dir.join(format!("{SPLIT_CANCEL}.request.json")),
+                 serde_json::to_vec(&json!({
+@@ -3483,7 +3497,7 @@ mod qa_split_producers {
+                 .unwrap(),
+             )
+             .unwrap();
+-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
++            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_none());
+             std::fs::write(
+                 dir.join(format!("{SPLIT_CANCEL}.request.json")),
+                 serde_json::to_vec(&json!({
+@@ -3495,7 +3509,7 @@ mod qa_split_producers {
+                 .unwrap(),
+             )
+             .unwrap();
+-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_some());
++            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_some());
+         }
+ 
+         fn retry_control() -> Value {
+@@ -3877,7 +3891,7 @@ mod qa_split_producers {
+                     .unwrap(),
+                 )
+                 .unwrap();
+-                assert!(read_control(&dir, name, &channel).is_none());
++                assert!(read_control_in(&dir, name, &channel).is_none());
+                 std::fs::write(
+                     dir.join(format!("{name}.request.json")),
+                     serde_json::to_vec(&json!({
+@@ -3892,7 +3906,7 @@ mod qa_split_producers {
+                     .unwrap(),
+                 )
+                 .unwrap();
+-                assert!(read_control(&dir, name, &channel).is_some());
++                assert!(read_control_in(&dir, name, &channel).is_some());
+             }
+         }
+     }
+diff --git a/src-tauri/src/terminal/pty.rs b/src-tauri/src/terminal/pty.rs
+index 940f756..c14c85b 100644
+--- a/src-tauri/src/terminal/pty.rs
++++ b/src-tauri/src/terminal/pty.rs
+@@ -1013,6 +1013,14 @@ impl PtyManager {
+         Ok(())
+     }
+ 
++    /// Drops the predecessor identity record installed for a session this daemon then failed to
++    /// adopt. Only a successful adopt removes the entry, so without this call a failed adopt would
++    /// hold the moved snapshot in `transfer_owners` for the daemon's whole lifetime.
++    #[cfg(unix)]
++    pub fn forget_transferred_owner(&self, session_id: &str) {
++        self.transfer_owners.lock().remove(session_id);
++    }
++
+     pub async fn relinquish_transferred_session(&self, session_id: &str) -> Result<(), PtyError> {
+         let session = self.get_session(session_id)
+             .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;
+diff --git a/src-tauri/src/terminal/qa_liveness.rs b/src-tauri/src/terminal/qa_liveness.rs
+index 2518ce6..b7bd88e 100644
+--- a/src-tauri/src/terminal/qa_liveness.rs
++++ b/src-tauri/src/terminal/qa_liveness.rs
+@@ -446,7 +446,18 @@ async fn await_frame_evidence(
+         while let Ok(observation) = events.try_recv() {
+             record_observation(tracker, queue, observation);
+         }
+-        if let Some(covered) = read_frame_submission(channel, &observation.session_id) {
++        // The sidecar read is synchronous filesystem I/O; it runs on the blocking pool so this
++        // 25 ms poll cadence never stalls a worker of the runtime that serves it.
++        let polled_channel = Arc::clone(channel);
++        let polled_session = observation.session_id.clone();
++        let submitted = match crate::ipc::run_blocking(move || {
++            Ok(read_frame_submission(&polled_channel, &polled_session))
++        }).await {
++            Ok(submitted) => submitted,
++            // A blocking read that cannot complete is "no evidence observed yet", never a pass.
++            Err(_) => None,
++        };
++        if let Some(covered) = submitted {
+             tracker.note_frame(&observation.session_id, covered);
+         }
+         if tracker.submitted_covering(&observation.session_id, observation.sequence) {
+diff --git a/ui/src/lib/paneDebugInfo.ts b/ui/src/lib/paneDebugInfo.ts
+index 817e724..cdc1326 100644
+--- a/ui/src/lib/paneDebugInfo.ts
++++ b/ui/src/lib/paneDebugInfo.ts
+@@ -6,12 +6,13 @@ export async function formatPaneDebugInfoAsync(
+   session: TerminalSession | null | undefined,
+ ): Promise<string> {
+   const backendId = session?.backendSessionId ?? session?.id;
+-  const liveness = backendId
++  const observation = backendId
+     ? await observePaneLivenessAsync(backendId, {
+         daemonEpoch: session?.daemonEpoch ?? null,
+         suspended: session?.processState === "suspended" ? true : session?.processState ? false : null,
+       })
+-    : "UNKNOWN";
++    : null;
++  const liveness = observation?.verdict ?? "UNKNOWN";
+ 
+   return JSON.stringify({
+     leafId,
+@@ -27,6 +28,7 @@ export async function formatPaneDebugInfoAsync(
+     agentType: session?.agentType ?? null,
+     agentSessionId: session?.agentSessionId ?? null,
+     liveness,
++    nativeSnapshotDeadlineFired: observation?.nativeSnapshotDeadlineFired ?? null,
+   });
+ }
+ 
+diff --git a/ui/src/lib/paneLiveness.ts b/ui/src/lib/paneLiveness.ts
+index e9b8627..ae90072 100644
+--- a/ui/src/lib/paneLiveness.ts
++++ b/ui/src/lib/paneLiveness.ts
+@@ -13,6 +13,12 @@ export type LivenessStageVerdict =
+ 
+ export interface PaneLivenessSnapshot {
+   readonly telemetryAvailable: boolean;
++  /**
++   * Set only by `observePaneLivenessAsync`: the native snapshot IPC lost the fixed 100 ms race,
++   * so every native-derived field below is absent because the deadline fired - not because the
++   * native lane reported nothing. Absent (`undefined`) means the deadline never fired.
++   */
++  readonly nativeSnapshotDeadlineFired?: boolean;
+   readonly sessionId?: string | null;
+   readonly vtSessionId?: string | null;
+   readonly operationId?: string | null;
+@@ -198,6 +204,16 @@ export function observePaneLiveness(
+   return classifyPaneLiveness(snapshot);
+ }
+ 
++/**
++ * One asynchronous liveness observation. `nativeSnapshotDeadlineFired` distinguishes the two
++ * ways the native snapshot can be absent: a fired deadline versus a native lane that reported
++ * nothing within the bound.
++ */
++export interface PaneLivenessObservation {
++  readonly verdict: LivenessStageVerdict;
++  readonly nativeSnapshotDeadlineFired: boolean;
++}
++
+ export async function observePaneLivenessAsync(
+   sessionId: string,
+   options?: {
+@@ -208,9 +224,9 @@ export async function observePaneLivenessAsync(
+     suspended?: boolean | null;
+     hubEndSequence?: number | null;
+   },
+-): Promise<LivenessStageVerdict> {
++): Promise<PaneLivenessObservation> {
+   if (!sessionId || sessionId.trim().length === 0) {
+-    return "UNKNOWN";
++    return { verdict: "UNKNOWN", nativeSnapshotDeadlineFired: false };
+   }
+ 
+   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessionId);
+@@ -218,15 +234,22 @@ export async function observePaneLivenessAsync(
+   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId);
+ 
+   let nativeSnapshot: Partial<PaneLivenessSnapshot> | null = null;
++  let nativeSnapshotDeadlineFired = false;
+   if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+     try {
+       const { invoke } = await import("@tauri-apps/api/core");
+-      nativeSnapshot = await Promise.race([
++      const observed = await Promise.race([
+         invoke<Partial<PaneLivenessSnapshot> | null>("cmd_native_terminal_pane_liveness", {
+           sessionId,
+-        }),
+-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
++        }).then((snapshot) => ({ snapshot })),
++        new Promise<{ snapshot: null }>((resolve) =>
++          setTimeout(() => resolve({ snapshot: null }), 100),
++        ),
+       ]);
++      nativeSnapshot = observed.snapshot;
++      // The race resolves null for two different reasons; record the deadline one so an artifact
++      // can tell "no native telemetry" from "the IPC outran the 100 ms bound".
++      nativeSnapshotDeadlineFired = observed.snapshot === null;
+     } catch {
+       nativeSnapshot = null;
+     }
+@@ -234,6 +257,7 @@ export async function observePaneLivenessAsync(
+ 
+   const snapshot: PaneLivenessSnapshot = {
+     telemetryAvailable: true,
++    nativeSnapshotDeadlineFired,
+     sessionId,
+     vtSessionId: nativeSnapshot?.vtSessionId ?? sessionId,
+     queuedHeadAgeMs,
+@@ -251,5 +275,8 @@ export async function observePaneLivenessAsync(
+     vtConsumedSequence: nativeSnapshot?.vtConsumedSequence ?? null,
+   };
+ 
+-  return classifyPaneLiveness(snapshot);
++  return {
++    verdict: classifyPaneLiveness(snapshot),
++    nativeSnapshotDeadlineFired,
++  };
+ }

@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/components/FilePreviewText.readingControls.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040812) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/FilePreviewText.readingControls.test.tsx (5 tests | 5 failed) 6ms
+   × FilePreviewText reading controls > wrap toggle flips class and persists 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × FilePreviewText reading controls > honors persisted word wrap false on mount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × FilePreviewText reading controls > font inc changes style fontSize to 15px 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × FilePreviewText reading controls > width toggle switches prose container between max-w-[72ch] mx-auto and full width 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × FilePreviewText reading controls > TOC lists headings and clicking calls scrollIntoView 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > wrap toggle flips class and persists
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > honors persisted word wrap false on mount
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > font inc changes style fontSize to 15px
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > width toggle switches prose container between max-w-[72ch] mx-auto and full width
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > TOC lists headings and clicking calls scrollIntoView
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/FilePreviewText.readingControls.test.tsx:13:16
+     11| 
+     12| beforeEach(() => {
+     13|   localStorage.clear();
+       |                ^
+     14| });
+     15| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > wrap toggle flips class and persists
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > honors persisted word wrap false on mount
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > font inc changes style fontSize to 15px
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > width toggle switches prose container between max-w-[72ch] mx-auto and full width
+ FAIL  src/components/FilePreviewText.readingControls.test.tsx > FilePreviewText reading controls > TOC lists headings and clicking calls scrollIntoView
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/FilePreviewText.readingControls.test.tsx:18:16
+     16| afterEach(() => {
+     17|   cleanup();
+     18|   localStorage.clear();
+       |                ^
+     19|   vi.restoreAllMocks();
+     20| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:10:25
+   Duration  1.30s (transform 223ms, setup 101ms, collect 657ms, tests 6ms, environment 218ms, prepare 45ms)
+
+error: script "test" exited with code 1

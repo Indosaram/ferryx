@@ -1,0 +1,14 @@
+{
+  "commit": "d82b35e43f208b53adf6310f4e3c89cbde8814f4",
+  "tree": "bb335b316d1b48afb1d4addf22f02081f276bd6a",
+  "purpose": "A/B every remaining unclassified pass2 failure file on its corresponding host after candidate executables exit",
+  "protected": [
+    "src/components/TerminalSearchOverlay.test.tsx:332",
+    "src/lib/updater.test.ts:141"
+  ],
+  "mandatory": [
+    "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+    "src/lib/pairedDaemonRollout.test.ts"
+  ],
+  "serial": true
+}

@@ -1,0 +1,15 @@
+SINGLE side=base native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 1.85s
+SINGLE side=base panic:
+    thread 'test_daemon_output_sequence_contiguity_and_replay_gap' (1956270) panicked at tests/daemon_persistence_contract.rs:1093:9:
+    assertion `left == right` failed
+      left: 0
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+SINGLE side=cand native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 1.41s
+SINGLE side=cand panic:
+    thread 'test_daemon_output_sequence_contiguity_and_replay_gap' (1956488) panicked at tests/daemon_persistence_contract.rs:1098:9:
+    assertion `left == right` failed
+      left: 0
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+SINGLE_AB_DONE

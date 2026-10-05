@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/components/NativeTerminalPane.presentation.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ✓ src/components/NativeTerminalPane.presentation.test.tsx (14 tests) 332ms
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  10:44:03
+   Duration  6.76s (transform 815ms, setup 1.89s, collect 1.42s, tests 332ms, environment 1.25s, prepare 145ms)
+

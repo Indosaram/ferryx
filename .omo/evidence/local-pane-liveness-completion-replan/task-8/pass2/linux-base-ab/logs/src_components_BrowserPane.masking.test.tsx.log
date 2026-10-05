@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/components/BrowserPane.masking.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041741) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserPane.masking.test.tsx (5 tests | 5 failed) 7ms
+   × BrowserPane global surface masking > hides the child webview while a role=dialog surface is mounted and restores it on dismissal 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane global surface masking > keeps a role=search surface masking the child webview 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane global surface masking > stays hidden when owner visibility is false even after a dialog is dismissed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane reveal ordering > does not show the child webview until its bounds update is acknowledged 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane reveal ordering > never shows a webview whose bounds update failed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserPane.masking.test.tsx > BrowserPane global surface masking > hides the child webview while a role=dialog surface is mounted and restores it on dismissal
+ FAIL  src/components/BrowserPane.masking.test.tsx > BrowserPane global surface masking > keeps a role=search surface masking the child webview
+ FAIL  src/components/BrowserPane.masking.test.tsx > BrowserPane global surface masking > stays hidden when owner visibility is false even after a dialog is dismissed
+ FAIL  src/components/BrowserPane.masking.test.tsx > BrowserPane reveal ordering > does not show the child webview until its bounds update is acknowledged
+ FAIL  src/components/BrowserPane.masking.test.tsx > BrowserPane reveal ordering > never shows a webview whose bounds update failed
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserPane.masking.test.tsx:51:23
+     49|   browserMocks.setBrowserBounds.mockClear();
+     50|   browserMocks.setBrowserVisible.mockClear();
+     51|   window.localStorage.clear();
+       |                       ^
+     52|   document.body.querySelectorAll("[role=dialog], [role=search]").forEa…
+     53| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:10:41
+   Duration  1.30s (transform 285ms, setup 115ms, collect 637ms, tests 7ms, environment 231ms, prepare 50ms)
+
+error: script "test" exited with code 1

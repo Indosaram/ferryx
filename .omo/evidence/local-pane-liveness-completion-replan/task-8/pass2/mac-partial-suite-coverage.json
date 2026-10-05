@@ -1,0 +1,1775 @@
+{
+  "status": "PARTIAL_NOT_ACCEPTANCE",
+  "filesWithEmittedResults": 353,
+  "testsInEmittedFileResults": 4341,
+  "failedTestsInEmittedFileResults": 200,
+  "finalSelectionUnknown": true,
+  "source": "mac-final-logs/full-ui.log",
+  "files": [
+    {
+      "file": "src/components/NativeTerminalPane.test.tsx",
+      "tests": 197,
+      "failed": 186
+    },
+    {
+      "file": "src/App.test.tsx",
+      "tests": 154,
+      "failed": 3
+    },
+    {
+      "file": "src/remote/RemoteUI.test.tsx",
+      "tests": 52,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.test.tsx",
+      "tests": 63,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteBrowser.test.tsx",
+      "tests": 41,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sessionPersistence.test.ts",
+      "tests": 44,
+      "failed": 0
+    },
+    {
+      "file": "src/App.notifications.test.tsx",
+      "tests": 50,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteTerminal.contract.test.tsx",
+      "tests": 69,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagGraphView.viewport.test.tsx",
+      "tests": 54,
+      "failed": 0
+    },
+    {
+      "file": "src/components/ProjectDialogs.test.tsx",
+      "tests": 44,
+      "failed": 0
+    },
+    {
+      "file": "src/components/NativeTerminalPane.lifecycle.test.tsx",
+      "tests": 36,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/RemoteSection.test.tsx",
+      "tests": 27,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.test.tsx",
+      "tests": 34,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/SshSection.test.tsx",
+      "tests": 31,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/browserProtocol.test.ts",
+      "tests": 59,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteBrowser.mobile.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/accountSession.test.ts",
+      "tests": 27,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.test.tsx",
+      "tests": 39,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteAppWorktreeRestore.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteApp.accountSession.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceRestore.test.tsx",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.test.tsx",
+      "tests": 28,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/attachTunnel.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationCoordinator.test.ts",
+      "tests": 51,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/shortcuts.test.tsx",
+      "tests": 84,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/tauri.test.ts",
+      "tests": 41,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagPaneBadge.test.tsx",
+      "tests": 32,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/remoteAppChatFrames.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/onboarding.test.ts",
+      "tests": 52,
+      "failed": 0
+    },
+    {
+      "file": "src/App.remote.test.tsx",
+      "tests": 20,
+      "failed": 1
+    },
+    {
+      "file": "src/remote/agentConversation.test.ts",
+      "tests": 30,
+      "failed": 0
+    },
+    {
+      "file": "src/components/WorktreeList.test.tsx",
+      "tests": 26,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceNativeActivity.test.tsx",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedHostInventory.test.ts",
+      "tests": 34,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeTerminalAttachPolicy.test.ts",
+      "tests": 51,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceActivity.test.tsx",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteAttention.test.tsx",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TabBar.test.tsx",
+      "tests": 23,
+      "failed": 0
+    },
+    {
+      "file": "src/state/layout.test.ts",
+      "tests": 27,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.sshSpawnOwnership.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentSessionDiscovery.test.ts",
+      "tests": 35,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentResume.test.ts",
+      "tests": 38,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalPane.test.tsx",
+      "tests": 27,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeTerminalInputQueue.test.ts",
+      "tests": 17,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/useDagWatchLifecycle.test.tsx",
+      "tests": 17,
+      "failed": 0
+    },
+    {
+      "file": "src/App.pairedDaemon.test.tsx",
+      "tests": 8,
+      "failed": 1
+    },
+    {
+      "file": "src/state/workspaceStore.browserLifecycle.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/state/screenActivity.test.ts",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteTerminal.mobile.test.tsx",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/App.remoteHostShortcuts.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/chat/MobileChatMessage.test.tsx",
+      "tests": 27,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/filePreview.test.ts",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentReconnect.integration.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/WorktreeDeleteDialog.test.tsx",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/linkRouting.test.ts",
+      "tests": 33,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentResumeAffordance.test.ts",
+      "tests": 21,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sessionLifecycle.test.ts",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/components/notification/NotificationCenterPopover.test.tsx",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteBrowser.reconnect.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewText.test.tsx",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/AccountLoginPage.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/state/inactiveProjectWorktrees.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserTauri.test.ts",
+      "tests": 26,
+      "failed": 0
+    },
+    {
+      "file": "src/components/AgentHistoryDialog.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.remote.test.tsx",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewDialog.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.paneToTabRow.runtime.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/localSplitLifecycle.test.ts",
+      "tests": 19,
+      "failed": 0
+    },
+    {
+      "file": "src/components/NativeTerminalPane.presentation.test.tsx",
+      "tests": 14,
+      "failed": 3
+    },
+    {
+      "file": "src/lib/notificationCenter/notificationCenter.test.ts",
+      "tests": 37,
+      "failed": 0
+    },
+    {
+      "file": "src/components/WorktreeDiskDialog.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceRuntime.test.tsx",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewImage.test.tsx",
+      "tests": 17,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSearchOverlay.test.tsx",
+      "tests": 11,
+      "failed": 1
+    },
+    {
+      "file": "src/components/settings/PermissionsSection.test.tsx",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteTerminalGestures.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/state/projectSwitchBack.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/WelcomeWizard.test.tsx",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeTerminalVisibility.test.tsx",
+      "tests": 19,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.hmrRetention.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedDaemonProject.test.ts",
+      "tests": 22,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/RemoteAccessSection.test.tsx",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalFileLinkActions.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sshHosts.test.tsx",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/state/activityRenderChain.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/accountSessionRetention.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/updater.test.ts",
+      "tests": 23,
+      "failed": 1
+    },
+    {
+      "file": "src/state/paneTree.test.ts",
+      "tests": 48,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/NotificationsSection.test.tsx",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserToolbar.test.tsx",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalTransport/terminalTransport.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/PermissionsStep.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalSettings.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentTitle.test.ts",
+      "tests": 22,
+      "failed": 0
+    },
+    {
+      "file": "src/state/inactiveProjectWorktrees.paired.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentAutoResume.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/directPathUpgrade.test.ts",
+      "tests": 42,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeTerminalLifecycle.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/state/agentLifecycleTruth.test.ts",
+      "tests": 21,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.filePreviewTab.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/attention/attentionModel.test.ts",
+      "tests": 19,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/AgentsCliStep.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/linkRouting.fileRouting.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/tabTitle.test.ts",
+      "tests": 25,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalEvents.bus.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.paneDrop.runtime.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteRouting.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/NativeTerminalPane.remoteDrop.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/accountSessionFollowups.test.ts",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeMenu.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/dagViewUtils.test.ts",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.mixedPaneLeaf.runtime.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/chat/MobileChatComposer.test.tsx",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.tabDrop.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/state/paneGeometry.test.ts",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/chat/MobileChatWorkspace.test.tsx",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.browserPaneDrop.runtime.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagGraphView.test.tsx",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sshRecovery.test.ts",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserWorktreeRestore.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationCenter/activityRecording.test.ts",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/AccountMachinesPage.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.paneDrop.runtime.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/TerminalSection.test.tsx",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/attachFraming.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/fileTabPaths.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentsSettings.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.browserPaneLeafMove.runtime.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalPane.sshReconnect.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalLinkTarget.test.ts",
+      "tests": 19,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentConflictAdoption.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/zeroConfigSecurityProbe.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/RemoteDirectoryPicker.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/MobileHostDrawer.test.tsx",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.browserAdoption.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewVideo.test.tsx",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/projectGrouping.test.ts",
+      "tests": 19,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserHistory.test.ts",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TabBar.fileTab.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/dagTypes.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentReconnect.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.shell.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemotePreferences.contract.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewPane.openWith.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalThroughput.regression.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.dnd.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagNodeInspector.test.tsx",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/AgentsSection.test.tsx",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/state/remoteHostStore.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/remoteTerminalFrames.test.ts",
+      "tests": 34,
+      "failed": 0
+    },
+    {
+      "file": "src/state/daemonRestartBatchRecovery.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/remoteProject.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/components/ShortcutHints.test.tsx",
+      "tests": 18,
+      "failed": 0
+    },
+    {
+      "file": "src/components/NativeTerminalPane.exitAttach.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/updateToast.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalOutput.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/state/browserSessionHydration.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationActivation.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/ProjectDialogs.pairedDaemon.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/components/notification/AttentionAskPanel.test.tsx",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/previewMarkdown.test.ts",
+      "tests": 16,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.update.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/BrowserSection.test.tsx",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/paneLiveness.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/components/WorktreeDiskDialog.lifecycle.test.tsx",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/nativeWindowFocus.test.ts",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/components/tab-dnd/SplitEdgeDropZone.test.tsx",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.browserDragVisibility.runtime.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/settingsRuntime.test.ts",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.paneFocus.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/whatsNew.test.ts",
+      "tests": 15,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.parity.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/state/pairedProjectWorktrees.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/projectIdentity.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/fileOpenTargets.test.ts",
+      "tests": 13,
+      "failed": 0
+    },
+    {
+      "file": "src/state/sshActivity.integration.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.sortableIdentity.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/control/attentionRows.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewText.readingControls.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.displayError.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/state/tabDisplay.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/PairedMachinesSection.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/tab-dnd/SortableTab.fileExtras.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/CliStep.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pathExistenceCache.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalPane.exitAttach.integration.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TabBar.browserTab.runtime.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.dragOver.runtime.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/AccountSignIn.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.cli.test.tsx",
+      "tests": 6,
+      "failed": 2
+    },
+    {
+      "file": "src/components/NativeTerminalPane.focusOwnership.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/state/activityStatePersistence.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteApp.accountAttach.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserDownloadsShelf.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.findRace.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/deviceIdentity.test.tsx",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/components/tab-dnd/SortableTab.agentIcon.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/storageKeys.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/ipynbParse.test.ts",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.ensureDedup.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceRestoreDuplicateTab.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/attention/AttentionInbox.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/state/dagStore.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/noisePrimitives.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserRestoreSettings.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.masking.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/resolveAccountOriginRetention.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.escape.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.sshReattach.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.activity.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.terminalExit.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewPane.chrome.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/state/worktreeActivityAcrossSwitch.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/RemoteSectionSignOut.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/windowsStoreMigration.test.ts",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/state/layout.paneHandleDrop.runtime.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/deviceIdentity.opera.test.ts",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.ssh.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewNotebook.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/localSplitContract.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/AddMachineModal.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/previewHighlight.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserSettings.test.ts",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/filePreviewReadingSettings.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedWorktreeActions.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserToolbar.devtools.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/notification/NotificationCenterButton.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/generalSettings.test.ts",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/components/notification/AttentionCountUnification.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.modalFocus.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserDesignFeedbackPopover.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/hardWrappedPath.test.ts",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalThroughputMetrics.test.ts",
+      "tests": 14,
+      "failed": 0
+    },
+    {
+      "file": "src/state/startupPaneAttention.integration.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sshRegistrationHeal.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/browserPopup.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TabBar.lifecycle.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.browserNavigation.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewCsv.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationPermissionHint.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedDaemonContracts.test.ts",
+      "tests": 78,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagNodeCard.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/state/inactiveProjectWorktrees.remote.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/state/parkedLifecycleRouting.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/worktreeOwnership.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/components/dag/DagPaneBadge.ownership.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/shellReplacement.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.pointerDrag.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/shortcutDiagnostics.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentIcon.test.tsx",
+      "tests": 10,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sessionEpochRestore.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/closedTabStack.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/activity.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalLinkActions.remember.test.tsx",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.privateHistory.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalLinkHints.test.ts",
+      "tests": 12,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteApp.threadsEntry.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/ui/sonner.test.tsx",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/clipboard.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/GeneralSection.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.sshActivity.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/appearanceThemeContract.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/tab-dnd/redundantSplitDrop.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/switchDebug.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/design/session.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/terminalGridProtocol.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/filePreviewTypes.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedActionBoundaries.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/remoteClient.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/branchFilter.test.ts",
+      "tests": 20,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.paired.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/GettingStartedChecklist.test.tsx",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/control/desktopInventory.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalLinkActions.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+      "tests": 1,
+      "failed": 1
+    },
+    {
+      "file": "src/lib/uuid.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserToolbar.omnibox.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewPane.viewers.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteBrowserControls.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/dagWatchRoots.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/state/attentionAcknowledgment.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/noiseInterop.test.ts",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalPane.slowTunnel.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pairedDaemonRollout.test.ts",
+      "tests": 5,
+      "failed": 1
+    },
+    {
+      "file": "src/components/WorkspaceHeader.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/markdownToc.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/state/workspaceStore.cwdGuard.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteReconnect.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/DaemonConnectionBanner.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/scopedContracts.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/dagRemoteBadge.integration.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/IntroAndProjectSteps.test.tsx",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/cliOpenFile.test.ts",
+      "tests": 7,
+      "failed": 0
+    },
+    {
+      "file": "src/state/paneTree.redundantSplit.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/RemoteSsh.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/csvParse.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalSplitView.tabDropFallback.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/AccountStep.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/Sidebar.projectIdentity.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/state/sidebarWorkspaceState.test.ts",
+      "tests": 8,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/fileTabIcon.test.ts",
+      "tests": 11,
+      "failed": 0
+    },
+    {
+      "file": "src/test/pointerCapture.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationSettings.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/pushSubscription.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/workspaceThemeContract.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/TerminalSection.interaction.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/TerminalPane.nativeAlways.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/BrowserPane.findError.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/state/projectWorkspaceScope.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/state/dagRunOwnership.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sshAgentState.test.ts",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/hangulComposition.test.ts",
+      "tests": 30,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/fileTabLabels.test.ts",
+      "tests": 9,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/design/overlay.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/manifest.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/CommandPalette.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/filePreviewTabRegistry.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/paneDebugInfo.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/push/client.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/remoteTransport.test.ts",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/sessionPersistence.customLabel.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/state/remoteHostStore.native.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/markdownDocLink.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/WhatsNewDialog.test.tsx",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/onboarding/FeaturesStep.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/agentManifestBranding.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/contextMenuGuard.test.ts",
+      "tests": 6,
+      "failed": 0
+    },
+    {
+      "file": "src/test/setup.selectors.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/BrowserSection.silentFailures.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/notificationSoundWire.test.ts",
+      "tests": 5,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/chat/ManagedChat.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/remote/attentionInventory.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/BrowserSection.failures.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/terminalEvents.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewPane.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/test/pairedDaemonFixtures.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/WorktreeDeleteDialog.owner.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/FilePreviewPane.restore.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/nativeTerminalPresentationBacking.test.ts",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/components/notification/NotificationCenterPopover.placement.test.ts",
+      "tests": 4,
+      "failed": 0
+    },
+    {
+      "file": "src/components/EmptyWorkspaceView.test.tsx",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/designTokens.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/settings/pairedDaemonGate.test.ts",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/control/control.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/features/ferryx/design/DesignFeedback.test.tsx",
+      "tests": 1,
+      "failed": 0
+    },
+    {
+      "file": "src/index-html.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/lib/types.test.ts",
+      "tests": 3,
+      "failed": 0
+    },
+    {
+      "file": "src/components/SettingsDialog.escapeUsable.test.tsx",
+      "tests": 2,
+      "failed": 0
+    },
+    {
+      "file": "src/linuxTauriWindowConfig.test.ts",
+      "tests": 1,
+      "failed": 0
+    }
+  ]
+}

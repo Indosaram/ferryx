@@ -1,0 +1,8 @@
+RGATE_DONE linux split-list native=0 listcount=15 
+RGATE_DONE linux split native=0 listcount=0 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2658 filtered out; finished in 0.01s
+RGATE_DONE linux all-targets native=101 listcount=0 
+RGATE_DONE linux transfer-list native=101 listcount=0 
+RGATE_DONE linux transfer native=101 listcount=0 
+RGATE_DONE linux pane-list native=0 listcount=47 
+RGATE_DONE linux pane native=0 listcount=0 test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 2626 filtered out; finished in 1.79s
+ALL_RUSTA_DONE linux

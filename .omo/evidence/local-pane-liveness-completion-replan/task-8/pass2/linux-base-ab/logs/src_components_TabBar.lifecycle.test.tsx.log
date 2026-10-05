@@ -1,0 +1,34 @@
+$ vitest run --maxWorkers=1 src/components/TabBar.lifecycle.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043307) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/TabBar.lifecycle.test.tsx (2 tests | 2 failed) 43ms
+   × TabBar lifecycle actions > (a) with sessionIdForLifecycle, invoking restart-session targets the focused pane session and suspend-session is absent 36ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar lifecycle actions > (b) without sessionIdForLifecycle, restart-session uses the tab's own sessionId 5ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TabBar.lifecycle.test.tsx > TabBar lifecycle actions > (a) with sessionIdForLifecycle, invoking restart-session targets the focused pane session and suspend-session is absent
+ FAIL  src/components/TabBar.lifecycle.test.tsx > TabBar lifecycle actions > (b) without sessionIdForLifecycle, restart-session uses the tab's own sessionId
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TabBar.lifecycle.test.tsx:97:16
+     95|   nativeMenu.lastCall = null;
+     96|   lifecycle.request.mockClear();
+     97|   localStorage.clear();
+       |                ^
+     98| });
+     99| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:11:01
+   Duration  1.32s (transform 193ms, setup 103ms, collect 628ms, tests 43ms, environment 225ms, prepare 60ms)
+
+error: script "test" exited with code 1

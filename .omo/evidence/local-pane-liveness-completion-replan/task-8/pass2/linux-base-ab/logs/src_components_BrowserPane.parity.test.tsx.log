@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/components/BrowserPane.parity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040239) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserPane.parity.test.tsx (5 tests | 5 failed) 6ms
+   × BrowserPane parity affordances > opens find-in-page from the browser shortcut and reports matches 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane parity affordances > shows the attempted URL on load failure and retries without replacing it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane parity affordances > forwards the cache-bypass request from the hard-reload shortcut to onReload 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane parity affordances > navigates an HTTP URL dropped as text/uri-list 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane parity affordances > offers system-browser and Save as actions for intercepted downloads 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserPane.parity.test.tsx > BrowserPane parity affordances > opens find-in-page from the browser shortcut and reports matches
+ FAIL  src/components/BrowserPane.parity.test.tsx > BrowserPane parity affordances > shows the attempted URL on load failure and retries without replacing it
+ FAIL  src/components/BrowserPane.parity.test.tsx > BrowserPane parity affordances > forwards the cache-bypass request from the hard-reload shortcut to onReload
+ FAIL  src/components/BrowserPane.parity.test.tsx > BrowserPane parity affordances > navigates an HTTP URL dropped as text/uri-list
+ FAIL  src/components/BrowserPane.parity.test.tsx > BrowserPane parity affordances > offers system-browser and Save as actions for intercepted downloads
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserPane.parity.test.tsx:81:23
+     79|   browserMocks.setBrowserBounds.mockClear();
+     80|   browserMocks.setBrowserVisible.mockClear();
+     81|   window.localStorage.clear();
+       |                       ^
+     82| });
+     83| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:10:19
+   Duration  1.18s (transform 172ms, setup 109ms, collect 525ms, tests 6ms, environment 221ms, prepare 47ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,105 @@
+   Compiling tauri v2.11.5
+   Compiling mac-notification-sys v0.6.15
+   Compiling objc2-foundation v0.2.2
+   Compiling libsqlite3-sys v0.30.1
+   Compiling quinn-proto v0.11.17
+   Compiling wgpu-core v30.0.1
+   Compiling nix v0.28.0
+   Compiling reqwest v0.13.4
+   Compiling core-graphics v0.23.2
+   Compiling rfd v0.16.0
+   Compiling axum-core v0.5.6
+   Compiling rand_chacha v0.3.1
+   Compiling blake2 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri)
+   Compiling sharded-slab v0.1.7
+   Compiling yasna v0.6.0
+   Compiling tracing-log v0.2.0
+   Compiling tokio-stream v0.1.19
+   Compiling filedescriptor v0.8.3
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serial2 v0.2.38
+   Compiling fsevent-sys v4.1.0
+   Compiling thread_local v1.1.10
+   Compiling fallible-iterator v0.3.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling smol_str v0.2.2
+   Compiling shell-words v1.1.1
+   Compiling matchit v0.8.4
+   Compiling nu-ansi-term v0.50.3
+   Compiling downcast-rs v1.2.1
+   Compiling minisign-verify v0.2.5
+   Compiling cursor-icon v1.2.0
+   Compiling objc2-app-kit v0.2.2
+   Compiling axum v0.8.9
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0 (/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/vendor/portable-pty)
+   Compiling quinn v0.11.11
+   Compiling rusqlite v0.32.1
+   Compiling notify v8.2.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling winit v0.30.13
+   Compiling tokio-test v0.4.5
+   Compiling rcgen v0.14.10
+   Compiling wgpu v30.0.1
+   Compiling snow v0.9.6
+   Compiling pbkdf2 v0.12.2
+   Compiling tauri-plugin-fs v2.5.1
+   Compiling notify-rust v4.18.0
+   Compiling tauri-plugin-process v2.3.1
+   Compiling tauri-plugin-updater v2.10.1
+   Compiling rand v0.8.7
+   Compiling tauri-plugin-notification v2.3.3
+   Compiling tauri-plugin-dialog v2.7.2
+   Compiling mime_guess v2.0.5
+   Compiling rodio v0.22.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling reqwest v0.12.28
+   Compiling x25519-dalek v2.0.1
+   Compiling cbc v0.1.2
+   Compiling tower-http v0.7.1
+   Compiling objc2-user-notifications v0.3.2
+   Compiling objc2-core-text v0.3.2
+   Compiling base64 v0.23.1
+   Compiling pollster v1.0.1
+error: failed to run custom build command for `ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-21a59ffe52c647d2/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rustc-link-search=native=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/ghostty_vt/lib
+  cargo:rustc-link-lib=static=ghostty-vt
+  cargo:include=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/ghostty_vt/include
+  cargo:ghostty_lib_dir=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/ghostty_vt/lib
+  cargo:ghostty_include_dir=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/ghostty_vt/include
+  cargo:ghostty_sha=6a508fd5e34c7e222c052a6d00bb3891ff3feace
+  cargo:ghostty_zig_version=0.16.0
+  cargo:ghostty_target=aarch64-apple-darwin
+  cargo:ghostty_zig_target=aarch64-macos
+  cargo:ghostty_artifact=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/ghostty_vt/lib/libghostty-vt.a
+  cargo:rerun-if-changed=native_terminal/build_ghostty.rs
+  cargo:rerun-if-changed=native_terminal/ghostty_source_lock.json
+  cargo:rerun-if-changed=vendor/ghostty/build.zig
+  cargo:rerun-if-changed=vendor/ghostty/src
+  cargo:rerun-if-changed=vendor/ghostty/include
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=HOST
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.conf.json
+  cargo:rerun-if-changed=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.macos.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=/Users/I552267/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-3956fc863a5c83b1/out/app-manifest/__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin
+  resource path `../ui/dist` doesn't exist

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "task": "task1-source-composition",
+  "worktree": {
+    "path": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation",
+    "branch": "work/local-pane-liveness-completion-foundation",
+    "baseCommit": "d82b35e43f208b53adf6310f4e3c89cbde8814f4",
+    "status": "source_ready_for_remote_verification"
+  },
+  "roles": {
+    "sourceComposer": "task1-source-composition-executor",
+    "verifier": "remote-windows-verifier-and-builder (maho-win)"
+  },
+  "cleanup": {
+    "temporaryPatchesRemoved": true,
+    "worktreeRetainedForVerification": true,
+    "unownedResourcesTouched": false
+  },
+  "unrunVerificationGates": [
+    {
+      "name": "ui-build",
+      "command": "bun run --cwd ui build",
+      "status": "UNRUN"
+    },
+    {
+      "name": "scoped-vitest",
+      "command": "bun run --cwd ui test src/lib/switchDebug.test.ts src/lib/paneDebugInfo.test.ts src/lib/paneLiveness.test.ts",
+      "status": "UNRUN"
+    },
+    {
+      "name": "scoped-rust-diagnostics",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib pane_liveness_diagnostics",
+      "status": "UNRUN"
+    },
+    {
+      "name": "qa-barrier-suite",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features local-split-qa qa_barrier",
+      "status": "UNRUN"
+    },
+    {
+      "name": "exact-presentation-barrier",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features local-split-qa real_coordinator_frame_holds_and_recovers_through_private_barrier",
+      "status": "UNRUN"
+    },
+    {
+      "name": "runner-vitest",
+      "command": "bun ui/node_modules/vitest/vitest.mjs run --config scripts/qa/pane-liveness-vitest.config.mjs scripts/qa/pane-liveness.test.mjs",
+      "status": "UNRUN"
+    },
+    {
+      "name": "runner-headless-smoke",
+      "command": "node scripts/qa/pane-liveness.mjs --scenario diagnostic-classifier --headless",
+      "status": "UNRUN"
+    }
+  ],
+  "manifestRevision": 3,
+  "activeManifest": "manifest-r3.json",
+  "historicalManifest": "manifest.json",
+  "sourceClosureNotes": "Revision 3: Added protocol.rs and 5 constructor-callsite files (reconciled 9 sites total, initialized with None) to close DaemonSessionDetails compilation closure.",
+  "historicalManifests": [
+    "manifest.json",
+    "manifest-r2.json"
+  ]
+}

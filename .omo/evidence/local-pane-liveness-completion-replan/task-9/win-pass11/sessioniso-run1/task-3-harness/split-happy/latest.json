@@ -1,0 +1,20 @@
+{
+  "scenario": "split-happy",
+  "runDir": "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\sessioniso-run1\\task-3-harness\\split-happy\\run-8bdf69aa-56ea-4d98-b74d-afac91898dc1",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "sourceDigest": "6f10b9fef29476ada05ef8f3fd346b62572f79201554ac80ed4df2bcbd6cfb5c",
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+    "--scenario",
+    "split-happy",
+    "--binary",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "--evidence-dir",
+    "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\sessioniso-run1",
+    "--isolation-root",
+    "C:\\Users\\sook\\ferryx-pane-completion\\pd12-iso\\split-happy\\sessioniso-run1"
+  ],
+  "finishedAt": "2026-10-04T19:26:09.520Z"
+}

@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/source-172baa87/ui[39m
+
+[90mstderr[2m | src/components/NativeTerminalPane.test.tsx[2m > [22m[2mNativeTerminalPane bounded wheel normalization[2m > [22m[2mnormalizes 'zero' through mounted onWheel
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: TypeError: Cannot read properties of undefined (reading 'transformCallback')
+      at transformCallback [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/core.js:72:39[90m)[39m
+      at listen [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/event.js:79:18[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:1204:37[90m)[39m
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.test.tsx[2m > [22m[2mNativeTerminalPane bounded wheel normalization[2m > [22m[2mnormalizes 'zero' through mounted onWheel
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: TypeError: Cannot read properties of undefined (reading 'transformCallback')
+      at transformCallback [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/core.js:72:39[90m)[39m
+      at listen [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/event.js:79:18[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:1204:37[90m)[39m
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.test.tsx[2m > [22m[2mNativeTerminalPane bounded wheel normalization[2m > [22m[2mnormalizes 'zero' through mounted onWheel
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: TypeError: Cannot read properties of undefined (reading 'transformCallback')
+      at transformCallback [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/core.js:72:39[90m)[39m
+      at listen [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/event.js:79:18[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:1204:37[90m)[39m
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.test.tsx[2m > [22m[2mNativeTerminalPane bounded wheel normalization[2m > [22m[2mnormalizes 'zero' through mounted onWheel
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: TypeError: Cannot read properties of undefined (reading 'transformCallback')
+      at transformCallback [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/core.js:72:39[90m)[39m
+      at listen [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/event.js:79:18[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:1204:37[90m)[39m
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.test.tsx[2m > [22m[2mNativeTerminalPane bounded wheel normalization[2m > [22m[2mnormalizes 'zero' through mounted onWheel
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: TypeError: Cannot read properties of undefined (reading 'transformCallback')
+      at transformCallback [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/core.js:72:39[90m)[39m
+      at listen [90m(file:///C:/Users/sook/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@tauri-apps/api[24m/event.js:79:18[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-172baa87\ui\[39msrc\components\NativeTerminalPane.tsx:1204:37[90m)[39m
+}
+

@@ -1,0 +1,3 @@
+$ tsc && vite build
+src/lib/paneLiveness.ts(176,46): error TS2339: Property 'getQueuedHeadAgeMs' does not exist on type 'NativeTerminalInputQueueManager'.
+src/lib/paneLiveness.ts(216,46): error TS2339: Property 'getQueuedHeadAgeMs' does not exist on type 'NativeTerminalInputQueueManager'.

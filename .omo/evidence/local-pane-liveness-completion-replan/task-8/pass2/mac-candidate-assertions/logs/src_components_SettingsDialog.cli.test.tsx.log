@@ -1,0 +1,795 @@
+$ vitest run --maxWorkers=1 src/components/SettingsDialog.cli.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-172baa87/ui
+
+ ❯ src/components/SettingsDialog.cli.test.tsx (6 tests | 2 failed) 8209ms
+   × Settings > General Ferryx CLI launcher > shows the launcher location and opt-in install control when missing 5008ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   × Settings > General Ferryx CLI launcher > installs the launcher and renders the returned installed state 2885ms
+     → Found multiple elements with the role "button" and name "Install Ferryx CLI"
+
+Here are the matching elements:
+
+Ignored nodes: comments, script, style
+[36m<button[39m
+  [33mclass[39m=[32m"justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-background shadow-sm hover:text-accent-foreground no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-50 transition-colors"[39m
+  [33mtype[39m=[32m"button"[39m
+[36m>[39m
+  [36m<svg[39m
+    [33mclass[39m=[32m"lucide lucide-download size-3"[39m
+    [33mfill[39m=[32m"none"[39m
+    [33mheight[39m=[32m"24"[39m
+    [33mstroke[39m=[32m"currentColor"[39m
+    [33mstroke-linecap[39m=[32m"round"[39m
+    [33mstroke-linejoin[39m=[32m"round"[39m
+    [33mstroke-width[39m=[32m"2"[39m
+    [33mviewBox[39m=[32m"0 0 24 24"[39m
+    [33mwidth[39m=[32m"24"[39m
+    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+  [36m>[39m
+    [36m<path[39m
+      [33md[39m=[32m"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"[39m
+    [36m/>[39m
+    [36m<polyline[39m
+      [33mpoints[39m=[32m"7 10 12 15 17 10"[39m
+    [36m/>[39m
+    [36m<line[39m
+      [33mx1[39m=[32m"12"[39m
+      [33mx2[39m=[32m"12"[39m
+      [33my1[39m=[32m"15"[39m
+      [33my2[39m=[32m"3"[39m
+    [36m/>[39m
+  [36m</svg>[39m
+  [0mInstall Ferryx CLI[0m
+[36m</button>[39m
+
+Ignored nodes: comments, script, style
+[36m<button[39m
+  [33mclass[39m=[32m"justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-background shadow-sm hover:text-accent-foreground no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-50 transition-colors"[39m
+  [33mtype[39m=[32m"button"[39m
+[36m>[39m
+  [36m<svg[39m
+    [33mclass[39m=[32m"lucide lucide-download size-3"[39m
+    [33mfill[39m=[32m"none"[39m
+    [33mheight[39m=[32m"24"[39m
+    [33mstroke[39m=[32m"currentColor"[39m
+    [33mstroke-linecap[39m=[32m"round"[39m
+    [33mstroke-linejoin[39m=[32m"round"[39m
+    [33mstroke-width[39m=[32m"2"[39m
+    [33mviewBox[39m=[32m"0 0 24 24"[39m
+    [33mwidth[39m=[32m"24"[39m
+    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+  [36m>[39m
+    [36m<path[39m
+      [33md[39m=[32m"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"[39m
+    [36m/>[39m
+    [36m<polyline[39m
+      [33mpoints[39m=[32m"7 10 12 15 17 10"[39m
+    [36m/>[39m
+    [36m<line[39m
+      [33mx1[39m=[32m"12"[39m
+      [33mx2[39m=[32m"12"[39m
+      [33my1[39m=[32m"15"[39m
+      [33my2[39m=[32m"3"[39m
+    [36m/>[39m
+  [36m</svg>[39m
+  [0mInstall Ferryx CLI[0m
+[36m</button>[39m
+
+(If this is intentional, then use the `*AllBy*` variant of the query (like `queryAllByText`, `getAllByText`, or `findAllByText`)).
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-label[39m=[32m"General"[39m
+      [33maria-labelledby[39m=[32m"settings-general-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-monitor-cog"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 17v4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 4.9-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 7.1-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 3.2-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 8.8-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 2.3-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 9.7-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 4.5-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 7.5-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M8 21h8"[39m
+              [36m/>[39m
+              [36m<circle[39m
+                [33mcx[39m=[32m"18"[39m
+                [33mcy[39m=[32m"6"[39m
+                [33mr[39m=[32m"3"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mGeneral[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mTab behavior, startup, CLI helper, and software updates.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-general-heading"[39m
+      [36m>[39m
+        [0mGeneral[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"space-y-6"[39m
+        [33mdata-testid[39m=[32m"settings-general-overview"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"border-y border-border"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mConfirm before closing a tab[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAsk before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"false"[39m
+                [33maria-label[39m=[32m"Confirm before closing a tab"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+                [33mdata-state[39m=[32m"unchecked"[39m
+                [33mid[39m=[32m"general-confirm-close-tab"[39m
+                [33mrole[39m=[32m"switch"[39m
+                [33mtype[39m=[32m"button"[39m
+                [33mvalue[39m=[32m"on"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"[39m
+                  [33mdata-state[39m=[32m"unchecked"[39m
+                [36m/>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mShow sidebar on startup[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mKeep the project sidebar open when Ferryx launches. Changes apply on next app start.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"true"[39m
+                [33maria-label[39m=[32m"Show sidebar on startup"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-label[39m=[32m"General"[39m
+      [33maria-labelledby[39m=[32m"settings-general-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-monitor-cog"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 17v4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 4.9-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 7.1-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 3.2-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 8.8-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 2.3-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 9.7-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 4.5-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 7.5-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M8 21h8"[39m
+              [36m/>[39m
+              [36m<circle[39m
+                [33mcx[39m=[32m"18"[39m
+                [33mcy[39m=[32m"6"[39m
+                [33mr[39m=[32m"3"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mGeneral[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mTab behavior, startup, CLI helper, and software updates.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-general-heading"[39m
+      [36m>[39m
+        [0mGeneral[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"space-y-6"[39m
+        [33mdata-testid[39m=[32m"settings-general-overview"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"border-y border-border"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mConfirm before closing a tab[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAsk before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"false"[39m
+                [33maria-label[39m=[32m"Confirm before closing a tab"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+                [33mdata-state[39m=[32m"unchecked"[39m
+                [33mid[39m=[32m"general-confirm-close-tab"[39m
+                [33mrole[39m=[32m"switch"[39m
+                [33mtype[39m=[32m"button"[39m
+                [33mvalue[39m=[32m"on"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"[39m
+                  [33mdata-state[39m=[32m"unchecked"[39m
+                [36m/>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mShow sidebar on startup[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mKeep the project sidebar open when Ferryx launches. Changes apply on next app start.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"true"[39m
+                [33maria-label[39m=[32m"Show sidebar on startup"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ...
+   ✓ Settings > General Ferryx CLI launcher > disables the control and announces progress while installation is pending 161ms
+   ✓ Settings > General Ferryx CLI launcher > shows an accessible backend installation failure 64ms
+   ✓ Settings > General Ferryx CLI launcher > does not offer a desktop-only install outside supported runtimes 38ms
+   ✓ Settings > General Ferryx CLI launcher > states that PATH and shell profiles are never changed automatically 52ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/SettingsDialog.cli.test.tsx > Settings > General Ferryx CLI launcher > shows the launcher location and opt-in install control when missing
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/components/SettingsDialog.cli.test.tsx:89:3
+     87|   afterEach(cleanup);
+     88| 
+     89|   it("shows the launcher location and opt-in install control when miss…
+       |   ^
+     90|     await renderGeneralSettings();
+     91| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/components/SettingsDialog.cli.test.tsx > Settings > General Ferryx CLI launcher > installs the launcher and renders the returned installed state
+TestingLibraryElementError: Found multiple elements with the role "button" and name "Install Ferryx CLI"
+
+Here are the matching elements:
+
+Ignored nodes: comments, script, style
+[36m<button[39m
+  [33mclass[39m=[32m"justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-background shadow-sm hover:text-accent-foreground no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-50 transition-colors"[39m
+  [33mtype[39m=[32m"button"[39m
+[36m>[39m
+  [36m<svg[39m
+    [33mclass[39m=[32m"lucide lucide-download size-3"[39m
+    [33mfill[39m=[32m"none"[39m
+    [33mheight[39m=[32m"24"[39m
+    [33mstroke[39m=[32m"currentColor"[39m
+    [33mstroke-linecap[39m=[32m"round"[39m
+    [33mstroke-linejoin[39m=[32m"round"[39m
+    [33mstroke-width[39m=[32m"2"[39m
+    [33mviewBox[39m=[32m"0 0 24 24"[39m
+    [33mwidth[39m=[32m"24"[39m
+    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+  [36m>[39m
+    [36m<path[39m
+      [33md[39m=[32m"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"[39m
+    [36m/>[39m
+    [36m<polyline[39m
+      [33mpoints[39m=[32m"7 10 12 15 17 10"[39m
+    [36m/>[39m
+    [36m<line[39m
+      [33mx1[39m=[32m"12"[39m
+      [33mx2[39m=[32m"12"[39m
+      [33my1[39m=[32m"15"[39m
+      [33my2[39m=[32m"3"[39m
+    [36m/>[39m
+  [36m</svg>[39m
+  [0mInstall Ferryx CLI[0m
+[36m</button>[39m
+
+Ignored nodes: comments, script, style
+[36m<button[39m
+  [33mclass[39m=[32m"justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-background shadow-sm hover:text-accent-foreground no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-50 transition-colors"[39m
+  [33mtype[39m=[32m"button"[39m
+[36m>[39m
+  [36m<svg[39m
+    [33mclass[39m=[32m"lucide lucide-download size-3"[39m
+    [33mfill[39m=[32m"none"[39m
+    [33mheight[39m=[32m"24"[39m
+    [33mstroke[39m=[32m"currentColor"[39m
+    [33mstroke-linecap[39m=[32m"round"[39m
+    [33mstroke-linejoin[39m=[32m"round"[39m
+    [33mstroke-width[39m=[32m"2"[39m
+    [33mviewBox[39m=[32m"0 0 24 24"[39m
+    [33mwidth[39m=[32m"24"[39m
+    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+  [36m>[39m
+    [36m<path[39m
+      [33md[39m=[32m"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"[39m
+    [36m/>[39m
+    [36m<polyline[39m
+      [33mpoints[39m=[32m"7 10 12 15 17 10"[39m
+    [36m/>[39m
+    [36m<line[39m
+      [33mx1[39m=[32m"12"[39m
+      [33mx2[39m=[32m"12"[39m
+      [33my1[39m=[32m"15"[39m
+      [33my2[39m=[32m"3"[39m
+    [36m/>[39m
+  [36m</svg>[39m
+  [0mInstall Ferryx CLI[0m
+[36m</button>[39m
+
+(If this is intentional, then use the `*AllBy*` variant of the query (like `queryAllByText`, `getAllByText`, or `findAllByText`)).
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-label[39m=[32m"General"[39m
+      [33maria-labelledby[39m=[32m"settings-general-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-monitor-cog"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 17v4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 4.9-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 7.1-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 3.2-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 8.8-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 2.3-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 9.7-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 4.5-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 7.5-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M8 21h8"[39m
+              [36m/>[39m
+              [36m<circle[39m
+                [33mcx[39m=[32m"18"[39m
+                [33mcy[39m=[32m"6"[39m
+                [33mr[39m=[32m"3"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mGeneral[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mTab behavior, startup, CLI helper, and software updates.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-general-heading"[39m
+      [36m>[39m
+        [0mGeneral[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"space-y-6"[39m
+        [33mdata-testid[39m=[32m"settings-general-overview"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"border-y border-border"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mConfirm before closing a tab[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAsk before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"false"[39m
+                [33maria-label[39m=[32m"Confirm before closing a tab"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+                [33mdata-state[39m=[32m"unchecked"[39m
+                [33mid[39m=[32m"general-confirm-close-tab"[39m
+                [33mrole[39m=[32m"switch"[39m
+                [33mtype[39m=[32m"button"[39m
+                [33mvalue[39m=[32m"on"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"[39m
+                  [33mdata-state[39m=[32m"unchecked"[39m
+                [36m/>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mShow sidebar on startup[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mKeep the project sidebar open when Ferryx launches. Changes apply on next app start.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"true"[39m
+                [33maria-label[39m=[32m"Show sidebar on startup"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-label[39m=[32m"General"[39m
+      [33maria-labelledby[39m=[32m"settings-general-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-monitor-cog"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 17v4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 4.9-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m15.2 7.1-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 3.2-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m16.9 8.8-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 2.3-.4.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m19.5 9.7-.4-.9"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 4.5-.9.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m21.7 7.5-.9-.4"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M8 21h8"[39m
+              [36m/>[39m
+              [36m<circle[39m
+                [33mcx[39m=[32m"18"[39m
+                [33mcy[39m=[32m"6"[39m
+                [33mr[39m=[32m"3"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mGeneral[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mTab behavior, startup, CLI helper, and software updates.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-general-heading"[39m
+      [36m>[39m
+        [0mGeneral[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"space-y-6"[39m
+        [33mdata-testid[39m=[32m"settings-general-overview"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"border-y border-border"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mConfirm before closing a tab[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAsk before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"false"[39m
+                [33maria-label[39m=[32m"Confirm before closing a tab"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+                [33mdata-state[39m=[32m"unchecked"[39m
+                [33mid[39m=[32m"general-confirm-close-tab"[39m
+                [33mrole[39m=[32m"switch"[39m
+                [33mtype[39m=[32m"button"[39m
+                [33mvalue[39m=[32m"on"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"[39m
+                  [33mdata-state[39m=[32m"unchecked"[39m
+                [36m/>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+              [36m>[39m
+                [0mShow sidebar on startup[0m
+              [36m</div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mKeep the project sidebar open when Ferryx launches. Changes apply on next app start.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"shrink-0"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-checked[39m=[32m"true"[39m
+                [33maria-label[39m=[32m"Show sidebar on startup"[39m
+                [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ...
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/components/SettingsDialog.cli.test.tsx:102:34
+    100|     await renderGeneralSettings();
+    101| 
+    102|     fireEvent.click(await screen.findByRole("button", { name: "Install…
+       |                                  ^
+    103| 
+    104|     expect(await screen.findByText("Installed")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 4 passed (6)
+   Start at  10:48:59
+   Duration  12.23s (transform 1.69s, setup 1.00s, collect 184ms, tests 8.21s, environment 1.20s, prepare 164ms)
+
+error: script "test" exited with code 1

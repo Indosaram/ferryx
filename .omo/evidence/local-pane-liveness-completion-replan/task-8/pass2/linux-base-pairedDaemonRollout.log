@@ -1,0 +1,58 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonRollout.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1031018) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/pairedDaemonRollout.test.ts (5 tests | 1 failed) 28ms
+   ✓ new local accepts an older epoch with fewer capabilities but never dispatches unsupported operations 8ms
+   ✓ failed renegotiation revokes prior admission: {"apiVersion":0,"daemonEpoch":"1","capabilities":[]} 3ms
+   × failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]} 13ms
+     → promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting
+   ✓ failed renegotiation revokes prior admission: {"accessScope":"mirror"} 2ms
+   ✓ failed renegotiation revokes prior admission: {"machineId":"other-machine"} 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]}
+AssertionError: promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Error {[39m
+[32m-   "message": "rejected promise",[39m
+[31m+ {[39m
+[31m+   "accessScope": "machine",[39m
+[31m+   "apiVersion": 1,[39m
+[31m+   "capabilities": [[39m
+[31m+     "directoryBrowseV1",[39m
+[31m+     "futureV9",[39m
+[31m+   ],[39m
+[31m+   "daemonEpoch": "9",[39m
+[31m+   "limits": {[39m
+[31m+     "directoryEntries": 100,[39m
+[31m+     "terminalSessions": 10,[39m
+[31m+   },[39m
+[31m+   "machineId": "machine-a",[39m
+[31m+   "permission": "control",[39m
+[31m+   "platform": "linux",[39m
+[2m  }[22m
+
+ ❯ src/lib/pairedDaemonRollout.test.ts:35:40
+     33|   await expect(f.adapter.directories()).resolves.toMatchObject({ path:…
+     34|   f.peer(peer);
+     35|   await expect(f.adapter.capabilities()).rejects.toMatchObject({ code …
+       |                                        ^
+     36|   const count = f.invoke.mock.calls.length;
+     37|   await expect(f.adapter.directories()).rejects.toMatchObject({ code: …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  10:06:54
+   Duration  757ms (transform 130ms, setup 171ms, collect 70ms, tests 28ms, environment 272ms, prepare 67ms)
+
+error: script "test" exited with code 1

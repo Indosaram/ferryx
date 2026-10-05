@@ -1,0 +1,94 @@
+$ vitest run --maxWorkers=1 src/components/settings/PermissionsSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037851) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/PermissionsSection.test.tsx (11 tests | 11 failed) 8ms
+   × PermissionsSection > renders applicable grant advice when macOS permissions are denied 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > triggers open system settings when clicking open settings buttons 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > renders all granted status correctly 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > requests notification permission and refreshes when Enable Notifications is clicked 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > replaces Enable Notifications with Open System Settings after a denial refresh 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > shows the structured notification error instead of clearing status 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > renders Windows notifications-only surface with OS-managed badge and Show Welcome Setup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > renders Linux notifications-only surface without open button and with Show Welcome Setup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > hides Show Welcome Setup when platform is web 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > follows the host platform, not the browser OS, for macOS-only copy and controls 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × PermissionsSection > resets onboarding storage key and dispatches ferryx:open-onboarding event on Show Welcome Setup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 11 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders applicable grant advice when macOS permissions are denied
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > triggers open system settings when clicking open settings buttons
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders all granted status correctly
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > requests notification permission and refreshes when Enable Notifications is clicked
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > replaces Enable Notifications with Open System Settings after a denial refresh
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > shows the structured notification error instead of clearing status
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders Windows notifications-only surface with OS-managed badge and Show Welcome Setup
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders Linux notifications-only surface without open button and with Show Welcome Setup
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > hides Show Welcome Setup when platform is web
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > follows the host platform, not the browser OS, for macOS-only copy and controls
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > resets onboarding storage key and dispatches ferryx:open-onboarding event on Show Welcome Setup
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/PermissionsSection.test.tsx:185:25
+    183|     mockTauri.requestAccessibilityPermission.mockReset();
+    184|     mockTauri.requestNotificationPermission.mockReset();
+    185|     window.localStorage.clear();
+       |                         ^
+    186|   });
+    187| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/22]⎯
+
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders applicable grant advice when macOS permissions are denied
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > triggers open system settings when clicking open settings buttons
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders all granted status correctly
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > requests notification permission and refreshes when Enable Notifications is clicked
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > replaces Enable Notifications with Open System Settings after a denial refresh
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > shows the structured notification error instead of clearing status
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders Windows notifications-only surface with OS-managed badge and Show Welcome Setup
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > renders Linux notifications-only surface without open button and with Show Welcome Setup
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > hides Show Welcome Setup when platform is web
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > follows the host platform, not the browser OS, for macOS-only copy and controls
+ FAIL  src/components/settings/PermissionsSection.test.tsx > PermissionsSection > resets onboarding storage key and dispatches ferryx:open-onboarding event on Show Welcome Setup
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/PermissionsSection.test.tsx:190:25
+    188|   afterEach(() => {
+    189|     cleanup();
+    190|     window.localStorage.clear();
+       |                         ^
+    191|     Object.defineProperty(process, "platform", { value: savedProcessPl…
+    192|     if (savedPlatform) Object.defineProperty(window.navigator, "platfo…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/22]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  11 failed (11)
+   Start at  10:09:43
+   Duration  1.02s (transform 118ms, setup 96ms, collect 501ms, tests 8ms, environment 234ms, prepare 45ms)
+
+error: script "test" exited with code 1

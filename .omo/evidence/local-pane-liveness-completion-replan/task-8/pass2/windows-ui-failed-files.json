@@ -1,0 +1,13 @@
+[
+  "src/lib/agentStateExtension.test.ts",
+  "src/App.pairedDaemon.test.tsx",
+  "src/App.remote.test.tsx",
+  "src/App.test.tsx",
+  "src/components/NativeTerminalPane.presentation.test.tsx",
+  "src/components/NativeTerminalPane.test.tsx",
+  "src/components/SettingsDialog.test.tsx",
+  "src/components/TerminalSearchOverlay.test.tsx",
+  "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+  "src/lib/pairedDaemonRollout.test.ts",
+  "src/lib/updater.test.ts"
+]

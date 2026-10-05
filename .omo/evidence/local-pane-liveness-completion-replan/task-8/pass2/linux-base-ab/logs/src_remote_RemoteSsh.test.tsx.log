@@ -1,0 +1,47 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteSsh.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044581) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteSsh.test.tsx (2 tests | 2 failed) 7ms
+   × lists each SSH session separately without treating background sessions as focused 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sends the backend session identity when selecting an SSH session 1ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteSsh.test.tsx > lists each SSH session separately without treating background sessions as focused
+ FAIL  src/remote/RemoteSsh.test.tsx > sends the backend session identity when selecting an SSH session
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteSsh.test.tsx:22:16
+     20|   cleanup();
+     21|   vi.unstubAllGlobals();
+     22|   localStorage.clear();
+       |                ^
+     23| });
+     24| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/remote/RemoteSsh.test.tsx > sends the backend session identity when selecting an SSH session
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/remote/RemoteSsh.test.tsx:46:16
+     44| 
+     45| it("sends the backend session identity when selecting an SSH session",…
+     46|   localStorage.setItem("ferryx_remote_token", "paired");
+       |                ^
+     47|   vi.stubGlobal("WebSocket", class {
+     48|     close() {}
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:11:19
+   Duration  1.24s (transform 293ms, setup 97ms, collect 737ms, tests 7ms, environment 226ms, prepare 46ms)
+
+error: script "test" exited with code 1
