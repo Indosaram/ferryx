@@ -513,8 +513,22 @@ export async function runSplitCancelScenario(ctx, plan, budget = new MonotonicBu
   barrierHub.command('split-cancel', { phase: 'duplicate-cancel' });
   evidence.action({ action: 'duplicate-cancel-sent' });
 
+  // Capture owned window screenshot & perform inspection handshake
+  const screenshotPath = join(ctx.evidenceRunDir, 'screenshot.png');
+  const screenshotMetadata = await driver.capture(evidence, screenshotPath, pid);
+
+  const markerRecognition = await performInspectionHandshake(
+    evidence,
+    barrierHub,
+    { runId: ctx.runId, operationId: ctx.operationId },
+    screenshotMetadata,
+    budget.consume(BUDGETS.stagePresentationMs, 'inspection handshake')
+  );
+
   return {
     cancelReceipt: cancel,
+    markerRecognition,
+    screenshotMetadata,
   };
 }
 

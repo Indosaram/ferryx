@@ -51,6 +51,37 @@ import {
 
 const fixtureRoot = () => realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'pane-liveness-test-')));
 
+// The four split adapters all end by capturing the owned window and performing the
+// inspection handshake, so a unit test that reaches a scenario's tail must supply the same
+// three things the runner does: a real screenshot file, the recognition artifact bound to
+// that file's digest, and a hub that can record the capture-ready event. Kept in one place
+// so the cancel adapter's tests match the sibling adapters' instead of inventing a variant.
+const CANCEL_SHOT_BYTES = 'cancel-fixture-screenshot';
+
+const cancelCapture = async (_evidence, path) => ({
+  path,
+  screenshotSha256: computeSourceDigest([path]),
+});
+
+function armCancelCapture(root, hubDir, { runId, operationId } = {}) {
+  const screenshotPath = join(root, 'screenshot.png');
+  writeFileSync(screenshotPath, Buffer.from(CANCEL_SHOT_BYTES));
+  const screenshotSha256 = computeSourceDigest([screenshotPath]);
+  writeFileSync(join(hubDir, 'marker-recognition.json'), JSON.stringify({
+    recognizer: 'cancel-inspector',
+    text: MARKER_TEXT,
+    paneBounds: { x: 0, y: 0, w: 500, h: 500 },
+    screenshotSha256,
+    ...(runId === undefined ? {} : { runId }),
+    ...(operationId === undefined ? {} : { operationId }),
+  }));
+  return screenshotSha256;
+}
+
+function cancelCaptureHub(dir) {
+  return { dir, recordCaptureReady: () => ({}) };
+}
+
 test('headless presentation releases after held event before its only settlement receipt', async () => {
   const root = fixtureRoot();
   const released = new Set();
@@ -934,6 +965,9 @@ test('split-cancel scenario adapter issues cancel before awaiting create and acc
   const commandsSent = [];
   const fakeHub = {
     ...hub,
+    // Spreading a class instance copies own properties only, so the prototype's
+    // `recordCaptureReady` has to be forwarded explicitly for the handshake.
+    recordCaptureReady: (meta) => hub.recordCaptureReady(meta),
     command: (name, payload) => {
       commandsSent.push({ name, payload });
       return hub.command(name, payload);
@@ -951,18 +985,23 @@ test('split-cancel scenario adapter issues cancel before awaiting create and acc
     },
   };
 
+  armCancelCapture(root, hub.dir, { runId: 'run-cancel', operationId: 'op-cancel' });
   const fakeCtx = {
     scenario: 'split-cancel',
     evidence,
     barrierHub: fakeHub,
     pid: 1234,
     platformPreflight: 'mock',
+    evidenceRunDir: root,
+    runId: 'run-cancel',
+    operationId: 'op-cancel',
   };
 
   const result = await runSplitCancelScenario(fakeCtx, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
   expect(result.cancelReceipt.cancelAckMs).toBe(120);
   expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
   expect(commandsSent.some(c => c.name === 'split-cancel')).toBe(true);
+  expect(result.markerRecognition.verified).toBe(true);
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -1241,16 +1280,21 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
       split: async () => calls.push('split'),
     };
     expect(native.selectNativeDriver({ platformPreflight: 'darwin', nativeDriver: driver })).toBe(driver);
+    const cancelHubDir = join(root, 'cancel-hub');
+    mkdirSync(cancelHubDir, { recursive: true });
+    armCancelCapture(root, cancelHubDir);
     const result = await runSplitCancelScenario({
-      platformPreflight: 'darwin', nativeDriver: driver, pid: 1234,
+      platformPreflight: 'darwin', nativeDriver: { ...driver, capture: cancelCapture }, pid: 1234,
       evidence: { action: () => {} },
       barrierHub: {
+        ...cancelCaptureHub(cancelHubDir),
         command: () => calls.push('cancel'),
         awaitReceipt: async () => {
           calls.push('receipt');
           return { cancelAckMs: 1, cleanupReceipt: { authoritative: true } };
         },
       },
+      evidenceRunDir: root,
     }, { cancel: { phase: 'before-create' } });
     expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
     expect(calls).toEqual(['focus', 'split', 'cancel', 'receipt', 'cancel']);
@@ -2896,12 +2940,15 @@ test('the split step records a post-click daemon inventory with its session delt
   const sink = new AppStdioSink(join(root, 'app-stdio'), { label: 'app' });
   const child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
   sink.attach(child);
+  armCancelCapture(root, hub.dir, { runId, operationId });
   const driver = {
     focus: async () => sequence.push('focus'),
     split: async () => { sequence.push('split-click'); child.stderr.emit('data', Buffer.from(appLine)); },
+    capture: cancelCapture,
   };
   const fakeHub = {
     ...hub,
+    recordCaptureReady: (meta) => hub.recordCaptureReady(meta),
     command: name => sequence.push(`command:${name}`),
     awaitReceipt: async () => ({ cancelAckMs: 120, timerDispatchLatencyMs: 5, cleanupReceipt: { authoritative: true, reapedPids: [] }, createdIdRequired: false }),
   };
@@ -2918,6 +2965,9 @@ test('the split step records a post-click daemon inventory with its session delt
       nativeDriver: driver,
       paneInventory: reader,
       appStdio: sink,
+      evidenceRunDir: root,
+      runId,
+      operationId,
     }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
     expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
 
@@ -3024,8 +3074,12 @@ test('the post-split inventory falls back to a fresh pre-split read, and a run w
       epoch: 3, elapsedMs: 1,
     }),
   });
-  const driver = { focus: async () => {}, split: async () => {} };
+  const cancelHubDir = join(root, 'cancel-hub');
+  mkdirSync(cancelHubDir, { recursive: true });
+  armCancelCapture(root, cancelHubDir);
+  const driver = { focus: async () => {}, split: async () => {}, capture: cancelCapture };
   const fakeHub = {
+    ...cancelCaptureHub(cancelHubDir),
     command: () => {},
     awaitReceipt: async () => ({ cancelAckMs: 5, cleanupReceipt: { authoritative: true } }),
   };
@@ -3041,6 +3095,7 @@ test('the post-split inventory falls back to a fresh pre-split read, and a run w
       platformPreflight: 'darwin',
       nativeDriver: driver,
       paneInventory: reader,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
     expect(result.cancelReceipt.cleanupReceipt.authoritative).toBe(true);
     const inventoryActions = actions
@@ -3061,6 +3116,7 @@ test('the post-split inventory falls back to a fresh pre-split read, and a run w
       pid: 1,
       platformPreflight: 'darwin',
       nativeDriver: driver,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, new MonotonicBudget());
     expect(noReader.cancelReceipt.cancelAckMs).toBe(5);
     const missing = actions.find(action => action.action === SPLIT_INVENTORY_ACTION);
@@ -3170,8 +3226,12 @@ test('a throwing inventory read is recorded as a typed action and the split scen
     },
     lastReading: () => null,
   };
-  const driver = { focus: async () => {}, split: async () => {} };
+  const cancelHubDir = join(root, 'cancel-hub');
+  mkdirSync(cancelHubDir, { recursive: true });
+  armCancelCapture(root, cancelHubDir);
+  const driver = { focus: async () => {}, split: async () => {}, capture: cancelCapture };
   const fakeHub = {
+    ...cancelCaptureHub(cancelHubDir),
     command: () => {},
     awaitReceipt: async () => ({ cancelAckMs: 5, cleanupReceipt: { authoritative: true } }),
   };
@@ -3184,6 +3244,7 @@ test('a throwing inventory read is recorded as a typed action and the split scen
       platformPreflight: 'darwin',
       nativeDriver: driver,
       paneInventory: throwingReader,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, budget);
     // (1) the scenario's own settlement is untouched: a measurement that throws
     // cannot turn this scenario into an ASSERTION_FAILURE.
@@ -3228,8 +3289,12 @@ test('a read the measured attempt window cannot pay for is refused, typed, inste
   });
   // A REAL budget whose window has nothing left: `remainingMs` clamps at 0.
   const spent = new MonotonicBudget(0);
-  const driver = { focus: async () => {}, split: async () => {} };
+  const cancelHubDir = join(root, 'cancel-hub');
+  mkdirSync(cancelHubDir, { recursive: true });
+  armCancelCapture(root, cancelHubDir);
+  const driver = { focus: async () => {}, split: async () => {}, capture: cancelCapture };
   const fakeHub = {
+    ...cancelCaptureHub(cancelHubDir),
     command: () => {},
     awaitReceipt: async () => ({ cancelAckMs: 7, cleanupReceipt: { authoritative: true } }),
   };
@@ -3264,6 +3329,7 @@ test('a read the measured attempt window cannot pay for is refused, typed, inste
       platformPreflight: 'darwin',
       nativeDriver: driver,
       paneInventory: reader,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, spentForMeasurement);
     expect(result.cancelReceipt.cancelAckMs).toBe(7);
     const after = actions.find(action => action.action === SPLIT_INVENTORY_ACTION);
@@ -3358,8 +3424,12 @@ test('instrumentation time spent inside the measured window is excluded from the
       };
     },
   });
-  const driver = { focus: async () => {}, split: async () => {} };
+  const cancelHubDir = join(root, 'cancel-hub');
+  mkdirSync(cancelHubDir, { recursive: true });
+  armCancelCapture(root, cancelHubDir);
+  const driver = { focus: async () => {}, split: async () => {}, capture: cancelCapture };
   const fakeHub = {
+    ...cancelCaptureHub(cancelHubDir),
     command: () => {},
     awaitReceipt: async () => ({ cancelAckMs: 13, cleanupReceipt: { authoritative: true } }),
   };
@@ -3373,6 +3443,7 @@ test('instrumentation time spent inside the measured window is excluded from the
       nativeDriver: driver,
       paneInventory: reader,
       instrumentation,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, budget);
     // (1) the scenario settles, and both reads really ran and really cost wall clock.
     expect(result.cancelReceipt.cancelAckMs).toBe(13);
@@ -3432,8 +3503,12 @@ test('a reader whose lastReading throws is recorded as a typed action and the sp
     },
     lastReading: () => { throw new HarnessError('ASSERTION_FAILURE', 'lastReading exploded'); },
   };
-  const driver = { focus: async () => {}, split: async () => {} };
+  const cancelHubDir = join(root, 'cancel-hub');
+  mkdirSync(cancelHubDir, { recursive: true });
+  armCancelCapture(root, cancelHubDir);
+  const driver = { focus: async () => {}, split: async () => {}, capture: cancelCapture };
   const fakeHub = {
+    ...cancelCaptureHub(cancelHubDir),
     command: () => {},
     awaitReceipt: async () => ({ cancelAckMs: 11, cleanupReceipt: { authoritative: true } }),
   };
@@ -3446,6 +3521,7 @@ test('a reader whose lastReading throws is recorded as a typed action and the sp
       platformPreflight: 'darwin',
       nativeDriver: driver,
       paneInventory: reader,
+      evidenceRunDir: root,
     }, { cancel: { phase: 'while-creating' } }, budget);
     // (1) the scenario's own settlement is untouched - the mirror of the throwing
     // `snapshot` case above.
