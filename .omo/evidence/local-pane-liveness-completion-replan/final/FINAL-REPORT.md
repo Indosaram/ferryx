@@ -91,12 +91,18 @@ The recorded root causes, each measured rather than asserted:
 - **Host reality is measured before it is planned around.** The disk guard threshold, the SSH failure **mode**
   (`refused` vs `MaxStartups` vs `timeout`), and whether a host even has a JS stage are all measured now.
 
-## 6. Remaining work
+## 7. Confirmation that the "zero split tags" finding is not a build artefact
 
-Everything left is **execution on a host**, not code:
+The claim that the product never called `cmd_terminal_spawn_operation` rests on **zero `FERRYX_QA_SPLIT_*` tags in
+app stderr**. That is only meaningful if the QA feature was actually compiled in, so it was checked against the
+evidence rather than assumed:
 
-1. Re-run the native scenario matrix where the split step settles, producing the screenshots F3 needs and the
-   success row F4 needs.
-2. Task 10 packaged bytes (mac), then the signature/notarization and packaged-smoke clauses of IS-6.
-3. The mac-parked holes (H-6, H-22, H-28) and the mac scenarios.
-4. Re-audit F3 and F4 once a scenario passes.
+| Check | Result |
+| --- | --- |
+| Build args recorded in the evidence | `features: ['local-split-qa', 'qa_barrier']` — **the QA feature was enabled** |
+| Does the app's stderr sink work at all? | **Yes** — every `app.stderr.log` carries the product's own line `[cmd_terminal_spawn] request received …` |
+| Does any `FERRYX_QA_*` tag appear in app stderr? | **No** — the tag names that do appear (`FERRYX_QA_RETRY_REFUSED`, `FERRYX_QA_STALE_BINDING_UNSERVICED`, …) live in the harness's **expected-marker lists** (`win-prov.ps1`, `marker-scan-default.txt`), not in product output |
+
+So the absence is real product behaviour, not a missing feature flag. (The first version of this work stream did
+misread a related signal — `split.pane.dispatched`, which is logged **unconditionally** — as proof a layout leaf
+had been created; that over-read is corrected in the ledger and in §4 above.)
