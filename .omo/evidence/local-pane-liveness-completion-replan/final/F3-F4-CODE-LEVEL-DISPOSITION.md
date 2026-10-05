@@ -95,3 +95,33 @@ fixed and on a host running the native matrix.
 **What a reviewer can do in seconds to re-check the code claims**: open `scripts/lib/qa-scenarios/native-driver.mjs` at
 `:1629` (the handshake and its validations), `:1715` (the ruling), and `scripts/lib/qa-scenarios/split-scenarios.mjs` at
 `:335`, `:452`, `:608` (the three wired scenarios) versus `:473-524` (`split-cancel`, unwired).
+
+---
+
+## Addendum (2026-10-05): why the `split-cancel` GAP is not a one-line wiring
+
+I attempted the obvious fix — port the sibling capture block into `runSplitCancelScenario` — and **reverted it**, because
+the blast radius is larger than the wiring itself. Recorded here so the next attempt starts from the measured constraint.
+
+**What was tried**: add to `split-scenarios.mjs:473` the same tail the three wired scenarios carry
+(`driver.capture(...)` then `performInspectionHandshake(...)`), and return `{ cancelReceipt, markerRecognition, screenshotMetadata }`.
+
+**Why it cannot land alone**:
+
+1. **Every one of the 9 `runSplitCancelScenario` call sites in `scripts/qa/pane-liveness.test.mjs` is a SUCCESS path**
+   (lines 962, 1244, 2912, 3036, 3057, 3179, 3259, 3367, 3441), unlike the sibling scenarios whose tests only exercise
+   rejection paths and therefore never reach their capture block.
+2. Those sites pass **inline drivers that define only the methods the scenario used to call** — e.g. `:1244` supplies
+   `{ split: async () => calls.push('split') }`. `driver.capture` would be `undefined` → `TypeError`.
+3. Even where a fuller driver exists, `performInspectionHandshake` **waits for `marker-recognition.json` and throws
+   `MARKER_RECOGNITION_UNVERIFIED` on timeout** (`native-driver.mjs:1629+`). No cancel test writes that artifact, so all
+   nine would fail on the handshake instead.
+
+**Conclusion**: closing this GAP requires updating those 9 tests in the same change, on a host where the frozen gate can be
+**run** to prove the new count. The gate is currently frozen at **98 passing** and the only host able to run it was
+unreachable (`maho-win` sshd down), so an unverifiable edit to it was refused rather than landed.
+
+**Next attempt, in order**: (1) host up, gate green at 98; (2) wire the capture + handshake into `runSplitCancelScenario`;
+(3) give each of the 9 sites a driver carrying `capture` and have each write `marker-recognition.json` (with matching
+`runId`/`operationId`/`screenshotSha256`/`paneBounds`) before the call; (4) re-run the gate and confirm **98** still pass
+with the cancel scenario now emitting `screenshot.png` + `markerRecognition`.
