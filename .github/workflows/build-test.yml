@@ -148,6 +148,7 @@ jobs:
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml \
             --target aarch64-apple-darwin \
+            --no-fail-fast \
             --lib \
             --test backend_hardening \
             --test daemon_persistence_contract \

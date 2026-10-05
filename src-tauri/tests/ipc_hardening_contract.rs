@@ -184,7 +184,13 @@ async fn swapped_checked_out_branches_cannot_delete_a_stale_identity_slot() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -257,7 +263,13 @@ async fn worktree_status_emits_dirty_changed_on_clean_to_dirty_transition() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -330,7 +342,13 @@ async fn worktree_status_emits_dirty_changed_on_dirty_to_clean_transition() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -401,7 +419,13 @@ async fn worktree_status_does_not_emit_when_dirty_state_is_unchanged() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -470,7 +494,13 @@ async fn dirty_delete_returns_structured_error_code() {
         .register("workspace-a", repo.path())
         .expect("register workspace");
 
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
