@@ -36,10 +36,11 @@ jobs:
   precheck:
     name: Lint, unit and integration tests (macOS)
     runs-on: xenoci-macos
-    # The full test step measures over 35 minutes (the library suite alone is ~8), and the
-    # platform's own job cap is 60. A slightly earlier, explicit deadline turns a cap kill into a
-    # clear "timed out" result instead of a run that ends with no logs at all.
-    timeout-minutes: 55
+    # The full test step measures ~15 minutes (the library suite alone is ~8), and the platform's
+    # own job cap is 60. This earlier, explicit deadline turns a genuine hang - such as the
+    # 20-minute runner-communication losses seen during bring-up - into a clear "timed out" result
+    # instead of a run that ends with no logs at all.
+    timeout-minutes: 45
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
       CARGO_BUILD_JOBS: '1'
