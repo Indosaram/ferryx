@@ -1013,6 +1013,14 @@ impl PtyManager {
         Ok(())
     }
 
+    /// Drops the predecessor identity record installed for a session this daemon then failed to
+    /// adopt. Only a successful adopt removes the entry, so without this call a failed adopt would
+    /// hold the moved snapshot in `transfer_owners` for the daemon's whole lifetime.
+    #[cfg(unix)]
+    pub fn forget_transferred_owner(&self, session_id: &str) {
+        self.transfer_owners.lock().remove(session_id);
+    }
+
     pub async fn relinquish_transferred_session(&self, session_id: &str) -> Result<(), PtyError> {
         let session = self.get_session(session_id)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;

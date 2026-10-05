@@ -2319,13 +2319,33 @@ function WorkspaceApp({
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
-      if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+      if (activeRemoteHostRef.current) {
+        switchDebug("split.active.refused.remote-host", { reason: `direction=${direction}` });
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        switchDebug("split.active.refused.paired-feature-gated", { reason: `direction=${direction}` });
+        return;
+      }
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
-      if (!activeTab || activeTab.kind === "browser") return;
+      if (!activeTab || activeTab.kind === "browser") {
+        switchDebug("split.active.refused.no-terminal-tab", {
+          reason: activeTab ? `tab-kind=${activeTab.kind}` : "no-active-tab",
+        });
+        return;
+      }
       const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
-      const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
+      if (!activeLayout) {
+        switchDebug("split.active.fallback.leaf-default.layout-missing", { reason: `tabId=${activeTab.id}` });
+      } else if (!activeLayout.activeLeafId) {
+        switchDebug("split.active.fallback.leaf-default.active-leaf-missing", { reason: `tabId=${activeTab.id}` });
+      }
+      const targetLeafId = activeLayout?.activeLeafId ??
+        (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
+      switchDebug("split.active.requested", {
+        reason: `direction=${direction} targetLeafId=${targetLeafId}`,
+      });
       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
@@ -2338,7 +2358,7 @@ function WorkspaceApp({
     if (!activeTab || activeTab.kind === "browser") return;
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
-    const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
+    const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
   }, [closePane, reportRuntimeError]);
 

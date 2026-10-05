@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 pub(crate) mod windows_input;
 
 #[cfg(windows)]
-mod windows_suspend {
+pub(crate) mod windows_suspend {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
     const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
@@ -258,6 +258,12 @@ pub struct SuspensionReceiptWire {
     pub pid: u32,
     pub incarnation: String,
     pub actuated_at_unix_ms: u64,
+    /// Carried across handover so a successor reports the guarantee the actuating
+    /// backend actually proved, instead of inferring the stronger one. Defaults to
+    /// `false` for a snapshot written by a predecessor that predates this field, so
+    /// a cross-version handover deserializes instead of failing.
+    #[serde(default)]
+    pub stop_observed: bool,
 }
 
 impl SuspensionReceiptWire {
@@ -268,7 +274,10 @@ impl SuspensionReceiptWire {
 
     pub fn receipt(&self) -> super::ActuationReceipt {
         super::ActuationReceipt { pid: self.pid, incarnation: self.incarnation.clone(),
-            source: super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: self.actuated_at_unix_ms }
+            source: super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: self.actuated_at_unix_ms,
+            stop_observed: self.stop_observed,
+            guarantee: if self.stop_observed { super::StopGuarantee::IdentityBoundObservedStop }
+                else { super::StopGuarantee::IdentityBoundUnverifiedStop } }
     }
 }
 
@@ -560,7 +569,7 @@ impl PtySession {
             receipt.source == super::SuspensionSource::FerryxOwned && self.pid() == Some(receipt.pid)
                 && self.incarnation() == Some(receipt.incarnation.as_str()))
             .map(|receipt| SuspensionReceiptWire { pid: receipt.pid, incarnation: receipt.incarnation,
-                actuated_at_unix_ms: receipt.actuated_at_unix_ms });
+                actuated_at_unix_ms: receipt.actuated_at_unix_ms, stop_observed: receipt.stop_observed });
     }
 
     pub(crate) fn suspension_receipt(&self) -> Option<super::ActuationReceipt> {
@@ -1504,12 +1513,13 @@ mod tests {
 
     #[test]
     fn pane_liveness_suspension_receipt_handover_roundtrip_matches_identity() {
-        let receipt = SuspensionReceiptWire { pid: 12345, incarnation: "owner-a".into(), actuated_at_unix_ms: 42 };
+        let receipt = SuspensionReceiptWire { pid: 12345, incarnation: "owner-a".into(), actuated_at_unix_ms: 42, stop_observed: true };
         let decoded: SuspensionReceiptWire = serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
         assert!(decoded.matches(Some(12345), Some("owner-a")));
         assert!(!decoded.matches(Some(12346), Some("owner-a")));
         assert!(!decoded.matches(Some(12345), Some("owner-b")));
         assert_eq!(decoded.receipt().source, super::super::SuspensionSource::FerryxOwned);
+        assert_eq!(decoded.receipt().guarantee, super::super::StopGuarantee::IdentityBoundObservedStop);
     }
 
     #[test]

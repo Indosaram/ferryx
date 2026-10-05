@@ -13,6 +13,12 @@ export type LivenessStageVerdict =
 
 export interface PaneLivenessSnapshot {
   readonly telemetryAvailable: boolean;
+  /**
+   * Set only by `observePaneLivenessAsync`: the native snapshot IPC lost the fixed 100 ms race,
+   * so every native-derived field below is absent because the deadline fired - not because the
+   * native lane reported nothing. Absent (`undefined`) means the deadline never fired.
+   */
+  readonly nativeSnapshotDeadlineFired?: boolean;
   readonly sessionId?: string | null;
   readonly vtSessionId?: string | null;
   readonly operationId?: string | null;
@@ -198,6 +204,16 @@ export function observePaneLiveness(
   return classifyPaneLiveness(snapshot);
 }
 
+/**
+ * One asynchronous liveness observation. `nativeSnapshotDeadlineFired` distinguishes the two
+ * ways the native snapshot can be absent: a fired deadline versus a native lane that reported
+ * nothing within the bound.
+ */
+export interface PaneLivenessObservation {
+  readonly verdict: LivenessStageVerdict;
+  readonly nativeSnapshotDeadlineFired: boolean;
+}
+
 export async function observePaneLivenessAsync(
   sessionId: string,
   options?: {
@@ -208,9 +224,9 @@ export async function observePaneLivenessAsync(
     suspended?: boolean | null;
     hubEndSequence?: number | null;
   },
-): Promise<LivenessStageVerdict> {
+): Promise<PaneLivenessObservation> {
   if (!sessionId || sessionId.trim().length === 0) {
-    return "UNKNOWN";
+    return { verdict: "UNKNOWN", nativeSnapshotDeadlineFired: false };
   }
 
   const queuedHeadAgeMs = terminalInputQueue.getQueuedHeadAgeMs(sessionId);
@@ -218,15 +234,22 @@ export async function observePaneLivenessAsync(
   const inFlightId = terminalInputQueue.getInFlightRequestId(sessionId);
 
   let nativeSnapshot: Partial<PaneLivenessSnapshot> | null = null;
+  let nativeSnapshotDeadlineFired = false;
   if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      nativeSnapshot = await Promise.race([
+      const observed = await Promise.race([
         invoke<Partial<PaneLivenessSnapshot> | null>("cmd_native_terminal_pane_liveness", {
           sessionId,
-        }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+        }).then((snapshot) => ({ snapshot })),
+        new Promise<{ snapshot: null }>((resolve) =>
+          setTimeout(() => resolve({ snapshot: null }), 100),
+        ),
       ]);
+      nativeSnapshot = observed.snapshot;
+      // The race resolves null for two different reasons; record the deadline one so an artifact
+      // can tell "no native telemetry" from "the IPC outran the 100 ms bound".
+      nativeSnapshotDeadlineFired = observed.snapshot === null;
     } catch {
       nativeSnapshot = null;
     }
@@ -234,6 +257,7 @@ export async function observePaneLivenessAsync(
 
   const snapshot: PaneLivenessSnapshot = {
     telemetryAvailable: true,
+    nativeSnapshotDeadlineFired,
     sessionId,
     vtSessionId: nativeSnapshot?.vtSessionId ?? sessionId,
     queuedHeadAgeMs,
@@ -251,5 +275,8 @@ export async function observePaneLivenessAsync(
     vtConsumedSequence: nativeSnapshot?.vtConsumedSequence ?? null,
   };
 
-  return classifyPaneLiveness(snapshot);
+  return {
+    verdict: classifyPaneLiveness(snapshot),
+    nativeSnapshotDeadlineFired,
+  };
 }

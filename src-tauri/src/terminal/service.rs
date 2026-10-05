@@ -661,7 +661,8 @@ mod preparation_tests {
         let failure = actuate_suspension(&target, &target, |_| Err(super::super::SuspensionError::NotOwned { pid: 42 }));
         assert!(failure.is_err());
         let receipt = super::super::ActuationReceipt { pid: 42, incarnation: target.incarnation.clone(),
-            source: super::super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: 200 };
+            source: super::super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: 200,
+            stop_observed: true, guarantee: super::super::StopGuarantee::IdentityBoundObservedStop };
         assert_eq!(actuate_suspension(&target, &target, |_| Ok(receipt.clone())).unwrap(), receipt);
     }
 

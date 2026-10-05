@@ -62,6 +62,24 @@ pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: b
     }
 }
 
+/// Stable prefix of every refusal produced by the spawn/handover gate: the token
+/// `retain_spawn_owner` returns to a spawn that arrives while a handover is prepared, and
+/// the token `prepare_handover`, `commit_handover_v4` and `commit_handover_v5` return
+/// while a spawn is in flight.
+///
+/// The token is the caller's retry signal, so it is part of the contract: the gate reopens
+/// as soon as the last in-flight spawn's `SpawnOwnerGuard` drops, and a caller that
+/// receives the refusal must retry rather than read it as a structural handover failure.
+/// Every refusal also names the guard identity (the handover status, or the in-flight
+/// spawn count), so a blocked handover is observable instead of a bare token.
+pub(crate) const HANDOVER_BUSY: &str = "HANDOVER_BUSY";
+
+/// True when `message` is the retryable spawn-gate refusal. Only this module produces the
+/// token, so the check cannot misclassify another handover failure.
+pub(crate) fn is_spawn_gate_busy(message: &str) -> bool {
+    message.starts_with(HANDOVER_BUSY)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoverStatus {
     Active,
@@ -509,6 +527,47 @@ mod spawn_owner_tests {
         manager.abort_handover().unwrap();
         assert!(manager.retain_spawn_owner().is_ok());
     }
+
+    /// F2 retry contract. A handover blocked by an in-flight spawn is a *retryable* busy
+    /// outcome, not a structural failure: while the spawn holds the gate the refusal is the
+    /// typed `HANDOVER_BUSY` outcome naming the guard, and the same handover succeeds once
+    /// that spawn completes.
+    #[cfg(unix)]
+    #[test]
+    fn a_blocked_handover_reports_busy_and_succeeds_on_retry_after_the_spawn_completes() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
+        let terminals = Arc::new(TerminalService::default());
+
+        // Given: one in-flight spawn holds the gate for its whole lifecycle.
+        let spawn = manager.retain_spawn_owner().expect("spawn claims the gate");
+
+        // When: a handover is prepared while that spawn is still in flight.
+        let refusal = match manager.prepare_handover(&terminals) {
+            Ok(_) => panic!("a handover must not prepare while a spawn is in flight"),
+            Err(refusal) => refusal,
+        };
+
+        // Then: the refusal is the retryable spawn-gate outcome, and it names the guard.
+        assert!(is_spawn_gate_busy(&refusal), "{refusal}");
+        assert!(refusal.contains("1 in-flight spawn"), "{refusal}");
+        assert_eq!(manager.status(), HandoverStatus::Active);
+
+        // When: the spawn completes and the caller retries the same handover.
+        drop(spawn);
+        let runtime_dir = get_runtime_dir();
+        fs::create_dir_all(&runtime_dir).expect("daemon runtime directory");
+        let (legacy, sessions, listener) = manager
+            .prepare_handover(&terminals)
+            .expect("the retry succeeds once the spawn has completed");
+
+        // Then: the retry takes the handover instead of reporting busy again.
+        assert!(sessions.is_empty());
+        assert!(legacy.exists());
+        assert_eq!(manager.status(), HandoverStatus::Prepared);
+        manager.abort_handover().unwrap();
+        drop(listener);
+    }
 }
 
 pub struct HandoverManager {
@@ -571,10 +630,30 @@ impl HandoverManager {
         Ok(())
     }
 
+    /// The refusal to return while an in-flight spawn owns the handover gate, naming the
+    /// guard count so the block is observable.
+    ///
+    /// Activation cost (deliberate, per F2-2): `retain_spawn_owner` is the only thing that
+    /// ever increments `spawn_owners`, so from the first production spawn onward a long
+    /// spawn -- notably `spawn_remote` waiting on a relay tunnel -- delays every handover
+    /// for its whole duration. That delay is bounded by the spawn, never unbounded: the
+    /// gate reopens when that spawn's guard drops, and the refusal is the typed, retryable
+    /// `HANDOVER_BUSY` outcome, so a blocked prepare or commit fails cleanly and a retry
+    /// after the spawn completes succeeds.
+    fn spawn_gate_refusal(&self) -> Option<String> {
+        let in_flight = self.spawn_owners.load(Ordering::Relaxed);
+        (in_flight != 0).then(|| {
+            format!("{HANDOVER_BUSY}: {in_flight} in-flight spawn(s) hold the handover gate")
+        })
+    }
+
     pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
         let status = self.status.write();
         if *status != HandoverStatus::Active {
-            return Err("HANDOVER_BUSY".into());
+            return Err(format!(
+                "{HANDOVER_BUSY}: handover is {:?} and does not accept new spawns",
+                *status
+            ));
         }
         self.spawn_owners.fetch_add(1, Ordering::Relaxed);
         Ok(SpawnOwnerGuard { manager: self.clone() })
@@ -653,8 +732,8 @@ impl HandoverManager {
         terminal_service: &Arc<TerminalService>,
     ) -> Result<(PathBuf, Vec<String>, tokio::net::UnixListener), String> {
         let mut status_guard = self.status.write();
-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
-            return Err("HANDOVER_BUSY".into());
+        if let Some(refusal) = self.spawn_gate_refusal() {
+            return Err(refusal);
         }
         if *status_guard != HandoverStatus::Active {
             return Err(format!(
@@ -705,8 +784,8 @@ impl HandoverManager {
     /// descriptor, so it retires only once its last session ends (`check_retirement_if_empty`).
     pub fn commit_handover_v4(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
-            return Err("HANDOVER_BUSY".into());
+        if let Some(refusal) = self.spawn_gate_refusal() {
+            return Err(refusal);
         }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
@@ -759,8 +838,8 @@ impl HandoverManager {
 
     pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
-            return Err("HANDOVER_BUSY".into());
+        if let Some(refusal) = self.spawn_gate_refusal() {
+            return Err(refusal);
         }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(

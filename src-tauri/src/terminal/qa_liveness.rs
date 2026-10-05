@@ -446,7 +446,18 @@ async fn await_frame_evidence(
         while let Ok(observation) = events.try_recv() {
             record_observation(tracker, queue, observation);
         }
-        if let Some(covered) = read_frame_submission(channel, &observation.session_id) {
+        // The sidecar read is synchronous filesystem I/O; it runs on the blocking pool so this
+        // 25 ms poll cadence never stalls a worker of the runtime that serves it.
+        let polled_channel = Arc::clone(channel);
+        let polled_session = observation.session_id.clone();
+        let submitted = match crate::ipc::run_blocking(move || {
+            Ok(read_frame_submission(&polled_channel, &polled_session))
+        }).await {
+            Ok(submitted) => submitted,
+            // A blocking read that cannot complete is "no evidence observed yet", never a pass.
+            Err(_) => None,
+        };
+        if let Some(covered) = submitted {
             tracker.note_frame(&observation.session_id, covered);
         }
         if tracker.submitted_covering(&observation.session_id, observation.sequence) {
@@ -867,7 +878,21 @@ async fn exercise_eof_watch_in(
         if tokio::time::Instant::now() >= deadline {
             return;
         }
-        let Some(request) = read_correlated_command(&dir, EXERCISE_EOF_COMMAND, &channel) else {
+        let Some(request) = {
+            // Same rule as the frame-side read above: this poll runs on the runtime that serves
+            // the 25 ms cadence, so the synchronous sidecar read goes to the blocking pool.
+            let polled_dir = dir.clone();
+            let polled_channel = Arc::clone(&channel);
+            match crate::ipc::run_blocking(move || {
+                Ok(read_correlated_command(&polled_dir, EXERCISE_EOF_COMMAND, &polled_channel))
+            })
+            .await
+            {
+                Ok(request) => request,
+                // A blocking read that cannot complete is "no control observed yet", never a pass.
+                Err(_) => None,
+            }
+        } else {
             continue;
         };
         let issued = request

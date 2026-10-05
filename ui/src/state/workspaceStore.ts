@@ -1086,13 +1086,28 @@ export function useWorkspaceStore({
     ) => {
       const snapshot = stateRef.current;
       const targetTab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!targetTab || !isTerminalTab(targetTab)) return;
+      if (!targetTab || !isTerminalTab(targetTab)) {
+        switchDebug("split.pane.refused.non-terminal-tab", {
+          reason: targetTab ? `tab-kind=${targetTab.kind}` : `tab-not-found:${tabId}`,
+        });
+        return;
+      }
       const targetLayout = snapshot.layout.layoutsByTabId?.[targetTab.id];
-      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) return;
+      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) {
+        switchDebug("split.pane.refused.target-leaf-not-in-layout", {
+          reason: `targetLeafId=${targetLeafId} layoutPresent=${targetLayout !== undefined} layoutLeaves=${targetLayout ? collectLeafIds(targetLayout.root).join("|") : "-"}`,
+        });
+        return;
+      }
 
       const sourceLocalSessionId = targetLayout.sessionIdsByLeafId[targetLeafId] ?? targetTab.sessionId;
       const sourceSession = snapshot.sessions[sourceLocalSessionId];
-      if (!sourceSession) return;
+      if (!sourceSession) {
+        switchDebug("split.pane.refused.source-session-missing", {
+          reason: `sourceLocalSessionId=${sourceLocalSessionId} tabSessionId=${targetTab.sessionId}`,
+        });
+        return;
+      }
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
@@ -1129,6 +1144,9 @@ export function useWorkspaceStore({
         newLeafId,
         content: options.content,
         session,
+      });
+      switchDebug("split.pane.dispatched", {
+        reason: `tabId=${targetTab.id} targetLeafId=${targetLeafId} direction=${direction} newLeafId=${newLeafId}`,
       });
 
       if (options.content && options.content.kind !== "terminal") {

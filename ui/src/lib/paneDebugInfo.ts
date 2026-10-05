@@ -6,12 +6,13 @@ export async function formatPaneDebugInfoAsync(
   session: TerminalSession | null | undefined,
 ): Promise<string> {
   const backendId = session?.backendSessionId ?? session?.id;
-  const liveness = backendId
+  const observation = backendId
     ? await observePaneLivenessAsync(backendId, {
         daemonEpoch: session?.daemonEpoch ?? null,
         suspended: session?.processState === "suspended" ? true : session?.processState ? false : null,
       })
-    : "UNKNOWN";
+    : null;
+  const liveness = observation?.verdict ?? "UNKNOWN";
 
   return JSON.stringify({
     leafId,
@@ -27,6 +28,7 @@ export async function formatPaneDebugInfoAsync(
     agentType: session?.agentType ?? null,
     agentSessionId: session?.agentSessionId ?? null,
     liveness,
+    nativeSnapshotDeadlineFired: observation?.nativeSnapshotDeadlineFired ?? null,
   });
 }
 

@@ -1868,6 +1868,19 @@ mod qa_split_producers {
         qa_barrier::active_channel()
     }
 
+    /// Async control read: the file read itself is blocking filesystem I/O, so it runs on the
+    /// blocking pool while the watcher keeps its exact 25 ms tick.
+    async fn read_control(dir: &Path, name: &str, channel: &Arc<QaBarrierChannel>) -> Option<Value> {
+        let dir = dir.to_owned();
+        let name = name.to_owned();
+        let channel = Arc::clone(channel);
+        match crate::ipc::run_blocking(move || Ok(read_control_in(&dir, &name, &channel))).await {
+            Ok(control) => control,
+            // A read that cannot complete is "no control observed yet", never an armed control.
+            Err(_) => None,
+        }
+    }
+
     fn barrier_dir() -> Option<PathBuf> {
         std::env::var("FERRYX_QA_BARRIER_DIR")
             .ok()
@@ -1875,8 +1888,9 @@ mod qa_split_producers {
             .map(PathBuf::from)
     }
 
-    /// A control that does not echo this run's nonces is never honored.
-    fn read_control(dir: &Path, name: &str, channel: &QaBarrierChannel) -> Option<Value> {
+    /// Synchronous half of the control read: a control that does not echo this run's nonces is
+    /// never honored. Callers on the async watchers run this through `run_blocking`.
+    fn read_control_in(dir: &Path, name: &str, channel: &QaBarrierChannel) -> Option<Value> {
         let text = std::fs::read_to_string(dir.join(format!("{name}.request.json"))).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
         if value.get("runId").and_then(Value::as_str) != Some(channel.run_id()) {
@@ -2573,7 +2587,7 @@ mod qa_split_producers {
         let mut unserviced_reported = false;
         loop {
             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
-            let Some(request) = read_control(&dir, RETRY, &channel) else {
+            let Some(request) = read_control(&dir, RETRY, &channel).await else {
                 continue;
             };
             let issued_at = request
@@ -3037,7 +3051,7 @@ mod qa_split_producers {
         let mut unserviced_reported = false;
         loop {
             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
-            let Some(request) = read_control(&dir, SPLIT_CONCURRENT_BATCH, &channel) else {
+            let Some(request) = read_control(&dir, SPLIT_CONCURRENT_BATCH, &channel).await else {
                 continue;
             };
             let issued_at = request
@@ -3109,7 +3123,7 @@ mod qa_split_producers {
         let mut handled: Vec<String> = Vec::new();
         loop {
             tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
-            let Some(request) = read_control(&dir, SPLIT_CANCEL, &channel) else {
+            let Some(request) = read_control(&dir, SPLIT_CANCEL, &channel).await else {
                 continue;
             };
             let issued_at = request
@@ -3228,9 +3242,9 @@ mod qa_split_producers {
             if triggered {
                 continue;
             }
-            if read_control(&dir, TRIGGER_HANDOVER, &channel).is_none()
-                && read_control(&dir, TRIGGER_HANDOVER_ABORT, &channel).is_none()
-            {
+            let handover_armed = read_control(&dir, TRIGGER_HANDOVER, &channel).await;
+            let handover_abort_armed = read_control(&dir, TRIGGER_HANDOVER_ABORT, &channel).await;
+            if handover_armed.is_none() && handover_abort_armed.is_none() {
                 continue;
             }
             triggered = true;
@@ -3471,7 +3485,7 @@ mod qa_split_producers {
                 .unwrap(),
             )
             .unwrap();
-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
+            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_none());
             std::fs::write(
                 dir.join(format!("{SPLIT_CANCEL}.request.json")),
                 serde_json::to_vec(&json!({
@@ -3483,7 +3497,7 @@ mod qa_split_producers {
                 .unwrap(),
             )
             .unwrap();
-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_none());
+            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_none());
             std::fs::write(
                 dir.join(format!("{SPLIT_CANCEL}.request.json")),
                 serde_json::to_vec(&json!({
@@ -3495,7 +3509,7 @@ mod qa_split_producers {
                 .unwrap(),
             )
             .unwrap();
-            assert!(read_control(&dir, SPLIT_CANCEL, &channel).is_some());
+            assert!(read_control_in(&dir, SPLIT_CANCEL, &channel).is_some());
         }
 
         fn retry_control() -> Value {
@@ -3877,7 +3891,7 @@ mod qa_split_producers {
                     .unwrap(),
                 )
                 .unwrap();
-                assert!(read_control(&dir, name, &channel).is_none());
+                assert!(read_control_in(&dir, name, &channel).is_none());
                 std::fs::write(
                     dir.join(format!("{name}.request.json")),
                     serde_json::to_vec(&json!({
@@ -3892,7 +3906,7 @@ mod qa_split_producers {
                     .unwrap(),
                 )
                 .unwrap();
-                assert!(read_control(&dir, name, &channel).is_some());
+                assert!(read_control_in(&dir, name, &channel).is_some());
             }
         }
     }
@@ -3914,10 +3928,24 @@ pub async fn cmd_terminal_spawn_operation(
     use crate::daemon::protocol::*;
     match request {
         SplitOperationRequest::Prepare { request_id, request, remaining_ms } => {
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            eprintln!(
+                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=prepare request_id={request_id} workspace_id={}",
+                request.workspace_id
+            );
             if request_id.trim().is_empty() || request.startup.is_some()
                 || crate::ssh::projects::is_remote(&request.workspace_id)
                 || request.workspace_id.starts_with("daemon:")
             {
+                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                eprintln!(
+                    "FERRYX_QA_SPLIT_OP_REFUSED: request_id={request_id} workspace_id={} blank_request_id={} startup_present={} remote_workspace={} paired_workspace={}",
+                    request.workspace_id,
+                    request_id.trim().is_empty(),
+                    request.startup.is_some(),
+                    crate::ssh::projects::is_remote(&request.workspace_id),
+                    request.workspace_id.starts_with("daemon:")
+                );
                 return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepare requires a local shell workspace and request identity"));
             }
             let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
@@ -3945,6 +3973,14 @@ pub async fn cmd_terminal_spawn_operation(
             })).await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split preparation timed out"))??;
             tokio::time::timeout_at(deadline, daemon_client.register_workspace(&request.workspace_id, &repo_root))
                 .await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split workspace registration timed out"))??;
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            eprintln!(
+                "FERRYX_QA_SPLIT_OP_PREPARED: request_id={} origin_epoch={} workspace_id={} cwd={}",
+                identity.request_id,
+                identity.origin_epoch,
+                request.workspace_id,
+                cwd.display()
+            );
             Ok(SplitOperationResponse::Prepare { prepared: PreparedLocalSplit {
                 identity, workspace_id: request.workspace_id, worktree: request.worktree,
                 cwd: cwd.to_string_lossy().into_owned(), shell: request.shell.or(default_shell),
@@ -3952,11 +3988,21 @@ pub async fn cmd_terminal_spawn_operation(
             } })
         }
         SplitOperationRequest::Status { identity, remaining_ms } => {
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            eprintln!(
+                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=status request_id={} origin_epoch={}",
+                identity.request_id, identity.origin_epoch
+            );
             let deadline = split_stage_deadline(remaining_ms, STAGE_CREATE_OR_STATUS_MAX_MS)?;
             Ok(SplitOperationResponse::Status { operation: split_wire_epoch(
                 daemon_client.local_split_status_until(&identity, deadline).await?) })
         }
         SplitOperationRequest::Cancel { identity, remaining_ms } => {
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            eprintln!(
+                "FERRYX_QA_SPLIT_OP_RECEIVED: variant=cancel request_id={} origin_epoch={}",
+                identity.request_id, identity.origin_epoch
+            );
             let deadline = split_stage_deadline(remaining_ms, CANCEL_ACK_MAX_MS)?;
             Ok(SplitOperationResponse::Cancel { operation: split_wire_epoch(
                 daemon_client.cancel_local_split_until(&identity, deadline).await?) })
@@ -3972,11 +4018,30 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     request: SpawnTerminalRequest,
 ) -> Result<SpawnTerminalResponse, IpcError> {
     if request.create_only == Some(true) || request.prepared_local_split.is_some() {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        eprintln!(
+            "FERRYX_QA_SPLIT_CREATE_RECEIVED: create_only={} prepared_local_split={} request_id={} workspace_id={}",
+            request.create_only == Some(true),
+            request.prepared_local_split.is_some(),
+            request.prepared_local_split.as_ref()
+                .map(|prepared| prepared.identity.request_id.as_str())
+                .unwrap_or("-"),
+            request.workspace_id
+        );
         let prepared = request.prepared_local_split.as_ref().ok_or_else(||
             IpcError::new(IpcErrorCode::InvalidArgument, "Create-only requires preparedLocalSplit"))?;
         if request.create_only != Some(true) || prepared.workspace_id != request.workspace_id
             || prepared.worktree != request.worktree || request.startup.is_some()
         {
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            eprintln!(
+                "FERRYX_QA_SPLIT_CREATE_REFUSED: request_id={} create_only_not_true={} workspace_mismatch={} worktree_mismatch={} startup_present={}",
+                prepared.identity.request_id,
+                request.create_only != Some(true),
+                prepared.workspace_id != request.workspace_id,
+                prepared.worktree != request.worktree,
+                request.startup.is_some()
+            );
             return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Prepared split identity does not match create request"));
         }
         let deadline = split_stage_deadline(request.remaining_ms.unwrap_or(0),
@@ -3988,6 +4053,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             &result.session_id,
             result.epoch,
             &result.session,
+        );
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        eprintln!(
+            "FERRYX_QA_SPLIT_CREATE_READY: request_id={} session_id={} daemon_epoch={}",
+            prepared.identity.request_id, result.session_id, result.epoch
         );
         return Ok(SpawnTerminalResponse { session_id: result.session_id,
             daemon_epoch: result.epoch.to_string(), session: result.session });

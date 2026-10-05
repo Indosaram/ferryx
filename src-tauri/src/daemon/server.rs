@@ -1946,6 +1946,22 @@ fn daemon_error(message: impl ToString) -> DaemonResponse {
     }
 }
 
+/// Maps a handover failure to its typed outcome. A refusal produced by the in-flight spawn
+/// gate is the retryable busy outcome -- `HandoverRejected` carrying the guard identity in
+/// `reason` -- because the gate reopens as soon as that spawn's guard drops, and the caller
+/// (the installer's upgrade poll, the desktop staleness probe) is expected to retry rather
+/// than treat the handover as structurally failed. Every other failure stays a generic
+/// error, prefixed with `context` when one is given.
+fn handover_failure_response(context: Option<&str>, message: String) -> DaemonResponse {
+    if crate::daemon::handover::is_spawn_gate_busy(&message) {
+        return DaemonResponse::HandoverRejected { reason: message };
+    }
+    match context {
+        Some(context) => daemon_error(format!("{context}: {message}")),
+        None => daemon_error(message),
+    }
+}
+
 fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
     DaemonResponse::Error {
         message: format!("Session '{session_id}' not found"),
@@ -2073,6 +2089,21 @@ impl DaemonServer {
             Arc::clone(&pty_manager),
             Arc::clone(&output_hub),
         ));
+        #[cfg(windows)]
+        {
+            // Windows has no supported way to observe a stop, so the suspension backend
+            // proves ownership against this daemon's own PTY registry rather than
+            // trusting a caller-supplied PID.
+            let ownership = Arc::clone(&terminal_service);
+            crate::terminal::install_ownership_verifier(move |pid, incarnation| {
+                ownership.list_sessions().into_iter().any(|session_id| {
+                    ownership.get_session(&session_id).is_some_and(|session| {
+                        session.pid() == Some(pid)
+                            && session.incarnation() == Some(incarnation)
+                    })
+                })
+            });
+        }
         let session_router = Arc::new(crate::daemon::proxy::SessionRouter::new(Arc::clone(
             &terminal_service,
         )));
@@ -2906,8 +2937,12 @@ impl DaemonServer {
                             Ok(output_rx) => output_rx,
                             Err(error) => {
                                 // The session stays with the predecessor, so this daemon must not
-                                // keep claiming its workspace.
+                                // keep claiming its workspace, nor keep the predecessor identity it
+                                // installed just above: only a successful adopt removes that entry,
+                                // so leaving it would hold the moved snapshot for the daemon's
+                                // lifetime.
                                 release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
+                                self.terminal_service.pty_manager().forget_transferred_owner(&session_id);
                                 return Err(format!("Failed to adopt transferred session: {error}"));
                             }
                         };
@@ -4239,7 +4274,7 @@ impl DaemonServer {
                                     active_sessions,
                                 }
                             }
-                            Err(e) => daemon_error(e),
+                            Err(e) => handover_failure_response(None, e),
                         }
                     }
                     #[cfg(not(unix))]
@@ -4357,11 +4392,17 @@ impl DaemonServer {
                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
                     }).await {
                         Ok(()) => DaemonResponse::CommitHandoverOk,
-                        Err(e) => daemon_error(e.to_string()),
+                        Err(e) => handover_failure_response(None, e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
-                    match self.handover_manager.abort_handover() {
+                    // `abort_handover` writes the decision transaction with create_new + fsync +
+                    // rename + parent-directory fsync, so it is offloaded exactly like the commit
+                    // path above instead of stalling a worker of the runtime that serves this loop.
+                    let manager = Arc::clone(&self.handover_manager);
+                    match crate::ipc::run_blocking(move || {
+                        manager.abort_handover().map_err(crate::ipc::IpcError::internal)
+                    }).await {
                         Ok(()) => {
                             let resumed = self
                                 .terminal_service
@@ -4373,7 +4414,7 @@ impl DaemonServer {
                             );
                             DaemonResponse::AbortHandoverOk
                         }
-                        Err(e) => daemon_error(e),
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::UploadClipboardImage { file_name, data }) => {
@@ -4774,7 +4815,7 @@ impl DaemonServer {
             .prepare_handover(&self.terminal_service)
         {
             Ok(res) => res,
-            Err(e) => return daemon_error(format!("Failed to prepare handover: {e}")),
+            Err(e) => return handover_failure_response(Some("Failed to prepare handover"), e),
         };
 
         Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener, target_exe);

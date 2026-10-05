@@ -1554,6 +1554,9 @@ impl DaemonSessionService {
 
     pub(super) async fn spawn_remote(
         &self,
+        // Held for the whole remote spawn so the handover gate covers a remote
+        // registered-session lifecycle exactly as it covers a local one.
+        _spawn_owner: Option<&super::handover::SpawnOwnerGuard>,
         project: crate::ssh::projects::RemoteProject,
         host: crate::ssh::SshHost,
         request: &str,
@@ -1874,9 +1877,36 @@ impl DaemonSessionService {
             return Ok(live_session_id);
         }
 
+        // Claim the in-flight spawn slot for the whole registered-session lifecycle so a
+        // handover cannot commit over a spawn that is still creating its session.
+        //
+        // Ordering is load-bearing: the claim sits *below* the idempotency-cache replay
+        // and the machine `previous`-record replay above, and below the live-session
+        // metadata replay just above. A retry of an already-created spawn is not a new
+        // session, so it must still return the session it already created even while a
+        // handover is prepared; taking the claim any earlier turns that retry into a
+        // HANDOVER_BUSY failure and breaks the idempotency contract. Only a request that
+        // is actually about to create a session takes the claim.
+        //
+        // A manager that is merely prepared (not draining) refuses the claim, which is
+        // exactly the HANDOVER_BUSY gate `prepare_handover`, `commit_handover_v4` and
+        // `commit_handover_v5` read. An absent manager (fixtures with no handover owner)
+        // keeps the previous permissive behavior instead of refusing every spawn.
+        let spawn_owner = self
+            .handover_manager
+            .upgrade()
+            .map(|manager| manager.retain_spawn_owner())
+            .transpose()
+            .map_err(|_| {
+                SpawnError::Other(
+                    "Daemon handover is in progress and does not accept new sessions".into(),
+                )
+            })?;
+
         if let Some((project, host)) = remote {
             return self
                 .spawn_remote(
+                    spawn_owner.as_ref(),
                     project,
                     host,
                     client_request_id,
@@ -2717,6 +2747,45 @@ mod tests {
     use crate::scoped_contracts::Epoch;
     use crate::terminal::output_hub::TerminalOutputHub;
     use crate::terminal::paired_daemon::{Descriptor, Proxy};
+
+    #[tokio::test]
+    async fn local_split_reliability_conflicting_fingerprint_reuse_is_rejected_without_creating_a_session() {
+        let server = DaemonServer::new();
+        let service = server.session_service();
+        let request_id = "conflict-fingerprint-request";
+        let epoch = 7u64;
+
+        let requests_dir = service.split_root().join("requests");
+        let key = DaemonSessionService::split_key(request_id, epoch);
+        let seeded = crate::daemon::split_journal::SplitJournalEntry {
+            request_id: key.clone(),
+            fingerprint: "fingerprint-from-a-different-parameter-set".to_string(),
+            expires_at_unix_ms: 0,
+            session_id: None,
+            cancel_requested: false,
+            tombstone: false,
+            outcome: None,
+        };
+        crate::daemon::split_journal::SplitJournal::open(&requests_dir)
+            .expect("open the requests journal")
+            .upsert(&seeded)
+            .expect("seed the conflicting record");
+
+        let envelope = crate::daemon::protocol::LocalSplitEnvelope {
+            origin_epoch: epoch,
+            expires_at_unix_ms: 0,
+            remaining_ms: 5_000,
+        };
+        let error = service
+            .create_split(
+                request_id, "ws-conflict-fingerprint", None, None, 80, 24, None,
+                envelope, epoch,
+            )
+            .await
+            .expect_err("a reused request identity with different parameters must be rejected");
+
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::SpawnRequestConflict);
+    }
 
     /// The paired describe branch must report the proxy actor's own incarnation, because the
     /// attach fence in `ipc/terminal.rs` proves identity by comparing exactly that value with the

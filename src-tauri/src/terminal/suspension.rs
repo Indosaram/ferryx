@@ -1,6 +1,17 @@
 //! Identity-bound suspension. Call these synchronous functions via `run_blocking`.
 //! Ownership is deliberately local to this daemon lifetime: a receipt is not restored
 //! from a caller-supplied PID or from serialized state after a handover.
+//!
+//! Actuation is identity-bound on every platform: the target's PID, incarnation and
+//! (where the kernel exposes it) start time are verified against the live process
+//! before any stop is actuated, and a receipt is minted only for a stop this daemon
+//! actuated. Positive *observation* of the stopped state is a second, stronger
+//! guarantee that a platform may not be able to provide; the receipt records which
+//! of the two it carries in `stop_observed`/`guarantee` rather than claiming the
+//! stronger one. Classification and resume stay strict on every platform: only a
+//! stop this daemon actuated and still owns is ever resumed, so a platform that cannot
+//! observe a stop reports `Unknown` (never `External`, never auto-resume) instead of
+//! guessing.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -9,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuspensionSource {
@@ -31,6 +42,26 @@ pub struct ActuationReceipt {
     pub incarnation: String,
     pub source: SuspensionSource,
     pub actuated_at_unix_ms: u64,
+    /// True only when the backend positively observed the stopped state on the
+    /// verified identity after actuation.
+    pub stop_observed: bool,
+    /// What this backend can prove about the stop it just actuated.
+    pub guarantee: StopGuarantee,
+}
+
+/// How much of the suspension contract a platform backend can prove.
+///
+/// `IdentityBoundUnverifiedStop` is deliberately weaker than
+/// `IdentityBoundObservedStop` and is reported verbatim on the receipt, so no
+/// caller can read an unobserved stop as a proven one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopGuarantee {
+    /// Identity-bound actuation with positive kernel observation of the stop.
+    IdentityBoundObservedStop,
+    /// Identity-bound actuation with an unverified stop: the platform has no way to
+    /// observe the stopped state, so ownership rests on the pre-actuation identity
+    /// check plus daemon-local bookkeeping.
+    IdentityBoundUnverifiedStop,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +154,10 @@ impl Ownership {
                 operation: "timestamp stop",
                 source: std::io::Error::other(error),
             })?,
+            // `Ownership::stop` returns only after re-observing the verified identity
+            // in the stopped state, so this backend always carries the stronger one.
+            stop_observed: true,
+            guarantee: StopGuarantee::IdentityBoundObservedStop,
         };
         self.stops.insert(target.pid, OwnedStop { target: target.clone(), identity: after.identity, receipt: receipt.clone() });
         Ok(receipt)
@@ -230,6 +265,8 @@ mod tests {
         process.acknowledge = true;
         let receipt = ledger.stop(&target(), &process).expect("acknowledged stop");
         assert_eq!(receipt.source, SuspensionSource::FerryxOwned);
+        assert!(receipt.stop_observed);
+        assert_eq!(receipt.guarantee, StopGuarantee::IdentityBoundObservedStop);
         assert_eq!(ledger.classify(&target(), &process).expect("classify"), SuspensionSource::FerryxOwned);
         ledger.resume(&target(), &process).expect("owned resume");
         assert_eq!(process.resumes.get(), 1);
