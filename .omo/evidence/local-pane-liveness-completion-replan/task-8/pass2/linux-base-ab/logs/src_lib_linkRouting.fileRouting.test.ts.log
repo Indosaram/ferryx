@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/lib/linkRouting.fileRouting.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039046) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/linkRouting.fileRouting.test.ts (12 tests | 7 failed) 9ms
+   × openTerminalToken file routing > routes HTML file to registered built-in browser opener and suppresses preview event 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > reveals directory via revealPath and suppresses preview event 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > shows error toast when file is missing and suppresses preview event 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > dispatches open-file-preview event with detail.request.path equal to original token path for regular file 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > dispatches open-file-preview event even when resolve rejects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > does not call resolveFilePreviewPath and invokes cmd_open_file_path when shiftKey is true 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken file routing > does not dispatch ferryx:open-file-preview and takes external path when image target is external 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   ✓ filePathToFileUrl > converts POSIX file path with spaces to file URL 0ms
+   ✓ filePathToFileUrl > converts Windows file path with backslashes and spaces to file URL 0ms
+   ✓ openTerminalToken worktree root routing > calls registered opener with resolvedPath and does not call revealPath when opener returns true 1ms
+   ✓ openTerminalToken worktree root routing > calls revealPath when registered opener returns false 0ms
+   ✓ openTerminalToken worktree root routing > calls revealPath when no opener is registered 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > routes HTML file to registered built-in browser opener and suppresses preview event
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > reveals directory via revealPath and suppresses preview event
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > shows error toast when file is missing and suppresses preview event
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > dispatches open-file-preview event with detail.request.path equal to original token path for regular file
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > dispatches open-file-preview event even when resolve rejects
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > does not call resolveFilePreviewPath and invokes cmd_open_file_path when shiftKey is true
+ FAIL  src/lib/linkRouting.fileRouting.test.ts > openTerminalToken file routing > does not dispatch ferryx:open-file-preview and takes external path when image target is external
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/linkRouting.fileRouting.test.ts:42:18
+     40|   beforeEach(() => {
+     41|     vi.clearAllMocks();
+     42|     localStorage.clear();
+       |                  ^
+     43|   });
+     44| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed | 5 passed (12)
+   Start at  10:10:01
+   Duration  793ms (transform 101ms, setup 102ms, collect 81ms, tests 9ms, environment 226ms, prepare 52ms)
+
+error: script "test" exited with code 1

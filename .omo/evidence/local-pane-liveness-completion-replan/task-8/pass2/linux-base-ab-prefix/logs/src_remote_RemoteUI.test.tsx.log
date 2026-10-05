@@ -1,0 +1,299 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteUI.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033431) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteUI.test.tsx (52 tests | 52 failed) 25ms
+   × selection request lifetime > releases selection when the request never settles 5ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × selection request lifetime > ignores an obsolete selection response while a newer selection is pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > creates a terminal in an empty selected worktree and waits for desktop publication 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > does not confirm creation from an unchanged terminal and reports rejected requests 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > shrinks the mobile shell on visual viewport resize without a screen-height minimum 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > keeps long workspace identifiers within the vertical worktree picker 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > keeps the hook order stable when a session token is cleared 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > PairingPage renders the Ferryx Desktop PIN flow 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > renders the native active-only state as one mirrored terminal without exposing paths 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > renders the current safe server workspace contract without local paths 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > mirrors only the server-declared terminal and safely confirms a context selection 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > waits for the desktop active-selection event when the first confirmation read is stale 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > recovers from a desktop that never confirms so the picker stays usable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > refreshes the mirrored terminal after an unsolicited desktop focus change 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > keeps the newest desktop focus when focus events arrive during a refresh 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > clears the mirrored terminal when desktop no longer focuses a terminal 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > shows no focused terminal when only undeclared background sessions are present 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > MobileKeyDock dispatches primary key actions and latches modifiers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > retains legacy authentication without rendering old Orca branding 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > sets browser document.title to active tab or terminal title on initial authenticated load 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > does not treat a worktree row id as a terminal tab id 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > updates document.title on unsolicited desktop focus and active tab change and falls back to Ferryx 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > resets document.title to Ferryx when unpaired or disconnected 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > allows sequential traversal using previous and next terminal tab controls and ordinal indicator 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > renders safe tab items under active worktree and dispatches tab switch request 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > cycles published terminal tabs only after Desktop confirms the selected tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > retains authorization across normal page reload when server returns transient error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > returns to the account sign-in surface when the session token is revoked (401) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > normalizeRemoteWorkspaceState parses activityState, agentType, and attention and drops invalid values defensively 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > tab strip renders state indicators for waiting and working tabs discoverable by accessible name 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > lists a published terminal pane even when the desktop has nothing focused 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > selects a pane from another worktree using that pane's own worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > context selector exposes worktree attention in its accessible name 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > immediately remounts RemoteTerminal to session when selecting a tab with sessionId before confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > remounts the optimistic terminal after confirmation when its socket closed before opening 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > remounts on confirmation when the optimistic socket opened and then closed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > remounts when the optimistic socket reports its failed handshake after confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > does not retry again when the confirmed replacement socket also closes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > does not perform immediate post-POST workspace/state refresh on selection 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > clears optimistic session override and reverts when confirmation times out 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > clears optimistic session override when selection request fails 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > clears optimistic session override and returns to account sign-in when user disconnects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > requires confirmation before Disconnect removes the pairing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > Cancel keeps the remote session paired 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > clears optimistic session override when a different authoritative state arrives 6ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Remote UI Components > prioritizes account magic-link consumption at /login?code=... over saved active host, device token, and stored account token 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 52 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > releases selection when the request never settles
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > creates a terminal in an empty selected worktree and waits for desktop publication
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not confirm creation from an unchanged terminal and reports rejected requests
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > shrinks the mobile shell on visual viewport resize without a screen-height minimum
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps long workspace identifiers within the vertical worktree picker
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps the hook order stable when a session token is cleared
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > PairingPage renders the Ferryx Desktop PIN flow
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders the native active-only state as one mirrored terminal without exposing paths
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders the current safe server workspace contract without local paths
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > mirrors only the server-declared terminal and safely confirms a context selection
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > waits for the desktop active-selection event when the first confirmation read is stale
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > recovers from a desktop that never confirms so the picker stays usable
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > refreshes the mirrored terminal after an unsolicited desktop focus change
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps the newest desktop focus when focus events arrive during a refresh
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears the mirrored terminal when desktop no longer focuses a terminal
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > shows no focused terminal when only undeclared background sessions are present
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > MobileKeyDock dispatches primary key actions and latches modifiers
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > retains legacy authentication without rendering old Orca branding
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > sets browser document.title to active tab or terminal title on initial authenticated load
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not treat a worktree row id as a terminal tab id
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > updates document.title on unsolicited desktop focus and active tab change and falls back to Ferryx
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > resets document.title to Ferryx when unpaired or disconnected
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > allows sequential traversal using previous and next terminal tab controls and ordinal indicator
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders safe tab items under active worktree and dispatches tab switch request
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > cycles published terminal tabs only after Desktop confirms the selected tab
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > retains authorization across normal page reload when server returns transient error
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > returns to the account sign-in surface when the session token is revoked (401)
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > normalizeRemoteWorkspaceState parses activityState, agentType, and attention and drops invalid values defensively
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > tab strip renders state indicators for waiting and working tabs discoverable by accessible name
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > lists a published terminal pane even when the desktop has nothing focused
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > selects a pane from another worktree using that pane's own worktree
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > context selector exposes worktree attention in its accessible name
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > immediately remounts RemoteTerminal to session when selecting a tab with sessionId before confirmation
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts the optimistic terminal after confirmation when its socket closed before opening
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts on confirmation when the optimistic socket opened and then closed
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts when the optimistic socket reports its failed handshake after confirmation
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not retry again when the confirmed replacement socket also closes
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not perform immediate post-POST workspace/state refresh on selection
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override and reverts when confirmation times out
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override when selection request fails
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override and returns to account sign-in when user disconnects
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > requires confirmation before Disconnect removes the pairing
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > Cancel keeps the remote session paired
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override when a different authoritative state arrives
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > prioritizes account magic-link consumption at /login?code=... over saved active host, device token, and stored account token
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteUI.test.tsx:218:16
+    216| 
+    217| beforeEach(() => {
+    218|   localStorage.clear();
+       |                ^
+    219|   vi.restoreAllMocks();
+    220| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/104]⎯
+
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > releases selection when the request never settles
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > selection request lifetime > ignores an obsolete selection response while a newer selection is pending
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > creates a terminal in an empty selected worktree and waits for desktop publication
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not confirm creation from an unchanged terminal and reports rejected requests
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > shrinks the mobile shell on visual viewport resize without a screen-height minimum
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps long workspace identifiers within the vertical worktree picker
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps the hook order stable when a session token is cleared
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > PairingPage renders the Ferryx Desktop PIN flow
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders the native active-only state as one mirrored terminal without exposing paths
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders the current safe server workspace contract without local paths
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > mirrors only the server-declared terminal and safely confirms a context selection
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > waits for the desktop active-selection event when the first confirmation read is stale
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > recovers from a desktop that never confirms so the picker stays usable
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > refreshes the mirrored terminal after an unsolicited desktop focus change
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > keeps the newest desktop focus when focus events arrive during a refresh
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears the mirrored terminal when desktop no longer focuses a terminal
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > shows no focused terminal when only undeclared background sessions are present
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > MobileKeyDock dispatches primary key actions and latches modifiers
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > retains legacy authentication without rendering old Orca branding
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > sets browser document.title to active tab or terminal title on initial authenticated load
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not treat a worktree row id as a terminal tab id
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > updates document.title on unsolicited desktop focus and active tab change and falls back to Ferryx
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > resets document.title to Ferryx when unpaired or disconnected
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > allows sequential traversal using previous and next terminal tab controls and ordinal indicator
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > renders safe tab items under active worktree and dispatches tab switch request
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > cycles published terminal tabs only after Desktop confirms the selected tab
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > retains authorization across normal page reload when server returns transient error
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > returns to the account sign-in surface when the session token is revoked (401)
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > normalizeRemoteWorkspaceState parses activityState, agentType, and attention and drops invalid values defensively
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > tab strip renders state indicators for waiting and working tabs discoverable by accessible name
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > lists a published terminal pane even when the desktop has nothing focused
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > selects a pane from another worktree using that pane's own worktree
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > context selector exposes worktree attention in its accessible name
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > immediately remounts RemoteTerminal to session when selecting a tab with sessionId before confirmation
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts the optimistic terminal after confirmation when its socket closed before opening
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts on confirmation when the optimistic socket opened and then closed
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > remounts when the optimistic socket reports its failed handshake after confirmation
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not retry again when the confirmed replacement socket also closes
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > does not perform immediate post-POST workspace/state refresh on selection
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override and reverts when confirmation times out
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override when selection request fails
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override and returns to account sign-in when user disconnects
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > requires confirmation before Disconnect removes the pairing
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > Cancel keeps the remote session paired
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > clears optimistic session override when a different authoritative state arrives
+ FAIL  src/remote/RemoteUI.test.tsx > Remote UI Components > prioritizes account magic-link consumption at /login?code=... over saved active host, device token, and stored account token
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteUI.test.tsx:224:16
+    222| afterEach(() => {
+    223|   cleanup();
+    224|   localStorage.clear();
+       |                ^
+    225|   EventWebSocket.latest = null;
+    226|   vi.unstubAllGlobals();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/104]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  52 failed (52)
+   Start at  10:08:50
+   Duration  1.38s (transform 384ms, setup 108ms, collect 837ms, tests 25ms, environment 221ms, prepare 47ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,73 @@
+$ vitest run --maxWorkers=1 src/lib/terminalSettings.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038762) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/terminalSettings.test.tsx (15 tests | 15 failed) 8ms
+   × terminal settings > loads safe local defaults and synchronizes persisted overrides 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > resolves local override above Ghostty and Ghostty above fallback 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > restores the cached terminal background before terminal settings finish loading 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > synchronizes the terminal surface token and cached first-paint background 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > updates the shared terminal surface after native preferences resolve 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > pushes local font overrides to the native runtime that owns the renderer 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > normalizes empty and whitespace shell strings to null 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > dedupes native preference fetches across concurrently mounted panes via the shared cache 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > still forces a fresh native fetch when a refresh is explicitly requested 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > does not flash the fallback background onto the shared surface when a later pane mounts 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > keeps the forced-refresh result when an earlier stale fetch resolves afterward 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > preserves the cached startup background until native preferences resolve 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > does not publish a fetch that resolves after the cache was reset 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > dispatches a single settings event per update under StrictMode 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × terminal settings > reports a font-size-only override as a local override 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 15 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > loads safe local defaults and synchronizes persisted overrides
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > resolves local override above Ghostty and Ghostty above fallback
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > restores the cached terminal background before terminal settings finish loading
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > synchronizes the terminal surface token and cached first-paint background
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > updates the shared terminal surface after native preferences resolve
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > pushes local font overrides to the native runtime that owns the renderer
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > normalizes empty and whitespace shell strings to null
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > dedupes native preference fetches across concurrently mounted panes via the shared cache
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > still forces a fresh native fetch when a refresh is explicitly requested
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > does not flash the fallback background onto the shared surface when a later pane mounts
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > keeps the forced-refresh result when an earlier stale fetch resolves afterward
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > preserves the cached startup background until native preferences resolve
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > does not publish a fetch that resolves after the cache was reset
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > dispatches a single settings event per update under StrictMode
+ FAIL  src/lib/terminalSettings.test.tsx > terminal settings > reports a font-size-only override as a local override
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/terminalSettings.test.tsx:74:16
+     72| 
+     73| beforeEach(() => {
+     74|   localStorage.clear();
+       |                ^
+     75|   document.documentElement.style.removeProperty("--terminal");
+     76|   native.getTerminalPreferences.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/15]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  15 failed (15)
+   Start at  10:09:57
+   Duration  560ms (transform 66ms, setup 98ms, collect 55ms, tests 8ms, environment 230ms, prepare 50ms)
+
+error: script "test" exited with code 1

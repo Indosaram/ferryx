@@ -146,9 +146,31 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: tauriCoreMocks.invoke,
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    const result = await tauriCoreMocks.invoke(command, args);
+    if (command === "cmd_native_terminal_set_bounds" && result && typeof result === "object") {
+      return { attachTuple: args?.attachTuple, ...result };
+    }
+    return result;
+  },
   isTauri: tauriCoreMocks.isTauri,
 }));
+
+vi.mock("../lib/localSplitLifecycle", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/localSplitLifecycle")>()),
+  // Model the asynchronous durable write; lifecycle registration still runs in production code.
+  persistNativeBinding: async (session: TerminalSession) => {
+    await Promise.resolve();
+    persistedNativeSessions.set(session.id, structuredClone(session));
+  },
+}));
+
+const persistedNativeSessions = new Map<string, TerminalSession>();
+
+beforeEach(() => {
+  persistedNativeSessions.clear();
+  resetNativeTerminalLifecycleForTest();
+});
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({

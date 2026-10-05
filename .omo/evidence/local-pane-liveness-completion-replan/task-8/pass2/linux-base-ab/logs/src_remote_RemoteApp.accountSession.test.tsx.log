@@ -1,0 +1,68 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteApp.accountSession.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1035624) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteApp.accountSession.test.tsx (5 tests | 5 failed) 9ms
+   × RemoteApp - Account Session Phone Flow > renders top context selector with empty initial body after login, then opens terminal pane on selecting worktree 6ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp - Account Session Phone Flow > does not prematurely mount old terminal when chosen target is wsB while host state remains wsA 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp - Account Session Phone Flow > confirms the selection when the desktop event lands while the post-select state read is in flight 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp - Account Session Phone Flow > displays error and allows retry without mounting old terminal if context selection POST fails 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp - Account Session Phone Flow > releases pending selection and shows retry/back error when desktop confirmation times out 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > renders top context selector with empty initial body after login, then opens terminal pane on selecting worktree
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > does not prematurely mount old terminal when chosen target is wsB while host state remains wsA
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > confirms the selection when the desktop event lands while the post-select state read is in flight
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > displays error and allows retry without mounting old terminal if context selection POST fails
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > releases pending selection and shows retry/back error when desktop confirmation times out
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/RemoteApp.accountSession.test.tsx:85:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > renders top context selector with empty initial body after login, then opens terminal pane on selecting worktree
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > does not prematurely mount old terminal when chosen target is wsB while host state remains wsA
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > confirms the selection when the desktop event lands while the post-select state read is in flight
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > displays error and allows retry without mounting old terminal if context selection POST fails
+ FAIL  src/remote/RemoteApp.accountSession.test.tsx > RemoteApp - Account Session Phone Flow > releases pending selection and shows retry/back error when desktop confirmation times out
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/RemoteApp.accountSession.test.tsx:95:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:09:06
+   Duration  1.58s (transform 415ms, setup 113ms, collect 895ms, tests 9ms, environment 293ms, prepare 95ms)
+
+error: script "test" exited with code 1

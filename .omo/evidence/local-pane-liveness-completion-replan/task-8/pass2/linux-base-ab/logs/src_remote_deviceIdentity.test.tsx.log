@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/remote/deviceIdentity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041501) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/deviceIdentity.test.tsx (9 tests | 3 failed) 7ms
+   ✓ deviceIdentity > suggestDeviceName > suggests 'iPhone - Safari' for an iPhone Safari user agent 1ms
+   ✓ deviceIdentity > suggestDeviceName > suggests 'macOS - Chrome' for a Mac Chrome user agent 0ms
+   ✓ deviceIdentity > suggestDeviceName > suggests 'macOS - Safari' for a Mac Safari user agent 0ms
+   ✓ deviceIdentity > suggestDeviceName > suggests 'Windows - Edge' for a Windows Edge user agent 0ms
+   ✓ deviceIdentity > suggestDeviceName > suggests 'Linux - Firefox' for a Linux Firefox user agent 0ms
+   ✓ deviceIdentity > suggestDeviceName > falls back to 'Browser Device' or 'Mobile Device' when unspecified 0ms
+   × deviceIdentity > getOrCreateInstallationId > generates a new UUID, stores it in localStorage with ferryx prefix, and reuses it 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × deviceIdentity > getOrCreateInstallationId > migrates legacy storage keys if present 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × deviceIdentity > PairingPage with Device Name input > renders device name pre-filled, allows editing, and submits installationId with deviceName 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/deviceIdentity.test.tsx > deviceIdentity > getOrCreateInstallationId > generates a new UUID, stores it in localStorage with ferryx prefix, and reuses it
+ FAIL  src/remote/deviceIdentity.test.tsx > deviceIdentity > getOrCreateInstallationId > migrates legacy storage keys if present
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/deviceIdentity.test.tsx:50:20
+     48|   describe("getOrCreateInstallationId", () => {
+     49|     beforeEach(() => {
+     50|       localStorage.clear();
+       |                    ^
+     51|     });
+     52| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/remote/deviceIdentity.test.tsx > deviceIdentity > PairingPage with Device Name input > renders device name pre-filled, allows editing, and submits installationId with deviceName
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/deviceIdentity.test.tsx:72:20
+     70|   describe("PairingPage with Device Name input", () => {
+     71|     beforeEach(() => {
+     72|       localStorage.clear();
+       |                    ^
+     73|     });
+     74| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 6 passed (9)
+   Start at  10:10:37
+   Duration  565ms (transform 66ms, setup 100ms, collect 49ms, tests 7ms, environment 229ms, prepare 51ms)
+
+error: script "test" exited with code 1

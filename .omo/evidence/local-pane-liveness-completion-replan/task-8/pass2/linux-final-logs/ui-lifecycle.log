@@ -1,0 +1,1823 @@
+$ vitest run --maxWorkers=1 src/lib/sessionPersistence.test.ts src/lib/sessionLifecycle.test.ts src/lib/nativeTerminalLifecycle.test.ts src/components/NativeTerminalPane.lifecycle.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-172baa87/ui
+
+(node:963978) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/lib/sessionPersistence.test.ts (44 tests) 32ms
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > reattaches the same backend when its output stream ends without user input
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m1[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461348[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'stream-ended'[39m,
+    paneIdentity: [32m'frontend-stream-ended'[39m,
+    bindingKey: [32m'stream-ended::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-stream-ended'[39m,
+    currentBackendSessionId: [32m'stream-ended'[39m,
+    currentBindingKey: [32m'stream-ended::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m2[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461348[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'stream-ended'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > held positive bounds cannot present a newer attempt or incarnation
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m3[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461360[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    paneIdentity: [32m'frontend-held-receipt'[39m,
+    bindingKey: [32m'held-receipt:7:0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-held-receipt'[39m,
+    currentBackendSessionId: [32m'held-receipt'[39m,
+    currentBindingKey: [32m'held-receipt:7:0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m4[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461360[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > held positive bounds cannot present a newer attempt or incarnation
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m5[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461361[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > recovers a stream that ends while its recovery attachment is pending
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m6[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461365[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'overlapping-stream-end'[39m,
+    paneIdentity: [32m'frontend-overlapping-stream-end'[39m,
+    bindingKey: [32m'overlapping-stream-end::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-overlapping-stream-end'[39m,
+    currentBackendSessionId: [32m'overlapping-stream-end'[39m,
+    currentBindingKey: [32m'overlapping-stream-end::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m7[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461365[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'overlapping-stream-end'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > bounds repeated stream recovery and permits an explicit retry
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m8[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461369[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    paneIdentity: [32m'frontend-bounded-stream'[39m,
+    bindingKey: [32m'bounded-stream::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-bounded-stream'[39m,
+    currentBackendSessionId: [32m'bounded-stream'[39m,
+    currentBindingKey: [32m'bounded-stream::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m9[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461369[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > bounds repeated stream recovery and permits an explicit retry
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m10[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461408[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    paneIdentity: [32m'frontend-bounded-stream'[39m,
+    bindingKey: [32m'bounded-stream::0:'[39m,
+    attemptGeneration: [33m6[39m,
+    currentPaneIdentity: [32m'frontend-bounded-stream'[39m,
+    currentBackendSessionId: [32m'bounded-stream'[39m,
+    currentBindingKey: [32m'bounded-stream::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m11[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461409[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not attach without an output recovery listener when registration fails
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: listener unavailable
+      at [90m/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/NativeTerminalPane.lifecycle.test.tsx:322:59
+      at mockCall [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at listen [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/NativeTerminalPane.lifecycle.test.tsx:53:44[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/NativeTerminalPane.tsx:2862:28[90m)[39m
+      at Object.operation [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/NativeTerminalPane.tsx:1204:37[90m)[39m
+      at [90m/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/nativeTerminalLifecycle.ts:269:19
+      at startLifecycleOperation [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/nativeTerminalLifecycle.ts:184:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/nativeTerminalLifecycle.ts:501:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/nativeTerminalLifecycle.ts:267:22[90m)[39m
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not attach without an output recovery listener when registration fails
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m12[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461433[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'listener-failure'[39m,
+    paneIdentity: [32m'frontend-listener-failure'[39m,
+    bindingKey: [32m'listener-failure::0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-listener-failure'[39m,
+    currentBackendSessionId: [32m'listener-failure'[39m,
+    currentBindingKey: [32m'listener-failure::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m13[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461433[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'listener-failure'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retries failed bounds with a fresh attachment and waits for presentation
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'native surface unavailable'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retries failed bounds with a fresh attachment and waits for presentation
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m14[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461443[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounds-retry'[39m,
+    paneIdentity: [32m'frontend-bounds-retry'[39m,
+    bindingKey: [32m'bounds-retry::0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-bounds-retry'[39m,
+    currentBackendSessionId: [32m'bounds-retry'[39m,
+    currentBindingKey: [32m'bounds-retry::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m15[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461443[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounds-retry'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > preserves the structured cause of a bounds failure in the visible error
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: {
+    code: [32m'INVALID_ARGUMENT'[39m,
+    message: [32m'Native terminal viewport is outside the configured surface'[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > uses effective native scale for IME anchor at fractional webview density
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m16[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461452[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m17[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461452[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > keeps ordinary equal-scale IME anchors
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m18[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461456[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m19[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461456[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > falls back to raw density for legacy IME receipts
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m20[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461459[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m21[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461459[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > falls back to raw density when native geometry is absent
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m22[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461462[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m23[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461462[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not reclaim the outgoing surface when input fails after tab replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m24[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461465[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m25[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461465[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not reclaim the outgoing surface when input fails after tab replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m26[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461467[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-1'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461467[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m27[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461467[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-1'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461467[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not reclaim the outgoing surface when input fails after tab replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m28[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461469[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m29[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461469[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not recover input when its owner becomes hidden
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m30[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461472[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m31[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461472[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not recover input when its owner becomes hidden
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m32[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461472[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-2'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461472[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m33[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461473[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-2'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461473[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not retry input after its owner leaves during recovery
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m34[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461476[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m35[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461476[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not retry input after its owner leaves during recovery
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m36[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461477[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-3'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461477[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m37[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461477[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-3'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461477[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not retry input after its owner leaves during recovery
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m38[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461477[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not retry input after its owner leaves during recovery
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m39[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461478[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m40[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461478[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > guards queued recovery attachment while preserving a returning owner (returns=false)
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m41[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461480[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-4'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461480[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m42[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461481[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-4'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461481[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > guards queued recovery attachment while preserving a returning owner (returns=false)
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m43[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461481[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > guards queued recovery attachment while preserving a returning owner (returns=true)
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m44[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461483[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-5'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461483[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m45[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461483[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-5'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461483[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > guards queued recovery attachment while preserving a returning owner (returns=true)
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m46[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461483[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > guards queued recovery attachment while preserving a returning owner (returns=true)
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m47[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461485[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m48[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461485[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale input receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m49[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461488[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m50[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461488[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale input receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m51[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461489[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-6'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461489[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m52[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461489[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-6'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461489[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale input receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m53[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461490[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m54[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461490[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale recovery error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m55[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461493[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m56[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461493[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale recovery error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m57[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461493[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-7'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461493[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m58[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461493[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-7'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461493[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale recovery error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m59[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461494[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale recovery error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m60[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461494[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m61[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461494[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m62[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461497[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m63[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461497[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m64[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461501[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-8'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461501[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m65[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461501[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-8'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461501[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m66[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461501[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m67[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461502[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-9'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461502[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m68[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461502[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-9'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461502[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry receipt after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m69[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461502[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m70[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461502[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m71[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461505[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m72[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461505[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m73[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461506[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-10'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461506[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m74[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461506[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-10'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461506[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m75[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461506[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m76[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461506[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-11'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461506[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m77[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461506[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-11'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461506[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not publish a stale retry error after replacement
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m78[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461507[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m79[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461507[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m80[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461509[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m81[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461509[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m82[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-12'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461510[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m83[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-12'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461510[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m84[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-13'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461510[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m85[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-13'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461510[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m86[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m87[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791074461510[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m88[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-14'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461511[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m89[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-14'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461511[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m90[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-15'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791074461511[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m91[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-owner-a-15'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461511[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m92[39m,
+  event: [32m'terminal.surface.input.sent'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, hasKeyEvent: [33mfalse[39m, textLength: [33m1[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > shares one recovery for concurrent inputs from a live owner
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m93[39m,
+  event: [32m'terminal.surface.input.sent'[39m,
+  wallTimeMs: [33m1791074461511[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, hasKeyEvent: [33mfalse[39m, textLength: [33m1[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m94[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461513[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m95[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461513[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m96[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461516[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-16'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791074461516[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m97[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461516[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-16'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461516[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: Error: Input receipt failed after delivery
+      at [90m/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/NativeTerminalPane.lifecycle.test.tsx:616:5
+      at [90mfile:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:40
+      at runWithSuite [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1849:8[90m)[39m
+      at Object.collect [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:10[90m)[39m
+      at Object.collect [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:738:54[90m)[39m
+  [90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+      at collectTests [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1179:25[90m)[39m
+      at startTests [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1817:17[90m)[39m
+      at [90mfile:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
+      at withEnv [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:84:3[90m)[39m
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m98[39m,
+  event: [32m'terminal.surface.input.failed'[39m,
+  wallTimeMs: [33m1791074461516[39m,
+  details: {
+    backendSessionId: [32m'accepted-input'[39m,
+    error: [32m'Error: Input receipt failed after delivery'[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m99[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461522[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m100[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461522[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m101[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461523[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-17'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791074461523[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m102[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461523[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-17'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461523[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'Receipt unavailable'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m103[39m,
+  event: [32m'terminal.surface.input.failed'[39m,
+  wallTimeMs: [33m1791074461523[39m,
+  details: { backendSessionId: [32m'accepted-input'[39m, error: [32m'[object Object]'[39m }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m104[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461528[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m105[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461528[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m106[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791074461529[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-18'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791074461529[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m107[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791074461529[39m,
+  details: {
+    operationId: [32m'req-1f5d6847-accepted-input-18'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791074461529[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retains the outgoing pane until a dropped frame is retried and presented
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m108[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461531[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-outgoing'[39m,
+    paneIdentity: [32m'frontend-frame-outgoing'[39m,
+    bindingKey: [32m'frame-outgoing::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-frame-outgoing'[39m,
+    currentBackendSessionId: [32m'frame-outgoing'[39m,
+    currentBindingKey: [32m'frame-outgoing::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m109[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461531[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-outgoing'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retains the outgoing pane until a dropped frame is retried and presented
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m110[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791074461532[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-incoming'[39m,
+    paneIdentity: [32m'frontend-frame-incoming'[39m,
+    bindingKey: [32m'frame-incoming::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-frame-incoming'[39m,
+    currentBackendSessionId: [32m'frame-incoming'[39m,
+    currentBindingKey: [32m'frame-incoming::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'60e9db93-94fa-4452-854c-d9bb6657b922'[39m,
+  sequence: [33m111[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791074461532[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-incoming'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+ ✓ src/components/NativeTerminalPane.lifecycle.test.tsx (36 tests) 1120ms
+stderr | src/lib/sessionLifecycle.test.ts > sessionLifecycle > idle sweep > vetoes suspension when the output ground truth cannot be verified
+Failed to read daemon suspension state: Error: ipc down
+    at [90m/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/sessionLifecycle.test.ts:356:50
+    at mockCall [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+    at describeTerminal [90m(file:///home/indo/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/source-172baa87/ui/[39msrc/lib/sessionLifecycle.ts:191:17
+
+ ✓ src/lib/sessionLifecycle.test.ts (20 tests) 121ms
+ ✓ src/lib/nativeTerminalLifecycle.test.ts (12 tests) 7ms
+
+ Test Files  4 passed (4)
+      Tests  112 passed (112)
+   Start at  09:40:59
+   Duration  3.50s (transform 410ms, setup 271ms, collect 575ms, tests 1.28s, environment 840ms, prepare 150ms)
+

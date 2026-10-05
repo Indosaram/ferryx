@@ -1,0 +1,793 @@
+diff --git a/src-tauri/src/daemon/handover.rs b/src-tauri/src/daemon/handover.rs
+index 85365930..67b8a2f5 100644
+--- a/src-tauri/src/daemon/handover.rs
++++ b/src-tauri/src/daemon/handover.rs
+@@ -62,6 +62,24 @@ pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: b
+     }
+ }
+ 
++/// Stable prefix of every refusal produced by the spawn/handover gate: the token
++/// `retain_spawn_owner` returns to a spawn that arrives while a handover is prepared, and
++/// the token `prepare_handover`, `commit_handover_v4` and `commit_handover_v5` return
++/// while a spawn is in flight.
++///
++/// The token is the caller's retry signal, so it is part of the contract: the gate reopens
++/// as soon as the last in-flight spawn's `SpawnOwnerGuard` drops, and a caller that
++/// receives the refusal must retry rather than read it as a structural handover failure.
++/// Every refusal also names the guard identity (the handover status, or the in-flight
++/// spawn count), so a blocked handover is observable instead of a bare token.
++pub(crate) const HANDOVER_BUSY: &str = "HANDOVER_BUSY";
++
++/// True when `message` is the retryable spawn-gate refusal. Only this module produces the
++/// token, so the check cannot misclassify another handover failure.
++pub(crate) fn is_spawn_gate_busy(message: &str) -> bool {
++    message.starts_with(HANDOVER_BUSY)
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum HandoverStatus {
+     Active,
+@@ -509,6 +527,47 @@ mod spawn_owner_tests {
+         manager.abort_handover().unwrap();
+         assert!(manager.retain_spawn_owner().is_ok());
+     }
++
++    /// F2 retry contract. A handover blocked by an in-flight spawn is a *retryable* busy
++    /// outcome, not a structural failure: while the spawn holds the gate the refusal is the
++    /// typed `HANDOVER_BUSY` outcome naming the guard, and the same handover succeeds once
++    /// that spawn completes.
++    #[cfg(unix)]
++    #[test]
++    fn a_blocked_handover_reports_busy_and_succeeds_on_retry_after_the_spawn_completes() {
++        let root = tempfile::tempdir().unwrap();
++        let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
++        let terminals = Arc::new(TerminalService::default());
++
++        // Given: one in-flight spawn holds the gate for its whole lifecycle.
++        let spawn = manager.retain_spawn_owner().expect("spawn claims the gate");
++
++        // When: a handover is prepared while that spawn is still in flight.
++        let refusal = match manager.prepare_handover(&terminals) {
++            Ok(_) => panic!("a handover must not prepare while a spawn is in flight"),
++            Err(refusal) => refusal,
++        };
++
++        // Then: the refusal is the retryable spawn-gate outcome, and it names the guard.
++        assert!(is_spawn_gate_busy(&refusal), "{refusal}");
++        assert!(refusal.contains("1 in-flight spawn"), "{refusal}");
++        assert_eq!(manager.status(), HandoverStatus::Active);
++
++        // When: the spawn completes and the caller retries the same handover.
++        drop(spawn);
++        let runtime_dir = get_runtime_dir();
++        fs::create_dir_all(&runtime_dir).expect("daemon runtime directory");
++        let (legacy, sessions, listener) = manager
++            .prepare_handover(&terminals)
++            .expect("the retry succeeds once the spawn has completed");
++
++        // Then: the retry takes the handover instead of reporting busy again.
++        assert!(sessions.is_empty());
++        assert!(legacy.exists());
++        assert_eq!(manager.status(), HandoverStatus::Prepared);
++        manager.abort_handover().unwrap();
++        drop(listener);
++    }
+ }
+ 
+ pub struct HandoverManager {
+@@ -571,10 +630,30 @@ impl HandoverManager {
+         Ok(())
+     }
+ 
++    /// The refusal to return while an in-flight spawn owns the handover gate, naming the
++    /// guard count so the block is observable.
++    ///
++    /// Activation cost (deliberate, per F2-2): `retain_spawn_owner` is the only thing that
++    /// ever increments `spawn_owners`, so from the first production spawn onward a long
++    /// spawn -- notably `spawn_remote` waiting on a relay tunnel -- delays every handover
++    /// for its whole duration. That delay is bounded by the spawn, never unbounded: the
++    /// gate reopens when that spawn's guard drops, and the refusal is the typed, retryable
++    /// `HANDOVER_BUSY` outcome, so a blocked prepare or commit fails cleanly and a retry
++    /// after the spawn completes succeeds.
++    fn spawn_gate_refusal(&self) -> Option<String> {
++        let in_flight = self.spawn_owners.load(Ordering::Relaxed);
++        (in_flight != 0).then(|| {
++            format!("{HANDOVER_BUSY}: {in_flight} in-flight spawn(s) hold the handover gate")
++        })
++    }
++
+     pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
+         let status = self.status.write();
+         if *status != HandoverStatus::Active {
+-            return Err("HANDOVER_BUSY".into());
++            return Err(format!(
++                "{HANDOVER_BUSY}: handover is {:?} and does not accept new spawns",
++                *status
++            ));
+         }
+         self.spawn_owners.fetch_add(1, Ordering::Relaxed);
+         Ok(SpawnOwnerGuard { manager: self.clone() })
+@@ -653,8 +732,8 @@ impl HandoverManager {
+         terminal_service: &Arc<TerminalService>,
+     ) -> Result<(PathBuf, Vec<String>, tokio::net::UnixListener), String> {
+         let mut status_guard = self.status.write();
+-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+-            return Err("HANDOVER_BUSY".into());
++        if let Some(refusal) = self.spawn_gate_refusal() {
++            return Err(refusal);
+         }
+         if *status_guard != HandoverStatus::Active {
+             return Err(format!(
+@@ -705,8 +784,8 @@ impl HandoverManager {
+     /// descriptor, so it retires only once its last session ends (`check_retirement_if_empty`).
+     pub fn commit_handover_v4(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
+         let mut status_guard = self.status.write();
+-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+-            return Err("HANDOVER_BUSY".into());
++        if let Some(refusal) = self.spawn_gate_refusal() {
++            return Err(refusal);
+         }
+         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
+             return Err(format!(
+@@ -759,8 +838,8 @@ impl HandoverManager {
+ 
+     pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
+         let mut status_guard = self.status.write();
+-        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+-            return Err("HANDOVER_BUSY".into());
++        if let Some(refusal) = self.spawn_gate_refusal() {
++            return Err(refusal);
+         }
+         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
+             return Err(format!(
+diff --git a/src-tauri/src/daemon/server.rs b/src-tauri/src/daemon/server.rs
+index 2349b9e4..2efa56e5 100644
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -1946,6 +1946,22 @@ fn daemon_error(message: impl ToString) -> DaemonResponse {
+     }
+ }
+ 
++/// Maps a handover failure to its typed outcome. A refusal produced by the in-flight spawn
++/// gate is the retryable busy outcome -- `HandoverRejected` carrying the guard identity in
++/// `reason` -- because the gate reopens as soon as that spawn's guard drops, and the caller
++/// (the installer's upgrade poll, the desktop staleness probe) is expected to retry rather
++/// than treat the handover as structurally failed. Every other failure stays a generic
++/// error, prefixed with `context` when one is given.
++fn handover_failure_response(context: Option<&str>, message: String) -> DaemonResponse {
++    if crate::daemon::handover::is_spawn_gate_busy(&message) {
++        return DaemonResponse::HandoverRejected { reason: message };
++    }
++    match context {
++        Some(context) => daemon_error(format!("{context}: {message}")),
++        None => daemon_error(message),
++    }
++}
++
+ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
+     DaemonResponse::Error {
+         message: format!("Session '{session_id}' not found"),
+@@ -2073,6 +2089,21 @@ impl DaemonServer {
+             Arc::clone(&pty_manager),
+             Arc::clone(&output_hub),
+         ));
++        #[cfg(windows)]
++        {
++            // Windows has no supported way to observe a stop, so the suspension backend
++            // proves ownership against this daemon's own PTY registry rather than
++            // trusting a caller-supplied PID.
++            let ownership = Arc::clone(&terminal_service);
++            crate::terminal::install_ownership_verifier(move |pid, incarnation| {
++                ownership.list_sessions().into_iter().any(|session_id| {
++                    ownership.get_session(&session_id).is_some_and(|session| {
++                        session.pid() == Some(pid)
++                            && session.incarnation() == Some(incarnation)
++                    })
++                })
++            });
++        }
+         let session_router = Arc::new(crate::daemon::proxy::SessionRouter::new(Arc::clone(
+             &terminal_service,
+         )));
+@@ -4239,7 +4270,7 @@ impl DaemonServer {
+                                     active_sessions,
+                                 }
+                             }
+-                            Err(e) => daemon_error(e),
++                            Err(e) => handover_failure_response(None, e),
+                         }
+                     }
+                     #[cfg(not(unix))]
+@@ -4357,7 +4388,7 @@ impl DaemonServer {
+                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
+                     }).await {
+                         Ok(()) => DaemonResponse::CommitHandoverOk,
+-                        Err(e) => daemon_error(e.to_string()),
++                        Err(e) => handover_failure_response(None, e.to_string()),
+                     }
+                 }
+                 Ok(DaemonRequest::AbortHandover) => {
+@@ -4774,7 +4805,7 @@ impl DaemonServer {
+             .prepare_handover(&self.terminal_service)
+         {
+             Ok(res) => res,
+-            Err(e) => return daemon_error(format!("Failed to prepare handover: {e}")),
++            Err(e) => return handover_failure_response(Some("Failed to prepare handover"), e),
+         };
+ 
+         Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener, target_exe);
+diff --git a/src-tauri/src/daemon/session_service.rs b/src-tauri/src/daemon/session_service.rs
+index 73c0817e..c490a2b5 100644
+--- a/src-tauri/src/daemon/session_service.rs
++++ b/src-tauri/src/daemon/session_service.rs
+@@ -1554,6 +1554,9 @@ impl DaemonSessionService {
+ 
+     pub(super) async fn spawn_remote(
+         &self,
++        // Held for the whole remote spawn so the handover gate covers a remote
++        // registered-session lifecycle exactly as it covers a local one.
++        _spawn_owner: Option<&super::handover::SpawnOwnerGuard>,
+         project: crate::ssh::projects::RemoteProject,
+         host: crate::ssh::SshHost,
+         request: &str,
+@@ -1874,9 +1877,36 @@ impl DaemonSessionService {
+             return Ok(live_session_id);
+         }
+ 
++        // Claim the in-flight spawn slot for the whole registered-session lifecycle so a
++        // handover cannot commit over a spawn that is still creating its session.
++        //
++        // Ordering is load-bearing: the claim sits *below* the idempotency-cache replay
++        // and the machine `previous`-record replay above, and below the live-session
++        // metadata replay just above. A retry of an already-created spawn is not a new
++        // session, so it must still return the session it already created even while a
++        // handover is prepared; taking the claim any earlier turns that retry into a
++        // HANDOVER_BUSY failure and breaks the idempotency contract. Only a request that
++        // is actually about to create a session takes the claim.
++        //
++        // A manager that is merely prepared (not draining) refuses the claim, which is
++        // exactly the HANDOVER_BUSY gate `prepare_handover`, `commit_handover_v4` and
++        // `commit_handover_v5` read. An absent manager (fixtures with no handover owner)
++        // keeps the previous permissive behavior instead of refusing every spawn.
++        let spawn_owner = self
++            .handover_manager
++            .upgrade()
++            .map(|manager| manager.retain_spawn_owner())
++            .transpose()
++            .map_err(|_| {
++                SpawnError::Other(
++                    "Daemon handover is in progress and does not accept new sessions".into(),
++                )
++            })?;
++
+         if let Some((project, host)) = remote {
+             return self
+                 .spawn_remote(
++                    spawn_owner.as_ref(),
+                     project,
+                     host,
+                     client_request_id,
+diff --git a/src-tauri/src/terminal/mod.rs b/src-tauri/src/terminal/mod.rs
+index 2352970e..a6b36605 100644
+--- a/src-tauri/src/terminal/mod.rs
++++ b/src-tauri/src/terminal/mod.rs
+@@ -45,6 +45,8 @@ pub mod service;
+ pub mod session;
+ pub mod shell;
+ pub mod suspension;
++#[cfg(windows)]
++pub use suspension::windows::install_ownership_verifier;
+ 
+ pub use output_hub::*;
+ pub use preferences::*;
+@@ -52,7 +54,7 @@ pub use pty::*;
+ pub use service::*;
+ pub use session::*;
+ pub use shell::*;
+-pub use suspension::{ActuationReceipt, SuspensionError, SuspensionSource, SuspensionTarget,
++pub use suspension::{ActuationReceipt, StopGuarantee, SuspensionError, SuspensionSource, SuspensionTarget,
+     classify_stop_source, resume_owned, stop_for_owned_suspension};
+ 
+ #[cfg(test)]
+diff --git a/src-tauri/src/terminal/service.rs b/src-tauri/src/terminal/service.rs
+index d6f9685a..26b59f85 100644
+--- a/src-tauri/src/terminal/service.rs
++++ b/src-tauri/src/terminal/service.rs
+@@ -661,7 +661,8 @@ mod preparation_tests {
+         let failure = actuate_suspension(&target, &target, |_| Err(super::super::SuspensionError::NotOwned { pid: 42 }));
+         assert!(failure.is_err());
+         let receipt = super::super::ActuationReceipt { pid: 42, incarnation: target.incarnation.clone(),
+-            source: super::super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: 200 };
++            source: super::super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: 200,
++            stop_observed: true, guarantee: super::super::StopGuarantee::IdentityBoundObservedStop };
+         assert_eq!(actuate_suspension(&target, &target, |_| Ok(receipt.clone())).unwrap(), receipt);
+     }
+ 
+diff --git a/src-tauri/src/terminal/session.rs b/src-tauri/src/terminal/session.rs
+index 370ab078..c43cd810 100644
+--- a/src-tauri/src/terminal/session.rs
++++ b/src-tauri/src/terminal/session.rs
+@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
+ pub(crate) mod windows_input;
+ 
+ #[cfg(windows)]
+-mod windows_suspend {
++pub(crate) mod windows_suspend {
+     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+ 
+     const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+@@ -258,6 +258,12 @@ pub struct SuspensionReceiptWire {
+     pub pid: u32,
+     pub incarnation: String,
+     pub actuated_at_unix_ms: u64,
++    /// Carried across handover so a successor reports the guarantee the actuating
++    /// backend actually proved, instead of inferring the stronger one. Defaults to
++    /// `false` for a snapshot written by a predecessor that predates this field, so
++    /// a cross-version handover deserializes instead of failing.
++    #[serde(default)]
++    pub stop_observed: bool,
+ }
+ 
+ impl SuspensionReceiptWire {
+@@ -268,7 +274,10 @@ impl SuspensionReceiptWire {
+ 
+     pub fn receipt(&self) -> super::ActuationReceipt {
+         super::ActuationReceipt { pid: self.pid, incarnation: self.incarnation.clone(),
+-            source: super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: self.actuated_at_unix_ms }
++            source: super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: self.actuated_at_unix_ms,
++            stop_observed: self.stop_observed,
++            guarantee: if self.stop_observed { super::StopGuarantee::IdentityBoundObservedStop }
++                else { super::StopGuarantee::IdentityBoundUnverifiedStop } }
+     }
+ }
+ 
+@@ -560,7 +569,7 @@ impl PtySession {
+             receipt.source == super::SuspensionSource::FerryxOwned && self.pid() == Some(receipt.pid)
+                 && self.incarnation() == Some(receipt.incarnation.as_str()))
+             .map(|receipt| SuspensionReceiptWire { pid: receipt.pid, incarnation: receipt.incarnation,
+-                actuated_at_unix_ms: receipt.actuated_at_unix_ms });
++                actuated_at_unix_ms: receipt.actuated_at_unix_ms, stop_observed: receipt.stop_observed });
+     }
+ 
+     pub(crate) fn suspension_receipt(&self) -> Option<super::ActuationReceipt> {
+@@ -1504,12 +1513,13 @@ mod tests {
+ 
+     #[test]
+     fn pane_liveness_suspension_receipt_handover_roundtrip_matches_identity() {
+-        let receipt = SuspensionReceiptWire { pid: 12345, incarnation: "owner-a".into(), actuated_at_unix_ms: 42 };
++        let receipt = SuspensionReceiptWire { pid: 12345, incarnation: "owner-a".into(), actuated_at_unix_ms: 42, stop_observed: true };
+         let decoded: SuspensionReceiptWire = serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
+         assert!(decoded.matches(Some(12345), Some("owner-a")));
+         assert!(!decoded.matches(Some(12346), Some("owner-a")));
+         assert!(!decoded.matches(Some(12345), Some("owner-b")));
+         assert_eq!(decoded.receipt().source, super::super::SuspensionSource::FerryxOwned);
++        assert_eq!(decoded.receipt().guarantee, super::super::StopGuarantee::IdentityBoundObservedStop);
+     }
+ 
+     #[test]
+diff --git a/src-tauri/src/terminal/suspension.rs b/src-tauri/src/terminal/suspension.rs
+index a6abdbf5..8bf4d278 100644
+--- a/src-tauri/src/terminal/suspension.rs
++++ b/src-tauri/src/terminal/suspension.rs
+@@ -1,6 +1,17 @@
+ //! Identity-bound suspension. Call these synchronous functions via `run_blocking`.
+ //! Ownership is deliberately local to this daemon lifetime: a receipt is not restored
+ //! from a caller-supplied PID or from serialized state after a handover.
++//!
++//! Actuation is identity-bound on every platform: the target's PID, incarnation and
++//! (where the kernel exposes it) start time are verified against the live process
++//! before any stop is actuated, and a receipt is minted only for a stop this daemon
++//! actuated. Positive *observation* of the stopped state is a second, stronger
++//! guarantee that a platform may not be able to provide; the receipt records which
++//! of the two it carries in `stop_observed`/`guarantee` rather than claiming the
++//! stronger one. Classification and resume stay strict on every platform: only a
++//! stop this daemon actuated and still owns is ever resumed, so a platform that cannot
++//! observe a stop reports `Unknown` (never `External`, never auto-resume) instead of
++//! guessing.
+ 
+ use std::collections::HashMap;
+ use std::sync::OnceLock;
+@@ -9,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
+ #[cfg(unix)]
+ mod unix;
+ #[cfg(windows)]
+-mod windows;
++pub mod windows;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum SuspensionSource {
+@@ -31,6 +42,26 @@ pub struct ActuationReceipt {
+     pub incarnation: String,
+     pub source: SuspensionSource,
+     pub actuated_at_unix_ms: u64,
++    /// True only when the backend positively observed the stopped state on the
++    /// verified identity after actuation.
++    pub stop_observed: bool,
++    /// What this backend can prove about the stop it just actuated.
++    pub guarantee: StopGuarantee,
++}
++
++/// How much of the suspension contract a platform backend can prove.
++///
++/// `IdentityBoundUnverifiedStop` is deliberately weaker than
++/// `IdentityBoundObservedStop` and is reported verbatim on the receipt, so no
++/// caller can read an unobserved stop as a proven one.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum StopGuarantee {
++    /// Identity-bound actuation with positive kernel observation of the stop.
++    IdentityBoundObservedStop,
++    /// Identity-bound actuation with an unverified stop: the platform has no way to
++    /// observe the stopped state, so ownership rests on the pre-actuation identity
++    /// check plus daemon-local bookkeeping.
++    IdentityBoundUnverifiedStop,
+ }
+ 
+ #[derive(Debug, thiserror::Error)]
+@@ -123,6 +154,10 @@ impl Ownership {
+                 operation: "timestamp stop",
+                 source: std::io::Error::other(error),
+             })?,
++            // `Ownership::stop` returns only after re-observing the verified identity
++            // in the stopped state, so this backend always carries the stronger one.
++            stop_observed: true,
++            guarantee: StopGuarantee::IdentityBoundObservedStop,
+         };
+         self.stops.insert(target.pid, OwnedStop { target: target.clone(), identity: after.identity, receipt: receipt.clone() });
+         Ok(receipt)
+@@ -230,6 +265,8 @@ mod tests {
+         process.acknowledge = true;
+         let receipt = ledger.stop(&target(), &process).expect("acknowledged stop");
+         assert_eq!(receipt.source, SuspensionSource::FerryxOwned);
++        assert!(receipt.stop_observed);
++        assert_eq!(receipt.guarantee, StopGuarantee::IdentityBoundObservedStop);
+         assert_eq!(ledger.classify(&target(), &process).expect("classify"), SuspensionSource::FerryxOwned);
+         ledger.resume(&target(), &process).expect("owned resume");
+         assert_eq!(process.resumes.get(), 1);
+diff --git a/src-tauri/src/terminal/suspension/windows.rs b/src-tauri/src/terminal/suspension/windows.rs
+index 9e8d012d..f501ed18 100644
+--- a/src-tauri/src/terminal/suspension/windows.rs
++++ b/src-tauri/src/terminal/suspension/windows.rs
+@@ -1,49 +1,321 @@
+-use super::{ActuationReceipt, SuspensionError, SuspensionSource, SuspensionTarget};
++//! Windows suspension backend.
++//!
++//! The supported Windows process APIs actuate a stop (`NtSuspendProcess`) and a
++//! resume (`NtResumeProcess`) but cannot report the resulting state: the thread
++//! suspend count is not readable through a documented interface, so a stopped
++//! process is indistinguishable from a running one by any query this daemon can
++//! make. The backend therefore proves two things and admits the third:
++//!
++//! * identity -- the PID and incarnation are checked against the daemon's own PTY
++//!   registry before anything is actuated, so a reused or foreign PID is never
++//!   signalled;
++//! * actuation -- a receipt is minted only after the actuation call succeeded;
++//! * observation -- NOT provable here. Every receipt carries `stop_observed: false`
++//!   and `StopGuarantee::IdentityBoundUnverifiedStop`, and ownership rests on
++//!   daemon-local bookkeeping for this daemon lifetime, never on serialized state or
++//!   a caller-supplied PID.
++//!
++//! Classification stays strict in the safe direction: a stop this daemon actuated is
++//! `FerryxOwned`, and anything else is `Unknown` -- never `External`, which would
++//! claim a proof of someone else's stop that this platform cannot make. Only
++//! `FerryxOwned` is ever resumed, so an unprovable stop is never auto-resumed.
+ 
+-fn unsupported() -> SuspensionError {
+-    SuspensionError::UnsupportedPlatform(
+-        "declared Windows features provide no identity-bound suspension and stop observation backend",
+-    )
++use super::{ActuationReceipt, StopGuarantee, SuspensionError, SuspensionSource, SuspensionTarget};
++use parking_lot::Mutex;
++use std::collections::HashMap;
++use std::sync::OnceLock;
++
++/// The daemon's PTY registry is the only trustworthy answer to "is this PID the
++/// incarnation this daemon spawned?", and this module cannot see it. The daemon
++/// installs its lookup here at boot; until then every actuation is refused.
++type OwnershipVerifier = dyn Fn(u32, &str) -> bool + Send + Sync;
++
++static OWNERSHIP_VERIFIER: OnceLock<Box<OwnershipVerifier>> = OnceLock::new();
++
++/// Install the daemon's ownership authority. Idempotent; the first install wins.
++pub fn install_ownership_verifier(
++    verifier: impl Fn(u32, &str) -> bool + Send + Sync + 'static,
++) {
++    let _ = OWNERSHIP_VERIFIER.set(Box::new(verifier));
++}
++
++fn verifier() -> Option<&'static OwnershipVerifier> {
++    OWNERSHIP_VERIFIER.get().map(|verifier| &**verifier)
++}
++
++fn platform_failure(operation: &'static str, message: String) -> SuspensionError {
++    SuspensionError::PlatformCallFailure {
++        operation,
++        source: std::io::Error::other(message),
++    }
++}
++
++fn timestamp() -> Result<u64, SuspensionError> {
++    let elapsed = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_err(|error| platform_failure("timestamp stop", error.to_string()))?;
++    elapsed
++        .as_millis()
++        .try_into()
++        .map_err(|error: std::num::TryFromIntError| platform_failure("timestamp stop", error.to_string()))
++}
++
++/// Identity gate. A target this daemon cannot attribute is refused, never signalled.
++fn verified(
++    verify: Option<&OwnershipVerifier>,
++    target: &SuspensionTarget,
++) -> Result<(), SuspensionError> {
++    if target.pid == 0 || target.incarnation.is_empty() {
++        return Err(SuspensionError::IdentityMismatch { pid: target.pid });
++    }
++    match verify {
++        Some(verify) if verify(target.pid, target.incarnation.as_str()) => Ok(()),
++        // No authority installed, or a foreign PID: refuse rather than actuate.
++        _ => Err(SuspensionError::NotOwned { pid: target.pid }),
++    }
++}
++
++fn actuate_stop(pid: u32) -> Result<(), SuspensionError> {
++    crate::terminal::session::windows_suspend::suspend_process(pid)
++        .map_err(|message| platform_failure("NtSuspendProcess", message))
++}
++
++fn actuate_resume(pid: u32) -> Result<(), SuspensionError> {
++    crate::terminal::session::windows_suspend::resume_process(pid)
++        .map_err(|message| platform_failure("NtResumeProcess", message))
++}
++
++struct OwnedStop {
++    target: SuspensionTarget,
++    receipt: ActuationReceipt,
++}
++
++/// Daemon-lifetime ownership ledger: the Windows counterpart of the ledger in
++/// `suspension.rs`, and equally never persisted.
++#[derive(Default)]
++struct WindowsOwnership {
++    stops: HashMap<u32, OwnedStop>,
++}
++
++impl WindowsOwnership {
++    fn stop(
++        &mut self,
++        target: &SuspensionTarget,
++        verify: Option<&OwnershipVerifier>,
++        stop_process: impl FnOnce(u32) -> Result<(), SuspensionError>,
++    ) -> Result<ActuationReceipt, SuspensionError> {
++        verified(verify, target)?;
++        stop_process(target.pid)?;
++        let receipt = ActuationReceipt {
++            pid: target.pid,
++            incarnation: target.incarnation.clone(),
++            source: SuspensionSource::FerryxOwned,
++            actuated_at_unix_ms: timestamp()?,
++            stop_observed: false,
++            guarantee: StopGuarantee::IdentityBoundUnverifiedStop,
++        };
++        self.stops.insert(
++            target.pid,
++            OwnedStop {
++                target: target.clone(),
++                receipt: receipt.clone(),
++            },
++        );
++        Ok(receipt)
++    }
++
++    fn classify(
++        &mut self,
++        target: &SuspensionTarget,
++        verify: Option<&OwnershipVerifier>,
++    ) -> Result<SuspensionSource, SuspensionError> {
++        verified(verify, target)?;
++        match self.stops.get(&target.pid) {
++            Some(owned) if owned.target == *target => Ok(owned.receipt.source),
++            Some(_) => {
++                // A new incarnation owns this PID now; the stop is not ours to resume.
++                self.stops.remove(&target.pid);
++                Ok(SuspensionSource::Unknown)
++            }
++            None => Ok(SuspensionSource::Unknown),
++        }
++    }
++
++    fn resume(
++        &mut self,
++        target: &SuspensionTarget,
++        verify: Option<&OwnershipVerifier>,
++        resume_process: impl FnOnce(u32) -> Result<(), SuspensionError>,
++    ) -> Result<(), SuspensionError> {
++        if self.classify(target, verify)? != SuspensionSource::FerryxOwned {
++            return Err(SuspensionError::NotOwned { pid: target.pid });
++        }
++        resume_process(target.pid)?;
++        self.stops.remove(&target.pid);
++        Ok(())
++    }
++}
++
++fn ownership() -> &'static Mutex<WindowsOwnership> {
++    static OWNERSHIP: OnceLock<Mutex<WindowsOwnership>> = OnceLock::new();
++    OWNERSHIP.get_or_init(|| Mutex::new(WindowsOwnership::default()))
+ }
+ 
+ pub(super) fn stop_for_owned_suspension(
+-    _target: &SuspensionTarget,
++    target: &SuspensionTarget,
+ ) -> Result<ActuationReceipt, SuspensionError> {
+-    Err(unsupported())
++    ownership().lock().stop(target, verifier(), actuate_stop)
+ }
+ 
+ pub(super) fn classify_stop_source(
+-    _target: &SuspensionTarget,
++    target: &SuspensionTarget,
+ ) -> Result<SuspensionSource, SuspensionError> {
+-    Err(unsupported())
++    ownership().lock().classify(target, verifier())
+ }
+ 
+-pub(super) fn resume_owned(_target: &SuspensionTarget) -> Result<(), SuspensionError> {
+-    Err(unsupported())
++pub(super) fn resume_owned(target: &SuspensionTarget) -> Result<(), SuspensionError> {
++    ownership().lock().resume(target, verifier(), actuate_resume)
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+-    #[test]
+-    fn unsupported_backend_never_claims_or_resumes_a_stop() {
+-        let target = SuspensionTarget {
++    fn target() -> SuspensionTarget {
++        SuspensionTarget {
+             pid: 42,
+             incarnation: "pane-a".into(),
+-            started_at_unix_ms: Some(100),
+-        };
++            started_at_unix_ms: None,
++        }
++    }
++
++    fn accepts(pid: u32, incarnation: &str) -> bool {
++        pid == 42 && incarnation == "pane-a"
++    }
++
++    #[test]
++    fn unverifiable_identity_is_refused_before_any_actuation() {
++        let mut ledger = WindowsOwnership::default();
++        let mut actuated = false;
++        let result = ledger.stop(&target(), None, |_| {
++            actuated = true;
++            Ok(())
++        });
++        assert!(matches!(result, Err(SuspensionError::NotOwned { pid: 42 })));
++        assert!(!actuated, "an unattributable target must never be signalled");
++
++        let mut foreign = target();
++        foreign.incarnation = "pane-b".into();
++        let authority: &OwnershipVerifier = &accepts;
+         assert!(matches!(
+-            stop_for_owned_suspension(&target),
+-            Err(SuspensionError::UnsupportedPlatform(_))
++            ledger.stop(&foreign, Some(authority), |_| Ok(())),
++            Err(SuspensionError::NotOwned { pid: 42 })
+         ));
+         assert!(matches!(
+-            classify_stop_source(&target),
+-            Err(SuspensionError::UnsupportedPlatform(_))
++            ledger.stop(
++                &SuspensionTarget { pid: 0, ..target() },
++                Some(authority),
++                |_| Ok(())
++            ),
++            Err(SuspensionError::IdentityMismatch { pid: 0 })
+         ));
++    }
++
++    #[test]
++    fn actuation_mints_a_receipt_that_admits_the_missing_observation() {
++        let mut ledger = WindowsOwnership::default();
++        let mut actuated = 0;
++        let authority: &OwnershipVerifier = &accepts;
++        let receipt = ledger
++            .stop(&target(), Some(authority), |pid| {
++                assert_eq!(pid, 42);
++                actuated += 1;
++                Ok(())
++            })
++            .expect("identity-bound actuation");
++        assert_eq!(actuated, 1);
++        assert_eq!(receipt.pid, 42);
++        assert_eq!(receipt.incarnation, "pane-a");
++        assert_eq!(receipt.source, SuspensionSource::FerryxOwned);
++        assert!(!receipt.stop_observed);
++        assert_eq!(receipt.guarantee, StopGuarantee::IdentityBoundUnverifiedStop);
++    }
++
++    #[test]
++    fn a_failed_actuation_mints_no_receipt_and_claims_no_ownership() {
++        let mut ledger = WindowsOwnership::default();
++        let authority: &OwnershipVerifier = &accepts;
++        let failed = ledger.stop(&target(), Some(authority), |_| {
++            Err(platform_failure("NtSuspendProcess", "denied".into()))
++        });
++        assert!(matches!(
++            failed,
++            Err(SuspensionError::PlatformCallFailure { .. })
++        ));
++        assert!(ledger.stops.is_empty());
++        assert_eq!(
++            ledger.classify(&target(), Some(authority)).expect("classify"),
++            SuspensionSource::Unknown
++        );
++    }
++
++    #[test]
++    fn only_an_owned_stop_is_resumed() {
++        let mut ledger = WindowsOwnership::default();
++        let authority: &OwnershipVerifier = &accepts;
++        let mut resumed = 0;
+         assert!(matches!(
+-            resume_owned(&target),
+-            Err(SuspensionError::UnsupportedPlatform(_))
++            ledger.resume(&target(), Some(authority), |_| {
++                resumed += 1;
++                Ok(())
++            }),
++            Err(SuspensionError::NotOwned { pid: 42 })
+         ));
++        assert_eq!(resumed, 0);
++
++        ledger
++            .stop(&target(), Some(authority), |_| Ok(()))
++            .expect("stop");
++        ledger
++            .resume(&target(), Some(authority), |_| {
++                resumed += 1;
++                Ok(())
++            })
++            .expect("owned resume");
++        assert_eq!(resumed, 1);
++        assert_eq!(
++            ledger.classify(&target(), Some(authority)).expect("classify"),
++            SuspensionSource::Unknown
++        );
++    }
++
++    #[test]
++    fn an_unprovable_stop_is_never_reported_as_external() {
++        let mut ledger = WindowsOwnership::default();
++        let authority: &OwnershipVerifier = &accepts;
++        assert_eq!(
++            ledger.classify(&target(), Some(authority)).expect("classify"),
++            SuspensionSource::Unknown
++        );
++    }
++
++    #[test]
++    fn reused_pid_with_a_new_incarnation_revokes_the_owned_stop() {
++        let mut ledger = WindowsOwnership::default();
++        let authority: &OwnershipVerifier = &accepts;
++        ledger
++            .stop(&target(), Some(authority), |_| Ok(()))
++            .expect("stop");
++        let mut replacement = target();
++        replacement.incarnation = "pane-b".into();
++        let accepts_replacement = |pid: u32, incarnation: &str| pid == 42 && incarnation == "pane-b";
++        let authority: &OwnershipVerifier = &accepts_replacement;
++        assert_eq!(
++            ledger
++                .classify(&replacement, Some(authority))
++                .expect("classify"),
++            SuspensionSource::Unknown
++        );
++        assert!(ledger.stops.is_empty());
+     }
+ }

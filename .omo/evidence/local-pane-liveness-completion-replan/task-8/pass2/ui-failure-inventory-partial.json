@@ -1,0 +1,24 @@
+{
+  "status": "INCOMPLETE_FULL_SUITE_PENDING",
+  "linux": [
+    "src/components/NativeTerminalPane.test.tsx",
+    "src/App.test.tsx",
+    "src/remote/RemoteUI.test.tsx",
+    "src/App.notifications.test.tsx",
+    "src/components/settings/RemoteSection.test.tsx",
+    "src/components/TerminalSplitView.test.tsx",
+    "src/components/settings/SshSection.test.tsx",
+    "src/remote/accountSession.test.ts",
+    "src/components/Sidebar.test.tsx",
+    "src/remote/RemoteAppWorktreeRestore.test.tsx",
+    "src/remote/RemoteApp.accountSession.test.tsx",
+    "src/state/workspaceRestore.test.tsx",
+    "src/components/SettingsDialog.test.tsx"
+  ],
+  "windows": "first NativeTerminalPane test still executing at snapshot",
+  "mandatoryAB": [
+    "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+    "src/lib/pairedDaemonRollout.test.ts"
+  ],
+  "classification": "NONE pending exact corresponding-host base evidence"
+}

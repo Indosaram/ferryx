@@ -54,6 +54,9 @@ import {
   resizeTerminalRemote,
   onTerminalRemoteStatus,
   describeRejection,
+  getAccountEnrollmentStatus,
+  enrollThisMachine,
+  type AccountEnrollmentStatus,
 } from "./tauri";
 
 describe("describeRejection", () => {
@@ -166,6 +169,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: null,
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
@@ -191,6 +197,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: "pwsh",
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });
@@ -241,6 +250,9 @@ describe("Tauri IPC wrapper contract", () => {
           providerSession: { key: "session_id", id: "provider-1" },
         },
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });
@@ -788,5 +800,34 @@ describe("dispatchNotification", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_notification_dispatch", {
       request: payload,
     });
+  });
+});
+
+describe("account enrollment API", () => {
+  it("invokes cmd_account_enrollment_status and returns status", async () => {
+    const status: AccountEnrollmentStatus = {
+      enrolled: true,
+      accountOrigin: "https://relay.example.com",
+      enrolledAt: 123456789,
+    };
+    core.invoke.mockResolvedValueOnce(status);
+    const result = await getAccountEnrollmentStatus();
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_enrollment_status", undefined);
+    expect(result).toEqual(status);
+  });
+
+  it("invokes cmd_account_enroll_this_machine with origin and code", async () => {
+    const status: AccountEnrollmentStatus = {
+      enrolled: true,
+      accountOrigin: "https://relay.example.com",
+      enrolledAt: 123456789,
+    };
+    core.invoke.mockResolvedValueOnce(status);
+    const result = await enrollThisMachine("https://relay.example.com", "code-123");
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_enroll_this_machine", {
+      origin: "https://relay.example.com",
+      enrollmentCode: "code-123",
+    });
+    expect(result).toEqual(status);
   });
 });

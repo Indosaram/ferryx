@@ -1,0 +1,432 @@
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source\src-tauri)
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/contracts.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:99:53
+    |
+ 99 |       let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+    |  _____________________________________________________^
+100 | |         "../../../docs/evidence/paired-daemon/fixtures/contracts.json"
+101 | |     ))
+    | |_____^
+
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/lifecycle.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:148:53
+    |
+148 |       let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+    |  _____________________________________________________^
+149 | |         "../../../docs/evidence/paired-daemon/fixtures/lifecycle.json"
+150 | |     ))
+    | |_____^
+
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/descriptor.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:172:50
+    |
+172 |       let descriptor: Value = serde_json::from_str(include_str!(
+    |  __________________________________________________^
+173 | |         "../../../docs/evidence/paired-daemon/fixtures/descriptor.json"
+174 | |     ))
+    | |_____^
+
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/identities.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:187:53
+    |
+187 |       let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+    |  _____________________________________________________^
+188 | |         "../../../docs/evidence/paired-daemon/fixtures/identities.json"
+189 | |     ))
+    | |_____^
+
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/contracts.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:210:50
+    |
+210 |       let valid: Vec<Value> = serde_json::from_str(include_str!(
+    |  __________________________________________________^
+211 | |         "../../../docs/evidence/paired-daemon/fixtures/contracts.json"
+212 | |     ))
+    | |_____^
+
+error: couldn't read `src\remote\../../../docs/evidence/paired-daemon/fixtures/invalid.json`: 吏?뺣맂 寃쎈줈瑜?李얠쓣 ???놁뒿?덈떎. (os error 3)
+   --> src\remote\machine_protocol_tests.rs:214:52
+    |
+214 |       let invalid: Vec<Value> = serde_json::from_str(include_str!(
+    |  ____________________________________________________^
+215 | |         "../../../docs/evidence/paired-daemon/fixtures/invalid.json"
+216 | |     ))
+    | |_____^
+
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `is_v5_ownership_transfer_enabled`
+  --> src\daemon\handover.rs:76:31
+   |
+76 |         idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+ --> src\daemon\server.rs:7:5
+  |
+7 | use crate::daemon::protocol::AgentProviderSessionKey;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:306:9
+    |
+306 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\ipc\remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `super::*`
+   --> src\native_terminal\renderer\color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src\remote\attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src\remote\attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src\remote\machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::terminal::session::PtySessionSnapshot`
+ --> src\terminal\pty.rs:4:5
+  |
+4 | use crate::terminal::session::PtySessionSnapshot;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1594:9
+     |
+1594 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1595:9
+     |
+1595 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1596:9
+     |
+1596 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0609]: no field `reader_paused` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:839:36
+    |
+839 |                 assert_eq!(session.reader_paused, None);
+    |                                    ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `kernel_stopped` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:840:36
+    |
+840 |                 assert_eq!(session.kernel_stopped, None);
+    |                                    ^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `registry_suspended` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:841:36
+    |
+841 |                 assert_eq!(session.registry_suspended, None);
+    |                                    ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `suspension_source` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:842:36
+    |
+842 |                 assert_eq!(session.suspension_source, None);
+    |                                    ^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `reader_paused` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:865:36
+    |
+865 |                 assert_eq!(session.reader_paused, Some(true));
+    |                                    ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `kernel_stopped` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:866:36
+    |
+866 |                 assert_eq!(session.kernel_stopped, Some(false));
+    |                                    ^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `registry_suspended` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:867:36
+    |
+867 |                 assert_eq!(session.registry_suspended, Some(true));
+    |                                    ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0609]: no field `suspension_source` on type `daemon::protocol::DaemonSessionDetails`
+   --> src\ipc\debug.rs:868:36
+    |
+868 |                 assert_eq!(session.suspension_source.as_deref(), Some("unknown"));
+    |                                    ^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `session_id`, `workspace_id`, `worktree`, `cwd`, `cols` ... and 6 others
+
+error[E0599]: no associated function or constant named `new` found for struct `daemon::protocol::DaemonSessionDetails` in the current scope
+   --> src\ipc\debug.rs:873:45
+    |
+873 |         let details = DaemonSessionDetails::new(
+    |                                             ^^^ associated function or constant not found in `daemon::protocol::DaemonSessionDetails`
+    |
+   ::: src\daemon\protocol.rs:98:1
+    |
+ 98 | pub struct DaemonSessionDetails {
+    | ------------------------------- associated function or constant `new` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following traits define an item `new`, perhaps you need to implement one of them:
+            candidate #1: `Bit`
+            candidate #2: `KeyInit`
+            candidate #3: `KeyIvInit`
+            candidate #4: `UniformSampler`
+            candidate #5: `VariableOutput`
+            candidate #6: `VariableOutputCore`
+            candidate #7: `brotli::enc::backward_references::hash_to_binary_tree::Allocable`
+            candidate #8: `brotli::enc::threading::AnyBoxConstructor`
+            candidate #9: `curve25519_dalek::traits::VartimePrecomputedMultiscalarMul`
+            candidate #10: `notify::Watcher`
+            candidate #11: `parking_lot_core::thread_parker::ThreadParkerT`
+            candidate #12: `rand::distr::uniform::UniformSampler`
+            candidate #13: `rand::distr::uniform::UniformSampler`
+            candidate #14: `ring::aead::BoundKey`
+            candidate #15: `serde_with::duplicate_key_impls::error_on_duplicate::PreventDuplicateInsertsMap`
+            candidate #16: `serde_with::duplicate_key_impls::error_on_duplicate::PreventDuplicateInsertsSet`
+            candidate #17: `serde_with::duplicate_key_impls::first_value_wins::DuplicateInsertsFirstWinsMap`
+            candidate #18: `serde_with::duplicate_key_impls::last_value_wins::DuplicateInsertsLastWinsSet`
+            candidate #19: `sha1::Digest`
+            candidate #20: `sha1::digest::Mac`
+            candidate #21: `symphonia_core::meta::MetadataReader`
+            candidate #22: `tauri_runtime::Runtime`
+            candidate #23: `tauri_runtime::window::WindowBuilder`
+            candidate #24: `wgpu::dispatch::InstanceInterface`
+            candidate #25: `zip::read::magic_finder::FinderDirection`
+help: there is a method `ne` with a similar name, but with different arguments
+   --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\cmp.rs:263:4
+
+warning: unused import: `base64::Engine`
+   --> src\remote\account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `handover_socket_path`
+    --> src\daemon\server.rs:3726:54
+     |
+3726 |                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+     |                                                      ^^^^^^^^^^^^^^^^^^^^ help: try ignoring the field: `handover_socket_path: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `host`
+   --> src\ipc\remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unused variable: `super_key`
+   --> src\native_terminal\input.rs:372:13
+    |
+372 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:5697:13
+     |
+5697 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:5748:13
+     |
+5748 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src\native_terminal\surface_host.rs:8423:13
+     |
+8423 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src\native_terminal\surface_host.rs:8433:13
+     |
+8433 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: unused variable: `hook`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1154:13
+     |
+1154 |         let hook = root.path().join("repo/.git/hooks/post-checkout");
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1155:13
+     |
+1155 |         let port = ready.local_addr().unwrap().port();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:671:9
+    |
+671 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:719:9
+    |
+719 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2501:13
+     |
+2501 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2531:13
+     |
+2531 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `c_pid`
+    --> src\ssh\bridge.rs:2569:13
+     |
+2569 |         let c_pid = c_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_pid`
+
+warning: unused variable: `r_pid`
+    --> src\ssh\bridge.rs:2570:13
+     |
+2570 |         let r_pid = r_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_r_pid`
+
+warning: unused variable: `initial_len`
+   --> src\ssh\projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: value assigned to `desired_size` is never read
+    --> src\terminal\remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pid1`
+    --> src\terminal\remote.rs:1705:13
+     |
+1705 |         let pid1 = child1.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid1`
+
+warning: unused variable: `pid2`
+    --> src\terminal\remote.rs:1706:13
+     |
+1706 |         let pid2 = child2.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid2`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src\lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0599, E0609.
+For more information about an error, try `rustc --explain E0599`.
+warning: `ferryx` (lib test) generated 41 warnings
+error: could not compile `ferryx` (lib test) due to 15 previous errors; 41 warnings emitted

@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "runId": "local-pane-liveness-completion-task-1",
+  "generatedAt": "2026-10-03T14:04:37.906Z",
+  "plan": ".omo/plans/local-pane-liveness-completion-replan.md",
+  "nativeGuiPermission": {
+    "requested": true,
+    "granted": false,
+    "notes": "Native GUI permission requested but not granted; execution is strictly read-only remote preflight."
+  },
+  "signingHostSplit": {
+    "macosBuildHost": "maho-mac",
+    "macosSignAndNotaryHost": "macbook",
+    "reason": "maho-mac holds Developer ID Application identity but lacks FerryxNotary keychain profile; local coordinator macbook holds both Developer ID Application and functional FerryxNotary profile."
+  },
+  "hosts": {
+    "maho-win": {
+      "role": "remote-windows-verifier-and-builder",
+      "platform": "win32",
+      "arch": "x64",
+      "ssh": {
+        "target": "sook@100.126.171.58",
+        "key": "/Users/indo/code/project/maho-workspace/.secrets/signing/maho_win_builder_ed25519",
+        "options": [
+          "-o BatchMode=yes",
+          "-o StrictHostKeyChecking=accept-new",
+          "-o ConnectTimeout=15"
+        ]
+      },
+      "actualIdentity": {
+        "user": "desktop-1lapjmp\\sook",
+        "hostname": "DESKTOP-1LAPJMP",
+        "osVersion": "Microsoft Windows [Version 10.0.26200.9457]",
+        "processorArchitecture": "AMD64"
+      },
+      "diskSpace": {
+        "drive": "C",
+        "freeBytes": 272011862016,
+        "freeGb": 253.33,
+        "usedGb": 677.18,
+        "totalGb": 930.51,
+        "meetsMinBudget20Gb": true
+      },
+      "exitCaptureValidation": {
+        "cmdExit7": 7,
+        "cmdExit7LastExitUnbound": "",
+        "cmdExit0": 0,
+        "cmdExit0LastExitUnbound": "",
+        "valid": true,
+        "method": "transferred PS1 script powershell.exe -NoProfile -File",
+        "cleanupReceipt": "Remove-Item succeeded; Test-Path returned False"
+      },
+      "toolchains": {
+        "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+        "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+        "cargoTauri": "tauri-cli 2.11.4",
+        "git": "git version 2.55.0.windows.2",
+        "node": "v24.19.0",
+        "bun": "1.4.0",
+        "zig": "0.16.0",
+        "rustupDefault": "stable-x86_64-pc-windows-msvc"
+      },
+      "ghostty": {
+        "root": "C:\\Users\\sook\\task2-ghostty-6a508fd5",
+        "headSha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+        "isExpectedPin": true,
+        "isClean": true,
+        "junctionTarget": "mklink /J <tree>\\src-tauri\\vendor\\ghostty C:\\Users\\sook\\task2-ghostty-6a508fd5"
+      },
+      "signingPackaging": {
+        "signtoolFound": true,
+        "signtoolPath": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\signtool.exe",
+        "makeappxFound": true,
+        "makeappxPath": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\makeappx.exe",
+        "certStoreChecked": true,
+        "hasCertificates": true,
+        "msixIngestionMode": "unsigned Store ingestion per runbook"
+      },
+      "remotePaths": {
+        "parent": "C:\\Users\\sook\\ferryx-pane-completion",
+        "status": "FREE",
+        "source": "C:\\Users\\sook\\ferryx-pane-completion\\source",
+        "binary": "C:\\Users\\sook\\ferryx-pane-completion\\source\\src-tauri\\target\\debug\\ferryx.exe",
+        "evidence": "C:\\Users\\sook\\ferryx-pane-completion\\evidence",
+        "runtime": "C:\\Users\\sook\\ferryx-pane-completion\\runtime"
+      }
+    },
+    "maho-mac": {
+      "role": "remote-macos-builder-and-native-verifier",
+      "platform": "darwin",
+      "arch": "arm64",
+      "ssh": {
+        "target": "I552267@100.65.239.35",
+        "options": [
+          "-o BatchMode=yes",
+          "-o StrictHostKeyChecking=accept-new",
+          "-o ConnectTimeout=15"
+        ]
+      },
+      "actualIdentity": {
+        "user": "I552267",
+        "hostname": "CQFQ4P2LXK",
+        "os": "Darwin arm64"
+      },
+      "diskSpace": {
+        "filesystem": "/System/Volumes/Data",
+        "freeBytes": 27540705280,
+        "freeGb": 27.51,
+        "usedGb": 412.67,
+        "capacityPercent": 94,
+        "meetsMinBudget20Gb": true
+      },
+      "toolchains": {
+        "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+        "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+        "tauriCli": "tauri-cli 2.10.1 (/Users/I552267/.bun/bin/tauri)",
+        "zig": "0.16.0 (/opt/homebrew/bin/zig)",
+        "git": "git version 2.54.0 (Apple Git-157)",
+        "node": "v22.23.1 (/Users/I552267/.local/bin/node)",
+        "bun": "1.4.2 (/Users/I552267/.bun/bin/bun)",
+        "xcodebuild": "Xcode 27.0 (Build version 27A266a)"
+      },
+      "ghostty": {
+        "root": "/Users/I552267/ferryx-ghostty",
+        "headSha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+        "isExpectedPin": true,
+        "isClean": true,
+        "symlinkTarget": "ln -s /Users/I552267/ferryx-ghostty <tree>/src-tauri/vendor/ghostty"
+      },
+      "signingPackaging": {
+        "hasDeveloperIdIdentity": true,
+        "identityHash": "0D2E16F5ACE28557225CFB0294CE45E4953EBDDB",
+        "identityName": "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+        "hasNotaryProfileOnMahoMac": false,
+        "notaryProfileNote": "Profile FerryxNotary resides on local macbook coordinator; retrieve app bundle and finalize locally."
+      },
+      "remotePaths": {
+        "parent": "/Users/I552267/ferryx-pane-completion",
+        "status": "FREE",
+        "source": "/Users/I552267/ferryx-pane-completion/source",
+        "binary": "/Users/I552267/ferryx-pane-completion/source/src-tauri/target/debug/ferryx",
+        "evidence": "/Users/I552267/ferryx-pane-completion/evidence",
+        "runtime": "/Users/I552267/ferryx-pane-completion/runtime"
+      }
+    },
+    "omaki": {
+      "role": "authorized-linux-builder",
+      "platform": "linux",
+      "arch": "x86_64",
+      "provenance": "scripts/lib/release-contract.mjs and scripts/release-hosts.example.json",
+      "ssh": {
+        "target": "indo@100.91.254.71",
+        "options": [
+          "-o BatchMode=yes",
+          "-o StrictHostKeyChecking=accept-new",
+          "-o ConnectTimeout=15"
+        ]
+      },
+      "actualIdentity": {
+        "user": "indo",
+        "hostname": "indo",
+        "os": "Linux x86_64"
+      },
+      "diskSpace": {
+        "filesystem": "/dev/mapper/root on /home",
+        "freeBytes": 115895750656,
+        "freeGb": 115.89,
+        "usedGb": 865.5,
+        "usePercent": 89,
+        "meetsMinBudget20Gb": true
+      },
+      "toolchains": {
+        "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+        "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+        "zig": "0.16.0 (/usr/local/bin/zig)",
+        "git": "git version 2.55.0",
+        "node": "v26.8.1 (/usr/local/bin/node)",
+        "bun": "1.4.0 (/home/indo/.bun/bin/bun)"
+      },
+      "ghostty": {
+        "root": "/home/indo/ghostty.bundle",
+        "headSha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+        "isExpectedPin": true,
+        "verification": "Bare clone verified HEAD commit matches expected pin; probe directory cleaned up"
+      },
+      "remotePaths": {
+        "parent": "/home/indo/ferryx-pane-completion",
+        "status": "FREE",
+        "source": "/home/indo/ferryx-pane-completion/source",
+        "binary": "/home/indo/ferryx-pane-completion/source/src-tauri/target/debug/ferryx",
+        "evidence": "/home/indo/ferryx-pane-completion/evidence",
+        "runtime": "/home/indo/ferryx-pane-completion/runtime"
+      }
+    }
+  }
+}

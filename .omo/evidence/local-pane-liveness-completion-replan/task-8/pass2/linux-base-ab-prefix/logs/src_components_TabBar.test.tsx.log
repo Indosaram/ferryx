@@ -1,0 +1,147 @@
+$ vitest run --maxWorkers=1 src/components/TabBar.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036462) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/TabBar.test.tsx (23 tests | 23 failed) 232ms
+   × TabBar > routes activate, close, and new-tab actions through real callbacks 80ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > renders the resolved display text and tooltip instead of the raw label 9ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > supports keyboard tab activation 12ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > renders leading working, waiting, and unread indicators with attention precedence 9ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > keeps whole-tab split actions separate from terminal-pane split actions 7ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > includes reset-agent-state in context menu and calls onResetAgentState for terminal tab 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > no longer offers copy-debug-info in the terminal tab menu 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > keeps pin state controlled by the workspace model and blocks pinned-tab close 9ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > commits trimmed title changes and cancels rename on Escape 15ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > exposes dnd-kit sortable metadata scoped to its tab group instead of global DOM hit testing 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > opens browser tabs from the action-only menu and keeps popovers out of window dragging 10ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > passes the configured homepage when opening a browser tab from the new-tab menu 9ms
+     → expected "spy" to be called with arguments: [ 'https://example.com/start' ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[32m-   "https://example.com/start",[90m
+[31m+   "about:blank",[90m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > disables terminal split for browser tabs while preserving whole-tab split 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > keeps Tauri window dragging on strip background without making tabs native drag regions 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > renders new tab trigger and popover outside the horizontal overflow tablist container to avoid vertical clipping 7ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > forwards launchable agents with brand icons and triggers onLaunchAgent from the new tab menu 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > forwards defaultAgentId so the usable default is first with a Default label 13ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > memoizes SortableTab with React.memo 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > stabilizes onCancelRename callback across all rendered tabs 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > memoizes SortableContext items array across re-renders when tabs are stable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > offers Windows terminal shell options in the new-tab menu on a Windows host and forwards selected shell to onAdd 9ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > does not offer Windows shell options in the new-tab menu on a macos host 7ms
+     → Cannot read properties of undefined (reading 'clear')
+   × TabBar > does not offer Windows shell options in the new-tab menu on a linux host 9ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 23 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TabBar.test.tsx > TabBar > routes activate, close, and new-tab actions through real callbacks
+ FAIL  src/components/TabBar.test.tsx > TabBar > renders the resolved display text and tooltip instead of the raw label
+ FAIL  src/components/TabBar.test.tsx > TabBar > supports keyboard tab activation
+ FAIL  src/components/TabBar.test.tsx > TabBar > renders leading working, waiting, and unread indicators with attention precedence
+ FAIL  src/components/TabBar.test.tsx > TabBar > keeps whole-tab split actions separate from terminal-pane split actions
+ FAIL  src/components/TabBar.test.tsx > TabBar > includes reset-agent-state in context menu and calls onResetAgentState for terminal tab
+ FAIL  src/components/TabBar.test.tsx > TabBar > no longer offers copy-debug-info in the terminal tab menu
+ FAIL  src/components/TabBar.test.tsx > TabBar > keeps pin state controlled by the workspace model and blocks pinned-tab close
+ FAIL  src/components/TabBar.test.tsx > TabBar > commits trimmed title changes and cancels rename on Escape
+ FAIL  src/components/TabBar.test.tsx > TabBar > exposes dnd-kit sortable metadata scoped to its tab group instead of global DOM hit testing
+ FAIL  src/components/TabBar.test.tsx > TabBar > opens browser tabs from the action-only menu and keeps popovers out of window dragging
+ FAIL  src/components/TabBar.test.tsx > TabBar > passes the configured homepage when opening a browser tab from the new-tab menu
+ FAIL  src/components/TabBar.test.tsx > TabBar > disables terminal split for browser tabs while preserving whole-tab split
+ FAIL  src/components/TabBar.test.tsx > TabBar > keeps Tauri window dragging on strip background without making tabs native drag regions
+ FAIL  src/components/TabBar.test.tsx > TabBar > renders new tab trigger and popover outside the horizontal overflow tablist container to avoid vertical clipping
+ FAIL  src/components/TabBar.test.tsx > TabBar > forwards launchable agents with brand icons and triggers onLaunchAgent from the new tab menu
+ FAIL  src/components/TabBar.test.tsx > TabBar > forwards defaultAgentId so the usable default is first with a Default label
+ FAIL  src/components/TabBar.test.tsx > TabBar > memoizes SortableTab with React.memo
+ FAIL  src/components/TabBar.test.tsx > TabBar > stabilizes onCancelRename callback across all rendered tabs
+ FAIL  src/components/TabBar.test.tsx > TabBar > memoizes SortableContext items array across re-renders when tabs are stable
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TabBar.test.tsx:119:16
+    117|   nativeWindow.startDragging.mockClear();
+    118|   nativeMenu.lastCall = null;
+    119|   localStorage.clear();
+       |                ^
+    120|   clearSleepingSessions();
+    121| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/24]⎯
+
+ FAIL  src/components/TabBar.test.tsx > TabBar > passes the configured homepage when opening a browser tab from the new-tab menu
+AssertionError: expected "spy" to be called with arguments: [ 'https://example.com/start' ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[32m-   "https://example.com/start",[90m
+[31m+   "about:blank",[90m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/components/TabBar.test.tsx:441:26
+    439|     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    440|     clickMenuItem("new-browser");
+    441|     expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/sta…
+       |                          ^
+    442|   });
+    443| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/24]⎯
+
+ FAIL  src/components/TabBar.test.tsx > TabBar > offers Windows terminal shell options in the new-tab menu on a Windows host and forwards selected shell to onAdd
+ FAIL  src/components/TabBar.test.tsx > TabBar > does not offer Windows shell options in the new-tab menu on a macos host
+ FAIL  src/components/TabBar.test.tsx > TabBar > does not offer Windows shell options in the new-tab menu on a linux host
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TabBar.test.tsx:119:16
+    117|   nativeWindow.startDragging.mockClear();
+    118|   nativeMenu.lastCall = null;
+    119|   localStorage.clear();
+       |                ^
+    120|   clearSleepingSessions();
+    121| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/24]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  23 failed (23)
+   Start at  10:09:19
+   Duration  1.39s (transform 226ms, setup 106ms, collect 658ms, tests 232ms, environment 219ms, prepare 54ms)
+
+error: script "test" exited with code 1

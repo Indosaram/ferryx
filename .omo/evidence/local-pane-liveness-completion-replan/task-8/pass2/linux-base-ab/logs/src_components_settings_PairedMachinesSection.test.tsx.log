@@ -1,0 +1,49 @@
+$ vitest run --maxWorkers=1 src/components/settings/PairedMachinesSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041018) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/PairedMachinesSection.test.tsx (7 tests | 7 failed) 7ms
+   × refresh preserves host selection, generation, and saved layout bytes 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × requires explicit confirmation before native credential forget, and cancel preserves credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × does not classify incompatible hosts as merely offline: {"grantScope":"mirror"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × does not classify incompatible hosts as merely offline: {"authStatus":"revoked"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × pairs and re-pairs only through native inventory and never selects a mirror host 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × pairs with the PIN alone using the built-in relay and default label 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fails closed without native inventory and exposes stale generation errors from capability negotiation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > refresh preserves host selection, generation, and saved layout bytes
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > requires explicit confirmation before native credential forget, and cancel preserves credentials
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > does not classify incompatible hosts as merely offline: {"grantScope":"mirror"}
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > does not classify incompatible hosts as merely offline: {"authStatus":"revoked"}
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > pairs and re-pairs only through native inventory and never selects a mirror host
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > pairs with the PIN alone using the built-in relay and default label
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx > fails closed without native inventory and exposes stale generation errors from capability negotiation
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/PairedMachinesSection.test.tsx:20:33
+     18|   return { store, commands, inventory };
+     19| }
+     20| beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); });
+       |                                 ^
+     21| afterEach(cleanup);
+     22| it("refresh preserves host selection, generation, and saved layout byt…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  10:10:29
+   Duration  647ms (transform 139ms, setup 98ms, collect 161ms, tests 7ms, environment 220ms, prepare 44ms)
+
+error: script "test" exited with code 1

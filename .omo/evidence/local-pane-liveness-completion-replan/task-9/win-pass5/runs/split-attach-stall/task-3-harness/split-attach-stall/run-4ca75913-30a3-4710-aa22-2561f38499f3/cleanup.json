@@ -1,0 +1,23 @@
+{
+  "registered": {
+    "processes": [],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-15042b0f\\runtime\\split-attach-stall"
+    ]
+  },
+  "reaped": [],
+  "receipts": [
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\ferryx-pane-completion\\task9-15042b0f\\runtime\\split-attach-stall",
+      "removed": false
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false
+  }
+}

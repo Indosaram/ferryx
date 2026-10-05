@@ -1,0 +1,644 @@
+   Compiling ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri)
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src/browser/snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:22:5
+   |
+22 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src/remote/session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src/remote/server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:442:9
+    |
+442 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+    --> src/ipc/native_terminal.rs:3593:13
+     |
+3593 |         use serde_json::Value;
+     |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:5389:13
+     |
+5389 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:5413:13
+     |
+5413 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src/ipc/pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/native_terminal/renderer/color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+     --> src/native_terminal/surface_host.rs:10421:13
+      |
+10421 |         use serde_json::Value;
+      |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src/remote/machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncBufReadExt`
+    --> src/ssh/bridge_tests.rs:1968:9
+     |
+1968 |     use tokio::io::AsyncBufReadExt;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `session_service` found for reference `&std::sync::Arc<DaemonServer>` in the current scope
+    --> src/daemon/qa_producers.rs:458:31
+     |
+ 458 |         let metadata = server.session_service().session_metadata.read();
+     |                               ^^^^^^^^^^^^^^^-- help: remove the arguments
+     |                               |
+     |                               field, not a method
+     |
+help: there is a method `session_is_live` with a similar name, but with different arguments
+    --> src/daemon/session_service.rs:2454:5
+     |
+2454 |     pub(super) fn session_is_live(&self, session_id: &str) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/daemon/server.rs:2923:83
+     |
+2923 | ...                   crate::daemon::qa_producers::describe_incarnation(self, &session_id);
+     |                       ------------------------------------------------- ^^^^ expected `&DaemonServer`, found `Arc<DaemonServer>`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected reference `&DaemonServer`
+                   found struct `std::sync::Arc<DaemonServer>`
+note: function defined here
+    --> src/daemon/qa_producers.rs:368:8
+     |
+ 368 | pub fn describe_incarnation(
+     |        ^^^^^^^^^^^^^^^^^^^^
+ 369 |     server: &super::server::DaemonServer,
+     |     ------------------------------------
+help: consider borrowing here
+     |
+2923 |                                 crate::daemon::qa_producers::describe_incarnation(&self, &session_id);
+     |                                                                                   +
+
+error[E0308]: mismatched types
+    --> src/ipc/terminal.rs:2487:45
+     |
+2487 |                 let state = operation_state(&operation).to_string();
+     |                             --------------- ^^^^^^^^^^ expected `&SplitOperationResult<String>`, found `&SplitOperationResult`
+     |                             |
+     |                             arguments to this function are incorrect
+     |
+     = note: expected reference `&SplitOperationResult<std::string::String>`
+                found reference `&SplitOperationResult<u64>`
+note: function defined here
+    --> src/ipc/terminal.rs:1934:8
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |        ^^^^^^^^^^^^^^^ ------------------------------------
+
+error[E0308]: mismatched types
+    --> src/ipc/terminal.rs:3205:33
+     |
+3205 |                 operation_state(&operation),
+     |                 --------------- ^^^^^^^^^^ expected `&SplitOperationResult<String>`, found `&SplitOperationResult`
+     |                 |
+     |                 arguments to this function are incorrect
+     |
+     = note: expected reference `&SplitOperationResult<std::string::String>`
+                found reference `&SplitOperationResult<u64>`
+note: function defined here
+    --> src/ipc/terminal.rs:1934:8
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |        ^^^^^^^^^^^^^^^ ------------------------------------
+
+error[E0631]: type mismatch in function arguments
+    --> src/ipc/terminal.rs:3206:37
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |     ------------------------------------------------------------------------ found signature defined here
+...
+3206 |                 status.as_ref().map(operation_state),
+     |                                 --- ^^^^^^^^^^^^^^^ expected due to this
+     |                                 |
+     |                                 required by a bound introduced by this call
+     |
+     = note: expected function signature `fn(&SplitOperationResult<u64>) -> _`
+                found function signature `fn(&SplitOperationResult<std::string::String>) -> _`
+note: required by a bound in `std::option::Option::<T>::map`
+    --> /home/indo/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1160:12
+     |
+1158 |     pub const fn map<U, F>(self, f: F) -> Option<U>
+     |                  --- required by a bound in this associated function
+1159 |     where
+1160 |         F: [const] FnOnce(T) -> U + [const] Destruct,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Option::<T>::map`
+help: consider wrapping the function in a closure
+     |
+3206 |                 status.as_ref().map(|arg0: &SplitOperationResult| operation_state(/* &SplitOperationResult<std::string::String> */)),
+     |                                     +++++++++++++++++++++++++++++                ++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0308]: mismatched types
+    --> src/daemon/server.rs:2923:83
+     |
+2923 | ...                   crate::daemon::qa_producers::describe_incarnation(self, &session_id);
+     |                       ------------------------------------------------- ^^^^ expected `&DaemonServer`, found `Arc<DaemonServer>`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected reference `&daemon::server::DaemonServer`
+                   found struct `std::sync::Arc<daemon::server::DaemonServer>`
+note: function defined here
+    --> src/daemon/qa_producers.rs:368:8
+     |
+ 368 | pub fn describe_incarnation(
+     |        ^^^^^^^^^^^^^^^^^^^^
+ 369 |     server: &super::server::DaemonServer,
+     |     ------------------------------------
+help: consider borrowing here
+     |
+2923 |                                 crate::daemon::qa_producers::describe_incarnation(&self, &session_id);
+     |                                                                                   +
+
+error[E0599]: no method named `session_service` found for reference `&DaemonServer` in the current scope
+    --> src/daemon/qa_producers.rs:372:18
+     |
+ 372 |     match server.session_service().handle_describe_session(session_id) {
+     |                  ^^^^^^^^^^^^^^^-- help: remove the arguments
+     |                  |
+     |                  field, not a method
+     |
+help: there is a method `session_is_live` with a similar name, but with different arguments
+    --> src/daemon/session_service.rs:2454:5
+     |
+2454 |     pub(super) fn session_is_live(&self, session_id: &str) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/ipc/terminal.rs:2487:45
+     |
+2487 |                 let state = operation_state(&operation).to_string();
+     |                             --------------- ^^^^^^^^^^ expected `&SplitOperationResult<String>`, found `&SplitOperationResult`
+     |                             |
+     |                             arguments to this function are incorrect
+     |
+     = note: expected reference `&daemon::protocol::SplitOperationResult<std::string::String>`
+                found reference `&daemon::protocol::SplitOperationResult<u64>`
+note: function defined here
+    --> src/ipc/terminal.rs:1934:8
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |        ^^^^^^^^^^^^^^^ ------------------------------------
+
+error[E0308]: mismatched types
+    --> src/ipc/terminal.rs:3205:33
+     |
+3205 |                 operation_state(&operation),
+     |                 --------------- ^^^^^^^^^^ expected `&SplitOperationResult<String>`, found `&SplitOperationResult`
+     |                 |
+     |                 arguments to this function are incorrect
+     |
+     = note: expected reference `&daemon::protocol::SplitOperationResult<std::string::String>`
+                found reference `&daemon::protocol::SplitOperationResult<u64>`
+note: function defined here
+    --> src/ipc/terminal.rs:1934:8
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |        ^^^^^^^^^^^^^^^ ------------------------------------
+
+error[E0631]: type mismatch in function arguments
+    --> src/ipc/terminal.rs:3206:37
+     |
+1934 |     fn operation_state(state: &SplitOperationResult<String>) -> &'static str {
+     |     ------------------------------------------------------------------------ found signature defined here
+...
+3206 |                 status.as_ref().map(operation_state),
+     |                                 --- ^^^^^^^^^^^^^^^ expected due to this
+     |                                 |
+     |                                 required by a bound introduced by this call
+     |
+     = note: expected function signature `fn(&daemon::protocol::SplitOperationResult<u64>) -> _`
+                found function signature `fn(&daemon::protocol::SplitOperationResult<std::string::String>) -> _`
+note: required by a bound in `std::option::Option::<T>::map`
+    --> /home/indo/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1160:12
+     |
+1158 |     pub const fn map<U, F>(self, f: F) -> Option<U>
+     |                  --- required by a bound in this associated function
+1159 |     where
+1160 |         F: [const] FnOnce(T) -> U + [const] Destruct,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Option::<T>::map`
+help: consider wrapping the function in a closure
+     |
+3206 |                 status.as_ref().map(|arg0: &daemon::protocol::SplitOperationResult| operation_state(/* &daemon::protocol::SplitOperationResult<std::string::String> */)),
+     |                                     +++++++++++++++++++++++++++++++++++++++++++++++                ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0308]: mismatched types
+    --> src/ipc/qa_barrier.rs:1222:34
+     |
+1222 |         let channel = Arc::clone(channel);
+     |                       ---------- ^^^^^^^ expected `&Arc<_, _>`, found `&QaBarrierChannel`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected reference `&std::sync::Arc<_, _>`
+                found reference `&QaBarrierChannel`
+note: method defined here
+    --> /home/indo/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+     |
+ 236 |     fn clone(&self) -> Self;
+     |        ^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:318:9
+    |
+318 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^ this value is reassigned later and never used
+...
+198 |         sent = n as usize;
+    |         ----------------- `sent` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^ this value is reassigned later and never used
+...
+222 |             written_total = n as usize;
+    |             -------------------------- `written_total` is overwritten here before the previous value is read
+
+error[E0599]: no method named `path` found for struct `std::path::PathBuf` in the current scope
+   --> src/daemon/qa_producers.rs:682:26
+    |
+682 |         let legacy = dir.path().join("legacy-7-1.sock");
+    |                          ^^^^
+    |
+help: there is a method `as_path` with a similar name
+    |
+682 |         let legacy = dir.as_path().join("legacy-7-1.sock");
+    |                          +++
+
+error[E0599]: no method named `path` found for struct `std::path::PathBuf` in the current scope
+   --> src/daemon/qa_producers.rs:708:26
+    |
+708 |         let legacy = dir.path().join("legacy-99-5.sock");
+    |                          ^^^^
+    |
+help: there is a method `as_path` with a similar name
+    |
+708 |         let legacy = dir.as_path().join("legacy-99-5.sock");
+    |                          +++
+
+error[E0599]: no method named `path` found for struct `std::path::PathBuf` in the current scope
+   --> src/daemon/qa_producers.rs:738:26
+    |
+738 |         let legacy = dir.path().join("legacy-1-1.sock");
+    |                          ^^^^
+    |
+help: there is a method `as_path` with a similar name
+    |
+738 |         let legacy = dir.as_path().join("legacy-1-1.sock");
+    |                          +++
+
+error[E0618]: expected function, found `qa_barrier::QaBarrierChannel`
+    --> src/daemon/qa_producers.rs:771:23
+     |
+  67 | pub fn channel() -> Option<Arc<QaBarrierChannel>> {
+     | ------------------------------------------------- this function of the same name is available here, but it's shadowed by the local binding
+...
+ 619 |     fn channel(dir: &Path) -> QaBarrierChannel {
+     |     ------------------------------------------ this function of the same name is available here, but it's shadowed by the local binding
+...
+ 764 |         let channel = channel(&dir);
+     |             ------- `channel` has type `qa_barrier::QaBarrierChannel`
+...
+ 771 |         let channel = channel(&dir);
+     |                       ^^^^^^^------
+     |                       |
+     |                       call expression requires function
+     |
+    ::: src/ipc/terminal.rs:1867:5
+     |
+1867 |     pub fn channel() -> Option<Arc<QaBarrierChannel>> {
+     |     ------------------------------------------------- this function of the same name is available here, but it's shadowed by the local binding
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:903:41
+    |
+903 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+error[E0308]: mismatched types
+    --> src/ipc/qa_barrier.rs:1222:34
+     |
+1222 |         let channel = Arc::clone(channel);
+     |                       ---------- ^^^^^^^ expected `&Arc<_, _>`, found `&QaBarrierChannel`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected reference `&std::sync::Arc<_, _>`
+                found reference `&qa_barrier::QaBarrierChannel`
+note: method defined here
+    --> /home/indo/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+     |
+ 236 |     fn clone(&self) -> Self;
+     |        ^^^^^
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:564:22
+    |
+564 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src/lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0308, E0599, E0631.
+For more information about an error, try `rustc --explain E0308`.
+warning: `ferryx` (lib) generated 25 warnings
+error: could not compile `ferryx` (lib) due to 7 previous errors; 25 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:339:9
+    |
+339 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:529:9
+    |
+529 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:543:26
+    |
+543 |         let mut cursor = 0usize;
+    |                          ^^^^^^ this value is reassigned later and never used
+...
+548 |         cursor = header.len();
+    |         --------------------- `cursor` is overwritten here before the previous value is read
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:569:14
+    |
+569 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:594:22
+    |
+594 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:7379:13
+     |
+7379 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:7430:13
+     |
+7430 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+     --> src/native_terminal/surface_host.rs:10106:13
+      |
+10106 |         let receipt = harness
+      |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+     --> src/native_terminal/surface_host.rs:10116:13
+      |
+10116 |         let render_receipt = harness
+      |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1333:9
+     |
+1333 |     let mut child = spawn_cat_child();
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1347:9
+     |
+1347 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1364:9
+     |
+1364 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+Some errors have detailed explanations: E0308, E0599, E0618, E0631.
+warning: `ferryx` (lib test) generated 49 warnings (23 duplicates)
+error: could not compile `ferryx` (lib test) due to 9 previous errors; 49 warnings emitted

@@ -1,0 +1,409 @@
+$ vitest run --maxWorkers=1 src/App.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-172baa87/ui
+
+stderr | src/App.test.tsx > App project workspace flow > shows a retryable error when a stored project fails to register at startup
+Local workspace registration skipped: heal-fail-a Error: repo path is gone
+    at [90m/Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39msrc/App.test.tsx:669:50
+    at [90mfile:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at [90mfile:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at [90mfile:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10[90m)[39m
+    at runTest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at runSuite [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1729:8[90m)[39m
+    at runSuite [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1729:8[90m)[39m
+
+stderr | src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects
+Error: Uncaught [Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+]
+    at reportException (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+    at VitestMocker.createError [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:284:17[90m)[39m
+    at Object.get [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:330:16[90m)[39m
+    at [90m/Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/onboarding/AccountStep.tsx:28:11
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:397:4[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:375:3[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:189:11[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:239:10[90m)[39m
+    at [90m/Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/onboarding/WelcomeWizard.tsx:10:1
+    at VitestExecutor.runModule [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:397:4[90m)[39m {
+  codeFrame: [32m'vi\x1B[33m.\x1B[39m\x1B[34mmock\x1B[39m(\x1B[35mimport\x1B[39m(\x1B[32m"./lib/tauri"\x1B[39m)\x1B[33m,\x1B[39m \x1B[35masync\x1B[39m (importOriginal) \x1B[33m=>\x1B[39m {\n'[39m +
+    [32m'  \x1B[35mconst\x1B[39m actual \x1B[33m=\x1B[39m \x1B[35mawait\x1B[39m \x1B[34mimportOriginal\x1B[39m()\n'[39m +
+    [32m'  \x1B[35mreturn\x1B[39m {\n'[39m +
+    [32m'    \x1B[33m...\x1B[39mactual\x1B[33m,\x1B[39m\n'[39m +
+    [32m'    \x1B[90m// your mocked methods\x1B[39m\n'[39m +
+    [32m'  }\n'[39m +
+    [32m'})'[39m
+}
+
+stderr | src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects
+Error: Uncaught [Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+]
+    at reportException (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+    at VitestMocker.createError [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:284:17[90m)[39m
+    at Object.get [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:330:16[90m)[39m
+    at [90m/Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/onboarding/AccountStep.tsx:28:11
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:397:4[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:375:3[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:189:11[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:239:10[90m)[39m
+    at [90m/Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39msrc/components/onboarding/WelcomeWizard.tsx:10:1
+    at VitestExecutor.runModule [90m(file:///Users/I552267/ferryx-pane-completion/source-172baa87/ui/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:397:4[90m)[39m {
+  codeFrame: [32m'vi\x1B[33m.\x1B[39m\x1B[34mmock\x1B[39m(\x1B[35mimport\x1B[39m(\x1B[32m"./lib/tauri"\x1B[39m)\x1B[33m,\x1B[39m \x1B[35masync\x1B[39m (importOriginal) \x1B[33m=>\x1B[39m {\n'[39m +
+    [32m'  \x1B[35mconst\x1B[39m actual \x1B[33m=\x1B[39m \x1B[35mawait\x1B[39m \x1B[34mimportOriginal\x1B[39m()\n'[39m +
+    [32m'  \x1B[35mreturn\x1B[39m {\n'[39m +
+    [32m'    \x1B[33m...\x1B[39mactual\x1B[33m,\x1B[39m\n'[39m +
+    [32m'    \x1B[90m// your mocked methods\x1B[39m\n'[39m +
+    [32m'  }\n'[39m +
+    [32m'})'[39m
+}
+The above error occurred in one of your React components:
+
+    at Lazy
+    at Suspense
+    at div
+    at WorkspaceApp (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/src/App.tsx:547:3)
+    at App (/Users/I552267/ferryx-pane-completion/source-172baa87/ui/src/App.tsx:329:56)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+ ❯ src/App.test.tsx (154 tests | 3 failed) 15235ms
+   ✓ App project workspace flow > awaits the local registration heal before publishing the bootstrap in both boot branches 4ms
+   ✓ App project workspace flow > dedupes repeated local registration heals and skips placeholder projects 3ms
+   ✓ App project workspace flow > shows a retryable error when a stored project fails to register at startup 20ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for nested content  453ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for flat content 98ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for top-level content 59ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for terminal content 87ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for missing-content content 75ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=true 11ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=false 7ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=true 9ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=false 18ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=true 15ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=false 17ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=true 14ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=false 17ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused working agent pane in a split without confirmation 18ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused waiting agent pane in a split without confirmation 20ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > does not ask for confirmation for an untagged pane's busy sibling 18ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=false even with a layout 16ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=true even with a layout 7ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > ignores a nonexistent active tab even with a leftover layout 9ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=true 10ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=false 8ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=true 8ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=false 17ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=true 16ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=false 23ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=true 18ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=false 29ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused working agent pane in a split without confirmation 10ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused waiting agent pane in a split without confirmation 6ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > does not ask for confirmation for an untagged pane's busy sibling 6ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=false even with a layout 7ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=true even with a layout 6ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > ignores a nonexistent active tab even with a leftover layout 5ms
+   ✓ App project workspace flow > passes live tabless workspace state to the sidebar 13ms
+   ✓ App project workspace flow > does not select tabless workspace rows through Cmd+digit 19ms
+   ✓ App project workspace flow > skips tabless background worktrees when indexing Cmd+N targets 21ms
+   ✓ App project workspace flow > returns reconnect failure to the pane instead of discarding its promise 20ms
+   ✓ App project workspace flow > routes the native Cmd+T menu accelerator through the normal new-terminal callback 17ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the active tab 14ms
+   ✓ App project workspace flow > routes web Cmd+W on a leaf-root terminal tab to its pane when focus is unset 14ms
+   ✓ App project workspace flow > confirms closing a single-pane tab with a working agent as a tab close 75ms
+   ✓ App project workspace flow > confirms closing a single-pane tab with a waiting agent as a tab close 67ms
+   ✓ App project workspace flow > closes a single pane in a split view with a working agent without confirmation 16ms
+   ✓ App project workspace flow > closes a single pane in a split view with a waiting agent without confirmation 40ms
+   ✓ App project workspace flow > confirms tab close for a working agent even with confirmCloseTab disabled 86ms
+   ✓ App project workspace flow > confirms tab close for a waiting agent even with confirmCloseTab disabled 78ms
+   ✓ App project workspace flow > closes an idle focused pane through native Cmd+W without confirming for a busy sibling 61ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab 7ms
+   ✓ App project workspace flow > routes the web Cmd+W shortcut to close the focused pane in a split terminal tab 6ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close an active browser tab 6ms
+   ✓ App project workspace flow > routes http links to a built-in browser tab through the app-registered opener 11ms
+   ✓ App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm 116ms
+   ✓ App project workspace flow > uses the canonical folder-derived project on an empty native startup 14ms
+   ✓ App project workspace flow > falls back to stored projects and initializes bootstrap when getInitialProject rejects 12ms
+   ✓ App project workspace flow > starts update polling on native mount and stops it on unmount 7ms
+   ✓ App project workspace flow > renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects 19ms
+   ✓ App project workspace flow > checks for a signed update when the native app starts 17ms
+   ✓ App project workspace flow > restores projects lost from WebView storage using the native session catalog 53ms
+   ✓ App project workspace flow > restores multi-project native session catalog when single persisted project differs from startup 41ms
+   ✓ App project workspace flow > does not restore historical projects into an existing multi-project catalog 19ms
+   ✓ App project workspace flow > keeps the native shell initializing until persisted workspace tabs are preloaded 71ms
+   ✓ App project workspace flow > migrates the legacy default placeholder to the canonical native project 23ms
+   ✓ App project workspace flow > removes a project via RemoveProjectDialog and switches active project when removing the active one 77ms
+   ✓ App project workspace flow > shows a genuine empty state and does not re-register the default project after removing the last project 104ms
+   ✓ App project workspace flow > scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree 33ms
+   ✓ App project workspace flow > migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10) 9ms
+   ✓ App project workspace flow > heals a legacy project entry (no gitRoot) into a git-backed project on startup 19ms
+   ✓ App project workspace flow > re-registers the active persisted project before refreshing its worktrees 11ms
+   ✓ App project workspace flow > opens a registered project's real branch-dropdown worktree flow 140ms
+   ✓ App project workspace flow > opens worktree creation for the clicked non-active project 81ms
+   ✓ App project workspace flow > switches to the non-active project before opening its created worktree 128ms
+   ✓ App project workspace flow > switches the active project when selecting a project row in the nested tree 31ms
+   ✓ App project workspace flow > shows the original project's worktrees again after switching away and clicking back 116ms
+   ✓ App project workspace flow > adopts the canonical workspaceId the backend returns for an already-registered root 13ms
+   ✓ App project workspace flow > retries registration on window focus after a transient failure instead of gating forever 18ms
+   ✓ App project workspace flow > persists the outgoing project's session when switching away 105ms
+   ✓ App project workspace flow > discards a parked worktree selection that belongs to a project no longer active 41ms
+   ✓ App project workspace flow > surfaces a genuine same-id different-root registration conflict instead of silently listing 17ms
+   ✓ App project workspace flow > switches project instead of activating when the worktree belongs to another project 57ms
+   ✓ App project workspace flow > switches project for a branch-less worktree nested under another project's root 41ms
+   ✓ App project workspace flow > activates a worktree directly when it belongs to the active project 18ms
+   ✓ App project workspace flow > walks visible worktrees top to bottom across expanded projects with Cmd+1.. 22ms
+   ✓ App project workspace flow > skips a collapsed project's rows when counting Cmd+N positions 36ms
+   ✓ App project workspace flow > selects a worktree when macOS forwards Cmd+N through the native key monitor 25ms
+   ✓ App project workspace flow > targets the synthesized root row of a visible non-Git project via native Cmd+digit 45ms
+   ✓ App project workspace flow > targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit 34ms
+   ✓ App project workspace flow > keeps out-of-range Cmd+N presses a no-op 6ms
+   ✓ App project workspace flow > navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys 9ms
+   ✓ App project workspace flow > toggles sidebar visibility with Cmd+B and persists state across mounts 67ms
+   ✓ App project workspace flow > keeps restored missing sessions in standby under the default Lazy policy 62ms
+   ✓ App project workspace flow > waits until registration and worktree refresh complete before restoring Lazy standby sessions 13ms
+   ✓ App project workspace flow > restores persisted terminal sessions only once when restored state changes effect dependencies 61ms
+   ✓ App project workspace flow > preserves live backend sessions when restoring during dev/HMR 63ms
+   ✓ App project workspace flow > reconciles live and missing sessions across split panes without auto-respawning dead sessions 59ms
+   × App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited 76ms
+     → expected { id: 'sess-mismatch', …(18) } to match object { id: 'sess-mismatch', …(4) }
+(14 matching properties omitted from actual)
+   ✓ App project workspace flow > toggles the settings dialog with Cmd+, 25ms
+   ✓ App project workspace flow > activates in-terminal search on active pane with Cmd+F 14ms
+   ✓ App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[ 13ms
+   ✓ App project workspace flow > detects agents on mount and launches agent via spawnTerminal and writeTerminal 118ms
+   ✓ App project workspace flow > surfaces the stored defaultAgentId first with a Default label in the New Tab agent list 60ms
+   ✓ App project workspace flow > opens a browser tab at the configured homepage from the new-tab menu 44ms
+   ✓ App project workspace flow > opens a blank browser tab from the new-tab menu when no homepage is set 52ms
+   ✓ App project workspace flow > preserves every registered workspace when saving session instead of clobbering inactive workspaces  1122ms
+   ✓ App project workspace flow > conditionally mounts SettingsDialog and CommandPalette only when open 11ms
+   ✓ App project workspace flow > lazy-loads SettingsDialog via React.lazy with Suspense 3ms
+   ✓ App project workspace flow > does not list state in registerWindowCloseGuard effect dependencies 2ms
+   ✓ App project workspace flow > does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval 45ms
+   ✓ App project workspace flow > does not pass inline arrow functions for onOpenSettings or onCloseSearch 2ms
+   ✓ App project workspace flow > preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning 68ms
+   ✓ App project workspace flow > successfully completes session restore under React StrictMode double-mount without skipping 65ms
+   ✓ App project workspace flow > skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists 9ms
+   × App project workspace flow > reconciles missing HMR sessions without automatically spawning replacements 63ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Array [
+        "dead-sess-1",
+      ],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes terminal tabs from every worktree with safe labels 4ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes the primary worktree with no managed slug 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane when a remote selection names a leaf-addressed entry 39ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > exposes every split pane of a tab as its own remote entry addressed by leaf 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps a single-pane tab addressed by its plain tab id 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives per-tab activityState and agentType when present in activityBySessionId 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps publishing the terminal inventory with an empty focus when a browser tab is active 3ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > returns null only when the desktop has no terminal tab at all 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > does not republish unchanged terminal inventory on unrelated workspace renders 17ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes focused terminal to native IPC on mount and layout changes 16ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes per-tab agent activity state and agent type to native IPC 21ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes real backendSessionId after session backend is bound or rebound 24ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > routes publishFocusedTerminal rejection to reportRuntimeError 71ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > creates a new remote terminal through openTab instead of reusing an existing worktree tab 18ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles native remote_selection_requested and activates requested worktree context 12ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles same-worktree tab selection request and activates exact tab 13ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles primary worktree selection within current project when on secondary worktree 14ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-worktree selection with tabId activating tab after worktree switch 64ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-project remote selection by switching project and then activating worktree 40ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > drops a queued remote slug when the user switches to a third project first 37ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane after a queued cross-project selection names a leaf entry 67ms
+   ✓ App project workspace flow > badge count synchronization > synchronizes badge count from unique true unreadTabIds in workspace state 22ms
+   ✓ App project workspace flow > badge count synchronization > routes native badge synchronization errors to reportRuntimeError 61ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed  949ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > does not crash and degrades silently when auto-resume spawn fails 63ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (1) when a remote host is active, calls toast.warning exactly once and adoptBrowserSession zero times 22ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (2) when no remote host is active and adoptBrowserSession returns null, calls the second toast warning exactly once 8ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (3) when no remote host is active and adoptBrowserSession returns a tab id, no toast warning fires 9ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with remote-host-active when a remote host owns the window 15ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with adopt-failed when the session could not be adopted 12ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=true when the tab was shown 14ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the tab owning the browserId, not the tab at the CLI index 12ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the terminal tab that hosts the browser in a pane 12ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > warns instead of staying silent when no tab owns the browserId 13ms
+   × App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects 8011ms
+     → Unable to find role="dialog" and name "Welcome to Ferryx"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > does not auto-open WelcomeWizard for platform web 15ms
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > renders GettingStartedChecklist with 'No projects' and 'Add Project' button when projects list is empty 25ms
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE 19ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited
+AssertionError: expected { id: 'sess-mismatch', …(18) } to match object { id: 'sess-mismatch', …(4) }
+(14 matching properties omitted from actual)
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "backendSessionId": "standby:sess-mismatch",[39m
+[32m-   "daemonEpoch": null,[39m
+[31m+   "backendSessionId": "live-backend-2",[39m
+[31m+   "daemonEpoch": "epoch-OLD",[39m
+[2m    "id": "sess-mismatch",[22m
+[2m    "lastOutputSequence": null,[22m
+[32m-   "lifecycle": "exited",[39m
+[31m+   "lifecycle": "working",[39m
+[2m  }[22m
+
+ ❯ src/App.test.tsx:2730:53
+    2728|     });
+    2729|     // Mismatching epoch -> exited / lost
+    2730|     expect(restoredState.sessions["sess-mismatch"]).toMatchObject({
+       |                                                     ^
+    2731|       id: "sess-mismatch",
+    2732|       backendSessionId: "standby:sess-mismatch",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > reconciles missing HMR sessions without automatically spawning replacements
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Array [
+        "dead-sess-1",
+      ],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/App.test.tsx:3335:51
+    3333| 
+    3334|       await waitFor(() => expect(workspace.restoreWorkspace).toHaveBee…
+    3335|       expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
+       |                                                   ^
+    3336|       expect(native.spawnTerminal).not.toHaveBeenCalled();
+    3337|       expect(native.loadSession).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects
+TestingLibraryElementError: Unable to find role="dialog" and name "Welcome to Ferryx"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/App.test.tsx:4900:24
+    4898|         // WelcomeWizard chunk is lazy-loaded, so wait for the dialog …
+    4899|         expect(
+    4900|           await screen.findByRole("dialog", { name: "Welcome to Ferryx…
+       |                        ^
+    4901|         ).toBeInTheDocument();
+    4902|       } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi[33m.[39m[34mmock[39m([35mimport[39m([32m"./lib/tauri"[39m)[33m,[39m [35masync[39m (importOriginal) [33m=>[39m {
+  [35mconst[39m actual [33m=[39m [35mawait[39m [34mimportOriginal[39m()
+  [35mreturn[39m {
+    [33m...[39mactual[33m,[39m
+    [90m// your mocked methods[39m
+  }
+})
+
+ ❯ VitestMocker.createError node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:284:17
+ ❯ Object.get node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:330:16
+ ❯ src/components/onboarding/AccountStep.tsx:28:11
+     26|   loadStatus: getAccountEnrollmentStatus,
+     27|   issueCode: issueEnrollmentCode,
+     28|   enroll: enrollThisMachine,
+       |           ^
+     29|   readToken: getStoredAccountSessionToken,
+     30| };
+ ❯ processTicksAndRejections node:internal/process/task_queues:103:5
+ ❯ VitestExecutor.runModule node_modules/vite-node/dist/client.mjs:397:4
+ ❯ VitestExecutor.directRequest node_modules/vite-node/dist/client.mjs:375:3
+ ❯ VitestExecutor.cachedRequest node_modules/vite-node/dist/client.mjs:189:11
+ ❯ VitestExecutor.dependencyRequest node_modules/vite-node/dist/client.mjs:239:10
+ ❯ src/components/onboarding/WelcomeWizard.tsx:10:1
+ ❯ VitestExecutor.runModule node_modules/vite-node/dist/client.mjs:397:4
+
+This error originated in "src/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 151 passed (154)
+     Errors  1 error
+   Start at  10:46:44
+   Duration  58.69s (transform 4.86s, setup 4.69s, collect 23.26s, tests 15.23s, environment 9.30s, prepare 536ms)
+
+error: script "test" exited with code 1

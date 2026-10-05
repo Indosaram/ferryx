@@ -9,11 +9,37 @@ export type SwitchDebugEntry = {
   details: Record<string, unknown>;
 };
 
+const RELEASE_PERSISTED_INPUT_EVENTS = new Set([
+  "terminal.surface.input.accepted",
+  "terminal.surface.input.dispatch",
+  "terminal.surface.input.stage.backend_write_start",
+  "terminal.surface.input.stage.backend_write",
+  "terminal.surface.input.stage.backend_write_result",
+  "terminal.render.vt_consumed",
+  "terminal.surface.presentation.receipt",
+  "terminal.surface.presented",
+  "terminal.surface.bounds_acknowledged",
+  "terminal.surface.input.dropped.overflow",
+  "terminal.surface.input.dropped.rate",
+  "terminal.surface.input.dropped.owner_mismatch",
+  "terminal.surface.input.dropped.summary",
+  "terminal.surface.input.in_flight_slow",
+  "terminal.surface.input.error.recovering",
+  "terminal.surface.input.failed",
+  "terminal.surface.input.sent",
+  "terminal.surface.presentation.stale",
+]);
+
+export function isReleasePersistedInputEvent(event: string): boolean {
+  return RELEASE_PERSISTED_INPUT_EVENTS.has(event);
+}
+
 type SwitchDebugLoggerOptions = {
   enabled: boolean;
   runId: string;
   now: () => number;
   sink: (entry: SwitchDebugEntry) => void;
+  allowReleasePersisted?: boolean;
 };
 
 export function createSwitchDebugLogger({
@@ -21,13 +47,16 @@ export function createSwitchDebugLogger({
   runId,
   now,
   sink,
+  allowReleasePersisted = true,
 }: SwitchDebugLoggerOptions): (
   event: string,
   details?: Record<string, unknown>,
 ) => SwitchDebugEntry | null {
   let sequence = 0;
   return (event, details = {}) => {
-    if (!enabled) return null;
+    const shouldTrace =
+      enabled || (allowReleasePersisted && isReleasePersistedInputEvent(event));
+    if (!shouldTrace) return null;
     const entry: SwitchDebugEntry = {
       runId,
       sequence: ++sequence,
@@ -65,6 +94,8 @@ const debugEnabled = resolveSwitchDebugEnabled({
 const runId = safeRandomUUID();
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();
+let pendingSinkCount = 0;
+const MAX_PENDING_SINK_ENTRIES = 64;
 
 const logger = createSwitchDebugLogger({
   enabled: debugEnabled,
@@ -73,10 +104,18 @@ const logger = createSwitchDebugLogger({
   sink: (entry) => {
     console.info("[ferryx:switch]", entry);
     if (!isTauri) return;
+    if (pendingSinkCount >= MAX_PENDING_SINK_ENTRIES) {
+      console.warn("[ferryx:switch] log sink dropped: queue full");
+      return;
+    }
+    pendingSinkCount += 1;
     sinkTail = sinkTail
       .then(() => invoke<void>("cmd_switch_debug_log", { entry }))
       .catch((error: unknown) => {
         console.warn("[ferryx:switch] log sink failed", String(error));
+      })
+      .finally(() => {
+        pendingSinkCount = Math.max(0, pendingSinkCount - 1);
       });
   },
 });

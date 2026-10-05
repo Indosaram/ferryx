@@ -1,0 +1,60 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.paired.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044250) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.paired.test.tsx (2 tests | 2 failed) 6ms
+   × opens the registered SSH folder rather than its parent Git worktree 4ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status 2ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.paired.test.tsx > opens the registered SSH folder rather than its parent Git worktree
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/components/Sidebar.paired.test.tsx:17:16
+     15|   };
+     16|   const select = vi.fn();
+     17|   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+       |                ^
+     18|   render(<Sidebar
+     19|     projects={[local, remote]} activeProjectId={local.workspaceId}
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/components/Sidebar.paired.test.tsx > opens the registered SSH folder rather than its parent Git worktree
+ FAIL  src/components/Sidebar.paired.test.tsx > keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.paired.test.tsx:9:43
+      7| import type { RegisteredProject } from "../lib/types";
+      8| vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id…
+      9| afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.res…
+       |                                           ^
+     10| it("opens the registered SSH folder rather than its parent Git worktre…
+     11|   const local: RegisteredProject = { workspaceId: "project", repoRoot:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/components/Sidebar.paired.test.tsx > keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/components/Sidebar.paired.test.tsx:41:16
+     39|   expect(groupProjects([local, ssh, ...paired])).toHaveLength(4);
+     40|   expect(projectRootWorktree(paired[0]).workspaceId).toBe(paired[0].wo…
+     41|   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+       |                ^
+     42|   const select = vi.fn();
+     43|   render(<Sidebar projects={[local, ssh, ...paired]} activeProjectId={…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:11:14
+   Duration  1.13s (transform 210ms, setup 104ms, collect 618ms, tests 6ms, environment 227ms, prepare 44ms)
+
+error: script "test" exited with code 1

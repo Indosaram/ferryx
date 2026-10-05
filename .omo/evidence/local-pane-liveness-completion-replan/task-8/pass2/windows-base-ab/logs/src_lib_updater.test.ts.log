@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/lib/updater.test.ts
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/lib/updater.test.ts [2m([22m[2m23 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 65[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22moffers plugin updates when the channel is installer[32m 15[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22moffers plugin updates when the channel is native[32m 5[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mstarts idle[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mmoves through checking to available when an update exists[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mreturns to idle when the endpoint reports no update[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22msurfaces a check failure as an error state instead of throwing[32m 2[2mms[22m[39m
+[31m   [31m×[31m updater status machine[2m > [22mreports monotonic download progress and relaunches after installation[39m[32m 5[2mms[22m[39m
+[31m     → expected "spy" to be called 1 times, but got 0 times[39m
+   [32m✓[39m updater status machine[2m > [22msurfaces a download failure as an error state[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mrefuses to download before an update has been found[32m 1[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mstops notifying an unsubscribed listener[32m 1[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mrelaunches through the process plugin[32m 1[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mflushes workspace persistence guards before restarting for an installed update[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mreads the running app version[32m 4[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mskips the update check when the install is Store-managed[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mcaches the Store-managed probe across checks[32m 2[2mms[22m[39m
+   [32m✓[39m updater status machine[2m > [22mtreats a failed Store-managed probe as updater-owned[32m 2[2mms[22m[39m
+   [32m✓[39m periodic update polling[2m > [22mchecks immediately, then once per interval until stopped[32m 4[2mms[22m[39m
+   [32m✓[39m periodic update polling[2m > [22mkeeps re-checking while an update is offered so a newer release replaces it[32m 2[2mms[22m[39m
+   [32m✓[39m periodic update polling[2m > [22mdoes not re-check once an update is staged for install[32m 2[2mms[22m[39m
+   [32m✓[39m periodic update polling[2m > [22mnever polls outside the desktop shell[32m 2[2mms[22m[39m
+   [32m✓[39m non-Tauri runtime[2m > [22mnever touches the updater plugin outside the desktop shell[32m 2[2mms[22m[39m
+   [32m✓[39m non-Tauri runtime[2m > [22mreports an unknown version instead of calling into Tauri[32m 1[2mms[22m[39m
+   [32m✓[39m window close guards[2m > [22mkeeps running every registered guard[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/lib/updater.test.ts[2m > [22mupdater status machine[2m > [22mreports monotonic download progress and relaunches after installation
+[31m[1mAssertionError[22m: expected "spy" to be called 1 times, but got 0 times[39m
+[36m [2m❯[22m src/lib/updater.test.ts:[2m141:22[22m[39m
+    [90m139| [39m    [34mexpect[39m(progress[33m.[39m[34mat[39m([33m-[39m[34m1[39m))[33m.[39m[34mtoBe[39m([34m1[39m)[33m;[39m
+    [90m140| [39m    [34mexpect[39m(updater[33m.[39m[34mgetUpdateStatus[39m()[33m.[39mstate)[33m.[39m[34mtoBe[39m([32m"downloaded"[39m)[33m;[39m
+    [90m141| [39m    [34mexpect[39m(relaunch)[33m.[39m[34mtoHaveBeenCalledTimes[39m([34m1[39m)[33m;[39m
+    [90m   | [39m                     [31m^[39m
+    [90m142| [39m  })[33m;[39m
+    [90m143| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m22 passed[39m[22m[90m (23)[39m
+[2m   Start at [22m 10:10:52
+[2m   Duration [22m 1.08s[2m (transform 70ms, setup 248ms, collect 29ms, tests 65ms, environment 502ms, prepare 80ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

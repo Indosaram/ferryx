@@ -1,0 +1,377 @@
+﻿{
+    "scenario":  "split-happy",
+    "startedAt":  "2026-10-05T04:29:33.7931002+09:00",
+    "scriptSession":  0,
+    "scriptInteractive":  false,
+    "runs":  [
+                 {
+                     "index":  1,
+                     "variant":  {
+                                     "tag":  "profileiso",
+                                     "sessionIsolation":  "profile",
+                                     "classifierSha":  "BBBA381F573FF528"
+                                 },
+                     "iso":  "C:\\ferryx-qa-p11\\pd12-iso\\split-happy\\profileiso-run1",
+                     "ev":  "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\profileiso-run1",
+                     "startedAt":  "2026-10-05T04:29:33.9105348+09:00",
+                     "hostSessionStateBefore":  {
+                                                    "mtime":  "2026-10-05T04:25:48.9747346+09:00",
+                                                    "size":  1963,
+                                                    "exists":  true
+                                                },
+                     "launcherPid":  26192,
+                     "completedRunDir":  "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\profileiso-run1\\task-3-harness\\split-happy\\run-96e29e01-7fb5-43ec-9f87-379d5c5a35a9",
+                     "elapsedMs":  15875,
+                     "hostSessionStateAfter":  {
+                                                   "mtime":  "2026-10-05T04:25:48.9747346+09:00",
+                                                   "size":  1963,
+                                                   "exists":  true
+                                               },
+                     "isoSessionState":  {
+                                             "mtime":  null,
+                                             "size":  0,
+                                             "exists":  false
+                                         },
+                     "appProcesses":  [
+                                          {
+                                              "pid":  8828,
+                                              "ppid":  18896,
+                                              "cmd":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+                                              "startedAt":  "2026-10-05T04:29:35.2518890+09:00",
+                                              "exe":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe"
+                                          },
+                                          {
+                                              "pid":  24744,
+                                              "ppid":  8828,
+                                              "cmd":  "\"C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe\" --daemon",
+                                              "startedAt":  "2026-10-05T04:29:36.3185130+09:00",
+                                              "exe":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe"
+                                          }
+                                      ],
+                     "samples":  [
+                                     {
+                                         "atMs":  4222,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  4891,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  5607,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  6318,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  7035,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  7702,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  8383,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  9060,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  9745,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  10428,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  11115,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  11813,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  12486,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  13152,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  13810,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  14469,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  15148,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "b15eeb93-0af8-4123-b44a-965154eba6d0",
+                                                          "fb04683a-e007-41b0-8472-054fa05cb42c"
+                                                      ]
+                                     }
+                                 ],
+                     "maxCountFromSamples":  2,
+                     "sampleCount":  17,
+                     "runnerVerdict":  "BLOCKED",
+                     "runnerCode":  "PANE_BINDING_UNBOUND",
+                     "runnerMessage":  "PANE_BINDING_UNBOUND: no presentation receipt named a session other than the 1 fixture session(s) within 8000ms, so the UI pane step created no observable pane (observed sessions: [])",
+                     "dumpsCaptured":  [
+                                           "new-pane"
+                                       ],
+                     "launcherKilled":  false
+                 },
+                 {
+                     "index":  2,
+                     "variant":  {
+                                     "tag":  "profileiso",
+                                     "sessionIsolation":  "profile",
+                                     "classifierSha":  "BBBA381F573FF528"
+                                 },
+                     "iso":  "C:\\ferryx-qa-p11\\pd12-iso\\split-happy\\profileiso-run2",
+                     "ev":  "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\profileiso-run2",
+                     "startedAt":  "2026-10-05T04:29:50.7012608+09:00",
+                     "hostSessionStateBefore":  {
+                                                    "mtime":  "2026-10-05T04:25:48.9747346+09:00",
+                                                    "size":  1963,
+                                                    "exists":  true
+                                                },
+                     "launcherPid":  20976,
+                     "completedRunDir":  "C:\\Users\\sook\\ferryx-pane-completion\\pd12-ev\\split-happy\\profileiso-run2\\task-3-harness\\split-happy\\run-94706171-1b9c-4fc3-bf17-f66a298f48d2",
+                     "elapsedMs":  14146,
+                     "hostSessionStateAfter":  {
+                                                   "mtime":  "2026-10-05T04:25:48.9747346+09:00",
+                                                   "size":  1963,
+                                                   "exists":  true
+                                               },
+                     "isoSessionState":  {
+                                             "mtime":  null,
+                                             "size":  0,
+                                             "exists":  false
+                                         },
+                     "appProcesses":  [
+                                          {
+                                              "pid":  9352,
+                                              "ppid":  25300,
+                                              "cmd":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+                                              "startedAt":  "2026-10-05T04:29:52.0022370+09:00",
+                                              "exe":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe"
+                                          },
+                                          {
+                                              "pid":  3228,
+                                              "ppid":  9352,
+                                              "cmd":  "\"C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe\" --daemon",
+                                              "startedAt":  "2026-10-05T04:29:52.5917670+09:00",
+                                              "exe":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe"
+                                          }
+                                      ],
+                     "samples":  [
+                                     {
+                                         "atMs":  3397,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  4085,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  4750,
+                                         "count":  1,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  5415,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  6081,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  6746,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  7402,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  8060,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  8728,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  9392,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  10061,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  10729,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  11395,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  12077,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  12758,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     },
+                                     {
+                                         "atMs":  13425,
+                                         "count":  2,
+                                         "sessions":  [
+                                                          "e5df0f7a-68ab-4d0a-969a-e93d8f8b80a5",
+                                                          "819ec09e-18a1-4def-bd1d-356f3aa56ec3"
+                                                      ]
+                                     }
+                                 ],
+                     "maxCountFromSamples":  2,
+                     "sampleCount":  16,
+                     "runnerVerdict":  "BLOCKED",
+                     "runnerCode":  "PANE_BINDING_UNBOUND",
+                     "runnerMessage":  "PANE_BINDING_UNBOUND: no presentation receipt named a session other than the 1 fixture session(s) within 8000ms, so the UI pane step created no observable pane (observed sessions: [])",
+                     "dumpsCaptured":  [
+                                           "new-pane"
+                                       ],
+                     "launcherKilled":  false
+                 }
+             ]
+}

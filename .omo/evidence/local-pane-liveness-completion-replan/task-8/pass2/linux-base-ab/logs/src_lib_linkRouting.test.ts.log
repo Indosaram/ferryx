@@ -1,0 +1,127 @@
+$ vitest run --maxWorkers=1 src/lib/linkRouting.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037043) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/linkRouting.test.ts (33 tests | 33 failed) 12ms
+   × HTTP link routing > routes a modifier click to the saved modifier target 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > routes ordinary links to the registered built-in browser by default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > routes Shift-click to the system browser when the modifier setting is enabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > keeps Shift on the normal built-in route when the modifier override is disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > opens system browser when built-in routing is disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > shows terminal actions when enabled and routes immediately when disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × HTTP link routing > rejects non-http schemes before any opener is called 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts HTTP/HTTPS URLs when column lands within the URL 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > returns null when column is outside the URL 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts relative file path with line and column 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts absolute file path with line number only 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts single file with extension like Cargo.toml:5 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts plain file path without line or column 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > strips enclosing quotes and brackets from path 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > handles balanced parentheses in URLs and strips trailing punctuation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > does not false-positive on IP addresses, versions, or decimal numbers 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts quoted paths containing spaces 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > extracts paths with apostrophes and escaped spaces 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > handles indented lines and CJK wide characters without column drift 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × resolveTokenAtCol > returns null for empty or plain text without file or URL tokens 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken > routes URL token through requestTerminalLinkOpen 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken > routes file token through cmd_open_file_path with cwd and line/col 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken > routes file token to a file tab event when source is provided and shiftKey is false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken > routes file token to cmd_open_file_path when shiftKey is true even if source is provided 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × openTerminalToken > recognizes single media and markdown file tokens (R13) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with parenthesized line and column on error line 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with parenthesized line and spaced column 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with parenthesized line only 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with #Lline-Lend range suffix 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with #Lline suffix 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > resolves path with #LlineCcol suffix 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > preserves standard :line:col parsing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Orca location suffix parsing > guards against IP addresses and version strings with Orca suffixes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 33 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > routes a modifier click to the saved modifier target
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > routes ordinary links to the registered built-in browser by default
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > routes Shift-click to the system browser when the modifier setting is enabled
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > keeps Shift on the normal built-in route when the modifier override is disabled
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > opens system browser when built-in routing is disabled
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > shows terminal actions when enabled and routes immediately when disabled
+ FAIL  src/lib/linkRouting.test.ts > HTTP link routing > rejects non-http schemes before any opener is called
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts HTTP/HTTPS URLs when column lands within the URL
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > returns null when column is outside the URL
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts relative file path with line and column
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts absolute file path with line number only
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts single file with extension like Cargo.toml:5
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts plain file path without line or column
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > strips enclosing quotes and brackets from path
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > handles balanced parentheses in URLs and strips trailing punctuation
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > does not false-positive on IP addresses, versions, or decimal numbers
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts quoted paths containing spaces
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > extracts paths with apostrophes and escaped spaces
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > handles indented lines and CJK wide characters without column drift
+ FAIL  src/lib/linkRouting.test.ts > resolveTokenAtCol > returns null for empty or plain text without file or URL tokens
+ FAIL  src/lib/linkRouting.test.ts > openTerminalToken > routes URL token through requestTerminalLinkOpen
+ FAIL  src/lib/linkRouting.test.ts > openTerminalToken > routes file token through cmd_open_file_path with cwd and line/col
+ FAIL  src/lib/linkRouting.test.ts > openTerminalToken > routes file token to a file tab event when source is provided and shiftKey is false
+ FAIL  src/lib/linkRouting.test.ts > openTerminalToken > routes file token to cmd_open_file_path when shiftKey is true even if source is provided
+ FAIL  src/lib/linkRouting.test.ts > openTerminalToken > recognizes single media and markdown file tokens (R13)
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with parenthesized line and column on error line
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with parenthesized line and spaced column
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with parenthesized line only
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with #Lline-Lend range suffix
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with #Lline suffix
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > resolves path with #LlineCcol suffix
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > preserves standard :line:col parsing
+ FAIL  src/lib/linkRouting.test.ts > Orca location suffix parsing > guards against IP addresses and version strings with Orca suffixes
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/linkRouting.test.ts:28:16
+     26| 
+     27| beforeEach(() => {
+     28|   localStorage.clear();
+       |                ^
+     29|   resetBrowserSettings();
+     30|   vi.mocked(openExternalUrl).mockReset().mockResolvedValue(undefined);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/33]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  33 failed (33)
+   Start at  10:09:28
+   Duration  692ms (transform 155ms, setup 103ms, collect 177ms, tests 12ms, environment 224ms, prepare 50ms)
+
+error: script "test" exited with code 1

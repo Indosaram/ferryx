@@ -3887,6 +3887,9 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy remote fixture does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             })
             .unwrap()
                 + "\n";
@@ -3948,6 +3951,11 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
+                                    incarnation: None, // Legacy remote fixture.
                                 },
                             })
                             .unwrap()
@@ -4205,6 +4213,9 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy handover fixture does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             })
             .unwrap()
                 + "\n";
@@ -4263,6 +4274,11 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
+                                    incarnation: None, // Legacy handover fixture.
                                 },
                             })
                             .unwrap()

@@ -1,0 +1,82 @@
+$ vitest run --maxWorkers=1 src/components/BrowserToolbar.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038653) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserToolbar.test.tsx (18 tests | 18 failed) 13ms
+   × BrowserToolbar > accepts navigation only for its DOM target undefined 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > accepts navigation only for its DOM target unrelated 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > accepts navigation only for its DOM target b-1 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > renders address input with tab url 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > submits navigated url on enter 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > triggers reload on reload click 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > asks for a cache-bypassing reload on Shift+Click and a plain reload otherwise 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > keeps Shift+Click a plain reload where the platform cannot bypass the cache 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > routes the hard-reload shortcut to a cache-bypassing reload 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > wires Back and Forward to the native browser session 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > shows recent browsing history and navigates the native browser when an entry is selected 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > handles zoom controls and calls setBrowserZoom 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > clamps zoom to the Settings-exposed range derived from BROWSER_ZOOM_LEVELS 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > calls focusBrowser on focus button click 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > fetches browser state via getBrowserState during state sync / reload 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > surfaces a rejected zoom with its structured code and restores the previous zoom 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > surfaces a rejected back navigation with its structured code 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserToolbar > surfaces a failed shortcut listener registration instead of discarding it 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 18 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > accepts navigation only for its DOM target undefined
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > accepts navigation only for its DOM target unrelated
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > accepts navigation only for its DOM target b-1
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > renders address input with tab url
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > submits navigated url on enter
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > triggers reload on reload click
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > asks for a cache-bypassing reload on Shift+Click and a plain reload otherwise
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > keeps Shift+Click a plain reload where the platform cannot bypass the cache
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > routes the hard-reload shortcut to a cache-bypassing reload
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > wires Back and Forward to the native browser session
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > shows recent browsing history and navigates the native browser when an entry is selected
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > handles zoom controls and calls setBrowserZoom
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > clamps zoom to the Settings-exposed range derived from BROWSER_ZOOM_LEVELS
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > calls focusBrowser on focus button click
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > fetches browser state via getBrowserState during state sync / reload
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > surfaces a rejected zoom with its structured code and restores the previous zoom
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > surfaces a rejected back navigation with its structured code
+ FAIL  src/components/BrowserToolbar.test.tsx > BrowserToolbar > surfaces a failed shortcut listener registration instead of discarding it
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserToolbar.test.tsx:47:23
+     45| 
+     46| beforeEach(() => {
+     47|   window.localStorage.clear();
+       |                       ^
+     48|   browserNative.openExternalUrl.mockReset();
+     49|   browserNative.setBrowserZoom.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/18]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  18 failed (18)
+   Start at  10:09:55
+   Duration  1.02s (transform 139ms, setup 105ms, collect 498ms, tests 13ms, environment 227ms, prepare 46ms)
+
+error: script "test" exited with code 1

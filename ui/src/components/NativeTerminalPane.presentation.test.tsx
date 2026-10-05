@@ -10,9 +10,22 @@ const bridge = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: bridge.invoke,
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    const result = await bridge.invoke(command, args);
+    return command === "cmd_native_terminal_set_bounds" && result && typeof result === "object"
+      ? { attachTuple: args?.attachTuple, ...result }
+      : result;
+  },
   isTauri: () => true,
 }));
+vi.mock("../lib/localSplitLifecycle", async (original) => ({
+  ...await original<typeof import("../lib/localSplitLifecycle")>(),
+  persistNativeBinding: async (owner: TerminalSession) => {
+    await Promise.resolve();
+    persistedBindings.set(owner.id, structuredClone(owner));
+  },
+}));
+const persistedBindings = new Map<string, TerminalSession>();
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onDragDropEvent: async () => () => undefined }),
 }));
@@ -53,6 +66,7 @@ function commands(name: string) {
 }
 
 beforeEach(() => {
+  persistedBindings.clear();
   vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockReturnValue(new DOMRect(10, 20, 800, 600));
@@ -141,6 +155,9 @@ describe("native terminal presentation retention", () => {
   ])("retains a shown final frame on exit, blocks input, and releases it on unmount (%j)", async (identity) => {
     const view = render(<NativeTerminalPane session={{ ...session(), ...identity }} active />);
     await act(async () => {});
+    const durableTuple = structuredClone(persistedBindings.get("pane-a")!.attachTuple!);
+    expect(durableTuple.daemonEpoch).toBe(identity.daemonEpoch ?? "");
+    expect(durableTuple.incarnation).toBeNull();
     expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
     await act(async () => { view.rerender(<NativeTerminalPane session={session(null)} active />); });
 
@@ -153,7 +170,7 @@ describe("native terminal presentation retention", () => {
     expect(commands("cmd_native_terminal_send_input")).toHaveLength(0);
     await act(async () => { view.unmount(); });
     expect(commands("cmd_native_terminal_detach")).toEqual([
-      ["cmd_native_terminal_detach", { sessionId: "backend-a" }],
+      ["cmd_native_terminal_detach", { sessionId: "backend-a", attachTuple: durableTuple }],
     ]);
   });
 
@@ -265,15 +282,18 @@ describe("native terminal presentation retention", () => {
       if (command !== "cmd_native_terminal_set_bounds") return undefined;
       return args?.sessionId === "backend-b" ? replacement : PRESENTED;
     });
-    const view = render(<NativeTerminalPane session={session()} />);
+    const view = render(<NativeTerminalPane session={{ ...session(), daemonEpoch: "epoch-a", incarnation: "pty-a" }} />);
     await act(async () => {});
+    const durableTuple = structuredClone(persistedBindings.get("pane-a")!.attachTuple!);
+    expect(durableTuple.daemonEpoch).toBe("epoch-a");
+    expect(durableTuple.incarnation).toBe("pty-a");
     await act(async () => { view.rerender(<NativeTerminalPane session={session(null)} />); });
     await act(async () => { view.rerender(<NativeTerminalPane session={session("backend-b")} />); });
     expect(commands("cmd_native_terminal_detach")).toHaveLength(0);
 
     await act(async () => { presentReplacement(PRESENTED); });
     expect(commands("cmd_native_terminal_detach")).toEqual([
-      ["cmd_native_terminal_detach", { sessionId: "backend-a" }],
+      ["cmd_native_terminal_detach", { sessionId: "backend-a", attachTuple: durableTuple }],
     ]);
     expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "true");
   });

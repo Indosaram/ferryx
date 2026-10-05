@@ -126,6 +126,9 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -206,6 +209,9 @@ async fn poisoned_requested_cwd_falls_back_to_the_worktree_root() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -268,6 +274,9 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -292,11 +301,32 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
     .await
     .expect("initial output timeout");
 
+    // The attach contract requires the persisted seven-field pane binding. This fixture's
+    // ordinary spawn is its own identity source: the backend session, the PTY incarnation the
+    // daemon reported for it, and the epoch the spawn answered with.
+    let attach_tuple = crate::daemon::protocol::PaneAttachTuple {
+        backend_session_id: spawned.session_id.clone(),
+        incarnation: Some(
+            spawned
+                .session
+                .incarnation
+                .clone()
+                .expect("spawn response reports the session's PTY incarnation"),
+        ),
+        daemon_epoch: spawned.daemon_epoch.clone(),
+        // The fixture binds no frontend pane, so these three carry fixture-local identity.
+        frontend_session_id: "attach-history-frontend".into(),
+        pane_identity: "attach-history-pane".into(),
+        binding_key: "attach-history-binding".into(),
+        attempt_generation: 1,
+    };
     let attach_res = cmd_terminal_attach(
         app.handle().clone(),
         client_state.clone(),
         spawned.session_id.clone(),
         None,
+        None,
+        Some(attach_tuple),
     )
     .await
     .expect("attach");
@@ -467,6 +497,9 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -545,6 +578,9 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -605,6 +641,9 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -811,6 +850,9 @@ async fn test_project_registration_then_daemon_spawn() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            create_only: None, // Ordinary spawn fixture.
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await
@@ -853,6 +895,9 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         rows: Some(24),
         client_request_id: Some("req-invalid-id".into()),
         inherit_from_session_id: None,
+        create_only: None, // Ordinary spawn fixture.
+        prepared_local_split: None,
+        remaining_ms: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -893,6 +938,9 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         rows: Some(24),
         client_request_id: Some("req-wrong-key".into()),
         inherit_from_session_id: None,
+        create_only: None, // Ordinary spawn fixture.
+        prepared_local_split: None,
+        remaining_ms: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -964,6 +1012,9 @@ async fn agent_resume_startup_cwd_jail_enforcement() {
         rows: Some(24),
         client_request_id: Some("req-outside-cwd".into()),
         inherit_from_session_id: None,
+        create_only: None, // Ordinary spawn fixture.
+        prepared_local_split: None,
+        remaining_ms: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -1078,6 +1129,8 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                 binary_path: None,
                                 binary_mtime_ms: None,
                                 daemon_version: None,
+                                capabilities: Vec::new(), // Legacy handshake fixture.
+                                admission_time_unix_ms: None,
                             },
                             DaemonRequest::Spawn { .. } => DaemonResponse::SpawnOk {
                                 session_id: "remote-mock-session".into(),
@@ -1094,6 +1147,11 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                     end_sequence: None,
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
+                                    incarnation: None, // Legacy session fixture.
                                 },
                             },
                             DaemonRequest::Attach { .. } => DaemonResponse::AttachOk {
@@ -1187,6 +1245,9 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         rows: Some(30),
         client_request_id: Some("req-forward-wt".into()),
         inherit_from_session_id: None,
+        create_only: None, // Ordinary spawn fixture.
+        prepared_local_split: None,
+        remaining_ms: None,
         shell: None,
         startup: None,
     };
@@ -1258,6 +1319,9 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         rows: Some(24),
         client_request_id: None,
         inherit_from_session_id: None,
+        create_only: None, // Ordinary spawn fixture.
+        prepared_local_split: None,
+        remaining_ms: None,
         shell: None,
         startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
             agent_type: "claude".into(),
@@ -1432,6 +1496,8 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -1592,6 +1658,8 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -1768,6 +1836,8 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -1920,6 +1990,8 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2087,6 +2159,8 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2262,6 +2336,8 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2434,6 +2510,8 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2574,6 +2652,8 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2712,6 +2792,8 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2845,6 +2927,8 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -2956,6 +3040,8 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3103,6 +3189,8 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3202,6 +3290,26 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
     server.abort();
 }
 
+/// The reinstalled proxy session this fixture attaches through, and the PTY incarnation its
+/// daemon reports for it: the attach contract requires the persisted seven-field pane binding,
+/// so the installed binding and the daemon's describe answer must agree on both values.
+const P13_PROXY_SESSION_ID: &str = "daemon-session:reinstalled-p13-proxy";
+const P13_PROXY_INCARNATION: &str = "p13-proxy-incarnation";
+
+#[cfg(feature = "native-terminal")]
+fn p13_proxy_pane_binding() -> crate::daemon::protocol::PaneAttachTuple {
+    crate::daemon::protocol::PaneAttachTuple {
+        backend_session_id: P13_PROXY_SESSION_ID.into(),
+        incarnation: Some(P13_PROXY_INCARNATION.into()),
+        // The proxy generation the fixture's reattach answers with (Epoch(2) -> AttachOk epoch 2).
+        daemon_epoch: "2".into(),
+        frontend_session_id: "p13-frontend-session".into(),
+        pane_identity: "p13-pane-identity".into(),
+        binding_key: "p13-binding-key".into(),
+        attempt_generation: 1,
+    }
+}
+
 #[tokio::test]
 async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
@@ -3262,6 +3370,8 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3321,6 +3431,32 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                                 }
                             }
                         }
+                        DaemonRequest::DescribeSession { session_id } => {
+                            if session_id == P13_PROXY_SESSION_ID {
+                                let mut session =
+                                    crate::daemon::protocol::DaemonSessionDetails::new(
+                                        P13_PROXY_SESSION_ID.into(),
+                                        None,
+                                        None,
+                                        None,
+                                        80,
+                                        24,
+                                        true,
+                                        Some(42),
+                                        Some(43),
+                                        None,
+                                        false,
+                                    );
+                                session.incarnation = Some(P13_PROXY_INCARNATION.into());
+                                DaemonResponse::DescribeSessionOk { session }
+                            } else {
+                                DaemonResponse::Error {
+                                    message: format!("Session '{session_id}' not found"),
+                                    code: Some("SESSION_NOT_FOUND".into()),
+                                    details: None,
+                                }
+                            }
+                        }
                         _ => DaemonResponse::Error {
                             message: "unexpected req".into(),
                             code: None,
@@ -3337,8 +3473,23 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
     });
 
     let client = Arc::new(DaemonClient::new_with_socket(socket));
-    let app = tauri::test::mock_builder()
-        .manage(client.clone())
+    // The attach contract requires the persisted seven-field pane binding for the session it
+    // attaches to, so install the binding this fixture's proxy session carries before attaching.
+    #[allow(unused_mut)]
+    let mut builder = tauri::test::mock_builder().manage(client.clone());
+    #[cfg(feature = "native-terminal")]
+    {
+        let surface_host =
+            crate::native_terminal::surface_host::NativeTerminalSurfaceHostState::default();
+        surface_host
+            .attach_test_session_for_liveness(P13_PROXY_SESSION_ID, 2, None)
+            .expect("seed proxy liveness session");
+        surface_host
+            .begin_replay_request_with_tuple(P13_PROXY_SESSION_ID, Some(p13_proxy_pane_binding()))
+            .expect("install persisted pane binding");
+        builder = builder.manage(surface_host);
+    }
+    let app = builder
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let client_state = app.state::<Arc<DaemonClient>>();
@@ -3348,6 +3499,8 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
         client_state,
         "daemon-session:orig-p13".into(),
         Some("42".into()),
+        None,
+        None,
     )
     .await
     .expect("attach of paired session must succeed through reinstalled proxy");
@@ -3421,6 +3574,8 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3484,6 +3639,8 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
         app.handle().clone(),
         client_state,
         "daemon-session:orig-p13-amb".into(),
+        None,
+        None,
         None,
     )
     .await
@@ -3552,6 +3709,8 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3590,6 +3749,8 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
         app.handle().clone(),
         client_state,
         "daemon-session:unknown-p13".into(),
+        None,
+        None,
         None,
     )
     .await
@@ -3648,6 +3809,8 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
                             binary_path: None,
                             binary_mtime_ms: None,
                             daemon_version: None,
+                            capabilities: Vec::new(), // Legacy handshake fixture.
+                            admission_time_unix_ms: None,
                         },
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
@@ -3709,6 +3872,8 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
         app.handle().clone(),
         client_state,
         "daemon-session:orig-hub-absent".into(),
+        None,
+        None,
         None,
     )
     .await

@@ -1,0 +1,37 @@
+$ vitest run --maxWorkers=1 src/state/activityRenderChain.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037949) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/state/activityRenderChain.test.tsx (3 tests | 3 failed) 9ms
+   × Activity render chain: native title -> workspace store -> TabBar -> StatusDot > renders a spinning working indicator on a non-active tab when an agent title arrives, then transitions to unread attention on completion 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Activity render chain: native title -> workspace store -> TabBar -> StatusDot > handles non-agent working titles (e.g. cargo/test spinners) through the full render chain 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Activity render chain: native title -> workspace store -> TabBar -> StatusDot > renders working then unread on a non-active tab from an EXTENSION-reported state, with no title involved 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/activityRenderChain.test.tsx > Activity render chain: native title -> workspace store -> TabBar -> StatusDot > renders a spinning working indicator on a non-active tab when an agent title arrives, then transitions to unread attention on completion
+ FAIL  src/state/activityRenderChain.test.tsx > Activity render chain: native title -> workspace store -> TabBar -> StatusDot > handles non-agent working titles (e.g. cargo/test spinners) through the full render chain
+ FAIL  src/state/activityRenderChain.test.tsx > Activity render chain: native title -> workspace store -> TabBar -> StatusDot > renders working then unread on a non-active tab from an EXTENSION-reported state, with no title involved
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/state/activityRenderChain.test.tsx:115:18
+    113|     nativeListeners.bell.clear();
+    114|     nativeWindow.startDragging.mockClear();
+    115|     localStorage.clear();
+       |                  ^
+    116|   });
+    117| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  10:09:45
+   Duration  1.52s (transform 488ms, setup 104ms, collect 998ms, tests 9ms, environment 225ms, prepare 50ms)
+
+error: script "test" exited with code 1

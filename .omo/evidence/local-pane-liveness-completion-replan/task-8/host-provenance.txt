@@ -1,0 +1,14 @@
+Linux fresh toolchain/provenance
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+1.4.0
+v26.8.1
+6a508fd5e34c7e222c052a6d00bb3891ff3feace
+e1ea8bd6875a15fdfc5205ae5f4e1ba21194c0163f6fecf4bfa821a0443fbd53  /home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/Cargo.lock
+d84cde8a0f35abd85835bf2fa17ebb7945604f7579bfde7d1e14a28155d13137  /home/indo/ferryx-pane-completion/source-5464da0d/ui/bun.lock
+
+Windows staging validation: CAPTURE_VALIDATION=7,0; Get-PSDrive C free 217.50 GiB; corrected staging native=0.
+
+Mac remote Cargo.lock and ui/bun.lock SHA256 match manifest exactly.
+Windows remote Get-FileHash Cargo.lock and ui/bun.lock SHA256 match manifest exactly.
+Windows rustc 1.97.0 (2d8144b78 2026-07-07), cargo 1.97.0 (c980f4866 2026-06-30), Bun 1.4.0, Node v24.19.0.

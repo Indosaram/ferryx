@@ -1,0 +1,6 @@
+
+AB2 side=base rep=1 native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2191 filtered out; finished in 0.07s | worktree::tests::plain_folder_without_git_registers_and_guards_worktrees
+AB2 side=cand rep=1 native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2279 filtered out; finished in 0.06s | worktree::tests::plain_folder_without_git_registers_and_guards_worktrees
+AB2 side=base rep=2 native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2191 filtered out; finished in 0.06s | worktree::tests::plain_folder_without_git_registers_and_guards_worktrees
+AB2 side=cand rep=2 native=101 | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2279 filtered out; finished in 0.04s | worktree::tests::plain_folder_without_git_registers_and_guards_worktrees
+AB2 side=base rep=1 native=-1 |  | daemon::session_service::machine_tests::interrupted_spawn_never_repeats_preallocated_intent

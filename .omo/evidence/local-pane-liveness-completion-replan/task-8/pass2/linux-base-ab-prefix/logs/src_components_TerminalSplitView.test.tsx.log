@@ -1,0 +1,74 @@
+$ vitest run --maxWorkers=1 src/components/TerminalSplitView.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033820) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/TerminalSplitView.test.tsx (34 tests | 1 failed) 511ms
+   ✓ TerminalSplitView group and pane rendering > renders a single tab group with a pane move handle and split controls 115ms
+   ✓ TerminalSplitView group and pane rendering > does not pass header hover chrome-suppression signal to TerminalPane on top hover hotspot activation while revealing toolbar 16ms
+   ✓ TerminalSplitView group and pane rendering > keeps an empty tab bar usable when all tabs have been closed 7ms
+   ✓ TerminalSplitView group and pane rendering > renders a nested terminal-pane tree inside one tab group with resize dividers 17ms
+   ✓ TerminalSplitView group and pane rendering > uses one-pixel gray split lines without consuming visible pane spacing 22ms
+   ✓ TerminalSplitView group and pane rendering > dispatches terminal-pane split actions from pane toolbar buttons 23ms
+   ✓ TerminalSplitView group and pane rendering > routes a tab context-menu split to that tab's own focused terminal leaf 14ms
+   ✓ TerminalSplitView group and pane rendering > exposes pane drags through dnd-kit metadata and keeps toolbar controls as non-native drags 29ms
+   ✓ TerminalSplitView group and pane rendering > renders dnd-kit group body and all four edge split drop zones 6ms
+   ✓ TerminalSplitView group and pane rendering > falls back to an even ratio when a terminal-pane resize container is too small 11ms
+   ✓ TerminalSplitView group and pane rendering > passes a frozen seam from pointerdown and keeps isolated true when Alt is held during divider drag 14ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > splits the panes evenly on a divider double-click 14ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > ignores two clicks separated by more than the double-click window 10ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > resizes instead of equalizing when a drag starts on the second press 9ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > ignores a right-button double-click 9ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > keeps the even division when the second press jitters within the slop 14ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > does not equalize when the second click follows a real resize drag 9ms
+   ✓ TerminalSplitView group and pane rendering > divider double-click equalize > equalizes split tab groups from the group divider 9ms
+   ✓ TerminalSplitView group and pane rendering > passes searchOpen true only to the pane matching searchLeafId 6ms
+   ✓ TerminalSplitView group and pane rendering > F-terminal-05 and F-terminal-06 perf optimizations > F-terminal-05: source check proves collisionDetection does not call droppableContainers.find inside filter/sort 0ms
+   ✓ TerminalSplitView group and pane rendering > F-terminal-05 and F-terminal-06 perf optimizations > F-terminal-05: workspaceCollisionDetection builds an O(1) container map and does not call find() on droppableContainers during sort/filter 1ms
+   ✓ TerminalSplitView group and pane rendering > F-terminal-05 and F-terminal-06 perf optimizations > F-terminal-06: source check proves stable module-level FALLBACK_SESSION is defined and used in PaneRenderer 0ms
+   ✓ TerminalSplitView group and pane rendering > F-terminal-05 and F-terminal-06 perf optimizations > F-terminal-06: exports stable FALLBACK_SESSION and maintains reference identity when session is missing 4ms
+   ✓ TerminalSplitView group and pane rendering > forwards defaultAgentId so the usable default is first with a Default label 16ms
+   ✓ TerminalSplitView group and pane rendering > narrows pane toolbar hover hotspot to h-5 (20px) and toggles toolbar on top hover 7ms
+   ✓ TerminalSplitView group and pane rendering > applies drop feedback without transitioning pane layout 5ms
+   ✓ TerminalSplitView group and pane rendering > does not apply amber ring class on pane leaf in any state, while forwarding needsAttention to terminal pane and rendering bottom DOM frame completion for waiting or unread done 28ms
+   ✓ TerminalSplitView group and pane rendering > dismisses both native and DOM attention for an acknowledged waiting pane 5ms
+   × TerminalSplitView group and pane rendering > renders no amber ring and passes needsAttention=false when attentionFrame setting is false 9ms
+     → [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"data-needs-attention"[32m[39m[2m, [22m[32m[32m"false"[32m[39m[2m) // element.getAttribute("data-needs-attention") === "false"[22m
+
+Expected the element to have attribute:
+[32m  data-needs-attention="false"[39m
+Received:
+[31m  data-needs-attention="true"[39m
+   ✓ inbox navigation flash > flashes only the target pane, fades out on its own, and leaves a sibling's attention frame alone 13ms
+   ✓ inbox navigation flash > restarts the flash when the same pane is reached again before the fade ends 8ms
+   ✓ TerminalSplitView pane copy debug info > copies exact debug info for the specific terminal pane, including inactive panes in a split 26ms
+   ✓ TerminalSplitView pane copy debug info > stops propagation on click and pointerDown to avoid changing pane focus or triggering split/drag 16ms
+   ✓ TerminalSplitView pane copy debug info > reveals toolbar when keyboard focus moves into toolbar controls and hides on blur 14ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TerminalSplitView.test.tsx > TerminalSplitView group and pane rendering > renders no amber ring and passes needsAttention=false when attentionFrame setting is false
+Error: [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"data-needs-attention"[32m[39m[2m, [22m[32m[32m"false"[32m[39m[2m) // element.getAttribute("data-needs-attention") === "false"[22m
+
+Expected the element to have attribute:
+[32m  data-needs-attention="false"[39m
+Received:
+[31m  data-needs-attention="true"[39m
+ ❯ src/components/TerminalSplitView.test.tsx:925:26
+    923| 
+    924|     const terminalPane = screen.getByTestId("terminal-pane");
+    925|     expect(terminalPane).toHaveAttribute("data-needs-attention", "fals…
+       |                          ^
+    926|     expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInT…
+    927|     expect(screen.queryByTestId("attention-frame-corner-left")).not.to…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 33 passed (34)
+   Start at  10:08:56
+   Duration  2.28s (transform 654ms, setup 102ms, collect 1.26s, tests 511ms, environment 235ms, prepare 53ms)
+
+error: script "test" exited with code 1

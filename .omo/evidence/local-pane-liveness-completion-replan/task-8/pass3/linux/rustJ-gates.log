@@ -1,0 +1,4 @@
+HOST=linux HEAD=70eefafe START=2026-10-04T11:18:03Z LOAD=2.52 4.36 6.14
+SECTION decisive-handover
+GATE linux handover-xfer native=0 selected=0 errors=0 secs=207 | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.21s
+SECTION affected-set

@@ -1,0 +1,62 @@
+$ vitest run --maxWorkers=1 src/remote/RemotePreferences.contract.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039654) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemotePreferences.contract.test.tsx (3 tests | 3 failed) 78ms
+   × migrates real scoped auth and loads only the selected host's preferences across gated host switches 7ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × rejects late preferences after an in-place credential change and retains local override precedence 60ms
+     → Cannot read properties of undefined (reading 'clear')
+   × keeps desktop-embedded appearance local even with remote transport credentials 10ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > migrates real scoped auth and loads only the selected host's preferences across gated host switches
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ Module.setRemoteAuthToken src/lib/remoteClient.ts:50:16
+     48|     return;
+     49|   }
+     50|   localStorage.setItem(TOKEN_KEY, token);
+       |                ^
+     51|   localStorage.removeItem(LEGACY_TOKEN_KEY);
+     52| }
+ ❯ src/remote/RemotePreferences.contract.test.tsx:111:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > migrates real scoped auth and loads only the selected host's preferences across gated host switches
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemotePreferences.contract.test.tsx:91:16
+     89|   cleanup();
+     90|   remoteHostStore.reset();
+     91|   localStorage.clear();
+       |                ^
+     92|   resetTerminalPreferencesCache();
+     93|   document.documentElement.style.removeProperty("--terminal");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > rejects late preferences after an in-place credential change and retains local override precedence
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > keeps desktop-embedded appearance local even with remote transport credentials
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemotePreferences.contract.test.tsx:91:16
+     89|   cleanup();
+     90|   remoteHostStore.reset();
+     91|   localStorage.clear();
+       |                ^
+     92|   resetTerminalPreferencesCache();
+     93|   document.documentElement.style.removeProperty("--terminal");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  10:10:09
+   Duration  1.43s (transform 361ms, setup 112ms, collect 810ms, tests 78ms, environment 245ms, prepare 51ms)
+
+error: script "test" exited with code 1

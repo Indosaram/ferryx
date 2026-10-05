@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036586) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/App.pairedDaemon.test.tsx (8 tests | 8 failed) 7ms
+   × App paired desktop shell > routes deletion of an inactive paired project's worktree through its owning project 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > refreshes unavailable paired inventory when selecting its project without refocusing the window 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > refreshes unavailable inventory when selecting a different worktree in the active paired project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > selects a worktree on a paired machine and requests terminal spawn with worktree path and identity 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > routes two different paired worktree selections to distinct backend spawn paths 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App paired desktop shell > switches to paired project and preserves pending worktree when selected from another project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > routes deletion of an inactive paired project's worktree through its owning project
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > preserves paired ownership and reports disabled native support without local registration
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > refreshes unavailable paired inventory when selecting its project without refocusing the window
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > refreshes unavailable inventory when selecting a different worktree in the active paired project
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > selects a worktree on a paired machine and requests terminal spawn with worktree path and identity
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > routes two different paired worktree selections to distinct backend spawn paths
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > switches to paired project and preserves pending worktree when selected from another project
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.pairedDaemon.test.tsx:117:16
+    115| async function mount() { await act(async () => { render(<App />); }); }
+    116| beforeEach(() => {
+    117|   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); h…
+       |                ^
+    118|   native.isTauriRuntime.mockReturnValue(false);
+    119|   native.registerProject.mockImplementation(async (request: { workspac…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  8 failed (8)
+   Start at  10:09:21
+   Duration  2.10s (transform 928ms, setup 103ms, collect 1.58s, tests 7ms, environment 231ms, prepare 53ms)
+
+error: script "test" exited with code 1

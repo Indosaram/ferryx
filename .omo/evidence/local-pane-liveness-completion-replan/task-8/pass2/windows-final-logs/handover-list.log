@@ -1,0 +1,292 @@
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-172baa87\src-tauri)
+error[E0432]: unresolved import `super::handover_transaction`
+   --> src\daemon\handover.rs:517:20
+    |
+517 |         use super::handover_transaction::{HandoverState, HandoverTransaction};
+    |                    ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `super::handover_transaction`
+   --> src\daemon\handover.rs:533:20
+    |
+533 |         use super::handover_transaction::{HandoverState, HandoverTransaction};
+    |                    ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `fs2`
+ --> src\daemon\split_journal.rs:1:5
+  |
+1 | use fs2::FileExt;
+  |     ^^^ use of unresolved module or unlinked crate `fs2`
+  |
+  = help: if you wanted to use a crate named `fs2`, use `cargo add fs2` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find `handover_transaction` in `super`
+   --> src\daemon\handover.rs:516:80
+    |
+516 |     pub fn recorded_decision(legacy: &std::path::Path) -> Result<Option<super::handover_transaction::HandoverState>, String> {
+    |                                                                                ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `handover_transaction` in `super`
+  --> src\daemon\server.rs:49:58
+   |
+49 |     D: std::future::Future<Output = Result<Option<super::handover_transaction::HandoverState>, String>>,
+   |                                                          ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+   |
+note: found an item that was configured out
+  --> src\daemon\mod.rs:9:9
+   |
+ 8 | #[cfg(unix)]
+   |       ---- the item is gated here
+ 9 | pub mod handover_transaction;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `handover_transaction` in `super`
+  --> src\daemon\server.rs:55:25
+   |
+55 |             Some(super::handover_transaction::HandoverState::Active) => Ok(()),
+   |                         ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+   |
+note: found an item that was configured out
+  --> src\daemon\mod.rs:9:9
+   |
+ 8 | #[cfg(unix)]
+   |       ---- the item is gated here
+ 9 | pub mod handover_transaction;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\ipc\remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\remote\session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src\remote\server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ffi::OsString`
+ --> src\ssh\..\ferryx_scope\ssh\process.rs:5:5
+  |
+5 |     ffi::OsString,
+  |     ^^^^^^^^^^^^^
+
+error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`
+    --> src\daemon\server.rs:3135:59
+     |
+3135 | ...                   code: Some(error.code.to_string()), details: error.details },
+     |                                             ^^^^^^^^^ method cannot be called on `ipc::error::IpcErrorCode` due to unsatisfied trait bounds
+     |
+    ::: src\ipc\error.rs:8:1
+     |
+   8 | pub enum IpcErrorCode {
+     | --------------------- method `to_string` not found for this enum because it doesn't satisfy `ipc::error::IpcErrorCode: ToString` or `ipc::error::IpcErrorCode: std::fmt::Display`
+     |
+     = note: the following trait bounds were not satisfied:
+             `ipc::error::IpcErrorCode: std::fmt::Display`
+             which is required by `ipc::error::IpcErrorCode: ToString`
+note: the trait `std::fmt::Display` must be implemented
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\fmt\mod.rs:1187:0
+note: the method `to_string` exists on the type `std::string::String`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\alloc\src\string.rs:2893:4
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `to_string`, perhaps you need to implement it:
+             candidate #1: `ToString`
+
+error[E0063]: missing field `incarnation` in initializer of `DaemonSessionDetails`
+    --> src\ipc\terminal.rs:2410:22
+     |
+2410 |             session: crate::daemon::protocol::DaemonSessionDetails {
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0283]: type annotations needed
+   --> src\terminal\service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                               ------------            ^^^^
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<std::string::String>` found in the following crates: `core`, `unicase`:
+            - impl<'a> Into<std::string::String> for unicase::UniCase<std::string::String>;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `SessionLifecycleRegistry::mark_running`
+   --> src\daemon\session_lifecycle.rs:58:53
+    |
+ 58 |     pub fn mark_running(&mut self, session_id: impl Into<String>) {
+    |                                                     ^^^^^^^^^^^^ required by this bound in `SessionLifecycleRegistry::mark_running`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+help: consider removing this method call, as the receiver has type `&str` and `&str: Into<std::string::String>` trivially holds
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(session_id);
+    |
+
+error[E0283]: type annotations needed
+   --> src\terminal\service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                                                       ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `axum_core`, `bytes`, `naga`, `reqwest`, `winnow`:
+            - impl std::convert::From<&'static str> for axum::body::Body;
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for reqwest::async_impl::body::Body;
+            - impl std::convert::From<&'static str> for wgpu::naga::front::wgsl::error::DiagnosticAttributeNotSupportedPosition;
+            - impl std::convert::From<&'static str> for winnow::error::StrContextValue;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+
+error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope
+   --> src\daemon\split_journal.rs:172:19
+    |
+172 |         lock_file.lock_exclusive()?;
+    |                   ^^^^^^^^^^^^^^ method not found in `std::fs::File`
+
+error[E0599]: no method named `active_presentation_generation` found for reference `&NativeTerminalSurfaceHost` in the current scope
+   --> src\native_terminal\surface_host.rs:971:38
+    |
+971 | ...                   host.active_presentation_generation() == Some(frame_generation)
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+971 -                                 host.active_presentation_generation() == Some(frame_generation)
+971 +                                 host.active_presentation_geometry() == Some(frame_generation)
+    |
+
+error[E0599]: no method named `active_presentation_epoch` found for reference `&NativeTerminalSurfaceHost` in the current scope
+   --> src\native_terminal\surface_host.rs:972:45
+    |
+972 | ...                   && host.active_presentation_epoch() == Some(frame_epoch)
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+972 -                                     && host.active_presentation_epoch() == Some(frame_epoch)
+972 +                                     && host.active_presentation_geometry() == Some(frame_epoch)
+    |
+
+warning: unused variable: `host`
+   --> src\ipc\remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `session`
+   --> src\terminal\pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src\terminal\remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0063, E0283, E0432, E0433, E0599.
+For more information about an error, try `rustc --explain E0063`.
+warning: `ferryx` (lib) generated 14 warnings
+error: could not compile `ferryx` (lib) due to 13 previous errors; 14 warnings emitted
+NATIVE_EXIT=101

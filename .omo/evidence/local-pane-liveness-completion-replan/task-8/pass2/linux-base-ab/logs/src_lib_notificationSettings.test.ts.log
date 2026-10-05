@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/lib/notificationSettings.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044870) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/notificationSettings.test.ts (5 tests | 5 failed) 6ms
+   × notificationSettings > loads defaults with attentionFrame as true 3ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × notificationSettings > roundtrips attentionFrame false and preserves other fields 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × notificationSettings > resets attentionFrame back to true on resetNotificationSettings 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × notificationSettings > dispatches NOTIFICATION_SETTINGS_EVENT when saving settings 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × notificationSettings > useAttentionFrameEnabled reflects stored value and updates on settings change event 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > loads defaults with attentionFrame as true
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > roundtrips attentionFrame false and preserves other fields
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > resets attentionFrame back to true on resetNotificationSettings
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > dispatches NOTIFICATION_SETTINGS_EVENT when saving settings
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > useAttentionFrameEnabled reflects stored value and updates on settings change event
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/notificationSettings.test.ts:15:18
+     13| describe("notificationSettings", () => {
+     14|   beforeEach(() => {
+     15|     localStorage.clear();
+       |                  ^
+     16|     resetNotificationSettings();
+     17|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > loads defaults with attentionFrame as true
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > roundtrips attentionFrame false and preserves other fields
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > resets attentionFrame back to true on resetNotificationSettings
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > dispatches NOTIFICATION_SETTINGS_EVENT when saving settings
+ FAIL  src/lib/notificationSettings.test.ts > notificationSettings > useAttentionFrameEnabled reflects stored value and updates on settings change event
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/notificationSettings.test.ts:20:18
+     18| 
+     19|   afterEach(() => {
+     20|     localStorage.clear();
+       |                  ^
+     21|     resetNotificationSettings();
+     22|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:11:22
+   Duration  542ms (transform 56ms, setup 94ms, collect 46ms, tests 6ms, environment 223ms, prepare 46ms)
+
+error: script "test" exited with code 1

@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 pub(crate) mod windows_input;
 
 #[cfg(windows)]
-mod windows_suspend {
+pub(crate) mod windows_suspend {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
     const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
@@ -254,8 +254,38 @@ impl ProcessHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuspensionReceiptWire {
+    pub pid: u32,
+    pub incarnation: String,
+    pub actuated_at_unix_ms: u64,
+    /// Carried across handover so a successor reports the guarantee the actuating
+    /// backend actually proved, instead of inferring the stronger one. Defaults to
+    /// `false` for a snapshot written by a predecessor that predates this field, so
+    /// a cross-version handover deserializes instead of failing.
+    #[serde(default)]
+    pub stop_observed: bool,
+}
+
+impl SuspensionReceiptWire {
+    pub fn matches(&self, pid: Option<u32>, incarnation: Option<&str>) -> bool {
+        pid == Some(self.pid) && incarnation == Some(self.incarnation.as_str())
+            && !self.incarnation.is_empty()
+    }
+
+    pub fn receipt(&self) -> super::ActuationReceipt {
+        super::ActuationReceipt { pid: self.pid, incarnation: self.incarnation.clone(),
+            source: super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: self.actuated_at_unix_ms,
+            stop_observed: self.stop_observed,
+            guarantee: if self.stop_observed { super::StopGuarantee::IdentityBoundObservedStop }
+                else { super::StopGuarantee::IdentityBoundUnverifiedStop } }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PtySessionSnapshot {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
     pub pid: Option<u32>,
     pub pgid: Option<u32>,
     pub cols: u16,
@@ -263,6 +293,8 @@ pub struct PtySessionSnapshot {
     pub worktree_path: Option<PathBuf>,
     pub state: PtySessionState,
     pub hub_snapshot: Option<SessionHubSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension_receipt: Option<SuspensionReceiptWire>,
 }
 
 pub type PtyAdoptSnapshot = PtySessionSnapshot;
@@ -271,6 +303,7 @@ pub type PtyAdoptSnapshot = PtySessionSnapshot;
 #[derive(Debug)]
 pub struct PtySessionExport {
     pub session_id: String,
+    pub incarnation: Option<String>,
     pub pid: Option<u32>,
     pub pgid: Option<u32>,
     pub cols: u16,
@@ -278,6 +311,7 @@ pub struct PtySessionExport {
     pub worktree_path: Option<PathBuf>,
     pub state: PtySessionState,
     pub hub_snapshot: Option<SessionHubSnapshot>,
+    pub suspension_receipt: Option<SuspensionReceiptWire>,
     pub master_raw_fd: std::os::fd::RawFd,
     pub master_fd: std::os::fd::OwnedFd,
 }
@@ -290,6 +324,7 @@ impl PtySessionExport {
     pub fn snapshot(&self) -> PtySessionSnapshot {
         PtySessionSnapshot {
             session_id: self.session_id.clone(),
+            incarnation: self.incarnation.clone(),
             pid: self.pid,
             pgid: self.pgid,
             cols: self.cols,
@@ -297,6 +332,8 @@ impl PtySessionExport {
             worktree_path: self.worktree_path.clone(),
             state: self.state.clone(),
             hub_snapshot: self.hub_snapshot.clone(),
+            suspension_receipt: self.suspension_receipt.clone().filter(|receipt|
+                receipt.matches(self.pid, self.incarnation.as_deref())),
         }
     }
 
@@ -308,8 +345,11 @@ impl PtySessionExport {
     pub fn from_parts(snapshot: PtySessionSnapshot, master_fd: std::os::fd::OwnedFd) -> Self {
         use std::os::fd::AsRawFd;
         let master_raw_fd = master_fd.as_raw_fd();
+        let suspension_receipt = snapshot.suspension_receipt.clone().filter(|receipt|
+            receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()));
         Self {
             session_id: snapshot.session_id,
+            incarnation: snapshot.incarnation,
             pid: snapshot.pid,
             pgid: snapshot.pgid,
             cols: snapshot.cols,
@@ -317,6 +357,7 @@ impl PtySessionExport {
             worktree_path: snapshot.worktree_path,
             state: snapshot.state,
             hub_snapshot: snapshot.hub_snapshot,
+            suspension_receipt,
             master_raw_fd,
             master_fd,
         }
@@ -346,6 +387,7 @@ pub(crate) struct PtySessionConfig {
     #[cfg(unix)]
     pub input: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     pub id: String,
+    pub incarnation: Option<String>,
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
     pub writer: Box<dyn Write + Send>,
@@ -369,6 +411,8 @@ pub struct PtySession {
     input: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     input_gate: tokio::sync::Mutex<()>,
     pub id: String,
+    incarnation: Option<String>,
+    suspension_receipt: Mutex<Option<SuspensionReceiptWire>>,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     child: Arc<Mutex<Option<ProcessHandle>>>,
@@ -385,6 +429,8 @@ pub struct PtySession {
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
     pause_requested: Arc<AtomicBool>,
     reader_paused: Arc<AtomicBool>,
+    #[cfg(unix)]
+    relinquish_wake: Option<std::os::unix::net::UnixStream>,
 }
 
 fn record_output_millis(target: &AtomicU64) {
@@ -439,6 +485,7 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
+                if reader_finished_task.load(Ordering::Acquire) { break; }
                 if pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
@@ -468,9 +515,7 @@ impl PtySession {
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         use std::os::fd::AsRawFd;
                         let mut poll = libc::pollfd {
-                            fd: reader_poll.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
+                            fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0,
                         };
                         if unsafe { libc::poll(&mut poll, 1, -1) } < 0
                             && std::io::Error::last_os_error().kind()
@@ -489,6 +534,10 @@ impl PtySession {
             input: config.input,
             input_gate: tokio::sync::Mutex::new(()),
             id: config.id,
+            #[cfg(unix)]
+            relinquish_wake: None,
+            incarnation: config.incarnation,
+            suspension_receipt: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(config.master))),
             writer: Arc::new(Mutex::new(Some(config.writer))),
             child: Arc::new(Mutex::new(Some(ProcessHandle::Spawned(config.child)))),
@@ -509,6 +558,68 @@ impl PtySession {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn incarnation(&self) -> Option<&str> {
+        self.incarnation.as_deref()
+    }
+
+    pub(crate) fn set_suspension_receipt(&self, receipt: Option<super::ActuationReceipt>) {
+        *self.suspension_receipt.lock() = receipt.filter(|receipt|
+            receipt.source == super::SuspensionSource::FerryxOwned && self.pid() == Some(receipt.pid)
+                && self.incarnation() == Some(receipt.incarnation.as_str()))
+            .map(|receipt| SuspensionReceiptWire { pid: receipt.pid, incarnation: receipt.incarnation,
+                actuated_at_unix_ms: receipt.actuated_at_unix_ms, stop_observed: receipt.stop_observed });
+    }
+
+    pub(crate) fn suspension_receipt(&self) -> Option<super::ActuationReceipt> {
+        self.suspension_receipt.lock().as_ref().filter(|receipt|
+            receipt.matches(self.pid(), self.incarnation())).map(SuspensionReceiptWire::receipt)
+    }
+
+    /// Blocking kernel identity lookup; callers must use `run_blocking`.
+    pub(crate) fn suspension_target(&self) -> Result<super::SuspensionTarget, PtyError> {
+        let pid = self.pid().ok_or_else(|| PtyError::Other("Missing suspension PID".into()))?;
+        let incarnation = self.incarnation().filter(|value| !value.is_empty())
+            .ok_or_else(|| PtyError::Other("Missing PTY incarnation".into()))?.to_owned();
+        #[cfg(target_os = "linux")]
+        let started_at_unix_ms = {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+            let start = stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| PtyError::Other("Invalid process start ticks".into()))?;
+            let boot = std::fs::read_to_string("/proc/stat")
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+            let boot = boot.lines().find_map(|line| line.strip_prefix("btime "))
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| PtyError::Other("Invalid kernel boot time".into()))?;
+            // SAFETY: sysconf takes a constant selector and no pointers.
+            let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            if ticks <= 0 { return Err(PtyError::Other("Invalid kernel clock ticks".into())); }
+            Some(boot.checked_mul(1000).and_then(|base| start.checked_mul(1000)
+                .and_then(|elapsed| base.checked_add(elapsed / ticks as u64)))
+                .ok_or_else(|| PtyError::Other("Process start time overflow".into()))?)
+        };
+        #[cfg(target_os = "macos")]
+        let started_at_unix_ms = {
+            // SAFETY: proc_bsdinfo is a C POD; the kernel receives its exact size.
+            let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+            let size = std::mem::size_of_val(&info) as i32;
+            // SAFETY: info is writable for size bytes for the duration of this call.
+            let count = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+            if count != size || info.pbi_pid != pid {
+                return Err(PtyError::Other("Cannot verify process start time".into()));
+            }
+            Some(info.pbi_start_tvsec.checked_mul(1_000_000)
+                .and_then(|value| value.checked_add(info.pbi_start_tvusec))
+                .ok_or_else(|| PtyError::Other("Process start time overflow".into()))? / 1000)
+        };
+        // The delivered Windows/other-platform backend reports UnsupportedPlatform.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let started_at_unix_ms = None;
+        Ok(super::SuspensionTarget { pid, incarnation, started_at_unix_ms })
     }
 
     /// Milliseconds since the PTY child last produced output, or `None` when no
@@ -628,9 +739,17 @@ impl PtySession {
     /// A reader parked by `pause_reader` never reads again on its own, so tearing the session
     /// down must release it, or its blocking thread outlives the session and stalls runtime
     /// shutdown. Only a paused reader is touched, and it exits without reading.
-    fn release_paused_reader(&self) {
-        if self.pause_requested.load(Ordering::Acquire) {
-            self.reader_finished.store(true, Ordering::Release);
+    pub(crate) fn release_paused_reader(&self) {
+        #[cfg(unix)]
+        let relinquishing = self.relinquish_wake.is_some();
+        #[cfg(not(unix))]
+        let relinquishing = false;
+        if !relinquishing && !self.pause_requested.load(Ordering::Acquire) { return; }
+        self.reader_finished.store(true, Ordering::Release);
+        self.pause_requested.store(false, Ordering::Release);
+        #[cfg(unix)]
+        if let Some(wake) = &self.relinquish_wake {
+            let _ = std::io::Write::write_all(&mut &*wake, &[1]);
         }
     }
 
@@ -1128,6 +1247,7 @@ impl PtySession {
 
         Ok(PtySessionExport {
             session_id: self.id.clone(),
+            incarnation: self.incarnation.clone(),
             pid,
             pgid,
             cols,
@@ -1135,6 +1255,8 @@ impl PtySession {
             worktree_path,
             state,
             hub_snapshot,
+            suspension_receipt: self.suspension_receipt.lock().clone().filter(|receipt|
+                receipt.matches(pid, self.incarnation())),
             master_raw_fd,
             master_fd,
         })
@@ -1215,6 +1337,8 @@ impl PtySession {
             .expect("duplicate PTY poll descriptor");
 
         let metrics_session_id = snapshot.session_id.clone();
+        let (wake_read, wake_write) = std::os::unix::net::UnixStream::pair()
+            .map_err(|error| PtyError::IoError(error.to_string()))?;
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
@@ -1229,6 +1353,7 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
+                if reader_finished_task.load(Ordering::Acquire) { break; }
                 if pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
@@ -1255,12 +1380,12 @@ impl PtySession {
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        let mut poll = libc::pollfd {
-                            fd: reader_poll.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        if unsafe { libc::poll(&mut poll, 1, -1) } < 0
+                        let mut poll = [libc::pollfd {
+                            fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                        }, libc::pollfd {
+                            fd: wake_read.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                        }];
+                        if unsafe { libc::poll(poll.as_mut_ptr(), 2, -1) } < 0
                             && std::io::Error::last_os_error().kind()
                                 != std::io::ErrorKind::Interrupted
                         {
@@ -1284,6 +1409,10 @@ impl PtySession {
             input,
             input_gate: tokio::sync::Mutex::new(()),
             id: snapshot.session_id,
+            relinquish_wake: Some(wake_write),
+            suspension_receipt: Mutex::new(snapshot.suspension_receipt.filter(|receipt|
+                receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()))),
+            incarnation: snapshot.incarnation,
             master: Arc::new(Mutex::new(Some(master_pty))),
             writer: Arc::new(Mutex::new(Some(writer))),
             child: Arc::new(Mutex::new(child_handle)),
@@ -1383,9 +1512,21 @@ mod tests {
     }
 
     #[test]
+    fn pane_liveness_suspension_receipt_handover_roundtrip_matches_identity() {
+        let receipt = SuspensionReceiptWire { pid: 12345, incarnation: "owner-a".into(), actuated_at_unix_ms: 42, stop_observed: true };
+        let decoded: SuspensionReceiptWire = serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(decoded.matches(Some(12345), Some("owner-a")));
+        assert!(!decoded.matches(Some(12346), Some("owner-a")));
+        assert!(!decoded.matches(Some(12345), Some("owner-b")));
+        assert_eq!(decoded.receipt().source, super::super::SuspensionSource::FerryxOwned);
+        assert_eq!(decoded.receipt().guarantee, super::super::StopGuarantee::IdentityBoundObservedStop);
+    }
+
+    #[test]
     fn test_session_snapshot_serialization_roundtrip() {
         let snapshot = PtySessionSnapshot {
             session_id: "test-roundtrip-id".to_string(),
+            incarnation: Some("uuid-incarnation-1".to_string()),
             pid: Some(12345),
             pgid: Some(12340),
             cols: 120,
@@ -1393,6 +1534,7 @@ mod tests {
             worktree_path: Some(PathBuf::from("/tmp/wt")),
             state: PtySessionState::Running,
             hub_snapshot: None,
+            suspension_receipt: None,
         };
 
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");

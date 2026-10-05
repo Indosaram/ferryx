@@ -1,0 +1,23 @@
+diff --git a/ui/src/lib/terminalTransport/terminalTransport.test.ts b/ui/src/lib/terminalTransport/terminalTransport.test.ts
+index 35d53983..d57042fe 100644
+--- a/ui/src/lib/terminalTransport/terminalTransport.test.ts
++++ b/ui/src/lib/terminalTransport/terminalTransport.test.ts
+@@ -78,6 +78,7 @@ describe("TerminalTransport abstractions", () => {
+         sessionId: "sess-exited",
+         worktreePath: "/repo/exited",
+         daemonEpoch: "epoch-exited",
++        incarnation: "incarnation-exited",
+         running: false,
+       },
+     ]);
+@@ -86,8 +87,8 @@ describe("TerminalTransport abstractions", () => {
+ 
+     expect(listSpy).toHaveBeenCalled();
+     expect(sessions).toEqual([
+-      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null, running: true },
+-      { sessionId: "sess-exited", worktreePath: "/repo/exited", daemonEpoch: "epoch-exited", running: false },
++      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null, incarnation: null, running: true },
++      { sessionId: "sess-exited", worktreePath: "/repo/exited", daemonEpoch: "epoch-exited", incarnation: "incarnation-exited", running: false },
+     ]);
+   });
+ 

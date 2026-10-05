@@ -1,0 +1,131 @@
+{
+  "registered": {
+    "processes": [
+      {
+        "pid": 20980,
+        "label": "",
+        "executable": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe"
+      }
+    ],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\runtime\\split-attach-stall"
+    ],
+    "servers": [
+      "frontend-dist"
+    ]
+  },
+  "reaped": [
+    20980
+  ],
+  "receipts": [
+    {
+      "kind": "process",
+      "pid": 20980,
+      "label": "",
+      "exited": true,
+      "alreadyTerminated": false,
+      "escalated": true,
+      "code": 1,
+      "signal": null,
+      "identityVerified": true,
+      "method": "taskkill /T /F (forced process tree)",
+      "descendants": [
+        {
+          "pid": 20428,
+          "ppid": 20980,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 10408,
+          "ppid": 20980,
+          "executable": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+          "identityVerified": true,
+          "identity": "executable is the binary this run launched"
+        },
+        {
+          "pid": 22680,
+          "ppid": 20428,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 21024,
+          "ppid": 20428,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 29184,
+          "ppid": 20428,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 25928,
+          "ppid": 20428,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 21768,
+          "ppid": 20428,
+          "executable": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\154.0.4258.53\\msedgewebview2.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files (x86)/microsoft/edgewebview/application/154.0.4258.53/msedgewebview2.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 11908,
+          "ppid": 10408,
+          "executable": "C:\\Windows\\system32\\conhost.exe",
+          "identityVerified": false,
+          "identity": "executable c:/windows/system32/conhost.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 27960,
+          "ppid": 10408,
+          "executable": "\\\\?\\C:\\Windows\\system32\\conhost.exe",
+          "identityVerified": false,
+          "identity": "executable //?/c:/windows/system32/conhost.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 28264,
+          "ppid": 10408,
+          "executable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "identityVerified": false,
+          "identity": "executable c:/program files/powershell/7/pwsh.exe is neither the launched binary nor inside this run's isolation root"
+        },
+        {
+          "pid": 18504,
+          "ppid": 10408,
+          "executable": null,
+          "identityVerified": null,
+          "identity": "executable path is not observable on this platform"
+        }
+      ]
+    },
+    {
+      "kind": "server",
+      "label": "frontend-dist",
+      "closed": true
+    },
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\runtime\\split-attach-stall",
+      "removed": true,
+      "attempts": 1
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true
+  }
+}

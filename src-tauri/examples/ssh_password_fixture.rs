@@ -80,7 +80,9 @@ async fn run() {
     let (read, mut write) = tokio::io::split(client);
     let mut read = BufReader::new(read);
     let request = DaemonRequest::Spawn { client_request_id:"password-daemon-spawn".into(), workspace_id:project.workspace_id, worktree:None, cwd:None, cols:80, rows:24, shell:None,
-        startup:Some(ferryx_lib::daemon::protocol::TerminalStartup::RemoteSsh { host_store_path:store.clone() }) };
+        startup:Some(ferryx_lib::daemon::protocol::TerminalStartup::RemoteSsh { host_store_path:store.clone() }),
+        // Legacy spawn fixture: no local-split envelope on the wire.
+        local_split: None };
     write.write_all(format!("{}\n",serde_json::to_string(&request).unwrap()).as_bytes()).await.unwrap();
     let mut line=String::new();
     tokio::time::timeout(Duration::from_secs(30),read.read_line(&mut line)).await.unwrap().unwrap();

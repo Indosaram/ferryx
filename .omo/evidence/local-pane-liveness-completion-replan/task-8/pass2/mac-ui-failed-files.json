@@ -1,0 +1,20 @@
+{
+  "status": "OBSERVED_BEFORE_FULL_SUITE_TIMEOUT",
+  "files": [
+    "src/components/NativeTerminalPane.test.tsx",
+    "src/App.test.tsx",
+    "src/App.remote.test.tsx",
+    "src/App.pairedDaemon.test.tsx",
+    "src/components/NativeTerminalPane.presentation.test.tsx",
+    "src/components/TerminalSearchOverlay.test.tsx",
+    "src/lib/updater.test.ts",
+    "src/components/SettingsDialog.cli.test.tsx",
+    "src/components/TerminalSplitView.paneHandleReach.test.tsx",
+    "src/lib/pairedDaemonRollout.test.ts"
+  ],
+  "count": 10,
+  "finalSuiteSelectedCount": null,
+  "fullSuiteComplete": false,
+  "source": "mac-final-logs/full-ui.log",
+  "classificationEvidence": "Serial matching-host base AB and candidate assertion recovery pending"
+}

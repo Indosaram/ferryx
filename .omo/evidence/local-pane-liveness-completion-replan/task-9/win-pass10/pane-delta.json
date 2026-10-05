@@ -1,0 +1,159 @@
+﻿{
+    "scenario":  "split-happy",
+    "session":  1,
+    "interactive":  true,
+    "startedAt":  "2026-10-05T04:07:51.9020644+09:00",
+    "runnerPid":  27820,
+    "runnerExited":  true,
+    "elapsedMs":  10050,
+    "samples":  [
+                    {
+                        "atMs":  2215,
+                        "count":  1,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7"
+                                     ]
+                    },
+                    {
+                        "atMs":  2929,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  3642,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  4354,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  5064,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  5773,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  6487,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  7202,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  7915,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  8624,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    },
+                    {
+                        "atMs":  9333,
+                        "count":  2,
+                        "sessions":  [
+                                         "cb71f12e-c415-440b-929a-63135dd74ca7",
+                                         "a6f9a001-66df-4812-846a-e33db77d1681"
+                                     ]
+                    }
+                ],
+    "finalSessions":  [
+                          null
+                      ],
+    "maxCount":  3,
+    "firstCount":  1,
+    "verdict":  "BLOCKED",
+    "code":  "PANE_AFFORDANCE_NOT_FOUND",
+    "errorMessage":  "PANE_AFFORDANCE_NOT_FOUND: the \"New Terminal\" affordance could not be identified by its exact accessible name: {\"selectorNames\":[\"New Terminal\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"windowsSearched\":[{\"hwnd\":6229050,\"title\":\"Ferryx\",\"className\":\"Tauri Window\",\"rootOffscreen\":false},{\"hwnd\":33031808,\"title\":\"\",\"className\":\"Tao Thread Event Target\",\"rootOffscreen\":false}],\"windowsSearchedCount\":2,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null,\"warmElements\":110,\"warmAttempts\":33,\"warmElapsedMs\":4036}",
+    "actions":  [
+                    "barriers.prearmed",
+                    "windows-interactive-admission",
+                    "frontend.served",
+                    "launch.binary",
+                    "fixture-setup",
+                    "powershell",
+                    "owned-window",
+                    "powershell",
+                    "owned-windows-enumerated",
+                    "powershell",
+                    "click-pane-affordance"
+                ],
+    "timeline":  [
+                     {
+                         "atMs":  0,
+                         "action":  "launch.binary",
+                         "code":  null
+                     },
+                     {
+                         "atMs":  1467,
+                         "action":  "fixture-setup",
+                         "code":  null
+                     },
+                     {
+                         "atMs":  3145,
+                         "action":  "owned-windows-enumerated",
+                         "code":  null
+                     },
+                     {
+                         "atMs":  7732,
+                         "action":  "click-pane-affordance",
+                         "code":  "PANE_AFFORDANCE_NOT_FOUND"
+                     }
+                 ],
+    "paneClick":  {
+                      "code":  "PANE_AFFORDANCE_NOT_FOUND",
+                      "candidateCount":  0,
+                      "actionableCount":  0,
+                      "candidates":  [
+
+                                     ],
+                      "chosen":  null
+                  },
+    "receipts":  [
+
+                 ],
+    "allReceipts":  {
+
+                    },
+    "workspaceFile":  "ABSENT",
+    "daemonLogTail":  "",
+    "finishedAt":  "2026-10-05T04:08:02.1095208+09:00"
+}

@@ -1,0 +1,37 @@
+$ vitest run --maxWorkers=1 src/lib/browserPopup.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043221) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/browserPopup.test.ts (5 tests | 2 failed) 7ms
+   ✓ popup opener link > maps a popup-open payload to the opener link the create request needs 2ms
+   × popup create request > sends the opener link on the create command so the host can route the callback 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × popup create request > resolves the profile and zoom the same way a normal create does 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   ✓ close request routing > finds the browser tab showing a browser id and ignores other tab kinds 0ms
+   ✓ close request routing > subscribes the popup close request to the host event 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browserPopup.test.ts > popup create request > sends the opener link on the create command so the host can route the callback
+ FAIL  src/lib/browserPopup.test.ts > popup create request > resolves the profile and zoom the same way a normal create does
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/browserPopup.test.ts:72:18
+     70| describe("popup create request", () => {
+     71|   beforeEach(() => {
+     72|     localStorage.clear();
+       |                  ^
+     73|     vi.mocked(invoke).mockReset();
+     74|     vi.mocked(invoke).mockResolvedValue({ browserId: "popup-1" });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 3 passed (5)
+   Start at  10:11:00
+   Duration  549ms (transform 86ms, setup 101ms, collect 52ms, tests 7ms, environment 227ms, prepare 52ms)
+
+error: script "test" exited with code 1

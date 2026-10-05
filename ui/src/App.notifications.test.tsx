@@ -112,6 +112,7 @@ const { noteObservationInteraction } = await import("./lib/notificationCenter/ac
 
 vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  listenDagWatchStatus: vi.fn(async () => () => undefined),
   // The notification coordinator re-consults the authoritative OS permission status before it
   // trusts an earlier denial, so the mock has to answer it or every dispatch rejects.
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" })),

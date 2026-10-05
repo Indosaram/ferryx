@@ -1,0 +1,3 @@
+2026-10-04T15:06:08.326509Z  INFO ferryx_lib::daemon::server: rorca daemon listening on C:\Users\sook\ferryx-pane-completion\task9-314251e0\manual-probe\runtime\daemon.port
+2026-10-04T15:06:08.330573Z  INFO ferryx_lib::daemon::server: Agent state ingress listening on loopback port=61997
+2026-10-04T15:06:08.476354Z  INFO ferryx_lib::cli: Registered startup workspace for headless daemon workspace_id=sook repo_root=\\?\C:\Users\sook

@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import {spawn} from 'node:child_process';
+const [base,host]=process.argv.slice(2);
+const out=base+'/task8-172baa87';
+const text=fs.readFileSync(out+'/logs/full-ui.log','utf8').replace(/\x1b\[[0-9;]*m/g,'');
+const files=new Set(['src/components/TerminalSplitView.paneHandleReach.test.tsx','src/lib/pairedDaemonRollout.test.ts']);
+for(const match of text.matchAll(/(?:FAIL\s+|❯\s+)(src\/\S+\.(?:test|spec)\.[jt]sx?)/g)) files.add(match[1]);
+console.log('AB_FILE_INVENTORY '+host+' '+JSON.stringify([...files]));
+const child=spawn('sh',[out+'/stage-ab-unix.sh',host,...files],{stdio:'inherit'});
+child.on('close',code=>process.exit(code??1));

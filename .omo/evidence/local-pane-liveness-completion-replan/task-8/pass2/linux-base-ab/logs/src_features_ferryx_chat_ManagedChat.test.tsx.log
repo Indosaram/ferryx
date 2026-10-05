@@ -1,0 +1,31 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/chat/ManagedChat.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1045335) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/features/ferryx/chat/ManagedChat.test.tsx (1 test | 1 failed) 4ms
+   × managed chat surface > preserves drafts on failed send, respects IME, revokes and renders terminal fallback 3ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/chat/ManagedChat.test.tsx > managed chat surface > preserves drafts on failed send, respects IME, revokes and renders terminal fallback
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/features/ferryx/chat/ManagedChat.test.tsx:8:16
+      6| describe("managed chat surface",()=>{
+      7|  it("preserves drafts on failed send, respects IME, revokes and render…
+      8|   localStorage.clear(); let sends=0;
+       |                ^
+      9|   let reject!: (e:Error)=>void;
+     10|   const pending=new Promise<never>((_,r)=>{reject=r;});
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  10:11:29
+   Duration  573ms (transform 79ms, setup 113ms, collect 71ms, tests 4ms, environment 223ms, prepare 47ms)
+
+error: script "test" exited with code 1

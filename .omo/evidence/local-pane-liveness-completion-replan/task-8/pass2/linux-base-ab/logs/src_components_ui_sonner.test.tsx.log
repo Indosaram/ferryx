@@ -1,0 +1,60 @@
+$ vitest run --maxWorkers=1 src/components/ui/sonner.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043800) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/ui/sonner.test.tsx (7 tests | 7 failed) 328ms
+   × sonner Toaster and useToastTheme > maps appearance themes to sonner themes 17ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > updates theme on APPEARANCE_SETTINGS_EVENT custom event 2ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > renders Toaster without crashing 46ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > hides the clear-all control when no toasts are visible 3ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > reserves bottom offset for the clear-all row from the very first render in which a toast is shown 17ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > shows the clear-all control while toasts are visible and dismisses all of them on click 239ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sonner Toaster and useToastTheme > has sonner styles imported in index.css 1ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > maps appearance themes to sonner themes
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > updates theme on APPEARANCE_SETTINGS_EVENT custom event
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > renders Toaster without crashing
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > hides the clear-all control when no toasts are visible
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > has sonner styles imported in index.css
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/ui/sonner.test.tsx:14:18
+     12|   afterEach(() => {
+     13|     cleanup();
+     14|     localStorage.clear();
+       |                  ^
+     15|     act(() => {
+     16|       toast.dismiss();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > reserves bottom offset for the clear-all row from the very first render in which a toast is shown
+ FAIL  src/components/ui/sonner.test.tsx > sonner Toaster and useToastTheme > shows the clear-all control while toasts are visible and dismisses all of them on click
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/ui/sonner.test.tsx:14:18
+     12|   afterEach(() => {
+     13|     cleanup();
+     14|     localStorage.clear();
+       |                  ^
+     15|     act(() => {
+     16|       toast.dismiss();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  10:11:09
+   Duration  1.25s (transform 75ms, setup 101ms, collect 417ms, tests 328ms, environment 235ms, prepare 49ms)
+
+error: script "test" exited with code 1

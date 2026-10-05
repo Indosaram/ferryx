@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scenario": "split-attach-stall",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-attach-stall",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\evidence\\split-attach-stall",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-attach-stall"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "bbbcdf143bd540578d14d0e9e81e08fbd6fb83c1d3ad5f70434f365ee211999d"
+  },
+  "sourceDigest": "666a1c13948d8c4d067215c6534d4f8afcac7344c6265042676b45952194a94b",
+  "runId": "qa-run-8a25a82f-fd34-4247-b169-0d1757ce85a2",
+  "operationId": "qa-op-f676b13f-d06d-48a2-9532-75ddf21806bd",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "BARRIER_ACK_TIMEOUT",
+    "message": "BARRIER_ACK_TIMEOUT: product did not settle barrier fixture-setup receipt[0] within 9000ms"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": [
+    {
+      "name": "attach-handshake",
+      "armedAt": "2026-10-04T15:17:11.063Z",
+      "heldAt": null,
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "split-attach-stall"
+    }
+  ]
+}

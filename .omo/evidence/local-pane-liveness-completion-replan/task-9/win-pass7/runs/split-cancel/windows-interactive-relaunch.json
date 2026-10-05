@@ -1,0 +1,37 @@
+{
+  "at": "2026-10-04T17:39:52.779Z",
+  "taskName": "ferryx-qa-split-cancel-21348-m88yrz",
+  "mechanism": "schtasks /create /it + /run bound to the interactive console user",
+  "outerProbe": {
+    "probe": "windows-session",
+    "interactive": false,
+    "sessionId": 0,
+    "processId": 8592,
+    "activeConsoleSessionId": 1,
+    "explorerSessions": [
+      1
+    ],
+    "computerName": "DESKTOP-1LAPJMP",
+    "userName": "sook",
+    "qwinsta": [
+      " ���� �̸�         ����� �̸�              ID  ����    ����        ��ġ ",
+      ">services                                            0  ��ũ                      ",
+      " console                   sook                      1  Ȱ��                        "
+    ]
+  },
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+    "--scenario",
+    "split-cancel",
+    "--binary",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "--evidence-dir",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-42fba06f\\evidence\\split-cancel",
+    "--isolation-root",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-42fba06f\\runtime\\split-cancel"
+  ],
+  "cwd": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0",
+  "batPath": "C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-qa-relaunch-8jYsox\\ferryx-qa-split-cancel-21348-m88yrz.bat",
+  "evidenceDir": "C:\\Users\\sook\\ferryx-pane-completion\\task9-42fba06f\\evidence\\split-cancel"
+}

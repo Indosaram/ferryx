@@ -50,7 +50,14 @@ vi.mock("./lib/sshHosts", async (importOriginal) => ({ ...await importOriginal<t
 }) }));
 const hosts = vi.hoisted(() => ({ current: [] as Array<{ id: string; label: string; hostname: string }> }));
 vi.mock("./lib/terminalEvents", async (importOriginal) => ({ ...await importOriginal<typeof import("./lib/terminalEvents")>(), ensureTerminalEvents: async () => undefined }));
-vi.mock("./lib/updater", () => ({ startUpdatePolling: () => undefined, registerWindowCloseGuard: (guard: () => Promise<void>) => { native.closeGuard = guard; return () => { native.closeGuard = null; }; } }));
+vi.mock("./lib/updater", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./lib/updater")>(),
+  getCurrentVersion: async () => "2026.1004.1",
+  subscribeUpdateStatus: () => () => undefined,
+  startUpdatePolling: () => undefined,
+  stopUpdatePolling: () => undefined,
+  registerWindowCloseGuard: (guard: () => Promise<void>) => { native.closeGuard = guard; return () => { native.closeGuard = null; }; },
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ isFocused: async () => true, onFocusChanged: async () => () => undefined }) }));
 vi.mock("./lib/updateToast", () => ({ initUpdateToasts: () => () => undefined }));

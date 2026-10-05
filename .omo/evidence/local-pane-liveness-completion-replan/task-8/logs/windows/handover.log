@@ -1,0 +1,55 @@
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri)
+error: failed to run custom build command for `ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-8c6d02707e254978\build-script-build` (exit code: 101)
+  --- stdout
+  cargo:rustc-link-arg-tests=/MANIFEST:EMBED
+  cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'
+  cargo:rustc-link-search=native=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ghostty_vt\lib
+  cargo:rustc-link-lib=static=ghostty-vt-static
+  cargo:include=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ghostty_vt\include
+  cargo:ghostty_lib_dir=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ghostty_vt\lib
+  cargo:ghostty_include_dir=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ghostty_vt\include
+  cargo:ghostty_sha=6a508fd5e34c7e222c052a6d00bb3891ff3feace
+  cargo:ghostty_zig_version=0.16.0
+  cargo:ghostty_target=x86_64-pc-windows-msvc
+  cargo:ghostty_zig_target=x86_64-windows-msvc
+  cargo:ghostty_artifact=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ghostty_vt\lib\ghostty-vt-static.lib
+  cargo:rerun-if-changed=native_terminal/build_ghostty.rs
+  cargo:rerun-if-changed=native_terminal/ghostty_source_lock.json
+  cargo:rerun-if-changed=vendor/ghostty/build.zig
+  cargo:rerun-if-changed=vendor/ghostty/src
+  cargo:rerun-if-changed=vendor/ghostty/include
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=HOST
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rustc-link-arg=/MANIFEST:EMBED
+  cargo:rustc-link-arg=/MANIFESTINPUT:C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\ferryx-app-manifest.xml
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\tauri.conf.json
+  cargo:rerun-if-changed=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\tauri.windows.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-856aea84d3fa5739\out\app-manifest\__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=x86_64-pc-windows-msvc
+  cargo:rerun-if-changed=resources\helpers\aarch64-apple-darwin\ferryx-remote-helper
+  cargo:rerun-if-changed=resources\helpers\aarch64-unknown-linux-gnu\ferryx-remote-helper
+  cargo:rerun-if-changed=resources\helpers\manifest.json
+  cargo:rerun-if-changed=resources\helpers\x86_64-apple-darwin\ferryx-remote-helper
+  cargo:rerun-if-changed=resources\helpers\x86_64-pc-windows-msvc\ferryx-remote-helper.exe
+  cargo:rerun-if-changed=resources\helpers\x86_64-unknown-linux-gnu\ferryx-remote-helper
+
+  --- stderr
+
+  thread 'main' (18448) panicked at build.rs:122:39:
+  tauri build failed: resource path `..\ui\dist` doesn't exist
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+NATIVE_EXIT=101

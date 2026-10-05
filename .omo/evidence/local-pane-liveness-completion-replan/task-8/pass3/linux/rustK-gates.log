@@ -1,0 +1,14 @@
+HOST=linux HEAD=70eefafe PHASE=affected-set START=2026-10-04T11:28:00Z LOAD=4.84 7.32 7.47
+GATE linux all-targets native=0 selected=0 errors=0 secs=1 | 
+GATE linux split-list native=0 selected=15 errors=0 secs=228 | 
+GATE linux split native=0 selected=0 errors=0 secs=2 | test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2668 filtered out; finished in 0.01s
+GATE linux pane-list native=0 selected=54 errors=0 secs=0 | 
+GATE linux pane native=0 selected=0 errors=0 secs=3 | test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 2629 filtered out; finished in 1.84s
+GATE linux hardening native=101 selected=0 errors=1 secs=24 | test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+GATE linux persistence native=101 selected=0 errors=1 secs=15 | test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+GATE linux gen4 native=0 selected=0 errors=0 secs=8 | test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+GATE linux gen5 native=101 selected=0 errors=1 secs=40 | test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.67s
+GATE linux handover native=0 selected=0 errors=0 secs=19 | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.82s
+GATE linux qa_barrier native=0 selected=0 errors=0 secs=179 | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 2683 filtered out; finished in 0.09s
+GATE linux full-lib native=101 selected=0 errors=1 secs=466 | test result: FAILED. 2647 passed; 30 failed; 6 ignored; 0 measured; 0 filtered out; finished in 464.13s
+RUSTK_DONE linux LOAD=3.67 4.88 6.34

@@ -1,0 +1,102 @@
+PROBE_OK
+CQFQ4P2LXK
+I552267
+rustc 1.92.0 (ded5c06cf 2025-12-08)
+cargo 1.92.0 (344c4567c 2025-10-21)
+1.4.2
+v22.23.1
+/dev/disk3s5   460Gi   400Gi    11Gi    98%    6.4M  119M    5%   /System/Volumes/Data
+6a508fd5e34c7e222c052a6d00bb3891ff3feace
+e1ea8bd6875a15fdfc5205ae5f4e1ba21194c0163f6fecf4bfa821a0443fbd53  /Users/I552267/ferryx-pane-completion/source-21dea3c0/src-tauri/Cargo.lock
+d84cde8a0f35abd85835bf2fa17ebb7945604f7579bfde7d1e14a28155d13137  /Users/I552267/ferryx-pane-completion/source-21dea3c0/ui/bun.lock
+bun install v1.4.2 (744846f84)
+
++ @testing-library/jest-dom@6.10.0
++ @testing-library/react@16.3.3
++ @types/node@22.20.1
++ @types/react@18.3.31
++ @types/react-dom@18.3.7
++ @vitejs/plugin-react@4.7.0
++ @vitest/coverage-v8@3.2.7
++ autoprefixer@10.5.5
++ bun-types@1.4.2
++ clsx@2.1.1
++ jsdom@26.1.0
++ postcss@8.5.28
++ react-doctor@0.9.14
++ react-grab@0.2.0
++ react-scan@0.5.7
++ tailwind-merge@3.6.0
++ tailwindcss@3.4.19
++ typescript@5.9.3
++ vite@6.4.3
++ vitest@3.2.7
++ @dnd-kit/core@6.3.1
++ @dnd-kit/sortable@10.0.0
++ @dnd-kit/utilities@3.2.2
++ @noble/ciphers@2.4.0
++ @noble/hashes@2.4.0
++ @radix-ui/react-label@2.1.15
++ @radix-ui/react-progress@1.1.16
++ @radix-ui/react-select@2.3.7
++ @radix-ui/react-separator@1.1.15
++ @radix-ui/react-slider@1.4.7
++ @radix-ui/react-slot@1.3.3
++ @radix-ui/react-switch@1.3.7
++ @tauri-apps/api@2.11.1
++ @tauri-apps/plugin-dialog@2.7.3
++ @tauri-apps/plugin-process@2.3.1
++ @tauri-apps/plugin-updater@2.11.0
++ @types/qrcode@1.5.6
++ class-variance-authority@0.7.1
++ highlight.js@11.11.1
++ lucide-react@0.475.0
++ qrcode@1.5.4
++ react@18.3.1
++ react-dom@18.3.1
++ react-markdown@10.1.0
++ remark-gfm@4.0.1
++ sonner@2.0.8
++ tailwindcss-animate@1.0.7
+
+624 packages installed [20.86s]
+GATE_DONE mac ui-build native=0 count=null status=RAN_PASSED
+✓ built in 11.57s
+GATE_DONE mac ui-split native=0 count=19 status=RAN_PASSED
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+GATE_DONE mac ui-lifecycle native=0 count=112 status=RAN_PASSED
+      at collectTests [90m(file:///Users/I552267/ferryx-pane-completion/source-21dea3c0/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1179:25[90m)[39m
+      at startTests [90m(file:///Users/I552267/ferryx-pane-completion/source-21dea3c0/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1817:17[90m)[39m
+ Test Files  4 passed (4)
+      Tests  112 passed (112)
+GATE_DONE mac runner native=0 count=28 status=RAN_PASSED
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+GATE_DONE mac local_split_reliability_-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 51 warnings emitted
+GATE_NOT_RUN_BLOCKED mac local_split_reliability_ cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED mac pane_liveness_ cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED mac all-targets cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED mac full-lib cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_DONE mac qa_barrier-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 53 warnings emitted
+GATE_NOT_RUN_BLOCKED mac qa_barrier cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/qa_barrier-list.log
+GATE_DONE mac handover-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib) due to 1 previous error; 32 warnings emitted
+GATE_NOT_RUN_BLOCKED mac handover cause=/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/handover-list.log
+GATE_DONE mac full-ui native=1 count=6521 status=RAN_FAILED
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: [2mexpect([22m[31melement[39m[2m).toHaveClass([22m[32m[32m"h-3"[32m[39m[2m)[22m
+Error: [vitest] No "enrollThisMachine" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+ Test Files  7 failed | 365 passed (372)
+      Tests  192 failed | 6329 passed (6521)
+error: script "test" exited with code 1
+ALL_GATES_DONE mac

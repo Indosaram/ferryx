@@ -1,0 +1,9 @@
+
+ RUN  v3.2.7 C:/Users/sook/ferryx-pane-completion/source
+
+ ??[39m scripts/qa/pane-liveness.test.mjs (19 tests) 292ms
+
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+   Start at  23:37:36
+   Duration  541ms (transform 89ms, setup 0ms, collect 143ms, tests 292ms, environment 0ms, prepare 37ms)

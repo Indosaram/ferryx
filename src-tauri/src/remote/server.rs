@@ -2048,6 +2048,17 @@ async fn handle_machine_terminal_socket(
     {
         return;
     }
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
     let replay = |snapshot: &AttachmentSnapshot, reset| {
         encode_frame(
             Metadata::Replay {
@@ -4707,12 +4718,13 @@ impl RemoteServerHandle {
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
-    pub(crate) fn replace_relay(
+    pub fn replace_relay(
         &mut self,
         state: Arc<RemoteGatewayState>,
         client: crate::remote::relay_client::RelayClient,
-    ) {
-        if let Some(task) = self.relay_task.take() {
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let prev_task = self.relay_task.take();
+        if let Some(ref task) = prev_task {
             task.abort();
         }
         let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -4724,6 +4736,7 @@ impl RemoteServerHandle {
         *state.relay_client.write() = Some(client.clone());
         self.published_pairing = Some((state, epoch));
         self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+        prev_task
     }
 
     pub fn is_external_bound(&self) -> bool {
@@ -4734,23 +4747,26 @@ impl RemoteServerHandle {
         self.gate_status.clone()
     }
 
-    pub fn stop(self) {
-        if let Some(task) = self.relay_task {
-            task.abort();
+    pub fn stop(mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let task = self.relay_task.take();
+        if let Some(ref t) = task {
+            t.abort();
         }
         // A stopped relay must not leave a dead coordinator selected for pairing:
         // requests would fail with "Relay registration channel closed" instead of
         // falling back to local pairing. Only clear our own publication.
-        if let Some((state, epoch)) = self.published_pairing {
+        if let Some((state, epoch)) = self.published_pairing.take() {
             let mut slot = state.relay_pairing.write();
             if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
                 *slot = None;
+                *state.relay_client.write() = None;
             }
         }
         let _ = self.shutdown_tx.send(());
         for tx in self._extra_shutdown_txs {
             let _ = tx.send(());
         }
+        task
     }
 }
 
@@ -8165,5 +8181,214 @@ mod tests {
         let _ = stop_tx.send(());
         let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&home);
+    }
+    #[tokio::test]
+    async fn test_remote_server_handle_prepare_and_replace_relay_contract() {
+        use futures_util::{SinkExt, StreamExt};
+
+        // RAII cleanup guard to guarantee all spawned background tasks are aborted even on panic.
+        struct TestCleanupGuard {
+            tasks: Vec<tokio::task::JoinHandle<()>>,
+        }
+        impl Drop for TestCleanupGuard {
+            fn drop(&mut self) {
+                for task in &self.tasks {
+                    task.abort();
+                }
+            }
+        }
+        let mut cleanup_guard = TestCleanupGuard { tasks: Vec::new() };
+
+        let root = tempfile::tempdir().unwrap();
+        let server = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = server.remote_state().clone();
+
+        // 1. Owned loopback mock relay handling both bearer-token and identity-challenge handshakes.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let relay_url = format!("http://{relay_addr}");
+        let gateway_addr: SocketAddr = "127.0.0.1:8899".parse().unwrap();
+
+        let (active_supervision_tx, active_supervision_rx) = tokio::sync::oneshot::channel();
+        let mock_server_task = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let has_auth_header = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let has_auth_header_cb = std::sync::Arc::clone(&has_auth_header);
+                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    if req.headers().contains_key("authorization") {
+                        has_auth_header_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(resp)
+                };
+                if let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                    let is_token = has_auth_header.load(std::sync::atomic::Ordering::SeqCst);
+                    let mut authed = is_token;
+                    if !is_token {
+                        let challenge = serde_json::json!({
+                            "nonce": "test-nonce-12345",
+                            "timestamp": 1_700_000_000u64,
+                        });
+                        if ws.send(tokio_tungstenite::tungstenite::Message::Text(challenge.to_string().into())).await.is_ok() {
+                            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_auth))) = ws.next().await {
+                                let resp = serde_json::json!({
+                                    "success": true,
+                                });
+                                if ws.send(tokio_tungstenite::tungstenite::Message::Text(resp.to_string().into())).await.is_ok() {
+                                    authed = true;
+                                }
+                            }
+                        }
+                    }
+                    if authed {
+                        // Await client post-auth message (RegisterPairingPin) to prove client consumed
+                        // auth success and entered steady-state control supervision.
+                        while let Some(Ok(msg)) = ws.next().await {
+                            if let tokio_tungstenite::tungstenite::Message::Text(txt) = msg {
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                                    let pin = val.get("pin").and_then(|v| v.as_str()).unwrap_or("123456");
+                                    let machine_id = val.get("machineId").and_then(|v| v.as_str()).unwrap_or("m-test");
+                                    let ack = serde_json::json!({
+                                        "generation": 1,
+                                        "pin": pin,
+                                        "machineId": machine_id,
+                                        "status": "registered",
+                                    });
+                                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(ack.to_string().into())).await;
+                                    let _ = active_supervision_tx.send(());
+                                    // Service socket until closed
+                                    while let Some(Ok(_)) = ws.next().await {}
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        cleanup_guard.tasks.push(mock_server_task);
+
+        // 2. prepare_relay validates relay URL, loads identity, and builds client.
+        let client_1 = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some(&relay_url),
+            gateway_addr,
+        )
+        .await
+        .expect("prepare_relay must succeed with owned loopback URL");
+
+        assert_eq!(
+            client_1.pairing_coordinator().state(),
+            crate::remote::PairingState::Created
+        );
+
+        // 3. First registration via replace_relay publishes coordinator and spawns task.
+        let (shutdown_tx, _) = tokio::sync::oneshot::channel();
+        let mut handle = RemoteServerHandle {
+            shutdown_tx,
+            relay_task: None,
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: None,
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        let prev = handle.replace_relay(Arc::clone(&state), client_1.clone());
+        assert!(prev.is_none(), "first replace has no previous task");
+
+        let (c1, epoch_1) = {
+            let pairing = state.relay_pairing.read();
+            let p = pairing.as_ref().expect("pairing coordinator published");
+            (p.coordinator.clone(), p.epoch)
+        };
+        assert!(state.relay_client.read().is_some(), "relay_client published");
+        assert!(handle.relay_task.is_some(), "relay_task active");
+
+        // 4. Trigger pairing generation; prove client consumed auth success, received internal
+        // registration request, and transmitted post-auth message over the control channel.
+        let reg_client = client_1.clone();
+        let reg_task = tokio::spawn(async move {
+            reg_client
+                .pairing_coordinator()
+                .generate_scoped_pairing(
+                    std::time::Duration::from_secs(60),
+                    crate::remote::auth::DevicePermission::Control,
+                    crate::remote::auth::DeviceAccessScope::Machine,
+                )
+                .await
+        });
+        cleanup_guard.tasks.push(tokio::spawn(async move { let _ = reg_task.await; }));
+
+        let supervision_res = tokio::time::timeout(std::time::Duration::from_secs(5), active_supervision_rx).await;
+        assert!(supervision_res.is_ok(), "active supervision post-auth event timed out");
+
+        // 5. Second registration replaces supervisor, aborts active task, advances epoch.
+        let client_2 = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some(&relay_url),
+            gateway_addr,
+        )
+        .await
+        .expect("second prepare_relay succeeds");
+
+        let prev_task = handle.replace_relay(Arc::clone(&state), client_2);
+        assert!(prev_task.is_some(), "second replace returns previous task");
+        let join_res = tokio::time::timeout(std::time::Duration::from_secs(5), prev_task.unwrap()).await;
+        assert!(join_res.is_ok(), "previous task join timed out");
+        let join_err = join_res.unwrap().expect_err("previous task must be aborted");
+        assert!(join_err.is_cancelled(), "previous task was cancelled");
+
+        let epoch_2 = {
+            let pairing = state.relay_pairing.read();
+            let p = pairing.as_ref().expect("pairing coordinator updated");
+            p.epoch
+        };
+        assert!(epoch_2 > epoch_1, "epoch must monotonically advance on replacement");
+
+        // 6. Teardown clears both pairing coordinator and relay_client under epoch ownership.
+        let last_task = handle.stop();
+        if let Some(t) = last_task {
+            let join_res = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
+            assert!(join_res.is_ok(), "last task join timed out");
+            let join_err = join_res.unwrap().expect_err("last task must be aborted");
+            assert!(join_err.is_cancelled(), "last task was cancelled");
+        }
+
+        assert!(state.relay_pairing.read().is_none(), "relay_pairing cleared on stop");
+        assert!(state.relay_client.read().is_none(), "relay_client cleared on stop");
+
+        // 7. Stale epoch isolation: a retired predecessor handle cannot clear newer state.
+        let (stale_shutdown_tx, _) = tokio::sync::oneshot::channel();
+        let stale_handle = RemoteServerHandle {
+            shutdown_tx: stale_shutdown_tx,
+            relay_task: None,
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: Some((Arc::clone(&state), epoch_1)), // stale epoch!
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        let next_epoch = epoch_2 + 1;
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: c1.clone(),
+            epoch: next_epoch,
+        });
+        *state.relay_client.write() = Some(crate::remote::relay_client::RelayClient::with_gateway(
+            &relay_url, "dummy", gateway_addr.to_string(),
+        ));
+
+        let _ = stale_handle.stop();
+
+        assert!(state.relay_pairing.read().is_some(), "stale handle must not clear newer pairing");
+        assert!(state.relay_client.read().is_some(), "stale handle must not clear newer client");
+
+        *state.relay_pairing.write() = None;
+        *state.relay_client.write() = None;
+
+        // Bounded join of mock server task on success path
+        for task in cleanup_guard.tasks.drain(..) {
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        }
     }
 }

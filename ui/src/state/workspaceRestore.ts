@@ -65,25 +65,26 @@ export type UseWorkspaceRestoreOptions = {
   restoreWorkspace: (state: WorkspaceState) => void;
   loadSessionFn?: () => Promise<unknown>;
   listLiveBackendSessionIdsFn?: () => Promise<
-    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
+    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
         complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
     | null
   >;
   enabled?: boolean;
 };
 
-export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>> {
+export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>> {
   if (isTauriRuntime()) {
     const liveSummaries = await listTerminalSessions();
     return liveSummaries.map((candidate) => ({
       sessionId: candidate.sessionId,
       daemonEpoch: candidate.daemonEpoch ?? null,
+      incarnation: candidate.incarnation ?? null,
       worktreePath: candidate.worktreePath ?? null,
       running: candidate.running ?? true,
     }));
@@ -92,8 +93,9 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
   return liveSessions.map((candidate) => ({
     sessionId: candidate.sessionId,
     daemonEpoch: candidate.daemonEpoch ?? null,
+    incarnation: candidate.incarnation ?? null,
     worktreePath: candidate.worktreePath ?? null,
-    running: (candidate as any).running ?? true,
+    running: candidate.running ?? true,
   }));
 }
 

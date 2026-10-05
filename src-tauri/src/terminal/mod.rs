@@ -35,6 +35,8 @@ pub mod paired_daemon;
 pub mod paired_runtime;
 pub mod preferences;
 pub mod pty;
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub(crate) mod qa_liveness;
 pub mod remote;
 #[cfg(test)]
 mod remote_runtime_tests;
@@ -42,6 +44,9 @@ pub(crate) mod resume_cwd;
 pub mod service;
 pub mod session;
 pub mod shell;
+pub mod suspension;
+#[cfg(windows)]
+pub use suspension::windows::install_ownership_verifier;
 
 pub use output_hub::*;
 pub use preferences::*;
@@ -49,6 +54,8 @@ pub use pty::*;
 pub use service::*;
 pub use session::*;
 pub use shell::*;
+pub use suspension::{ActuationReceipt, StopGuarantee, SuspensionError, SuspensionSource, SuspensionTarget,
+    classify_stop_source, resume_owned, stop_for_owned_suspension};
 
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,69 @@
+$ vitest run --maxWorkers=1 src/lib/settingsRuntime.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040162) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/settingsRuntime.test.ts (10 tests | 10 failed) 7ms
+   × settings runtime contracts > persists and applies appearance theme, accent, and density 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > applies live appearance updates when useApplyAppearanceSettings is mounted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > wires useApplyAppearanceSettings into the App root component 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > does not perform DOM text patching or arbitrary div scans in settingsRuntimeBridge 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > reapplies persisted appearance through the runtime bridge after remount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > dispatches appearance changes in the same webview 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > uses the configured search provider for address-bar queries 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > persists browser zoom and restore preference and resets them 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > installSettingsRuntimeBridge > does not attach a document-wide subtree MutationObserver on documentElement 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × settings runtime contracts > installSettingsRuntimeBridge > re-applies system appearance when OS color scheme flips 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 10 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > persists and applies appearance theme, accent, and density
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > applies live appearance updates when useApplyAppearanceSettings is mounted
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > wires useApplyAppearanceSettings into the App root component
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > does not perform DOM text patching or arbitrary div scans in settingsRuntimeBridge
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > reapplies persisted appearance through the runtime bridge after remount
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > dispatches appearance changes in the same webview
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > uses the configured search provider for address-bar queries
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > persists browser zoom and restore preference and resets them
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/settingsRuntime.test.ts:28:16
+     26| 
+     27| beforeEach(() => {
+     28|   localStorage.clear();
+       |                ^
+     29|   document.documentElement.removeAttribute("data-theme");
+     30|   document.documentElement.removeAttribute("data-accent");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > installSettingsRuntimeBridge > does not attach a document-wide subtree MutationObserver on documentElement
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > installSettingsRuntimeBridge > re-applies system appearance when OS color scheme flips
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/settingsRuntime.test.ts:28:16
+     26| 
+     27| beforeEach(() => {
+     28|   localStorage.clear();
+       |                ^
+     29|   document.documentElement.removeAttribute("data-theme");
+     30|   document.documentElement.removeAttribute("data-accent");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  10 failed (10)
+   Start at  10:10:18
+   Duration  566ms (transform 76ms, setup 105ms, collect 59ms, tests 7ms, environment 228ms, prepare 46ms)
+
+error: script "test" exited with code 1

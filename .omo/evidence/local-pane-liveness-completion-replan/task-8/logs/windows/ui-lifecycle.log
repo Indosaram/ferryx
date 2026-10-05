@@ -1,0 +1,2082 @@
+$ vitest run --maxWorkers=1 src/lib/sessionPersistence.test.ts src/lib/sessionLifecycle.test.ts src/lib/nativeTerminalLifecycle.test.ts src/components/NativeTerminalPane.lifecycle.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/source-5464da0d/ui[39m
+
+ [31m❯[39m src/lib/sessionPersistence.test.ts [2m([22m[2m44 tests[22m[2m | [22m[31m8 failed[39m[2m)[22m[32m 29[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround trips all seven durable native binding fields[32m 3[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22maccepts a handover epoch only with the same authoritative incarnation[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mkeeps unknown predecessor identity recoverable rather than dead[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mstale restoration cannot overwrite the current backend binding[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mrestores a successfully presented split through normal live-session restoration[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround trips hidden prepared intent with cancellation false and save key[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround trips hidden prepared intent with cancellation true and save key[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpersists and restores incarnation across save and deserialize[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpersists recent scrollback captured for hibernated sessions across restore/resave[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpreserves paired ownership and proxy identity despite local inventory absence[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mprojects paired targets without embedding credential fields[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mdoes not trust incomplete inventory as proof of local process death[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mquarantines an invalid paired workspace without affecting another row[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mretains Git grouping metadata in session snapshots and subsequent saves[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mserializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mdoes not serialize terminal sessions that no tab or pane references[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround-trips Orca-style split tab groups without changing either tab's pane ownership[32m 1[2mms[22m[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mmatches live native PTYs by backendSessionId instead of the frontend-local session id[39m[32m 4[2mms[22m[39m
+[31m     → expected 'backend-2' to be null[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mdrops persisted terminal sessions that no restored tab or pane references[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround-trips explicit browser metadata rather than guessing browser kind from a pane tree[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mmigrates v1 worktree identity and legacy session identifiers[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mmaps a v1 pane tree with no per-leaf mapping by leafId rather than tab id[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround-trips multi-worktree workspace state with active and parked worktree layouts without session leakage[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mdeserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mround-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy[32m 1[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpersists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs[32m 0[2mms[22m[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mreconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result[39m[32m 3[2mms[22m[39m
+[31m     → expected { id: 'sess-3', …(17) } to match object { id: 'sess-3', …(4) }
+(13 matching properties omitted from actual)[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mmarks sessions exited/lost on daemon epoch change without auto-respawn[39m[32m 1[2mms[22m[39m
+[31m     → expected { id: 'sess-1', …(17) } to match object { id: 'sess-1', …(4) }
+(13 matching properties omitted from actual)[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpersists and restores activityBySessionId for active referenced tabs and drops orphan session activity[32m 0[2mms[22m[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mpreserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions[39m[32m 1[2mms[22m[39m
+[31m     → expected 'working' to be 'done' // Object.is equality[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mmarks session exited and settles working activity to done when daemon reports running: false[39m[32m 0[2mms[22m[39m
+[31m     → expected 'working' to be 'exited' // Object.is equality[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mrestores activities with seen: true so startup does not trigger attention frames on any pane[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mpersists and restores agentType and agentSessionId across serialization and deserialization[32m 0[2mms[22m[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mpreserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId[39m[32m 0[2mms[22m[39m
+[31m     → expected 'backend-1' to be null[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mloads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null[32m 0[2mms[22m[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mkeeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore[39m[32m 0[2mms[22m[39m
+[31m     → expected 'backend-2' to be null[39m
+[31m   [31m×[31m sessionPersistence v3 serialization and migration[2m > [22mpersists providerSession and never serializes transient reconnect locks or in-flight state[39m[32m 2[2mms[22m[39m
+[31m     → expected '{"version":3,"timestamp":179106902460…' not to contain 'reconnectRequestId'[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mfalls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mmigrateLegacyAgentType[2m > [22mmigrates legacy gemini agent type to antigravity and preserves other inputs[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mmigrates legacy gemini agentType to antigravity and generates providerSession during restore[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistence v3 serialization and migration[2m > [22mmigrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistenceKey[2m > [22mchanges when an agent rotates its conversation id inside the same pane[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistenceKey[2m > [22mis stable while nothing persistable changed[32m 0[2mms[22m[39m
+   [32m✓[39m sessionPersistenceKey[2m > [22mstill changes on backend rebinding and lifecycle transitions[32m 0[2mms[22m[39m
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mreattaches the same backend when its output stream ends without user input
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m1[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025804[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'stream-ended'[39m,
+    paneIdentity: [32m'frontend-stream-ended'[39m,
+    bindingKey: [32m'stream-ended::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-stream-ended'[39m,
+    currentBackendSessionId: [32m'stream-ended'[39m,
+    currentBindingKey: [32m'stream-ended::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m2[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025805[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'stream-ended'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mheld positive bounds cannot present a newer attempt or incarnation
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m3[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025813[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    paneIdentity: [32m'frontend-held-receipt'[39m,
+    bindingKey: [32m'held-receipt:7:0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-held-receipt'[39m,
+    currentBackendSessionId: [32m'held-receipt'[39m,
+    currentBindingKey: [32m'held-receipt:7:0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m4[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025814[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mheld positive bounds cannot present a newer attempt or incarnation
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m5[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025814[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'held-receipt'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mrecovers a stream that ends while its recovery attachment is pending
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m6[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025818[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'overlapping-stream-end'[39m,
+    paneIdentity: [32m'frontend-overlapping-stream-end'[39m,
+    bindingKey: [32m'overlapping-stream-end::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-overlapping-stream-end'[39m,
+    currentBackendSessionId: [32m'overlapping-stream-end'[39m,
+    currentBindingKey: [32m'overlapping-stream-end::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m7[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025818[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'overlapping-stream-end'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mbounds repeated stream recovery and permits an explicit retry
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m8[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025821[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    paneIdentity: [32m'frontend-bounded-stream'[39m,
+    bindingKey: [32m'bounded-stream::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-bounded-stream'[39m,
+    currentBackendSessionId: [32m'bounded-stream'[39m,
+    currentBindingKey: [32m'bounded-stream::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m9[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025822[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mbounds repeated stream recovery and permits an explicit retry
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m10[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025851[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    paneIdentity: [32m'frontend-bounded-stream'[39m,
+    bindingKey: [32m'bounded-stream::0:'[39m,
+    attemptGeneration: [33m6[39m,
+    currentPaneIdentity: [32m'frontend-bounded-stream'[39m,
+    currentBackendSessionId: [32m'bounded-stream'[39m,
+    currentBindingKey: [32m'bounded-stream::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m11[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025851[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounded-stream'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not attach without an output recovery listener when registration fails
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: listener unavailable
+      at [90mC:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\components\NativeTerminalPane.lifecycle.test.tsx:322:59
+      at mockCall [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at listen [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\components\NativeTerminalPane.lifecycle.test.tsx:53:44[90m)[39m
+      at Object.ensureStreamListenerRef.current [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\components\NativeTerminalPane.tsx:2858:28[90m)[39m
+      at Object.operation [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\components\NativeTerminalPane.tsx:1200:37[90m)[39m
+      at [90mC:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\nativeTerminalLifecycle.ts:265:19
+      at startLifecycleOperation [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\nativeTerminalLifecycle.ts:180:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\nativeTerminalLifecycle.ts:497:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(C:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\nativeTerminalLifecycle.ts:263:22[90m)[39m
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not attach without an output recovery listener when registration fails
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m12[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025863[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'listener-failure'[39m,
+    paneIdentity: [32m'frontend-listener-failure'[39m,
+    bindingKey: [32m'listener-failure::0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-listener-failure'[39m,
+    currentBackendSessionId: [32m'listener-failure'[39m,
+    currentBindingKey: [32m'listener-failure::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m13[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025864[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'listener-failure'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mretries failed bounds with a fresh attachment and waits for presentation
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'native surface unavailable'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mretries failed bounds with a fresh attachment and waits for presentation
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m14[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025874[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounds-retry'[39m,
+    paneIdentity: [32m'frontend-bounds-retry'[39m,
+    bindingKey: [32m'bounds-retry::0:'[39m,
+    attemptGeneration: [33m1[39m,
+    currentPaneIdentity: [32m'frontend-bounds-retry'[39m,
+    currentBackendSessionId: [32m'bounds-retry'[39m,
+    currentBindingKey: [32m'bounds-retry::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m15[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025874[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'bounds-retry'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mpreserves the structured cause of a bounds failure in the visible error
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: {
+    code: [32m'INVALID_ARGUMENT'[39m,
+    message: [32m'Native terminal viewport is outside the configured surface'[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2muses effective native scale for IME anchor at fractional webview density
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m16[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025882[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m17[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025882[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mkeeps ordinary equal-scale IME anchors
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m18[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025885[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m19[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025885[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mfalls back to raw density for legacy IME receipts
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m20[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025891[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m21[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025891[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mfalls back to raw density when native geometry is absent
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m22[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025893[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    paneIdentity: [32m'frontend-ime-scale'[39m,
+    bindingKey: [32m'ime-scale::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-ime-scale'[39m,
+    currentBackendSessionId: [32m'ime-scale'[39m,
+    currentBindingKey: [32m'ime-scale::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m23[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025893[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'ime-scale'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m16[39m,
+    cellHeightPx: [33m32[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not reclaim the outgoing surface when input fails after tab replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m24[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025895[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m25[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025895[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not reclaim the outgoing surface when input fails after tab replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m26[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025897[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-1'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025897[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m27[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025897[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-1'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025897[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not reclaim the outgoing surface when input fails after tab replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m28[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025898[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m29[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025898[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not recover input when its owner becomes hidden
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m30[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025900[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m31[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025900[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not recover input when its owner becomes hidden
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m32[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025901[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-2'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025901[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m33[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025901[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-2'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025901[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not retry input after its owner leaves during recovery
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m34[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025903[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m35[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025903[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not retry input after its owner leaves during recovery
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m36[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025904[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-3'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025904[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m37[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025904[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-3'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025904[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not retry input after its owner leaves during recovery
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m38[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025904[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not retry input after its owner leaves during recovery
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m39[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025905[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m40[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025905[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mguards queued recovery attachment while preserving a returning owner (returns=false)
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m41[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025907[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-4'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025907[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m42[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025907[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-4'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025907[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mguards queued recovery attachment while preserving a returning owner (returns=false)
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m43[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025907[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mguards queued recovery attachment while preserving a returning owner (returns=true)
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m44[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025909[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-5'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025909[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m45[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025909[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-5'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025909[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mguards queued recovery attachment while preserving a returning owner (returns=true)
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m46[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025909[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mguards queued recovery attachment while preserving a returning owner (returns=true)
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m47[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025910[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m48[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025910[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale input receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m49[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025912[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m50[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025912[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale input receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m51[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025913[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-6'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025913[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m52[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025913[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-6'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025913[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale input receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m53[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025914[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m54[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025914[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale recovery error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m55[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025915[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m56[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025915[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale recovery error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m57[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025916[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-7'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025916[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m58[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025916[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-7'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025916[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale recovery error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m59[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025916[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale recovery error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m60[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025917[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m61[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025917[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m62[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025918[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m63[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025918[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m64[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025919[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-8'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025919[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m65[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025919[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-8'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025919[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m66[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025919[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m67[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025919[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-9'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025919[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m68[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025919[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-9'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025919[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry receipt after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m69[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025920[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m70[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025920[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m71[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025922[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m72[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025922[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m73[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025922[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-10'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025922[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m74[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025922[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-10'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025922[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m75[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025922[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m76[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025923[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-11'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025923[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m77[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025923[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-11'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025923[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not publish a stale retry error after replacement
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m78[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025923[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    paneIdentity: [32m'frontend-owner-b'[39m,
+    bindingKey: [32m'owner-b::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-b'[39m,
+    currentBackendSessionId: [32m'owner-b'[39m,
+    currentBindingKey: [32m'owner-b::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m79[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025923[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-b'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m80[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025925[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [32m'frontend-owner-a'[39m,
+    bindingKey: [32m'owner-a::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-owner-a'[39m,
+    currentBackendSessionId: [32m'owner-a'[39m,
+    currentBindingKey: [32m'owner-a::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m81[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025925[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m82[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-12'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025926[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m83[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-12'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025926[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m84[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-13'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025926[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m85[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-13'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025926[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m86[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m87[39m,
+  event: [32m'terminal.surface.input.error.recovering'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m88[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-14'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025926[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m89[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-14'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025926[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m90[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-15'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791069025926[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m91[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: {
+    operationId: [32m'req-edd369cd-owner-a-15'[39m,
+    backendSessionId: [32m'owner-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025926[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m92[39m,
+  event: [32m'terminal.surface.input.sent'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, hasKeyEvent: [33mfalse[39m, textLength: [33m1[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mshares one recovery for concurrent inputs from a live owner
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m93[39m,
+  event: [32m'terminal.surface.input.sent'[39m,
+  wallTimeMs: [33m1791069025926[39m,
+  details: { backendSessionId: [32m'owner-a'[39m, hasKeyEvent: [33mfalse[39m, textLength: [33m1[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m94[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025928[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m95[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025928[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m96[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025930[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-16'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791069025930[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m97[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025930[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-16'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025930[39m
+  }
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {}
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: Error: Input receipt failed after delivery
+      at [90mC:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\components\NativeTerminalPane.lifecycle.test.tsx:616:5
+      at [90mfile:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:40
+      at runWithSuite [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1849:8[90m)[39m
+      at Object.collect [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:10[90m)[39m
+      at Object.collect [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:738:54[90m)[39m
+  [90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+      at collectTests [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1179:25[90m)[39m
+      at startTests [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1817:17[90m)[39m
+      at [90mfile:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
+      at withEnv [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:84:3[90m)[39m
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m98[39m,
+  event: [32m'terminal.surface.input.failed'[39m,
+  wallTimeMs: [33m1791069025931[39m,
+  details: {
+    backendSessionId: [32m'accepted-input'[39m,
+    error: [32m'Error: Input receipt failed after delivery'[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m99[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025936[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m100[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025936[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m101[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025937[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-17'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791069025937[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m102[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025937[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-17'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025937[39m
+  }
+}
+
+[90mstderr[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[22m[39mNative terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'Receipt unavailable'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m103[39m,
+  event: [32m'terminal.surface.input.failed'[39m,
+  wallTimeMs: [33m1791069025937[39m,
+  details: { backendSessionId: [32m'accepted-input'[39m, error: [32m'[object Object]'[39m }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m104[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025940[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [32m'frontend-accepted-input'[39m,
+    bindingKey: [32m'accepted-input::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-accepted-input'[39m,
+    currentBackendSessionId: [32m'accepted-input'[39m,
+    currentBindingKey: [32m'accepted-input::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m105[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025940[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    cursorCol: [33m2[39m,
+    cursorRow: [33m3[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mdoes not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m106[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791069025941[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-18'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m32[39m,
+    queuedAt: [33m1791069025941[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m107[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791069025941[39m,
+  details: {
+    operationId: [32m'req-edd369cd-accepted-input-18'[39m,
+    backendSessionId: [32m'accepted-input'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791069025941[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mretains the outgoing pane until a dropped frame is retried and presented
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m108[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025943[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-outgoing'[39m,
+    paneIdentity: [32m'frontend-frame-outgoing'[39m,
+    bindingKey: [32m'frame-outgoing::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-frame-outgoing'[39m,
+    currentBackendSessionId: [32m'frame-outgoing'[39m,
+    currentBindingKey: [32m'frame-outgoing::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m109[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025943[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-outgoing'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+[90mstdout[2m | src/components/NativeTerminalPane.lifecycle.test.tsx[2m > [22m[2mNativeTerminalPane compositor ownership lifecycle[2m > [22m[2mretains the outgoing pane until a dropped frame is retried and presented
+[22m[39m[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m110[39m,
+  event: [32m'terminal.surface.presentation.stale'[39m,
+  wallTimeMs: [33m1791069025944[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-incoming'[39m,
+    paneIdentity: [32m'frontend-frame-incoming'[39m,
+    bindingKey: [32m'frame-incoming::0:'[39m,
+    attemptGeneration: [33m0[39m,
+    currentPaneIdentity: [32m'frontend-frame-incoming'[39m,
+    currentBackendSessionId: [32m'frame-incoming'[39m,
+    currentBindingKey: [32m'frame-incoming::0:'[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'c5a87b28-ffae-42ed-9786-f304d1a3d22d'[39m,
+  sequence: [33m111[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791069025944[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'frame-incoming'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m10[39m,
+    cellHeightPx: [33m20[39m
+  }
+}
+
+ [32m✓[39m src/components/NativeTerminalPane.lifecycle.test.tsx [2m([22m[2m36 tests[22m[2m)[22m[33m 1500[2mms[22m[39m
+[90mstderr[2m | src/lib/sessionLifecycle.test.ts[2m > [22m[2msessionLifecycle[2m > [22m[2midle sweep[2m > [22m[2mvetoes suspension when the output ground truth cannot be verified
+[22m[39mFailed to read daemon suspension state: Error: ipc down
+    at [90mC:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\sessionLifecycle.test.ts:356:50
+    at mockCall [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+    at describeTerminal [90m(file:///C:/Users/sook/ferryx-pane-completion/source-5464da0d/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+    at [90mC:\Users\sook\ferryx-pane-completion\source-5464da0d\ui\[39msrc\lib\sessionLifecycle.ts:191:17
+
+ [31m❯[39m src/lib/sessionLifecycle.test.ts [2m([22m[2m20 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 140[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mEOF listener mutation cannot notify removed or newly registered owners[32m 2[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mdisplays authoritative suspension without resuming on activation[32m 1[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mfailed explicit resume preserves the suspended state[32m 1[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mrepresents a restored shell as standby without allocating a real backend[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mdistinguishes running and hibernated resource state[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mpreserves an explicitly persisted hibernated standby identity[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mclears hibernated state after a process is resumed[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mexplicit resume invokes resumeTerminal on backend[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mpreserves durable session across unmount without destroying backing PTY[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mmanual Hibernate holds an active pane asleep until a real focus transition[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mretains only bounded recent scrollback for persisted hibernated sessions[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22madopts a daemon-reported suspension the GUI did not perform (restart case)[32m 61[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mleaves a running daemon session awake[32m 62[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22msuspendRegisteredSession preserves backendSessionId and marks processState suspended[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mresumeRegisteredSession clears sleeping bit and restores running state[32m 0[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22mrestartRegisteredSession closes old backend and allocates a fresh running shell, invoking rebind handler[32m 1[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22midle sweep[2m > [22mnever suspends when the idle timeout is 0 (off)[32m 2[2mms[22m[39m
+   [32m✓[39m sessionLifecycle[2m > [22midle sweep[2m > [22mvetoes suspension when the session produced recent PTY output despite an idle classifier[32m 1[2mms[22m[39m
+[31m   [31m×[31m sessionLifecycle[2m > [22midle sweep[2m > [22msuspends when classifier and output ground truth agree on inactivity[39m[32m 4[2mms[22m[39m
+[31m     → expected "suspendTerminal" to be called with arguments: [ 'backend-live-1' ][90m
+
+Number of calls: [1m0[22m
+[31m[39m
+   [32m✓[39m sessionLifecycle[2m > [22midle sweep[2m > [22mvetoes suspension when the output ground truth cannot be verified[32m 4[2mms[22m[39m
+ [32m✓[39m src/lib/nativeTerminalLifecycle.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 9 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionLifecycle.test.ts[2m > [22msessionLifecycle[2m > [22midle sweep[2m > [22msuspends when classifier and output ground truth agree on inactivity
+[31m[1mAssertionError[22m: expected "suspendTerminal" to be called with arguments: [ 'backend-live-1' ][90m
+
+Number of calls: [1m0[22m
+[31m[39m
+[36m [2m❯[22m src/lib/sessionLifecycle.test.ts:[2m341:34[22m[39m
+    [90m339| [39m        [34mregisterSessionSnapshot[39m(live[33m,[39m [32m"idle"[39m)[33m;[39m
+    [90m340| [39m        [35mawait[39m vi[33m.[39m[34madvanceTimersByTimeAsync[39m([34m31[39m [33m*[39m [34m60_000[39m)[33m;[39m
+    [90m341| [39m        expect(spies.suspendSpy).toHaveBeenCalledWith("backend-live-1"…
+    [90m   | [39m                                 [31m^[39m
+    [90m342| [39m        [34mexpect[39m([34misSessionSleeping[39m(live[33m.[39mid))[33m.[39m[34mtoBe[39m([35mtrue[39m)[33m;[39m
+    [90m343| [39m      } [35mfinally[39m {
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mmatches live native PTYs by backendSessionId instead of the frontend-local session id
+[31m[1mAssertionError[22m: expected 'backend-2' to be null[39m
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"backend-2"
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m331:59[22m[39m
+    [90m329| [39m    [34mexpect[39m(restored)[33m.[39mnot[33m.[39m[34mtoBeNull[39m()[33m;[39m
+    [90m330| [39m    expect(restored!.sessions["sess-1"].backendSessionId).toBe("backen…
+    [90m331| [39m    [34mexpect[39m(restored[33m![39m[33m.[39msessions[[32m"sess-2"[39m][33m.[39mbackendSessionId)[33m.[39m[34mtoBeNull[39m()[33m;[39m
+    [90m   | [39m                                                          [31m^[39m
+    [90m332| [39m    expect(restored!.sessions["sess-3"].backendSessionId).toBe("backen…
+    [90m333| [39m    expect(restored!.sessions["sess-1"].cwd).toBe("/workspace/main/pac…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mreconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result
+[31m[1mAssertionError[22m: expected { id: 'sess-3', …(17) } to match object { id: 'sess-3', …(4) }
+(13 matching properties omitted from actual)[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "backendSessionId": null,[39m
+[32m-   "daemonEpoch": null,[39m
+[31m+   "backendSessionId": "backend-3",[39m
+[31m+   "daemonEpoch": "epoch-100",[39m
+[2m    "id": "sess-3",[22m
+[32m-   "lastOutputSequence": null,[39m
+[32m-   "lifecycle": "exited",[39m
+[31m+   "lastOutputSequence": "300",[39m
+[31m+   "lifecycle": "working",[39m
+[2m  }[22m
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m974:41[22m[39m
+    [90m972| [39m
+    [90m973| [39m    // sess-3: missing backend ID in live list -> marked exited/lost w…
+    [90m974| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-3"[39m])[33m.[39m[34mtoMatchObject[39m({
+    [90m   | [39m                                        [31m^[39m
+    [90m975| [39m      id[33m:[39m [32m"sess-3"[39m[33m,[39m
+    [90m976| [39m      backendSessionId[33m:[39m [35mnull[39m[33m,[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mmarks sessions exited/lost on daemon epoch change without auto-respawn
+[31m[1mAssertionError[22m: expected { id: 'sess-1', …(17) } to match object { id: 'sess-1', …(4) }
+(13 matching properties omitted from actual)[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "backendSessionId": null,[39m
+[32m-   "daemonEpoch": null,[39m
+[31m+   "backendSessionId": "backend-1",[39m
+[31m+   "daemonEpoch": "epoch-OLD",[39m
+[2m    "id": "sess-1",[22m
+[32m-   "lastOutputSequence": null,[39m
+[32m-   "lifecycle": "exited",[39m
+[31m+   "lastOutputSequence": "500",[39m
+[31m+   "lifecycle": "working",[39m
+[2m  }[22m
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1005:41[22m[39m
+    [90m1003| [39m
+    [90m1004| [39m    // On epoch mismatch, session must be marked exited/lost without a…
+    [90m1005| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m])[33m.[39m[34mtoMatchObject[39m({
+    [90m   | [39m                                        [31m^[39m
+    [90m1006| [39m      id[33m:[39m [32m"sess-1"[39m[33m,[39m
+    [90m1007| [39m      backendSessionId[33m:[39m [35mnull[39m[33m,[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mpreserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions
+[31m[1mAssertionError[22m: expected 'working' to be 'done' // Object.is equality[39m
+
+Expected: [32m"done"[39m
+Received: [31m"working"[39m
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1143:61[22m[39m
+    [90m1141| [39m    expect(restored.activityBySessionId?.["sess-2"]?.state).toBe("wait…
+    [90m1142| [39m    // sess-3 was not live in the daemon, so its in-flight working cla…
+    [90m1143| [39m    expect(restored.activityBySessionId?.["sess-3"]?.state).toBe("done…
+    [90m   | [39m                                                            [31m^[39m
+    [90m1144| [39m
+    [90m1145| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mlifecycle)[33m.[39m[34mtoBe[39m([32m"working"[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mmarks session exited and settles working activity to done when daemon reports running: false
+[31m[1mAssertionError[22m: expected 'working' to be 'exited' // Object.is equality[39m
+
+Expected: [32m"exited"[39m
+Received: [31m"working"[39m
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1174:51[22m[39m
+    [90m1172| [39m    [35mif[39m ([33m![39mrestored) [35mreturn[39m[33m;[39m
+    [90m1173| [39m
+    [90m1174| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mlifecycle)[33m.[39m[34mtoBe[39m([32m"exited"[39m)[33m;[39m
+    [90m   | [39m                                                  [31m^[39m
+    [90m1175| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mbackendSessionId)[33m.[39m[34mtoBeNull[39m()[33m;[39m
+    [90m1176| [39m    expect(restored.activityBySessionId?.["sess-1"]?.state).toBe("done…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mpreserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId
+[31m[1mAssertionError[22m: expected 'backend-1' to be null[39m
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"backend-1"
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1267:58[22m[39m
+    [90m1265| [39m
+    [90m1266| [39m    // Backend session is nulled and lifecycle is exited because PTY i…
+    [90m1267| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mbackendSessionId)[33m.[39m[34mtoBeNull[39m()[33m;[39m
+    [90m   | [39m                                                         [31m^[39m
+    [90m1268| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mlifecycle)[33m.[39m[34mtoBe[39m([32m"exited"[39m)[33m;[39m
+    [90m1269| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-1"[39m][33m.[39mdaemonEpoch)[33m.[39m[34mtoBeNull[39m()[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mkeeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore
+[31m[1mAssertionError[22m: expected 'backend-2' to be null[39m
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"backend-2"
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1393:58[22m[39m
+    [90m1391| [39m
+    [90m1392| [39m    // sess-2 was not in liveSessions, so its backendSessionId is null…
+    [90m1393| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-2"[39m][33m.[39mbackendSessionId)[33m.[39m[34mtoBeNull[39m()[33m;[39m
+    [90m   | [39m                                                         [31m^[39m
+    [90m1394| [39m    [34mexpect[39m(restored[33m.[39msessions[[32m"sess-2"[39m][33m.[39mlifecycle)[33m.[39m[34mtoBe[39m([32m"exited"[39m)[33m;[39m
+    [90m1395| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/9]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/lib/sessionPersistence.test.ts[2m > [22msessionPersistence v3 serialization and migration[2m > [22mpersists providerSession and never serializes transient reconnect locks or in-flight state
+[31m[1mAssertionError[22m: expected '{"version":3,"timestamp":179106902460…' not to contain 'reconnectRequestId'[39m
+
+Expected: [32m"reconnectRequestId"[39m
+Received: [31m"{"version":3,"timestamp":1791069024607,"activeWorkspaceId":"default","workspaces":{"default":{"workspaceId":"default","repoRoot":"/workspace/main","worktrees":[{"path":"/workspace/main","branch":"main","head":"123456","isMain":true,"isLocked":false}],"activeWorktreePath":"/workspace/main","layout":{"splitMode":"horizontal","primaryTabId":"tab-1","secondaryTabId":null,"activeTabId":"tab-1","tabs":[{"id":"tab-1","kind":"terminal","label":"main","pinned":true,"terminal":{"primarySessionId":"sess-1","paneTree":{"type":"split","direction":"horizontal","first":{"type":"leaf","leafId":"leaf-1"},"second":{"type":"leaf","leafId":"leaf-2"},"ratio":0.5},"sessionIdsByLeafId":{"leaf-1":"sess-1","leaf-2":"sess-3"},"contentsByLeafId":{"leaf-1":{"kind":"terminal","sessionId":"sess-1"},"leaf-2":{"kind":"terminal","sessionId":"sess-3"}},"activeLeafId":"leaf-2","expandedLeafId":"leaf-2"}},{"id":"tab-2","kind":"terminal","label":"feature","pinned":false,"terminal":{"primarySessionId":"sess-2","paneTree":{"type":"leaf","leafId":"leaf-feature"},"sessionIdsByLeafId":{"leaf-feature":"sess-2"},"contentsByLeafId":{"leaf-feature":{"kind":"terminal","sessionId":"sess-2"}},"activeLeafId":"leaf-feature","expandedLeafId":null}}],"tabGroups":[{"id":"group-default","tabIds":["tab-1","tab-2"],"activeTabId":"tab-1"}],"tabGroupLayout":{"type":"group","groupId":"group-default"},"focusedGroupId":"group-default"},"terminalSessions":{"sess-1":{"localSessionId":"sess-1","backendSessionId":"backend-1","processState":"running","worktreePath":"/workspace/main","cwd":"/workspace/main/packages/api","daemonEpoch":null,"lastOutputSequence":null,"agentType":"claude","agentSessionId":"c18f-uuid-456","providerSession":{"key":"session_id","id":"c18f-uuid-456"},"createdAt":1791069024607,"incarnation":null,"reconnectRequestId":"transient-request-id"},"sess-2":{"localSessionId":"sess-2","backendSessionId":"backend-2","processState":"running","worktreePath":"/workspace/main","cwd":"/workspace/main","daemonEpoch":null,"lastOutputSequence":null,"agentType":null,"agentSessionId":null,"providerSession":null,"createdAt":1791069024607,"incarnation":null},"sess-3":{"localSessionId":"sess-3","backendSessionId":"backend-3","processState":"running","worktreePath":"/workspace/main","cwd":"/workspace/main/packages/web","daemonEpoch":null,"lastOutputSequence":null,"agentType":null,"agentSessionId":null,"providerSession":null,"createdAt":1791069024607,"incarnation":null}}}}}"[39m
+
+[36m [2m❯[22m src/lib/sessionPersistence.test.ts:[2m1432:25[22m[39m
+    [90m1430| [39m    [34mexpect[39m(rawJson)[33m.[39mnot[33m.[39m[34mtoContain[39m([32m"spawning"[39m)[33m;[39m
+    [90m1431| [39m    [34mexpect[39m(rawJson)[33m.[39mnot[33m.[39m[34mtoContain[39m([32m"clientRequestId"[39m)[33m;[39m
+    [90m1432| [39m    [34mexpect[39m(rawJson)[33m.[39mnot[33m.[39m[34mtoContain[39m([32m"reconnectRequestId"[39m)[33m;[39m
+    [90m   | [39m                        [31m^[39m
+    [90m1433| [39m
+    [90m1434| [39m    // Deserialization on cold loss initializes transient reconnect st…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/9]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m2 passed[39m[22m[90m (4)[39m
+[2m      Tests [22m [1m[31m9 failed[39m[22m[2m | [22m[1m[32m102 passed[39m[22m[90m (111)[39m
+[2m   Start at [22m 08:10:22
+[2m   Duration [22m 5.91s[2m (transform 543ms, setup 768ms, collect 1.12s, tests 1.67s, environment 1.60s, prepare 269ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

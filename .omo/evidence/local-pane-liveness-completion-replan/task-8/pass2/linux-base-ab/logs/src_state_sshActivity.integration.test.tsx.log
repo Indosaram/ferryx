@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/state/sshActivity.integration.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040505) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/state/sshActivity.integration.test.tsx (4 tests | 4 failed) 5ms
+   × routes SSH 'blocked' at '/srv/repo' into notification, spinner and pane highlight 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × routes SSH 'idle' at '/srv/repo' into notification, spinner and pane highlight 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × routes SSH 'blocked' at 'C:\work\repo' into notification, spinner and pane highlight 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × routes SSH 'idle' at 'C:\work\repo' into notification, spinner and pane highlight 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/sshActivity.integration.test.tsx > routes SSH 'blocked' at '/srv/repo' into notification, spinner and pane highlight
+ FAIL  src/state/sshActivity.integration.test.tsx > routes SSH 'idle' at '/srv/repo' into notification, spinner and pane highlight
+ FAIL  src/state/sshActivity.integration.test.tsx > routes SSH 'blocked' at 'C:\work\repo' into notification, spinner and pane highlight
+ FAIL  src/state/sshActivity.integration.test.tsx > routes SSH 'idle' at 'C:\work\repo' into notification, spinner and pane highlight
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/state/sshActivity.integration.test.tsx:42:16
+     40| beforeEach(() => {
+     41|   resetSessionLifecycleForTests();
+     42|   localStorage.clear();
+       |                ^
+     43|   vi.clearAllMocks();
+     44|   vi.spyOn(document, "hasFocus").mockReturnValue(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  10:10:21
+   Duration  1.87s (transform 742ms, setup 97ms, collect 1.35s, tests 5ms, environment 232ms, prepare 49ms)
+
+error: script "test" exited with code 1

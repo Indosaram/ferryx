@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/source-21dea3c0[39m
+
+ [32m✓[39m scripts/qa/pane-liveness.test.mjs [2m([22m[2m28 tests[22m[2m)[22m[33m 317[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m28 passed[39m[22m[90m (28)[39m
+[2m   Start at [22m 15:26:32
+[2m   Duration [22m 560ms[2m (transform 54ms, setup 0ms, collect 79ms, tests 317ms, environment 0ms, prepare 62ms)[22m
+
+NATIVE_EXIT=0

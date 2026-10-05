@@ -1,0 +1,66 @@
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-172baa87
+
+ ❯ scripts/qa/pane-liveness.test.mjs (26 tests | 5 failed) 287ms
+   ✓ headless presentation releases after held event before its only settlement receipt 2ms
+   ✓ the nine plan scenarios are the only accepted names, and headless is diagnostic-classifier only 2ms
+   ✓ unknown flags, missing flags, duplicates and positionals are rejected before launch 0ms
+   ✓ preflight rejects production runtime roots, preexisting isolation roots, relative paths and production installs 2ms
+   ✓ barriers pre-arm before trigger, acknowledge held/released state, and time out without product acks 154ms
+   ✓ timing budgets match the plan contract 0ms
+   ✓ cleanup reaps registered owned processes by PID and removes registered roots 4ms
+   ✓ regression H10 false-pass: a cleanup failure cannot leave a passing gate 0ms
+   ✓ regression P2 correlation: receipts must echo runId/operationId/producer nonces 0ms
+   ✓ regression M3 deadline: unsettled waits become typed timeouts without leaks; errors propagate typed 51ms
+   ✓ regression H4 authoritative 7-tuple: presence alone is insufficient; all 7 fields must correlate and presented must be true 1ms
+   ✓ regression H3 invariants: handover/suspension/stale receipts are asserted, not logged 1ms
+   × regression H6 source digest: evidence pointer binds to runner bytes 8ms
+     → ENOENT: no such file or directory, open 'scripts/qa/pane-liveness.mjs'
+   ✓ BarrierHub prearm validates targetRole and awaitBound correlates bound-ack 1ms
+   ✓ regression B4: post-release recovery must be positively observed; Unknown is nonpassing 0ms
+   ✓ regression B1: entrypoint module evaluates its argv-resolution path behaviorally (no source-text pin) 0ms
+   ✓ regression B2: marker-recognition hash path executes behaviorally (no source-text pin) 1ms
+   ✓ regression B3: real spawnOwned group reap - leader awaits grandchild exit, absence proven once, fallback truly reclaims 44ms
+   ✓ regression B5: headless diagnostic-classifier requires exact positive stageProgress; rejects missing/false progress and fake presentation 1ms
+   ✓ MonotonicBudget enforces monotonic consumption and deadline exhaustion 1ms
+   ✓ validateFixtureSetup enforces scenario-specific fixture requirements without forcing 4 fixtures on basic split 1ms
+   ✓ performInspectionHandshake writes capture-ready.json and verifies matching inspection artifact 1ms
+   × split-cancel scenario adapter issues cancel before awaiting create and accepts cancel-ack without requiring created ID 5ms
+     → spawn osascript ENOENT
+   × split-attach-stall asserts actionable failure, releases hold, and executes Retry with NEW attemptGeneration on same backend 2ms
+     → spawn osascript ENOENT
+   × retained-handover and handover-abort adapters verify transfer and relinquishment invariants 1ms
+     → spawn osascript ENOENT
+   × suspension-ownership and stale-binding adapters verify process actuation and reattach invariants 2ms
+     → spawn osascript ENOENT
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  scripts/qa/pane-liveness.test.mjs > regression H6 source digest: evidence pointer binds to runner bytes
+Error: ENOENT: no such file or directory, open 'scripts/qa/pane-liveness.mjs'
+ ❯ computeSourceDigest scripts/lib/qa-scenarios/common-harness.mjs:786:53
+    784| export function computeSourceDigest(paths) {
+    785|   const hash = createHash('sha256');
+    786|   for (const path of paths) hash.update(readFileSync(path));
+       |                                                     ^
+    787|   return hash.digest('hex');
+    788| }
+ ❯ scripts/qa/pane-liveness.test.mjs:283:37
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  scripts/qa/pane-liveness.test.mjs > split-cancel scenario adapter issues cancel before awaiting create and accepts cancel-ack without requiring created ID
+ FAIL  scripts/qa/pane-liveness.test.mjs > split-attach-stall asserts actionable failure, releases hold, and executes Retry with NEW attemptGeneration on same backend
+ FAIL  scripts/qa/pane-liveness.test.mjs > retained-handover and handover-abort adapters verify transfer and relinquishment invariants
+ FAIL  scripts/qa/pane-liveness.test.mjs > suspension-ownership and stale-binding adapters verify process actuation and reattach invariants
+Error: spawn osascript ENOENT
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 21 passed (26)
+   Start at  09:41:03
+   Duration  487ms (transform 56ms, setup 0ms, collect 69ms, tests 287ms, environment 0ms, prepare 39ms)
+
+error: script "test" exited with code 1

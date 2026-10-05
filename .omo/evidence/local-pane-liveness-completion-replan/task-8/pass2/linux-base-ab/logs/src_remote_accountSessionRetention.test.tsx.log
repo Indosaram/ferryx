@@ -1,0 +1,69 @@
+$ vitest run --maxWorkers=1 src/remote/accountSessionRetention.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038042) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/accountSessionRetention.test.tsx (6 tests | 6 failed) 7ms
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a): untyped HTML 403 is classified as LIST_MACHINES_FAILED, surfaces hook error, and PRESERVES account credentials and preferred sessions 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a2): untyped plain text 401 is classified as LIST_MACHINES_FAILED and PRESERVES credentials and issuer origin 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a3): structured 403 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a4): structured 500 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (b): structured account 401 UNAUTHORIZED invokes onUnauthorized and erases credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Worktrees Auth Classification & Session Retention Regressions > Scenario (c): downstream machine-specific 401 does NOT trigger onUnauthorized and preserves account credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a): untyped HTML 403 is classified as LIST_MACHINES_FAILED, surfaces hook error, and PRESERVES account credentials and preferred sessions
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a2): untyped plain text 401 is classified as LIST_MACHINES_FAILED and PRESERVES credentials and issuer origin
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a3): structured 403 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a4): structured 500 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (b): structured account 401 UNAUTHORIZED invokes onUnauthorized and erases credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (c): downstream machine-specific 401 does NOT trigger onUnauthorized and preserves account credentials
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/accountSessionRetention.test.tsx:38:18
+     36| 
+     37|   beforeEach(() => {
+     38|     localStorage.clear();
+       |                  ^
+     39|     sessionStorage.clear();
+     40|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a): untyped HTML 403 is classified as LIST_MACHINES_FAILED, surfaces hook error, and PRESERVES account credentials and preferred sessions
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a2): untyped plain text 401 is classified as LIST_MACHINES_FAILED and PRESERVES credentials and issuer origin
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a3): structured 403 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (a4): structured 500 with code UNAUTHORIZED is reclassified as LIST_MACHINES_FAILED and PRESERVES credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (b): structured account 401 UNAUTHORIZED invokes onUnauthorized and erases credentials
+ FAIL  src/remote/accountSessionRetention.test.tsx > Account Worktrees Auth Classification & Session Retention Regressions > Scenario (c): downstream machine-specific 401 does NOT trigger onUnauthorized and preserves account credentials
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/accountSessionRetention.test.tsx:45:18
+     43|   afterEach(() => {
+     44|     globalThis.fetch = originalFetch;
+     45|     localStorage.clear();
+       |                  ^
+     46|     sessionStorage.clear();
+     47|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/12]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  10:09:47
+   Duration  1.14s (transform 213ms, setup 99ms, collect 609ms, tests 7ms, environment 228ms, prepare 60ms)
+
+error: script "test" exited with code 1

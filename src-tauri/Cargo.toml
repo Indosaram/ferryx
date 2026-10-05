@@ -7,6 +7,7 @@ license = "SUL-1.0"
 repository = "https://github.com/ferryx/ferryx"
 homepage = "https://ferryx.app"
 edition = "2021"
+rust-version = "1.89"
 default-run = "ferryx"
 
 [lib]
@@ -51,6 +52,10 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 default = ["native-terminal"]
+# Task 3 private QA barrier channel for the pane-liveness diagnostic
+# classifier headless harness. Compile-time gated; never enabled in release
+# builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
+local-split-qa = []
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
     "dep:wgpu",

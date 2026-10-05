@@ -1,0 +1,119 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteAttention.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036382) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteAttention.test.tsx (16 tests | 16 failed) 10ms
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'published') 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'omitted') 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'published') 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'omitted') 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'published') 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'omitted') 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > keeps the worktree list as the sheet default and opens the two-state inbox from its icon 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > renders attention affordance with accessible name when a background tab enters waiting state 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > activating the attention affordance issues exactly one context selection carrying tabId, workspaceId, and worktreeSlug 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > is absent from the DOM when no tab is waiting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > is absent from the DOM when the waiting tab is already the active tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > targets the first waiting tab in published order and states the waiting count when multiple tabs are waiting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > identifies worktree in accessible name when the waiting target belongs to a different worktree 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > horizontal swipe left on embedded terminal advances to next tab using existing selection path 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > horizontal swipe right on embedded terminal retreats to previous tab using existing selection path 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteAttention Affordance > swiping past the last tab or before the first tab is a no-op issuing no selection request 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 16 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > keeps the worktree list as the sheet default and opens the two-state inbox from its icon
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > renders attention affordance with accessible name when a background tab enters waiting state
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > activating the attention affordance issues exactly one context selection carrying tabId, workspaceId, and worktreeSlug
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > is absent from the DOM when no tab is waiting
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > is absent from the DOM when the waiting tab is already the active tab
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > targets the first waiting tab in published order and states the waiting count when multiple tabs are waiting
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > identifies worktree in accessible name when the waiting target belongs to a different worktree
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > horizontal swipe left on embedded terminal advances to next tab using existing selection path
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > horizontal swipe right on embedded terminal retreats to previous tab using existing selection path
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > swiping past the last tab or before the first tab is a no-op issuing no selection request
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteAttention.test.tsx:127:16
+    125| 
+    126| beforeEach(() => {
+    127|   localStorage.clear();
+       |                ^
+    128|   vi.restoreAllMocks();
+    129| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/32]⎯
+
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'omitted')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > keeps the worktree list as the sheet default and opens the two-state inbox from its icon
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > renders attention affordance with accessible name when a background tab enters waiting state
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > activating the attention affordance issues exactly one context selection carrying tabId, workspaceId, and worktreeSlug
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > is absent from the DOM when no tab is waiting
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > is absent from the DOM when the waiting tab is already the active tab
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > targets the first waiting tab in published order and states the waiting count when multiple tabs are waiting
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > identifies worktree in accessible name when the waiting target belongs to a different worktree
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > horizontal swipe left on embedded terminal advances to next tab using existing selection path
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > horizontal swipe right on embedded terminal retreats to previous tab using existing selection path
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > swiping past the last tab or before the first tab is a no-op issuing no selection request
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteAttention.test.tsx:133:16
+    131| afterEach(() => {
+    132|   cleanup();
+    133|   localStorage.clear();
+       |                ^
+    134|   EventWebSocket.latest = null;
+    135|   vi.unstubAllGlobals();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/32]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  16 failed (16)
+   Start at  10:09:17
+   Duration  1.28s (transform 312ms, setup 111ms, collect 756ms, tests 10ms, environment 229ms, prepare 44ms)
+
+error: script "test" exited with code 1

@@ -111,6 +111,8 @@ impl TestDaemonClient {
                 cwd: None,
                 shell: Some("/bin/sh".to_string()),
                 startup: None,
+                // Legacy spawn fixture: no local-split envelope on the wire.
+                local_split: None,
                 cols,
                 rows,
             })

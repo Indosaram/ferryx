@@ -1,0 +1,109 @@
+$ vitest run --maxWorkers=1 src/components/settings/RemoteSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033723) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/RemoteSection.test.tsx (27 tests | 27 failed) 13ms
+   × RemoteSection UX Unification & Review Blockers > authenticates SSH with a separate password before probing and never saves it in the host 5ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > shows machines without top-level destination navigation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > renders ONE mixed machine list without All/Paired/SSH tabs or separate headings 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > renders EXACTLY ONE Add Machine button even when the inventory is empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > renders NO permanent add or PIN forms on the page body 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > common rows display concise status, Add Project, and Details toggle with technical metadata hidden 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > shows the sign-in form with email input when signed out and asserts Generate QR is absent 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > asserts PIN issuance is no longer offered on this surface 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > asserts Generate QR is absent and the SSH tab is present in Add Machine 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > asserts an SSH machine row is still rendered 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > lists one machine from a stubbed account API with a signed-in fixture and enables Add Project only when grant scope is machine 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > issues an enrollment code and displays the exact CLI command 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > displays empty state copy stating the other machine has to enroll first when signed in with no machines 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > config import separates imported-not-verified result with NO ready/project offer 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > restores system SSH config discovery, card, and import options inside Add Machine modal 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > restores all SSH edit fields including port validation, authMethod, identityFile, and jumpHost 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > restores sameConnection invalidation: clears stale test results when host config changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > disables Paired Add Project without onOpenProject even if onOpenSshProject is provided 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > namespaces machine row IDs and prevents ID collision between Paired and SSH machines 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > handles Escape in Add Machine modal without propagating to parent SettingsDialog 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > restores focus to trigger element when Add Machine modal closes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > resets dismissed state on reopen: open-close-reopen SSH connection succeeds and is not discarded 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > passes supplied non-default account origin to listMachines and issueEnrollmentCode 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > switches account authority without sending the previous session token to the new server 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > treats account machines with absent grantScope as ungranted and disables Add Project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > re-pair explains the account enrollment path instead of a retired PIN 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection UX Unification & Review Blockers > re-pair on an enrolled account machine re-issues its machine grant 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 27 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > authenticates SSH with a separate password before probing and never saves it in the host
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > shows machines without top-level destination navigation
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > renders ONE mixed machine list without All/Paired/SSH tabs or separate headings
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > renders EXACTLY ONE Add Machine button even when the inventory is empty
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > renders NO permanent add or PIN forms on the page body
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > common rows display concise status, Add Project, and Details toggle with technical metadata hidden
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > shows the sign-in form with email input when signed out and asserts Generate QR is absent
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > asserts PIN issuance is no longer offered on this surface
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > asserts Generate QR is absent and the SSH tab is present in Add Machine
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > asserts an SSH machine row is still rendered
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > lists one machine from a stubbed account API with a signed-in fixture and enables Add Project only when grant scope is machine
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > issues an enrollment code and displays the exact CLI command
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > displays empty state copy stating the other machine has to enroll first when signed in with no machines
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > config import separates imported-not-verified result with NO ready/project offer
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > restores system SSH config discovery, card, and import options inside Add Machine modal
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > restores all SSH edit fields including port validation, authMethod, identityFile, and jumpHost
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > restores sameConnection invalidation: clears stale test results when host config changes
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > disables Paired Add Project without onOpenProject even if onOpenSshProject is provided
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > namespaces machine row IDs and prevents ID collision between Paired and SSH machines
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > handles Escape in Add Machine modal without propagating to parent SettingsDialog
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > restores focus to trigger element when Add Machine modal closes
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > resets dismissed state on reopen: open-close-reopen SSH connection succeeds and is not discarded
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > passes supplied non-default account origin to listMachines and issueEnrollmentCode
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > switches account authority without sending the previous session token to the new server
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > treats account machines with absent grantScope as ungranted and disables Add Project
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > re-pair explains the account enrollment path instead of a retired PIN
+ FAIL  src/components/settings/RemoteSection.test.tsx > RemoteSection UX Unification & Review Blockers > re-pair on an enrolled account machine re-issues its machine grant
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/RemoteSection.test.tsx:102:18
+    100|     vi.clearAllMocks();
+    101|     resetSshHostsCache();
+    102|     localStorage.clear();
+       |                  ^
+    103|     isTauriMock.mockReturnValue(true);
+    104| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/27]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  27 failed (27)
+   Start at  10:08:54
+   Duration  1.26s (transform 310ms, setup 105ms, collect 735ms, tests 13ms, environment 228ms, prepare 50ms)
+
+error: script "test" exited with code 1

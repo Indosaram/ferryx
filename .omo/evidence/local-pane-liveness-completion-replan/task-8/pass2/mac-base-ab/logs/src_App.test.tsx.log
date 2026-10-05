@@ -1,0 +1,1169 @@
+$ vitest run --maxWorkers=1 src/App.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+stderr | src/App.test.tsx > App project workspace flow > shows a retryable error when a stored project fails to register at startup
+Local workspace registration skipped: heal-fail-a Error: repo path is gone
+    at [90m/Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/App.test.tsx:668:50
+    at [90mfile:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at [90mfile:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at [90mfile:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout [90m(file:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10[90m)[39m
+    at runTest [90m(file:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at runSuite [90m(file:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1729:8[90m)[39m
+    at runSuite [90m(file:///Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1729:8[90m)[39m
+
+ ❯ src/App.test.tsx (154 tests | 1 failed) 18295ms
+   ✓ App project workspace flow > awaits the local registration heal before publishing the bootstrap in both boot branches 8ms
+   ✓ App project workspace flow > dedupes repeated local registration heals and skips placeholder projects 7ms
+   ✓ App project workspace flow > shows a retryable error when a stored project fails to register at startup 38ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for nested content  467ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for flat content 68ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for top-level content 159ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for terminal content 136ms
+   ✓ App project workspace flow > P05 focused browser shortcut targeting on Windows > routes mounted receivers for missing-content content 201ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=true 14ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=true split=false 10ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=true 14ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=true pinned=false split=false 46ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=true 31ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=true split=false 40ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=true 26ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > targets only the focused pane: tagged=false pinned=false split=false 16ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused working agent pane in a split without confirmation 15ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > closes focused waiting agent pane in a split without confirmation 9ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > does not ask for confirmation for an untagged pane's busy sibling 13ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=false even with a layout 45ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > preserves browser whole-tab guard with pinned=true even with a layout 67ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > Ctrl+W > ignores a nonexistent active tab even with a leftover layout 42ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=true 14ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=true split=false 11ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=true 98ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=true pinned=false split=false 34ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=true 11ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=true split=false 10ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=true 71ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > targets only the focused pane: tagged=false pinned=false split=false 34ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused working agent pane in a split without confirmation 12ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > closes focused waiting agent pane in a split without confirmation 12ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > does not ask for confirmation for an untagged pane's busy sibling 15ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=false even with a layout 28ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > preserves browser whole-tab guard with pinned=true even with a layout 24ms
+   ✓ App project workspace flow > P05 optional-kind focused close wiring on Windows > native menu > ignores a nonexistent active tab even with a leftover layout 15ms
+   ✓ App project workspace flow > passes live tabless workspace state to the sidebar 17ms
+   ✓ App project workspace flow > does not select tabless workspace rows through Cmd+digit 16ms
+   ✓ App project workspace flow > skips tabless background worktrees when indexing Cmd+N targets 36ms
+   ✓ App project workspace flow > returns reconnect failure to the pane instead of discarding its promise 70ms
+   ✓ App project workspace flow > routes the native Cmd+T menu accelerator through the normal new-terminal callback 52ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the active tab 7ms
+   ✓ App project workspace flow > routes web Cmd+W on a leaf-root terminal tab to its pane when focus is unset 10ms
+   ✓ App project workspace flow > confirms closing a single-pane tab with a working agent as a tab close 212ms
+   ✓ App project workspace flow > confirms closing a single-pane tab with a waiting agent as a tab close 95ms
+   ✓ App project workspace flow > closes a single pane in a split view with a working agent without confirmation 75ms
+   ✓ App project workspace flow > closes a single pane in a split view with a waiting agent without confirmation 51ms
+   ✓ App project workspace flow > confirms tab close for a working agent even with confirmCloseTab disabled 144ms
+   ✓ App project workspace flow > confirms tab close for a waiting agent even with confirmCloseTab disabled 119ms
+   ✓ App project workspace flow > closes an idle focused pane through native Cmd+W without confirming for a busy sibling 75ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab 37ms
+   ✓ App project workspace flow > routes the web Cmd+W shortcut to close the focused pane in a split terminal tab 42ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close an active browser tab 10ms
+   ✓ App project workspace flow > routes http links to a built-in browser tab through the app-registered opener 15ms
+   ✓ App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm 189ms
+   ✓ App project workspace flow > uses the canonical folder-derived project on an empty native startup 69ms
+   ✓ App project workspace flow > falls back to stored projects and initializes bootstrap when getInitialProject rejects 53ms
+   ✓ App project workspace flow > starts update polling on native mount and stops it on unmount 14ms
+   ✓ App project workspace flow > renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects 17ms
+   ✓ App project workspace flow > checks for a signed update when the native app starts 23ms
+   ✓ App project workspace flow > restores projects lost from WebView storage using the native session catalog 117ms
+   ✓ App project workspace flow > restores multi-project native session catalog when single persisted project differs from startup 115ms
+   ✓ App project workspace flow > does not restore historical projects into an existing multi-project catalog 38ms
+   ✓ App project workspace flow > keeps the native shell initializing until persisted workspace tabs are preloaded 72ms
+   ✓ App project workspace flow > migrates the legacy default placeholder to the canonical native project 16ms
+   ✓ App project workspace flow > removes a project via RemoveProjectDialog and switches active project when removing the active one 144ms
+   ✓ App project workspace flow > shows a genuine empty state and does not re-register the default project after removing the last project 129ms
+   ✓ App project workspace flow > scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree 19ms
+   ✓ App project workspace flow > migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10) 10ms
+   ✓ App project workspace flow > heals a legacy project entry (no gitRoot) into a git-backed project on startup 74ms
+   ✓ App project workspace flow > re-registers the active persisted project before refreshing its worktrees 72ms
+   ✓ App project workspace flow > opens a registered project's real branch-dropdown worktree flow 172ms
+   ✓ App project workspace flow > opens worktree creation for the clicked non-active project 101ms
+   ✓ App project workspace flow > switches to the non-active project before opening its created worktree 169ms
+   ✓ App project workspace flow > switches the active project when selecting a project row in the nested tree 65ms
+   ✓ App project workspace flow > shows the original project's worktrees again after switching away and clicking back 199ms
+   ✓ App project workspace flow > adopts the canonical workspaceId the backend returns for an already-registered root 16ms
+   ✓ App project workspace flow > retries registration on window focus after a transient failure instead of gating forever 70ms
+   ✓ App project workspace flow > persists the outgoing project's session when switching away 110ms
+   ✓ App project workspace flow > discards a parked worktree selection that belongs to a project no longer active 100ms
+   ✓ App project workspace flow > surfaces a genuine same-id different-root registration conflict instead of silently listing 7ms
+   ✓ App project workspace flow > switches project instead of activating when the worktree belongs to another project 85ms
+   ✓ App project workspace flow > switches project for a branch-less worktree nested under another project's root 72ms
+   ✓ App project workspace flow > activates a worktree directly when it belongs to the active project 27ms
+   ✓ App project workspace flow > walks visible worktrees top to bottom across expanded projects with Cmd+1.. 42ms
+   ✓ App project workspace flow > skips a collapsed project's rows when counting Cmd+N positions 62ms
+   ✓ App project workspace flow > selects a worktree when macOS forwards Cmd+N through the native key monitor 46ms
+   ✓ App project workspace flow > targets the synthesized root row of a visible non-Git project via native Cmd+digit 37ms
+   ✓ App project workspace flow > targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit 26ms
+   ✓ App project workspace flow > keeps out-of-range Cmd+N presses a no-op 30ms
+   ✓ App project workspace flow > navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys 27ms
+   ✓ App project workspace flow > toggles sidebar visibility with Cmd+B and persists state across mounts 72ms
+   ✓ App project workspace flow > keeps restored missing sessions in standby under the default Lazy policy 88ms
+   ✓ App project workspace flow > waits until registration and worktree refresh complete before restoring Lazy standby sessions 27ms
+   ✓ App project workspace flow > restores persisted terminal sessions only once when restored state changes effect dependencies 67ms
+   ✓ App project workspace flow > preserves live backend sessions when restoring during dev/HMR 71ms
+   ✓ App project workspace flow > reconciles live and missing sessions across split panes without auto-respawning dead sessions 68ms
+   ✓ App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited 83ms
+   ✓ App project workspace flow > toggles the settings dialog with Cmd+, 22ms
+   ✓ App project workspace flow > activates in-terminal search on active pane with Cmd+F 8ms
+   ✓ App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[ 5ms
+   ✓ App project workspace flow > detects agents on mount and launches agent via spawnTerminal and writeTerminal 158ms
+   ✓ App project workspace flow > surfaces the stored defaultAgentId first with a Default label in the New Tab agent list 33ms
+   ✓ App project workspace flow > opens a browser tab at the configured homepage from the new-tab menu 78ms
+   ✓ App project workspace flow > opens a blank browser tab from the new-tab menu when no homepage is set 35ms
+   ✓ App project workspace flow > preserves every registered workspace when saving session instead of clobbering inactive workspaces 19ms
+   ✓ App project workspace flow > conditionally mounts SettingsDialog and CommandPalette only when open 10ms
+   ✓ App project workspace flow > lazy-loads SettingsDialog via React.lazy with Suspense 3ms
+   ✓ App project workspace flow > does not list state in registerWindowCloseGuard effect dependencies 2ms
+   ✓ App project workspace flow > does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval 113ms
+   ✓ App project workspace flow > does not pass inline arrow functions for onOpenSettings or onCloseSearch 5ms
+   ✓ App project workspace flow > preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning  1655ms
+   ✓ App project workspace flow > successfully completes session restore under React StrictMode double-mount without skipping 85ms
+   ✓ App project workspace flow > skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists 16ms
+   ✓ App project workspace flow > reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted 67ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes terminal tabs from every worktree with safe labels 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes the primary worktree with no managed slug 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane when a remote selection names a leaf-addressed entry 10ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > exposes every split pane of a tab as its own remote entry addressed by leaf 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps a single-pane tab addressed by its plain tab id 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives per-tab activityState and agentType when present in activityBySessionId 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps publishing the terminal inventory with an empty focus when a browser tab is active 2ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > returns null only when the desktop has no terminal tab at all 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > does not republish unchanged terminal inventory on unrelated workspace renders 12ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes focused terminal to native IPC on mount and layout changes 6ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes per-tab agent activity state and agent type to native IPC 56ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes real backendSessionId after session backend is bound or rebound 43ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > routes publishFocusedTerminal rejection to reportRuntimeError 76ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > creates a new remote terminal through openTab instead of reusing an existing worktree tab 15ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles native remote_selection_requested and activates requested worktree context 43ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles same-worktree tab selection request and activates exact tab 34ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles primary worktree selection within current project when on secondary worktree 50ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-worktree selection with tabId activating tab after worktree switch 65ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-project remote selection by switching project and then activating worktree 43ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > drops a queued remote slug when the user switches to a third project first 60ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane after a queued cross-project selection names a leaf entry 80ms
+   ✓ App project workspace flow > badge count synchronization > synchronizes badge count from unique true unreadTabIds in workspace state 26ms
+   ✓ App project workspace flow > badge count synchronization > routes native badge synchronization errors to reportRuntimeError 67ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed  955ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > does not crash and degrades silently when auto-resume spawn fails 73ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (1) when a remote host is active, calls toast.warning exactly once and adoptBrowserSession zero times 19ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (2) when no remote host is active and adoptBrowserSession returns null, calls the second toast warning exactly once 15ms
+   ✓ App project workspace flow > T2 onBrowserSessionCreated skipped adoption notifications > (3) when no remote host is active and adoptBrowserSession returns a tab id, no toast warning fires 14ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with remote-host-active when a remote host owns the window 20ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=false with adopt-failed when the session could not be adopted 23ms
+   ✓ App project workspace flow > T2 clause (a) adoption reporting reaches the CLI > reports adopted=true when the tab was shown 19ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the tab owning the browserId, not the tab at the CLI index 13ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > activates the terminal tab that hosts the browser in a pane 7ms
+   ✓ App project workspace flow > T9 browser_tab_switch activates the owning layout tab > warns instead of staying silent when no tab owns the browserId 6ms
+   × App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects 8010ms
+     → Unable to find role="dialog" and name "Welcome to Ferryx"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"selectable"[39m
+        [33mdata-native-terminal-yield[39m=[32m"off"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mdata-empty-workspaces[39m=[32m"[]"[39m
+        [33mdata-open[39m=[32m"true"[39m
+        [33mdata-testid[39m=[32m"mock-sidebar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mHide sidebar[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mOpen settings[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mAdd project[0m
+        [36m</button>[39m
+        [36m<span>[39m
+          [0mActive project [0m
+          [0mdefault[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<main[39m
+        [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"[39m
+          [33mdata-testid[39m=[32m"no-projects-view"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-md px-4"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[15px] font-semibold tracking-tight text-foreground"[39m
+              [36m>[39m
+                [0mNo projects[0m
+              [36m</p>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"mt-1 text-[13px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAdd a project to open a terminal workspace.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 grid gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Add Project"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-add-project"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-folder-plus size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M12 10v6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M9 13h6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mAdd Project[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPick a folder on this computer. Git repositories unlock worktrees.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Connect machine"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-connect-machine"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-monitor size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<rect[39m
+                      [33mheight[39m=[32m"14"[39m
+                      [33mrx[39m=[32m"2"[39m
+                      [33mwidth[39m=[32m"20"[39m
+                      [33mx[39m=[32m"2"[39m
+                      [33my[39m=[32m"3"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"8"[39m
+                      [33mx2[39m=[32m"16"[39m
+                      [33my1[39m=[32m"21"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"12"[39m
+                      [33mx2[39m=[32m"12"[39m
+                      [33my1[39m=[32m"17"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mConnect a machine[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPair another computer through your Ferryx account.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 flex items-center justify-between gap-3 border-t border-border pt-4"[39m
+              [33mdata-testid[39m=[32m"checklist-review-setup"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mPermissions, agents, and CLI[0m
+              [36m</span>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mOpen Welcome Setup[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</main>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33maria-hidden[39m=[32m"true"[39m
+    [33mclass[39m=[32m"pointer-events-none fixed inset-0 z-50"[39m
+    [33mdata-shortcut-hints[39m=[32m"true"[39m
+  [36m/>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"selectable"[39m
+        [33mdata-native-terminal-yield[39m=[32m"off"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mdata-empty-workspaces[39m=[32m"[]"[39m
+        [33mdata-open[39m=[32m"true"[39m
+        [33mdata-testid[39m=[32m"mock-sidebar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mHide sidebar[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mOpen settings[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mAdd project[0m
+        [36m</button>[39m
+        [36m<span>[39m
+          [0mActive project [0m
+          [0mdefault[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<main[39m
+        [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"[39m
+          [33mdata-testid[39m=[32m"no-projects-view"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-md px-4"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[15px] font-semibold tracking-tight text-foreground"[39m
+              [36m>[39m
+                [0mNo projects[0m
+              [36m</p>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"mt-1 text-[13px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAdd a project to open a terminal workspace.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 grid gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Add Project"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-add-project"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-folder-plus size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M12 10v6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M9 13h6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mAdd Project[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPick a folder on this computer. Git repositories unlock worktrees.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Connect machine"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-connect-machine"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-monitor size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<rect[39m
+                      [33mheight[39m=[32m"14"[39m
+                      [33mrx[39m=[32m"2"[39m
+                      [33mwidth[39m=[32m"20"[39m
+                      [33mx[39m=[32m"2"[39m
+                      [33my[39m=[32m"3"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"8"[39m
+                      [33mx2[39m=[32m"16"[39m
+                      [33my1[39m=[32m"21"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"12"[39m
+                      [33mx2[39m=[32m"12"[39m
+                      [33my1[39m=[32m"17"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mConnect a machine[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPair another computer through your Ferryx account.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 flex items-center justify-between gap-3 border-t border-border pt-4"[39m
+              [33mdata-testid[39m=[32m"checklist-review-setup"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mPermissions, agents, and CLI[0m
+              [36m</span>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mOpen Welcome Setup[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</main>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33maria-hidden[39m=[32m"true"[39m
+    [33mclass[39m=[32m"pointer-events-none fixed inset-0 z-50"[39m
+    [33mdata-shortcut-hints[39m=[32m"true"[39m
+  [36m/>[39m
+[36m</body>[39m
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > does not auto-open WelcomeWizard for platform web 12ms
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > renders GettingStartedChecklist with 'No projects' and 'Add Project' button when projects list is empty 11ms
+   ✓ App project workspace flow > Wave 3a Onboarding and Welcome > renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE 31ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects
+TestingLibraryElementError: Unable to find role="dialog" and name "Welcome to Ferryx"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"selectable"[39m
+        [33mdata-native-terminal-yield[39m=[32m"off"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mdata-empty-workspaces[39m=[32m"[]"[39m
+        [33mdata-open[39m=[32m"true"[39m
+        [33mdata-testid[39m=[32m"mock-sidebar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mHide sidebar[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mOpen settings[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mAdd project[0m
+        [36m</button>[39m
+        [36m<span>[39m
+          [0mActive project [0m
+          [0mdefault[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<main[39m
+        [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"[39m
+          [33mdata-testid[39m=[32m"no-projects-view"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-md px-4"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[15px] font-semibold tracking-tight text-foreground"[39m
+              [36m>[39m
+                [0mNo projects[0m
+              [36m</p>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"mt-1 text-[13px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAdd a project to open a terminal workspace.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 grid gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Add Project"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-add-project"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-folder-plus size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M12 10v6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M9 13h6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mAdd Project[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPick a folder on this computer. Git repositories unlock worktrees.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Connect machine"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-connect-machine"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-monitor size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<rect[39m
+                      [33mheight[39m=[32m"14"[39m
+                      [33mrx[39m=[32m"2"[39m
+                      [33mwidth[39m=[32m"20"[39m
+                      [33mx[39m=[32m"2"[39m
+                      [33my[39m=[32m"3"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"8"[39m
+                      [33mx2[39m=[32m"16"[39m
+                      [33my1[39m=[32m"21"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"12"[39m
+                      [33mx2[39m=[32m"12"[39m
+                      [33my1[39m=[32m"17"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mConnect a machine[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPair another computer through your Ferryx account.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 flex items-center justify-between gap-3 border-t border-border pt-4"[39m
+              [33mdata-testid[39m=[32m"checklist-review-setup"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mPermissions, agents, and CLI[0m
+              [36m</span>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mOpen Welcome Setup[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</main>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33maria-hidden[39m=[32m"true"[39m
+    [33mclass[39m=[32m"pointer-events-none fixed inset-0 z-50"[39m
+    [33mdata-shortcut-hints[39m=[32m"true"[39m
+  [36m/>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"selectable"[39m
+        [33mdata-native-terminal-yield[39m=[32m"off"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mdata-empty-workspaces[39m=[32m"[]"[39m
+        [33mdata-open[39m=[32m"true"[39m
+        [33mdata-testid[39m=[32m"mock-sidebar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mHide sidebar[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mOpen settings[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0mAdd project[0m
+        [36m</button>[39m
+        [36m<span>[39m
+          [0mActive project [0m
+          [0mdefault[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<main[39m
+        [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"[39m
+          [33mdata-testid[39m=[32m"no-projects-view"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-md px-4"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"text-[15px] font-semibold tracking-tight text-foreground"[39m
+              [36m>[39m
+                [0mNo projects[0m
+              [36m</p>[39m
+              [36m<p[39m
+                [33mclass[39m=[32m"mt-1 text-[13px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mAdd a project to open a terminal workspace.[0m
+              [36m</p>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 grid gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Add Project"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-add-project"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-folder-plus size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M12 10v6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M9 13h6"[39m
+                    [36m/>[39m
+                    [36m<path[39m
+                      [33md[39m=[32m"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mAdd Project[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPick a folder on this computer. Git repositories unlock worktrees.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Connect machine"[39m
+                [33mclass[39m=[32m"group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"[39m
+                [33mdata-testid[39m=[32m"checklist-connect-machine"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"[39m
+                [36m>[39m
+                  [36m<svg[39m
+                    [33mclass[39m=[32m"lucide lucide-monitor size-4 text-foreground"[39m
+                    [33mfill[39m=[32m"none"[39m
+                    [33mheight[39m=[32m"24"[39m
+                    [33mstroke[39m=[32m"currentColor"[39m
+                    [33mstroke-linecap[39m=[32m"round"[39m
+                    [33mstroke-linejoin[39m=[32m"round"[39m
+                    [33mstroke-width[39m=[32m"2"[39m
+                    [33mviewBox[39m=[32m"0 0 24 24"[39m
+                    [33mwidth[39m=[32m"24"[39m
+                    [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                  [36m>[39m
+                    [36m<rect[39m
+                      [33mheight[39m=[32m"14"[39m
+                      [33mrx[39m=[32m"2"[39m
+                      [33mwidth[39m=[32m"20"[39m
+                      [33mx[39m=[32m"2"[39m
+                      [33my[39m=[32m"3"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"8"[39m
+                      [33mx2[39m=[32m"16"[39m
+                      [33my1[39m=[32m"21"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                    [36m<line[39m
+                      [33mx1[39m=[32m"12"[39m
+                      [33mx2[39m=[32m"12"[39m
+                      [33my1[39m=[32m"17"[39m
+                      [33my2[39m=[32m"21"[39m
+                    [36m/>[39m
+                  [36m</svg>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"min-w-0 flex-1"[39m
+                [36m>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                  [36m>[39m
+                    [0mConnect a machine[0m
+                  [36m</div>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"mt-0.5 text-[12px] leading-relaxed text-muted-foreground"[39m
+                  [36m>[39m
+                    [0mPair another computer through your Ferryx account.[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"m9 18 6-6-6-6"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"mt-4 flex items-center justify-between gap-3 border-t border-border pt-4"[39m
+              [33mdata-testid[39m=[32m"checklist-review-setup"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] text-muted-foreground"[39m
+              [36m>[39m
+                [0mPermissions, agents, and CLI[0m
+              [36m</span>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mOpen Welcome Setup[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</main>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33maria-hidden[39m=[32m"true"[39m
+    [33mclass[39m=[32m"pointer-events-none fixed inset-0 z-50"[39m
+    [33mdata-shortcut-hints[39m=[32m"true"[39m
+  [36m/>[39m
+[36m</body>[39m
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/App.test.tsx:4897:24
+    4895|         // WelcomeWizard chunk is lazy-loaded, so wait for the dialog …
+    4896|         expect(
+    4897|           await screen.findByRole("dialog", { name: "Welcome to Ferryx…
+       |                        ^
+    4898|         ).toBeInTheDocument();
+    4899|       } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯
+Error: [vitest] No "getAccountEnrollmentStatus" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi[33m.[39m[34mmock[39m([35mimport[39m([32m"./lib/tauri"[39m)[33m,[39m [35masync[39m (importOriginal) [33m=>[39m {
+  [35mconst[39m actual [33m=[39m [35mawait[39m [34mimportOriginal[39m()
+  [35mreturn[39m {
+    [33m...[39mactual[33m,[39m
+    [90m// your mocked methods[39m
+  }
+})
+
+ ❯ VitestMocker.createError node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:284:17
+ ❯ Object.get node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:330:16
+ ❯ Timeout._onTimeout src/App.tsx:2481:9
+    2479|         getSystemPermissionsStatus().catch(() => null),
+    2480|         getCliLauncherStatus().catch(() => null),
+    2481|         getAccountEnrollmentStatus().catch(() => null),
+       |         ^
+    2482|       ]);
+    2483|       if (cancelled) return;
+ ❯ listOnTimeout node:internal/timers:585:17
+ ❯ processTimers node:internal/timers:521:7
+
+This error originated in "src/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 153 passed (154)
+     Errors  1 error
+   Start at  10:42:48
+   Duration  33.93s (transform 5.22s, setup 1.03s, collect 10.96s, tests 18.29s, environment 1.87s, prepare 180ms)
+
+error: script "test" exited with code 1

@@ -67,6 +67,10 @@ const actionListeners = new Set<(action: SessionLifecycleAction, sessionId: stri
 const inFlightResumes = new Map<string, Promise<void>>();
 /** `${sessionId}\0${backendSessionId}` pairs whose suspension was already read from the daemon. */
 const reconciledSuspendBindings = new Set<string>();
+const suspensionDetails = new Map<string, import("./tauri").TerminalDescribeResult>();
+export function getDaemonSuspension(sessionId: string): import("./tauri").TerminalDescribeResult | undefined {
+  return suspensionDetails.get(sessionId);
+}
 let sleepingSnapshot = "";
 let monitoringStarted = false;
 let idleSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -86,7 +90,9 @@ export function setSessionRebindHandler(handler: SessionRebindHandler | null): v
 
 function emitSleepingChange(): void {
   sleepingSnapshot = [...sleepingSessionIds].sort().join("\u0000");
-  for (const listener of sleepingListeners) listener();
+  for (const listener of [...sleepingListeners]) {
+    if (sleepingListeners.has(listener)) listener();
+  }
 }
 
 export function setSessionSleeping(sessionId: string, sleeping: boolean): void {
@@ -178,19 +184,23 @@ function reconcileDaemonSuspension(session: TerminalSession): void {
   const backendSessionId = session.backendSessionId;
   if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) return;
   if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return;
-  const key = `${session.id}\u0000${backendSessionId}`;
+  const key = `${session.id}\u0000${backendSessionId}\u0000${session.incarnation ?? ""}\u0000${session.daemonEpoch ?? ""}`;
   if (reconciledSuspendBindings.has(key)) return;
   reconciledSuspendBindings.add(key);
   void Promise.resolve()
     .then(() => describeTerminal(backendSessionId))
     .then((details) => {
-      if (!details?.suspended) return;
+      if (!details) return;
       const entry = registeredSessions.get(session.id);
       // The pane may have been rebound or resumed while the query was in flight.
-      if (!entry || entry.session.backendSessionId !== backendSessionId || inFlightResumes.has(session.id)) return;
-      entry.session = { ...entry.session, processState: "suspended" };
+      if (!entry || entry.session.backendSessionId !== backendSessionId ||
+        entry.session.incarnation !== session.incarnation || entry.session.daemonEpoch !== session.daemonEpoch ||
+        inFlightResumes.has(session.id)) return;
+      suspensionDetails.set(session.id, details);
+      const stopped = details.suspended === true || details.kernelStopped === true || details.readerPaused === true;
+      entry.session = { ...entry.session, processState: stopped ? "suspended" : "running" };
       entry.idleSince = null;
-      setSessionSleeping(session.id, true);
+      setSessionSleeping(session.id, stopped);
     })
     .catch((error) => {
       // Unknown is not suspended; allow a later registration to ask again.
@@ -289,11 +299,13 @@ export async function resumeRegisteredSession(sessionId: string): Promise<void> 
 
     try {
       await resumeTerminal(backendSessionId);
+      if (registeredSessions.get(sessionId) !== entry || entry.session.backendSessionId !== backendSessionId ||
+        entry.session.incarnation !== session.incarnation || entry.session.daemonEpoch !== session.daemonEpoch) return;
+      suspensionDetails.delete(sessionId);
       setSessionSleeping(sessionId, false);
       entry.session = { ...session, processState: "running" };
       entry.idleSince = Date.now();
     } catch (error) {
-      setSessionSleeping(sessionId, false);
       throw error;
     }
   })();
@@ -493,6 +505,7 @@ export function resetSessionLifecycleForTests(): void {
   manualHibernateHoldIds.clear();
   inFlightResumes.clear();
   reconciledSuspendBindings.clear();
+  suspensionDetails.clear();
   sleepingSnapshot = "";
   monitoringStarted = false;
   if (idleSweepTimer) clearInterval(idleSweepTimer);

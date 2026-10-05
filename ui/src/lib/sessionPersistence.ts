@@ -1,4 +1,5 @@
 import { hasValidProjectTarget } from "./projectIdentity";
+import { localSplitIntent } from "./localSplitLifecycle";
 import { createLayoutState, normalizeLayout } from "../state/layout";
 import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
@@ -63,7 +64,7 @@ export function sessionPersistenceKey(sessions: Record<string, TerminalSession>)
   return Object.entries(sessions)
     .map(
       ([id, session]) =>
-        `${id}:${session.backendSessionId ?? ""}:${getSessionProcessState(session)}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}`,
+        `${id}:${session.backendSessionId ?? ""}:${session.daemonEpoch ?? ""}:${session.incarnation ?? ""}:${getSessionProcessState(session)}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}:${JSON.stringify(localSplitIntent(session) ?? null)}:${JSON.stringify(session.attachTuple ?? null)}`,
     )
     .join(",");
 }
@@ -307,7 +308,7 @@ export function serializeWorkspaceState(
   const persistedTerminalSessions: Record<string, PersistedTerminalSession> = {};
   const createdAt = Date.now();
   for (const [id, sess] of Object.entries(state.sessions)) {
-    if (!sess || !referencedSessionIds.has(id)) continue;
+    if (!sess || (!referencedSessionIds.has(id) && !localSplitIntent(sess))) continue;
     const activity = state.activityBySessionId?.[id];
     const agentType = sess.agentType ?? (activity?.isAgent && activity?.agentType ? activity.agentType : null);
     persistedTerminalSessions[id] = {
@@ -323,6 +324,9 @@ export function serializeWorkspaceState(
       providerSession: sess.providerSession ?? null,
       recentScrollback: getSessionRecentScrollback(id),
       createdAt,
+      incarnation: sess.incarnation ?? null,
+      attachTuple: sess.attachTuple,
+      spawnIntent: localSplitIntent(sess),
     };
   }
 
@@ -383,16 +387,16 @@ export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
   liveBackendSessionIds?:
-    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
+    | Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
         authoritative?: boolean;
         complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
+        sessions?: Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
-    | Map<string, { daemonEpoch?: string | null; running?: boolean } | boolean>
+    | Map<string, { incarnation?: string | null; daemonEpoch?: string | null; running?: boolean } | boolean>
     | null,
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
@@ -408,7 +412,7 @@ export function deserializeWorkspaceState(
   const fallbackProfileId = resolveSupportedBrowserProfileId(browserSettings.defaultProfileId, browserSettings);
 
   let globalLiveEpoch: string | null = null;
-  const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
+  const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null }>();
   const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
   let isAuthoritative = hasLiveSessionQuery;
   if (typeof liveBackendSessionIds === "object" && liveBackendSessionIds !== null) {
@@ -431,7 +435,7 @@ export function deserializeWorkspaceState(
       for (const [key, value] of (liveBackendSessionIds as Map<any, any>).entries()) {
         const itemEpoch = typeof value === "object" && value !== null && value.daemonEpoch != null ? String(value.daemonEpoch) : globalLiveEpoch;
         const isRunning = typeof value === "object" && value !== null && "running" in value ? (value as any).running !== false : value !== false;
-        liveSessionMap.set(String(key), { daemonEpoch: itemEpoch, running: isRunning });
+        liveSessionMap.set(String(key), { daemonEpoch: itemEpoch, running: isRunning, incarnation: typeof value === "object" ? value?.incarnation : null });
       }
     } else if (
       typeof liveBackendSessionIds === "object" &&
@@ -444,7 +448,7 @@ export function deserializeWorkspaceState(
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
+        sessions?: Iterable<string | { sessionId: string; incarnation?: string | null; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       };
       const rawEpoch = container.epoch ?? container.daemonEpoch;
       if (rawEpoch != null) {
@@ -457,7 +461,7 @@ export function deserializeWorkspaceState(
         } else if (item && typeof item === "object" && "sessionId" in item) {
           const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : globalLiveEpoch;
           const isRunning = (item as any).running !== false;
-          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning });
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning, incarnation: item.incarnation });
         }
       }
     } else {
@@ -470,7 +474,7 @@ export function deserializeWorkspaceState(
             globalLiveEpoch = itemEpoch;
           }
           const isRunning = item.running !== false;
-          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning });
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning, incarnation: item.incarnation });
         }
       }
     }
@@ -528,7 +532,7 @@ export function deserializeWorkspaceState(
       // Keep its persisted backendSessionId so the user can reattach or recover.
       const isLive = Boolean(persistedBackendSessionId);
       backendSessionId = isLive ? persistedBackendSessionId : null;
-      daemonEpoch = isLive ? (liveSessionMap.get(persistedBackendSessionId!)?.daemonEpoch ?? persistedEpoch) : null;
+      daemonEpoch = isLive ? persistedEpoch : null;
       lastOutputSequence = isLive ? (daemonEpoch === persistedEpoch ? persistedSequence : null) : null;
       lifecycle = isLive ? "working" : "exited";
       processState = isLive ? "running" : processState;
@@ -554,15 +558,15 @@ export function deserializeWorkspaceState(
         // because no reducer writes daemonEpoch onto a session -- it is null in every save file.
         let epochMatches = true;
         if (effectiveLiveEpoch !== null && persistedEpoch !== null) {
-          epochMatches = effectiveLiveEpoch === persistedEpoch;
+          epochMatches = effectiveLiveEpoch === persistedEpoch || Boolean(sess.incarnation && liveInfo?.incarnation === sess.incarnation);
         } else if (liveInfo === undefined && effectiveLiveEpoch !== null && persistedEpoch === null) {
           epochMatches = false;
         }
 
         if (epochMatches && isProcessRunning) {
           backendSessionId = persistedBackendSessionId;
-          daemonEpoch = persistedEpoch ?? effectiveLiveEpoch ?? null;
-          lastOutputSequence = persistedSequence;
+          daemonEpoch = effectiveLiveEpoch ?? persistedEpoch;
+          lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
           lifecycle = "working";
           processState = "running";
         } else {
@@ -571,6 +575,21 @@ export function deserializeWorkspaceState(
           lastOutputSequence = null;
           lifecycle = "exited";
         }
+      }
+    }
+
+    if (!isSshSession && !isPairedSession && persistedBackendSessionId && lifecycle === "exited") {
+      const live = liveSessionMap.get(persistedBackendSessionId);
+      const epoch = live?.daemonEpoch ?? globalLiveEpoch;
+      // Absence in a new epoch cannot establish death in a draining predecessor.
+      if (live?.running !== false && persistedEpoch !== null && epoch !== null && epoch !== persistedEpoch &&
+          (!live || !sess.incarnation || !live.incarnation)) {
+        backendSessionId = persistedBackendSessionId;
+        daemonEpoch = persistedEpoch;
+        lastOutputSequence = persistedSequence;
+        lifecycle = "working";
+        processState = "running";
+        isReconnecting = true;
       }
     }
 
@@ -602,6 +621,7 @@ export function deserializeWorkspaceState(
       lifecycle,
       daemonEpoch,
       lastOutputSequence,
+      attachTuple: sess.attachTuple,
       agentType,
       agentSessionId,
       providerSession,
@@ -614,6 +634,29 @@ export function deserializeWorkspaceState(
           ? { remoteConnectionState: "reconnecting" as const }
           : {}),
     };
+    const persistedIncarnation = sess.incarnation ?? null;
+    const savedIntent = sess.spawnIntent;
+    if (savedIntent && (!savedIntent.ready || savedIntent.cancelRequested)) {
+      Object.assign(sessions[localSessionId], {
+        spawnIntent: savedIntent,
+        reconnectRequestId: savedIntent.requestId,
+        backendSessionId: persistedBackendSessionId,
+        daemonEpoch: persistedEpoch,
+        incarnation: persistedIncarnation,
+        lifecycle: "starting",
+        reconnectLifecycle: "failed",
+        reconnectError: {
+          code: "SPAWN_ATTEMPT_TIMEOUT",
+          message: "Shell startup requires reconciliation. Retry the original request.",
+          details: { delivery: "ambiguous" },
+        },
+      });
+    } else if (persistedIncarnation) {
+      sessions[localSessionId].incarnation = persistedIncarnation;
+    }
+    if (savedIntent?.ready && !savedIntent.cancelRequested) {
+      sessions[localSessionId].spawnIntent = savedIntent;
+    }
   }
 
   function deserializeLayout(
@@ -965,7 +1008,7 @@ export function deserializeWorkspaceState(
   }
 
   const referencedSessions = Object.fromEntries(
-    Object.entries(sessions).filter(([sessionId]) => referencedSessionIds.has(sessionId)),
+    Object.entries(sessions).filter(([sessionId, session]) => referencedSessionIds.has(sessionId) || localSplitIntent(session)),
   );
 
   const restoredActivity: Record<string, TerminalActivity> = {};

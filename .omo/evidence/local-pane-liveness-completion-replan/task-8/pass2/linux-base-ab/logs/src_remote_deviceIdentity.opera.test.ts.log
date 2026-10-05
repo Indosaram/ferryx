@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/remote/deviceIdentity.opera.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042418) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/deviceIdentity.opera.test.ts (8 tests | 5 failed) 7ms
+   ✓ Windows Opera device suggestion > identifies 'Opera' when its Windows UA contains compatibility tokens 1ms
+   ✓ Windows Opera device suggestion > identifies 'Edge' when its Windows UA contains compatibility tokens 0ms
+   ✓ Windows Opera device suggestion > identifies 'Chrome' when its Windows UA contains compatibility tokens 0ms
+   × Windows Opera device suggestion > submits 'Windows - Opera' when 'Opera' pairing uses the 'unedited' name 3ms
+     → Cannot read properties of undefined (reading 'getItem')
+   × Windows Opera device suggestion > submits 'Windows - Edge' when 'Edge' pairing uses the 'unedited' name 0ms
+     → Cannot read properties of undefined (reading 'getItem')
+   × Windows Opera device suggestion > submits 'Windows - Chrome' when 'Chrome' pairing uses the 'unedited' name 0ms
+     → Cannot read properties of undefined (reading 'getItem')
+   × Windows Opera device suggestion > submits 'My Opera workstation' when 'Opera' pairing uses the 'edited' name 0ms
+     → Cannot read properties of undefined (reading 'getItem')
+   × Windows Opera device suggestion > submits 'Windows - Opera' when 'Opera' pairing uses the 'blank fallback' name 0ms
+     → Cannot read properties of undefined (reading 'getItem')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/deviceIdentity.opera.test.ts > Windows Opera device suggestion > submits 'Windows - Opera' when 'Opera' pairing uses the 'unedited' name
+ FAIL  src/remote/deviceIdentity.opera.test.ts > Windows Opera device suggestion > submits 'Windows - Edge' when 'Edge' pairing uses the 'unedited' name
+ FAIL  src/remote/deviceIdentity.opera.test.ts > Windows Opera device suggestion > submits 'Windows - Chrome' when 'Chrome' pairing uses the 'unedited' name
+ FAIL  src/remote/deviceIdentity.opera.test.ts > Windows Opera device suggestion > submits 'My Opera workstation' when 'Opera' pairing uses the 'edited' name
+ FAIL  src/remote/deviceIdentity.opera.test.ts > Windows Opera device suggestion > submits 'Windows - Opera' when 'Opera' pairing uses the 'blank fallback' name
+TypeError: Cannot read properties of undefined (reading 'getItem')
+ ❯ src/remote/deviceIdentity.opera.test.ts:51:37
+     49|   ])("submits $expected when $browser pairing uses the $scenario name"…
+     50|     // Given: real pairing UI/storage logic, with only the network bou…
+     51|     const previousId = localStorage.getItem(REMOTE_INSTALLATION_ID_STO…
+       |                                     ^
+     52|     const response = deferred<Response>();
+     53|     const requested = deferred<void>();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 3 passed (8)
+   Start at  10:10:49
+   Duration  571ms (transform 68ms, setup 115ms, collect 57ms, tests 7ms, environment 225ms, prepare 50ms)
+
+error: script "test" exited with code 1

@@ -107,6 +107,9 @@ async fn reset_scenario(succeeds: bool) {
             binary_path: None,
             binary_mtime_ms: None,
             daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
+            // Legacy reset-event fixture does not advertise split admission.
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         };
         writer
             .write_all(

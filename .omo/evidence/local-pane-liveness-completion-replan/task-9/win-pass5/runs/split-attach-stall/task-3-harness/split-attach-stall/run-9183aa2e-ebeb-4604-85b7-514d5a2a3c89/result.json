@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scenario": "split-attach-stall",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-attach-stall",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-15042b0f\\evidence\\split-attach-stall",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-15042b0f\\runtime\\split-attach-stall"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "9f70427d1ca16fcf086344bfc237d74583f6c772c4a587b69c5aa0ac5851c349",
+  "runId": "qa-run-b47f4b8b-097f-4c02-9c05-65691bfd388e",
+  "operationId": "qa-op-780b7a90-7362-4d6d-93b5-cb8ceb5d1f5f",
+  "verdict": "FAIL",
+  "nativeEvidence": null,
+  "error": {
+    "code": "NATIVE_AUTOMATION_UNSUPPORTED",
+    "message": "NATIVE_AUTOMATION_UNSUPPORTED: powershell exited 1: ��ġ ��:1 ����:46\r\n+ $ErrorActionPreference = 'Stop'; Add-Type @\" using System; using Syst ...\r\n+                                              ~\r\nhere-string ��� �ڿ��� ���ڰ� ������ ������ �� �� �տ��� ���˴ϴ�.\r\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\r\n    + FullyQualifiedErrorId : UnexpectedCharactersAfterHereStringHeader"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false,
+    "gateFailed": true
+  },
+  "barriers": [
+    {
+      "name": "attach-handshake",
+      "armedAt": "2026-10-04T17:02:02.982Z",
+      "heldAt": null,
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "split-attach-stall"
+    }
+  ]
+}

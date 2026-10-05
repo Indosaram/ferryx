@@ -20,6 +20,11 @@ fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetail
         end_sequence: None,
         last_output_age_ms: None,
         suspended: false,
+        reader_paused: None,
+        kernel_stopped: None,
+        registry_suspended: None,
+        suspension_source: None,
+        incarnation: None, // File-link fixture has no local split incarnation.
     }
 }
 
@@ -557,6 +562,10 @@ async fn session_id_resolves_the_live_local_terminal_cwd() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            // Ordinary spawn fixture does not prepare a local split.
+            create_only: None,
+            prepared_local_split: None,
+            remaining_ms: None,
         },
     )
     .await

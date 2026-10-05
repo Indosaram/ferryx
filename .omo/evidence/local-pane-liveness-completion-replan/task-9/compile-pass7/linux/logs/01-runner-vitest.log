@@ -1,0 +1,92 @@
+VITEST START 2026-10-05T02:38:15+09:00 load=1.79 2.38 2.47
+TESTFILE_SHA=79cf8f6bb8c7a34eb7e00fbff2005f28e4cb56bb0bdb42235b11ec0a86329f57 DECLARED=52
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-21dea3c0
+
+ ❯ scripts/qa/pane-liveness.test.mjs (52 tests | 1 failed) 842ms
+   ✓ headless presentation releases after held event before its only settlement receipt 2ms
+   ✓ the nine plan scenarios are the only accepted names, and headless is diagnostic-classifier only 2ms
+   ✓ unknown flags, missing flags, duplicates and positionals are rejected before launch 0ms
+   ✓ preflight rejects production runtime roots, preexisting isolation roots, relative paths and production installs 2ms
+   ✓ barriers pre-arm before trigger, acknowledge held/released state, and time out without product acks 154ms
+   ✓ timing budgets match the plan contract 0ms
+   ✓ cleanup reaps registered owned processes by PID and removes registered roots 29ms
+   ✓ regression H10 false-pass: a cleanup failure cannot leave a passing gate 0ms
+   ✓ pass-6 cleanup: the escalated reap force-kills the owned tree by exact PID 7ms
+   ✓ pass-6 cleanup: reap scoping signals only this run's exact PIDs and never a name pattern 4ms
+   ✓ pass-6 cleanup: isolation-root removal is retried within a bounded budget 0ms
+   ✓ pass-6 cleanup: a still-held root keeps cleanupGate.ok=false and names the holder 0ms
+   ✓ pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group  452ms
+   ✓ regression P2 correlation: receipts must echo runId/operationId/producer nonces 1ms
+   ✓ regression M3 deadline: unsettled waits become typed timeouts without leaks; errors propagate typed 51ms
+   ✓ regression H4 authoritative 7-tuple: presence alone is insufficient; all 7 fields must correlate and presented must be true 1ms
+   ✓ regression H3 invariants: handover/suspension/stale receipts are asserted, not logged 1ms
+   ✓ regression H6 source digest: evidence pointer binds to runner bytes 0ms
+   ✓ BarrierHub prearm validates targetRole and awaitBound correlates bound-ack 1ms
+   ✓ regression BARRIER_ROLES: every scenario pre-arm carries a role prearm() accepts 2ms
+   ✓ regression B4: post-release recovery must be positively observed; Unknown is nonpassing 0ms
+   ✓ regression B1: entrypoint module evaluates its argv-resolution path behaviorally (no source-text pin) 0ms
+   ✓ regression B2: marker-recognition hash path executes behaviorally (no source-text pin) 1ms
+   ✓ regression B3: real spawnOwned group reap - leader awaits grandchild exit, absence proven once, fallback truly reclaims 96ms
+   ✓ regression B5: headless diagnostic-classifier requires exact positive stageProgress; rejects missing/false progress and fake presentation 1ms
+   ✓ MonotonicBudget enforces monotonic consumption and deadline exhaustion 1ms
+   ✓ validateFixtureSetup enforces scenario-specific fixture requirements without forcing 4 fixtures on basic split 1ms
+   ✓ performInspectionHandshake writes capture-ready.json and verifies matching inspection artifact 1ms
+   ✓ split-cancel scenario adapter issues cancel before awaiting create and accepts cancel-ack without requiring created ID 1ms
+   ✓ split-attach-stall asserts actionable failure, releases hold, and executes Retry with NEW attemptGeneration on same backend 1ms
+   ✓ retained-handover and handover-abort adapters verify transfer and relinquishment invariants 1ms
+   ✓ suspension-ownership and stale-binding adapters verify process actuation and reattach invariants 1ms
+   ✓ source digest resolves relative paths against an injected base and preserves absolute paths 0ms
+   ✓ driver dispatch is explicit, mock-safe, and accepts an injected adapter driver 1ms
+   ✓ private channel env carries the operation nonce so barrier-less scenarios can correlate 0ms
+   ✓ windows session admission relaunches into the active console session or fails typed 1ms
+   ✓ windows interactive admission is inert off win32 and on the headless lane 0ms
+   ✓ windows probe stdout is parsed tolerantly and never invented 0ms
+   ✓ interactive relaunch plan keeps the frozen argv and uses the proven scheduled-task mechanism 0ms
+   ✓ owned-window wait fails typed with the measured session id and window visibility 0ms
+   ✓ split-right selection is scoped to the focused pane and never picks the first match 1ms
+   ✓ windows automation failures keep their typed identity instead of collapsing 0ms
+   ✓ windows lane blocks are typed, nonzero, and never a pass 1ms
+   ✓ split-right PowerShell script keeps the here-string header and terminator on their own lines 1ms
+   ✓ owned-window wait PowerShell script keeps the here-string header and terminator on their own lines 0ms
+   ✓ owned-window capture PowerShell script keeps the here-string header and terminator on their own lines 0ms
+   ✓ retry, focus, and marker PowerShell scripts keep one statement per line and carry no here-string 1ms
+   ✓ windows session probe script is newline-joined like every other PowerShell builder 0ms
+   ✓ no generated PowerShell script merges a statement onto the here-string header or terminator line 1ms
+   ✓ split-affordance search enumerates every owned window and searches the visible ones main-handle-first 1ms
+   × split-affordance match is multi-property and exact, never a substring or first-match heuristic 12ms
+     → expected [] to deeply equal [ 'split-pane-right' ]
+   ✓ split-affordance not-found path keeps the typed verdict and emits a bounded Split inventory 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  scripts/qa/pane-liveness.test.mjs > split-affordance match is multi-property and exact, never a substring or first-match heuristic
+AssertionError: expected [] to deeply equal [ 'split-pane-right' ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [[39m
+[32m-   "split-pane-right",[39m
+[32m- ][39m
+[31m+ [][39m
+
+ ❯ scripts/qa/pane-liveness.test.mjs:1664:38
+    1662|   expect(byId.ok).toBe(true);
+    1663|   expect(byId.matchedWindowHwnd).toBe(1);
+    1664|   expect(byId.selectorAutomationIds).toEqual(['split-pane-right']);
+       |                                      ^
+    1665|   // A probe that reports no bound names still records the default bin…
+    1666|   // refusing to search for nothing is typed instead of an empty match.
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 51 passed (52)
+   Start at  02:38:15
+   Duration  1.15s (transform 139ms, setup 0ms, collect 164ms, tests 842ms, environment 0ms, prepare 49ms)
+
+error: script "test" exited with code 1
+VITEST_EXIT=1

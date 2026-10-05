@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "scenario": "split-happy",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-happy",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\ev20\\r1",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\iso20\\r1"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "2f3c81efbb74674bd08b41afdecf925a74495c8df38ca3b71343a7fe6a8b8056",
+  "runId": "qa-run-4886df45-fd1b-4622-8b68-6169206b2e0f",
+  "operationId": "qa-op-bacd5ca6-930b-4e91-8259-1b2945a9d9c1",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "SPLIT_RIGHT_NOT_FOUND",
+    "message": "SPLIT_RIGHT_NOT_FOUND: the \"Split pane right\" affordance of the focused pane could not be identified: {\"selector\":\"Split pane right\",\"selectorNames\":[\"Split pane right\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"mainWindowHandle\":26216662,\"windowVisible\":true,\"visibleWindowCount\":2,\"windowsSearched\":[{\"hwnd\":26216662,\"title\":\"Ferryx\",\"className\":\"Tauri Window\"},{\"hwnd\":71174646,\"title\":\"\",\"className\":\"Tao Thread Event Target\"}],\"windowsSearchedCount\":2,\"windowSearchDepths\":[],\"matchedWindowHwnd\":null,\"warmElements\":108,\"warmAttempts\":null,\"warmElapsedMs\":null,\"warmAttachCount\":1,\"warmAttachElementCounts\":[108],\"warmDocumentSeen\":true,\"warmAttachElapsedMs\":66,\"focusedFound\":false,\"focusSource\":null,\"scopeDepth\":-1,\"scopeIsWindowRoot\":false,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": [],
+  "appStdio": {
+    "dir": "C:\\Users\\sook\\ferryx-pane-completion\\ev20\\r1\\task-3-harness\\split-happy\\run-db67827c-fae2-46e0-a47b-30ac82251f65",
+    "stdout": "C:\\Users\\sook\\ferryx-pane-completion\\ev20\\r1\\task-3-harness\\split-happy\\run-db67827c-fae2-46e0-a47b-30ac82251f65\\app.stdout.log",
+    "stderr": "C:\\Users\\sook\\ferryx-pane-completion\\ev20\\r1\\task-3-harness\\split-happy\\run-db67827c-fae2-46e0-a47b-30ac82251f65\\app.stderr.log",
+    "maxBytes": 4194304,
+    "bytes": 97,
+    "truncated": false,
+    "droppedBytes": 0,
+    "closed": true,
+    "closedOk": true
+  }
+}

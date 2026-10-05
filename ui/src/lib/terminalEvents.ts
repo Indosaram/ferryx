@@ -105,7 +105,7 @@ function findPartialOscPrefix(source: string): string {
   return "";
 }
 
-class TerminalEventBus {
+export class TerminalEventBus {
   private readonly decoderRegistry = new TerminalOutputDecoderRegistry();
   private readonly outputListeners = new Map<string, Set<OutputListener>>();
   private readonly replayGapListeners = new Map<string, Set<ReplayGapListener>>();
@@ -331,7 +331,9 @@ class TerminalEventBus {
       const tail = this.decoderRegistry.finish(payload.sessionId);
       if (tail) this.trackTitles(payload.sessionId, tail);
     }
-    for (const listener of this.lifecycleListeners) listener(payload);
+    for (const listener of [...this.lifecycleListeners]) {
+      if (this.lifecycleListeners.has(listener)) listener(payload);
+    }
   }
 
   private trackTitles(sessionId: string, text: string) {

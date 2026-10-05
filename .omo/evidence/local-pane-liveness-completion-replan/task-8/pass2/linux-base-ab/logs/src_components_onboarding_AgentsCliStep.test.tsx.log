@@ -1,0 +1,114 @@
+$ vitest run --maxWorkers=1 src/components/onboarding/AgentsCliStep.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038958) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/onboarding/AgentsCliStep.test.tsx (15 tests | 15 failed) 9ms
+   × AgentsCliStep > renders a default-agent radiogroup with Auto plus only the installed agents 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > renders the brand icon for a known agent and no image for an unknown one 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > persists the chosen default agent immediately 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > moves the selection with arrow keys and keeps the roving tabindex 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > lists unavailable agents in one quiet line 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > shows the empty message when nothing is installed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > has no control that leaves the wizard 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > focuses the name field and adds a custom agent as the default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > persists arguments separately from the command in a single settings write 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > submits the custom agent form with Enter 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > rejects an empty custom agent name without persisting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > rejects a reserved built-in agent name 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > dispatches the agents-settings changed event on Rescan 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > closes the custom agent form on Escape without propagating the keydown 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × AgentsCliStep > returns focus to the add button when the form is cancelled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 15 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > renders a default-agent radiogroup with Auto plus only the installed agents
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > renders the brand icon for a known agent and no image for an unknown one
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > persists the chosen default agent immediately
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > moves the selection with arrow keys and keeps the roving tabindex
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > lists unavailable agents in one quiet line
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > shows the empty message when nothing is installed
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > has no control that leaves the wizard
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > focuses the name field and adds a custom agent as the default
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > persists arguments separately from the command in a single settings write
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > submits the custom agent form with Enter
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > rejects an empty custom agent name without persisting
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > rejects a reserved built-in agent name
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > dispatches the agents-settings changed event on Rescan
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > closes the custom agent form on Escape without propagating the keydown
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > returns focus to the add button when the form is cancelled
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/onboarding/AgentsCliStep.test.tsx:28:25
+     26| describe("AgentsCliStep", () => {
+     27|   beforeEach(() => {
+     28|     window.localStorage.clear();
+       |                         ^
+     29|   });
+     30| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/30]⎯
+
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > renders a default-agent radiogroup with Auto plus only the installed agents
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > renders the brand icon for a known agent and no image for an unknown one
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > persists the chosen default agent immediately
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > moves the selection with arrow keys and keeps the roving tabindex
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > lists unavailable agents in one quiet line
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > shows the empty message when nothing is installed
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > has no control that leaves the wizard
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > focuses the name field and adds a custom agent as the default
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > persists arguments separately from the command in a single settings write
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > submits the custom agent form with Enter
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > rejects an empty custom agent name without persisting
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > rejects a reserved built-in agent name
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > dispatches the agents-settings changed event on Rescan
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > closes the custom agent form on Escape without propagating the keydown
+ FAIL  src/components/onboarding/AgentsCliStep.test.tsx > AgentsCliStep > returns focus to the add button when the form is cancelled
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/onboarding/AgentsCliStep.test.tsx:33:25
+     31|   afterEach(() => {
+     32|     cleanup();
+     33|     window.localStorage.clear();
+       |                         ^
+     34|   });
+     35| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/30]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  15 failed (15)
+   Start at  10:09:59
+   Duration  1.21s (transform 270ms, setup 97ms, collect 684ms, tests 9ms, environment 220ms, prepare 64ms)
+
+error: script "test" exited with code 1

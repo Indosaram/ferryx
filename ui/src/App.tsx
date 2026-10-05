@@ -41,6 +41,7 @@ import { notificationCenterStore } from "./lib/notificationCenter/notificationCe
 import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
+import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -1279,14 +1280,14 @@ function WorkspaceApp({
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
         if (!isAgent) {
           // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
-          if (session.backendSessionId === null) {
+          if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         } else {
           const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
           if (affordance.canReconnect) {
             hasResumableAgents = true;
-          } else if (session.backendSessionId === null) {
+          } else if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         }
@@ -1305,7 +1306,7 @@ function WorkspaceApp({
         });
       }
     },
-    [restoreWorkspace],
+    [recoveredFromHmr, restoreWorkspace],
   );
 
   // Initial session restore on startup & HMR recovery managed by coordinator.
@@ -1349,6 +1350,18 @@ function WorkspaceApp({
     return persistSessionStrict(workspaceId, repoRoot, currentState).catch((error) => {
       console.error("Failed to save workspace session:", error);
     });
+  }, [persistSessionStrict]);
+
+  useEffect(() => {
+    setLocalSplitPersistence((owner) => {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === owner.workspaceId);
+      const snapshot = getWorkspaceSnapshot(owner.workspaceId);
+      if (!project || !snapshot) return Promise.reject(new Error("Split persistence owner is unavailable"));
+      return persistSessionStrict(owner.workspaceId, project.repoRoot, {
+        ...snapshot, sessions: { ...snapshot.sessions, [owner.id]: owner },
+      });
+    });
+    return () => setLocalSplitPersistence(undefined);
   }, [persistSessionStrict]);
 
   const handleReconnectAgentSession = useCallback(
@@ -2306,13 +2319,33 @@ function WorkspaceApp({
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
-      if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+      if (activeRemoteHostRef.current) {
+        switchDebug("split.active.refused.remote-host", { reason: `direction=${direction}` });
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        switchDebug("split.active.refused.paired-feature-gated", { reason: `direction=${direction}` });
+        return;
+      }
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
-      if (!activeTab || activeTab.kind === "browser") return;
+      if (!activeTab || activeTab.kind === "browser") {
+        switchDebug("split.active.refused.no-terminal-tab", {
+          reason: activeTab ? `tab-kind=${activeTab.kind}` : "no-active-tab",
+        });
+        return;
+      }
       const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
-      const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
+      if (!activeLayout) {
+        switchDebug("split.active.fallback.leaf-default.layout-missing", { reason: `tabId=${activeTab.id}` });
+      } else if (!activeLayout.activeLeafId) {
+        switchDebug("split.active.fallback.leaf-default.active-leaf-missing", { reason: `tabId=${activeTab.id}` });
+      }
+      const targetLeafId = activeLayout?.activeLeafId ??
+        (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
+      switchDebug("split.active.requested", {
+        reason: `direction=${direction} targetLeafId=${targetLeafId}`,
+      });
       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
@@ -2325,7 +2358,7 @@ function WorkspaceApp({
     if (!activeTab || activeTab.kind === "browser") return;
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
-    const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
+    const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
   }, [closePane, reportRuntimeError]);
 

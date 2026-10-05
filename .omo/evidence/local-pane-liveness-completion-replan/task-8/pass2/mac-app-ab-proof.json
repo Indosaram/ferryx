@@ -1,0 +1,38 @@
+{
+  "file": "src/App.test.tsx",
+  "classification": "MIXED_CANDIDATE_AND_BASELINE",
+  "owner": "frontend",
+  "candidateLog": "mac-candidate-app.log",
+  "baseLog": "mac-base-ab/logs/src_App.test.tsx.log",
+  "failures": [
+    {
+      "names": [
+        "FAIL  src/App.test.tsx > App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited"
+      ],
+      "assertion": "AssertionError: expected { id: 'sess-mismatch', …(18) } to match object { id: 'sess-mismatch', …(4) }",
+      "baseAssertions": [
+        []
+      ]
+    },
+    {
+      "names": [
+        "FAIL  src/App.test.tsx > App project workspace flow > reconciles missing HMR sessions without automatically spawning replacements"
+      ],
+      "assertion": "AssertionError: expected \"spy\" to not be called at all, but actually been called 1 times",
+      "baseAssertions": [
+        []
+      ]
+    },
+    {
+      "names": [
+        "FAIL  src/App.test.tsx > App project workspace flow > Wave 3a Onboarding and Welcome > auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects"
+      ],
+      "assertion": "TestingLibraryElementError: Unable to find role=\"dialog\" and name \"Welcome to Ferryx\"",
+      "baseAssertions": [
+        [
+          "TestingLibraryElementError: Unable to find role=\"dialog\" and name \"Welcome to Ferryx\""
+        ]
+      ]
+    }
+  ]
+}

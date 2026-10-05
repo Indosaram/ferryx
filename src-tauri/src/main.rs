@@ -17,6 +17,30 @@ fn main() {
         std::process::exit(code);
     }
     let args: Vec<String> = std::env::args().collect();
+    // Task 3 (local-split-qa): private headless diagnostic-classifier
+    // dispatch, BEFORE any GUI/daemon routing. Explicit argv only:
+    // `ferryx diagnostic-classifier --headless`.
+    // Invalid invocations MUST NOT fall through to GUI.
+    if args.get(1).is_some_and(|arg| arg == "diagnostic-classifier") {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        {
+            if args.len() == 3 && args.get(2).map(String::as_str) == Some("--headless") {
+                std::process::exit(ferryx_lib::ipc::qa_barrier::run_diagnostic_classifier_headless());
+            } else {
+                eprintln!(
+                    "INVALID_QA_INVOCATION: expected exactly `ferryx diagnostic-classifier --headless`"
+                );
+                std::process::exit(2);
+            }
+        }
+        #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+        {
+            eprintln!(
+                "QA_FEATURE_NOT_COMPILED: diagnostic-classifier requires feature local-split-qa"
+            );
+            std::process::exit(2);
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))

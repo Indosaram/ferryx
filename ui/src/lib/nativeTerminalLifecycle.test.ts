@@ -6,8 +6,14 @@ import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
   presentNativeTerminalLifecycle,
+  subscribeNativeTerminalPresentation,
+  emitNativeTerminalPresentation,
+  type NativeTerminalPresentationReceipt,
   resetNativeTerminalLifecycleForTest,
+  registerDurableNativeBinding,
+  getDurableNativeBinding,
 } from "./nativeTerminalLifecycle";
+import type { PaneAttachTuple } from "./types";
 
 function deferred() {
   let resolve = () => {};
@@ -21,6 +27,74 @@ function deferred() {
 
 describe("nativeTerminalLifecycle sibling pane ownership", () => {
   beforeEach(resetNativeTerminalLifecycleForTest);
+
+  it("rejects stale tuple ownership and lets a bumped retry supersede it", () => {
+    const tuple: PaneAttachTuple = {
+      backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
+      frontendSessionId: "front", paneIdentity: "pane", bindingKey: "binding", attemptGeneration: 3,
+    };
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    const stale: PaneAttachTuple[] = [
+      { ...tuple, incarnation: "other" }, { ...tuple, daemonEpoch: "7" },
+      { ...tuple, frontendSessionId: "other" }, { ...tuple, paneIdentity: "other" },
+      { ...tuple, bindingKey: "other" }, { ...tuple, attemptGeneration: 2 },
+    ];
+    for (const candidate of stale) {
+      expect(registerDurableNativeBinding(candidate)).toBe(false);
+      expect(getDurableNativeBinding("back")).toEqual(tuple);
+    }
+    const retry = { ...tuple, attemptGeneration: 4 };
+    expect(registerDurableNativeBinding(retry)).toBe(true);
+    expect(registerDurableNativeBinding(tuple)).toBe(false);
+    expect(getDurableNativeBinding("back")).toEqual(retry);
+  });
+
+  it("replaces an authoritative binding only while its persisted predecessor is current", () => {
+    const previous: PaneAttachTuple = { backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
+      frontendSessionId: "front", paneIdentity: "pane", bindingKey: "old", attemptGeneration: 3 };
+    expect(registerDurableNativeBinding(previous)).toBe(true);
+    const next = { ...previous, daemonEpoch: "9", bindingKey: "new", attemptGeneration: 4 };
+    expect(registerDurableNativeBinding(next)).toBe(false);
+    expect(registerDurableNativeBinding(next, performance.now(), previous)).toBe(true);
+    expect(getDurableNativeBinding("back")).toEqual(next);
+    expect(registerDurableNativeBinding({ ...previous, attemptGeneration: 5 }, performance.now(), previous)).toBe(false);
+    expect(getDurableNativeBinding("back")).toEqual(next);
+  });
+
+  it("requires every supplied attach tuple field before becoming ready", () => {
+    const tuple: NativeTerminalPresentationReceipt = {
+      backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
+      frontendSessionId: "front", paneIdentity: "pane", bindingKey: "binding", attemptGeneration: 3,
+    };
+    let ready = false;
+    subscribeNativeTerminalPresentation(tuple, () => { ready = true; });
+    const stale = [
+      { ...tuple, backendSessionId: "other" }, { ...tuple, incarnation: "other" },
+      { ...tuple, daemonEpoch: "7" }, { ...tuple, frontendSessionId: "other" },
+      { ...tuple, paneIdentity: "other" }, { ...tuple, bindingKey: "other" },
+      { ...tuple, attemptGeneration: 2 },
+    ];
+    for (const receipt of stale) emitNativeTerminalPresentation(receipt);
+    expect(ready).toBe(false);
+    emitNativeTerminalPresentation(tuple);
+    expect(ready).toBe(true);
+  });
+
+  it("listener mutation does not deliver an EOF receipt to newly added owners", () => {
+    const receipt: NativeTerminalPresentationReceipt = {
+      frontendSessionId: "front", paneIdentity: "pane", backendSessionId: "back",
+      bindingKey: "binding", attemptGeneration: 1,
+    };
+    const seen: string[] = [];
+    let remove = () => {};
+    subscribeNativeTerminalPresentation({}, () => {
+      seen.push("first"); remove();
+      subscribeNativeTerminalPresentation({}, () => seen.push("new"));
+    });
+    remove = subscribeNativeTerminalPresentation({}, () => seen.push("removed"));
+    emitNativeTerminalPresentation(receipt);
+    expect(seen).toEqual(["first"]);
+  });
 
   it("waits for native readiness when a pending attachment is reused", async () => {
     const native = deferred();
@@ -170,5 +244,37 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
 
     // Detach operation must have been skipped because generation changed
     expect(detached).toEqual([]);
+  });
+
+  it("delivers matched presentation receipts and respects reset", () => {
+    const received: NativeTerminalPresentationReceipt[] = [];
+    subscribeNativeTerminalPresentation(
+      { paneIdentity: "pane-1", attemptGeneration: 2 },
+      (receipt) => { received.push(receipt); },
+    );
+
+    const nonMatching: NativeTerminalPresentationReceipt = {
+      frontendSessionId: "fs-1",
+      paneIdentity: "pane-2",
+      backendSessionId: "bs-1",
+      bindingKey: "bk-1",
+      attemptGeneration: 2,
+    };
+    expect(emitNativeTerminalPresentation(nonMatching)).toBe(0);
+    expect(received).toHaveLength(0);
+
+    const matching: NativeTerminalPresentationReceipt = {
+      frontendSessionId: "fs-1",
+      paneIdentity: "pane-1",
+      backendSessionId: "bs-1",
+      bindingKey: "bk-1",
+      attemptGeneration: 2,
+    };
+    expect(emitNativeTerminalPresentation(matching)).toBe(1);
+    expect(received).toEqual([matching]);
+
+    resetNativeTerminalLifecycleForTest();
+    expect(emitNativeTerminalPresentation(matching)).toBe(0);
+    expect(received).toHaveLength(1);
   });
 });

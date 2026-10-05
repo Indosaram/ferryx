@@ -1,0 +1,56 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonRollout.test.ts
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ❯ src/lib/pairedDaemonRollout.test.ts (5 tests | 1 failed) 48ms
+   ✓ new local accepts an older epoch with fewer capabilities but never dispatches unsupported operations 17ms
+   ✓ failed renegotiation revokes prior admission: {"apiVersion":0,"daemonEpoch":"1","capabilities":[]} 7ms
+   × failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]} 16ms
+     → promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting
+   ✓ failed renegotiation revokes prior admission: {"accessScope":"mirror"} 1ms
+   ✓ failed renegotiation revokes prior admission: {"machineId":"other-machine"} 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]}
+AssertionError: promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Error {[39m
+[32m-   "message": "rejected promise",[39m
+[31m+ {[39m
+[31m+   "accessScope": "machine",[39m
+[31m+   "apiVersion": 1,[39m
+[31m+   "capabilities": [[39m
+[31m+     "directoryBrowseV1",[39m
+[31m+     "futureV9",[39m
+[31m+   ],[39m
+[31m+   "daemonEpoch": "9",[39m
+[31m+   "limits": {[39m
+[31m+     "directoryEntries": 100,[39m
+[31m+     "terminalSessions": 10,[39m
+[31m+   },[39m
+[31m+   "machineId": "machine-a",[39m
+[31m+   "permission": "control",[39m
+[31m+   "platform": "linux",[39m
+[2m  }[22m
+
+ ❯ src/lib/pairedDaemonRollout.test.ts:35:40
+     33|   await expect(f.adapter.directories()).resolves.toMatchObject({ path:…
+     34|   f.peer(peer);
+     35|   await expect(f.adapter.capabilities()).rejects.toMatchObject({ code …
+       |                                        ^
+     36|   const count = f.invoke.mock.calls.length;
+     37|   await expect(f.adapter.directories()).rejects.toMatchObject({ code: …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  10:40:39
+   Duration  6.93s (transform 334ms, setup 1.29s, collect 390ms, tests 48ms, environment 2.33s, prepare 198ms)
+
+error: script "test" exited with code 1

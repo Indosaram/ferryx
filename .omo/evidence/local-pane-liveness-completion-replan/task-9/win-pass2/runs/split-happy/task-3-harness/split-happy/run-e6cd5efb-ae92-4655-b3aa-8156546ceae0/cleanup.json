@@ -1,0 +1,39 @@
+{
+  "registered": {
+    "processes": [
+      {
+        "pid": 22416,
+        "label": ""
+      }
+    ],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-happy"
+    ]
+  },
+  "reaped": [
+    22416
+  ],
+  "receipts": [
+    {
+      "kind": "process",
+      "pid": 22416,
+      "label": "",
+      "exited": true,
+      "alreadyTerminated": true,
+      "code": 1,
+      "signal": null
+    },
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\ferryx-pane-completion\\task9-314251e0\\runtime\\split-happy",
+      "removed": true
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true
+  }
+}

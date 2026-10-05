@@ -1,0 +1,21 @@
+VITEST START 2026-10-05T03:34:45+09:00 load=1.70 1.76 1.97
+TESTFILE_SHA=0a1ad75f970cc6870e63a5d02d95588975d8ad8383e2b7ebec06e633aec03bc1 DECLARED=64
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-21dea3c0
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  scripts/qa/pane-liveness.test.mjs [ scripts/qa/pane-liveness.test.mjs ]
+Error: Unknown system error -122: Unknown system error -122, write
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  03:34:45
+   Duration  213ms (transform 73ms, setup 0ms, collect 0ms, tests 0ms, environment 0ms, prepare 54ms)
+
+error: script "test" exited with code 1
+VITEST_EXIT=1

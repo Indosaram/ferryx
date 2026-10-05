@@ -1,0 +1,12 @@
+{
+  "file": "src/components/NativeTerminalPane.test.tsx",
+  "candidateCommit": "172baa874f5e320ef08f4ed1dc5f11b391898477",
+  "baseCommit": "d82b35e43f208b53adf6310f4e3c89cbde8814f4",
+  "candidateLog": "mac-candidate-native-pane.log",
+  "baseLog": "mac-base-ab/logs/src_components_NativeTerminalPane.test.tsx.log",
+  "candidateFailureBlocks": 186,
+  "baseFailureBlocks": 186,
+  "changedNamedAssertions": [],
+  "classification": "AB_CONFIRMED_PRE_EXISTING",
+  "scope": "Recovered file assertions only; Mac full-suite remains TIMED_OUT"
+}

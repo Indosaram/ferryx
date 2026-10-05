@@ -1,0 +1,47 @@
+LINUX_SCENARIO_START 2026-10-05T00:07:01+09:00 load=2.90 3.32 4.30
+{
+  "schema": 1,
+  "scenario": "split-happy",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "/home/indo/.local/share/mise/installs/node/26.8.1/bin/node",
+      "/home/indo/ferryx-pane-completion/source-21dea3c0/scripts/qa/pane-liveness.mjs",
+      "--scenario",
+      "split-happy",
+      "--binary",
+      "/home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri/target/debug/ferryx",
+      "--evidence-dir",
+      "/tmp/t9p2-linux-ev",
+      "--isolation-root",
+      "/tmp/t9p2-linux-iso"
+    ]
+  },
+  "host": {
+    "platform": "linux",
+    "release": "7.1.9-arch1-2",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "/home/indo/ferryx-pane-completion/source-21dea3c0/src-tauri/target/debug/ferryx",
+    "sha256": "c653b0343dadce9215dea26396bc71ebefcdc744f914b2aceccd61ad1242cdc4"
+  },
+  "sourceDigest": "666a1c13948d8c4d067215c6534d4f8afcac7344c6265042676b45952194a94b",
+  "runId": "qa-run-bca8f85c-13cf-4cd4-b5b5-5b21f7c853dc",
+  "operationId": "qa-op-0b527c94-d114-4823-9fd1-0911a28ef109",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "NATIVE_AUTOMATION_UNSUPPORTED",
+    "message": "NATIVE_AUTOMATION_UNSUPPORTED: native desktop automation is not implemented for platform linux"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": []
+}
+LINUX_SCENARIO_EXIT=4

@@ -1,0 +1,21 @@
+VITEST_RERUN START 2026-10-05T03:35:35+09:00 load=3.30 2.07 2.06
+TMPDIR=/home/indo/ferryx-pane-completion/vitest-tmp
+TESTFILE_SHA=0a1ad75f970cc6870e63a5d02d95588975d8ad8383e2b7ebec06e633aec03bc1 DECLARED=64
+TMP_FREE_BEFORE=tmpfs            16G   13G  3.2G  80% /tmp
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-21dea3c0
+
+ ✓ scripts/qa/pane-liveness.test.mjs (64 tests) 2663ms
+   ✓ pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group  469ms
+   ✓ pane binding reads the app's own presentation receipt and excludes the fixture sessions  304ms
+   ✓ marker receipts are addressed by session, so another pane cannot satisfy the assertion  604ms
+   ✓ a split whose own pane never presents or reports cannot pass on the app pane receipts  803ms
+
+ Test Files  1 passed (1)
+      Tests  64 passed (64)
+   Start at  03:35:35
+   Duration  3.34s (transform 420ms, setup 0ms, collect 487ms, tests 2.66s, environment 0ms, prepare 72ms)
+
+VITEST_EXIT=0
+TMP_FREE_AFTER=tmpfs            16G   13G  3.2G  80% /tmp

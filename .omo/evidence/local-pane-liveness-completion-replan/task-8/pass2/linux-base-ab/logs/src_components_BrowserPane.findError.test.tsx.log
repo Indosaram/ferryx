@@ -1,0 +1,31 @@
+$ vitest run --maxWorkers=1 src/components/BrowserPane.findError.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1045075) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserPane.findError.test.tsx (1 test | 1 failed) 4ms
+   × BrowserPane find failure surfacing > shows the structured IPC code when find rejects, not a generic fallback 3ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserPane.findError.test.tsx > BrowserPane find failure surfacing > shows the structured IPC code when find rejects, not a generic fallback
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserPane.findError.test.tsx:45:23
+     43| beforeEach(() => {
+     44|   browserMocks.findBrowser.mockReset();
+     45|   window.localStorage.clear();
+       |                       ^
+     46| });
+     47| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  10:11:24
+   Duration  1.01s (transform 142ms, setup 97ms, collect 511ms, tests 4ms, environment 226ms, prepare 51ms)
+
+error: script "test" exited with code 1

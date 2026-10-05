@@ -1,0 +1,11 @@
+GATES_HOST DESKTOP-1LAPJMP LASTBOOT 10/03/2026 10:33:16 UPTIME 1.12:44:55.6495123
+GATES_LOAD_PCT 62
+GATES_FREE_GB 32.41
+GATE list-pane_liveness_ EXIT=0 SECS=116.5
+GATE pane_liveness_ EXIT=0 SECS=1
+   | test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.12s
+GATE list-local_split EXIT=0 SECS=0.8
+GATE local_split_reliability_ EXIT=0 SECS=0.9
+   | test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2275 filtered out; finished in 0.15s
+GATE split_journal EXIT=0 SECS=0.9
+   | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 2282 filtered out; finished in 0.07s

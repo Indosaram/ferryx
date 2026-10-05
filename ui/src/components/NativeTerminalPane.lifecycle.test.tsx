@@ -27,8 +27,9 @@ await import("../test/setup");
 
 const { NativeTerminalVisibilityProvider } = await import("../lib/nativeTerminalVisibility");
 const { NativeTerminalPane, resetNativeTerminalPaneForTest } = await import("./NativeTerminalPane");
-const { resetNativeTerminalLifecycleForTest } = await import("../lib/nativeTerminalLifecycle");
+const { resetNativeTerminalLifecycleForTest, registerDurableNativeBinding } = await import("../lib/nativeTerminalLifecycle");
 const shortcuts = await import("../lib/shortcuts");
+const { setLocalSplitPersistence } = await import("../lib/localSplitLifecycle");
 import type { TerminalSession } from "../lib/types";
 
 const tauriInvoke = vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined);
@@ -61,6 +62,11 @@ class TestResizeObserver implements ResizeObserver {
 }
 
 function session(id: string): TerminalSession {
+  registerDurableNativeBinding({
+    backendSessionId: id, incarnation: null, daemonEpoch: "",
+    frontendSessionId: `frontend-${id}`, paneIdentity: `frontend-${id}`,
+    bindingKey: `${id}::0:`, attemptGeneration: 0,
+  });
   return {
     id: `frontend-${id}`,
     cwd: "/workspace/orca-lite",
@@ -161,6 +167,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
   const originalResizeObserver = globalThis.ResizeObserver;
 
   beforeEach(() => {
+    setLocalSplitPersistence(async () => {});
     resetNativeTerminalLifecycleForTest();
     resetNativeTerminalPaneForTest();
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
@@ -183,6 +190,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
   });
 
   afterEach(async () => {
+    setLocalSplitPersistence(undefined);
     restorePaneRect();
     await act(async () => { cleanup(); });
     Object.defineProperty(globalThis, "ResizeObserver", {
@@ -221,6 +229,42 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await act(async () => { ended!({ payload: { sessionId: "stream-ended" } }); });
     expect(lifecycleCalls().filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(attachedBeforeStaleEvent);
     tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("held positive bounds cannot present a newer attempt or incarnation", async () => {
+    const lifecycle = await import("../lib/nativeTerminalLifecycle");
+    const started = deferred();
+    const held = deferred<typeof PRESENTED & { attachTuple: import("../lib/types").PaneAttachTuple }>();
+    const confirmed = deferred();
+    let first = true;
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_set_bounds") {
+        if (first) { first = false; started.resolve(); return held.promise; }
+        return { ...PRESENTED, attachTuple: args.attachTuple };
+      }
+      return undefined;
+    });
+    const current = { ...session("held-receipt"), incarnation: "life-1", daemonEpoch: "7" };
+    lifecycle.resetNativeTerminalLifecycleForTest();
+    const tuple = { backendSessionId: "held-receipt", incarnation: "life-1", daemonEpoch: "7",
+      frontendSessionId: current.id, paneIdentity: current.id, bindingKey: "held-receipt:7:0:", attemptGeneration: 1 };
+    lifecycle.registerDurableNativeBinding(tuple);
+    const receipts: number[] = [];
+    const unsubscribe = lifecycle.subscribeNativeTerminalPresentation({}, (receipt) => {
+      receipts.push(receipt.attemptGeneration);
+      confirmed.resolve();
+    });
+    const view = render(<NativeTerminalPane session={current} splitAttempt={{ frontendSessionId: current.id, generation: 1 }} />);
+    await act(async () => { await started.promise; });
+    await act(async () => {
+      lifecycle.registerDurableNativeBinding({ ...tuple, attemptGeneration: 2 });
+      view.rerender(<NativeTerminalPane session={current} splitAttempt={{ frontendSessionId: current.id, generation: 2 }} />);
+      held.resolve({ ...PRESENTED, attachTuple: tuple });
+    });
+    await confirmed.promise;
+    expect(receipts).toEqual([2]);
+    expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
+    unsubscribe();
   });
 
   it("recovers a stream that ends while its recovery attachment is pending", async () => {

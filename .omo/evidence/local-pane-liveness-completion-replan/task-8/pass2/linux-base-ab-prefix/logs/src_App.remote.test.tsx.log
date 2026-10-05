@@ -1,0 +1,88 @@
+$ vitest run --maxWorkers=1 src/App.remote.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036163) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/App.remote.test.tsx (20 tests | 20 failed) 11ms
+   × App SSH project lifecycle > shows progress throughout registration, restore, and first SSH tab creation 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > shows progress for manual first-tab creation and allows retry after failure 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > replaces registration failure with progress on explicit retry 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > does not leak a late SSH failure into the selected local workspace 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > focuses the existing SSH terminal addressed by its backend identity 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > loads a stored remote target without registering its path locally 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > returns from a local project to the requested existing SSH session 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > opens the registered SSH project from remote without a preexisting terminal 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > opens an SSH folder inside a parent Git repository without selecting the local project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > handles the chooser's registered remote project through actual App registration 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > routes the chooser Settings CTA to SSH machines, not inbound Remote Access 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > adopts the server's canonical host-qualified ID and path before new tabs and splits 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > selects inactive remote roots by workspace identity even when a local root has the same path 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > leaves a rejected host unavailable instead of spawning locally 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > ignores remote registration that resolves after switching to a local project 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"ssh"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"ssh","hostId":""} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > rejects malformed stored targets without converting them to local: null 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"unknown"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × App SSH project lifecycle > reattaches remote sessions after native startup without replacement and preserves their target and identity in the next save 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 20 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > shows progress throughout registration, restore, and first SSH tab creation
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > shows progress for manual first-tab creation and allows retry after failure
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > replaces registration failure with progress on explicit retry
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > does not leak a late SSH failure into the selected local workspace
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > focuses the existing SSH terminal addressed by its backend identity
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > loads a stored remote target without registering its path locally
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > returns from a local project to the requested existing SSH session
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > opens the registered SSH project from remote without a preexisting terminal
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > opens an SSH folder inside a parent Git repository without selecting the local project
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > handles the chooser's registered remote project through actual App registration
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > routes the chooser Settings CTA to SSH machines, not inbound Remote Access
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > adopts the server's canonical host-qualified ID and path before new tabs and splits
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > selects inactive remote roots by workspace identity even when a local root has the same path
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > leaves a rejected host unavailable instead of spawning locally
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > ignores remote registration that resolves after switching to a local project
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"ssh"}
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"ssh","hostId":""}
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > rejects malformed stored targets without converting them to local: null
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > rejects malformed stored targets without converting them to local: {"kind":"unknown"}
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > reattaches remote sessions after native startup without replacement and preserves their target and identity in the next save
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.remote.test.tsx:90:16
+     88| async function mount() { await act(async () => { render(<App />); }); }
+     89| beforeEach(() => {
+     90|   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); h…
+       |                ^
+     91|   native.isTauriRuntime.mockReturnValue(false);
+     92|   native.registerProject.mockImplementation(async (request: { workspac…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/20]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  20 failed (20)
+   Start at  10:09:13
+   Duration  2.10s (transform 907ms, setup 106ms, collect 1.59s, tests 11ms, environment 227ms, prepare 47ms)
+
+error: script "test" exited with code 1

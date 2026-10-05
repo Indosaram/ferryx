@@ -1,0 +1,26 @@
+{
+  "commit": "172baa874f5e320ef08f4ed1dc5f11b391898477",
+  "tree": "a0ac605669047d15f184b395018924f38aaf71b0",
+  "base": "d82b35e4",
+  "cargoLockSha256": "e1ea8bd6875a15fdfc5205ae5f4e1ba21194c0163f6fecf4bfa821a0443fbd53",
+  "uiLockSha256": "d84cde8a0f35abd85835bf2fa17ebb7945604f7579bfde7d1e14a28155d13137",
+  "ghostty": {
+    "sha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+    "mac": "/Users/I552267/ferryx-ghostty",
+    "windows": "C:\\Users\\sook\\task2-ghostty-6a508fd5",
+    "linuxBundle": "/home/indo/ghostty.bundle"
+  },
+  "tier": "LIGHT: remote verification control plane only",
+  "hosts": {
+    "mac": "CQFQ4P2LXK",
+    "windows": "DESKTOP-1LAPJMP",
+    "linux": "indo"
+  },
+  "sourceStrategy": "git archive exact commit; owned source-172baa87; clean status verified; no target/cache copied",
+  "pass": 2,
+  "baseChain": [
+    "d82b35e4",
+    "5464da0d",
+    "172baa874f5e320ef08f4ed1dc5f11b391898477"
+  ]
+}

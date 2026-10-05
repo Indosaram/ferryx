@@ -1,0 +1,118 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteAppWorktreeRestore.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1034232) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteAppWorktreeRestore.test.tsx (15 tests | 15 failed) 21ms
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: explicit Sign out in the host drawer calls logoutAccountSession and clears storage even if network fetch rejects 10ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: confirmed account UNAUTHORIZED from the machine list clears the local session without calling logoutAccountSession 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target triggers automatic worktree selection once machine is online 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory confirms machine missing 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory is empty [] 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient machine probe error or offline status PRESERVES stored target key 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient listMachines failure (e.g. 500) PRESERVES stored target key 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: deferred /machines response preserves stored target key across initial render ticks 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: project unavailable / pending preserves stored target key without dropping it 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: logout while acquireConnection is pending closes connection and cancels restore without repopulating storage 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 401 keeps the account session and only drops the machine attachment 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 403 keeps the account session and only drops the machine attachment 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 401' keeps the account session and reports the machine error 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 403' keeps the account session and reports the machine error 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'structured 401 UNAUTHORIZED' keeps the account session and reports the machine error 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 15 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: explicit Sign out in the host drawer calls logoutAccountSession and clears storage even if network fetch rejects
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: confirmed account UNAUTHORIZED from the machine list clears the local session without calling logoutAccountSession
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target triggers automatic worktree selection once machine is online
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory confirms machine missing
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory is empty []
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient machine probe error or offline status PRESERVES stored target key
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient listMachines failure (e.g. 500) PRESERVES stored target key
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: deferred /machines response preserves stored target key across initial render ticks
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: project unavailable / pending preserves stored target key without dropping it
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: logout while acquireConnection is pending closes connection and cancels restore without repopulating storage
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 401 keeps the account session and only drops the machine attachment
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 403 keeps the account session and only drops the machine attachment
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 401' keeps the account session and reports the machine error
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 403' keeps the account session and reports the machine error
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'structured 401 UNAUTHORIZED' keeps the account session and reports the machine error
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/RemoteAppWorktreeRestore.test.tsx:283:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/30]⎯
+
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: explicit Sign out in the host drawer calls logoutAccountSession and clears storage even if network fetch rejects
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item A: confirmed account UNAUTHORIZED from the machine list clears the local session without calling logoutAccountSession
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target triggers automatic worktree selection once machine is online
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory confirms machine missing
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: reload with stored target drops key when complete successful inventory is empty []
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient machine probe error or offline status PRESERVES stored target key
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: transient listMachines failure (e.g. 500) PRESERVES stored target key
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: deferred /machines response preserves stored target key across initial render ticks
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: project unavailable / pending preserves stored target key without dropping it
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > Item C: logout while acquireConnection is pending closes connection and cancels restore without repopulating storage
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 401 keeps the account session and only drops the machine attachment
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > workspace state untyped 403 keeps the account session and only drops the machine attachment
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 401' keeps the account session and reports the machine error
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'untyped 403' keeps the account session and reports the machine error
+ FAIL  src/remote/RemoteAppWorktreeRestore.test.tsx > RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore > machine-scoped grant rejection with 'structured 401 UNAUTHORIZED' keeps the account session and reports the machine error
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/RemoteAppWorktreeRestore.test.tsx:295:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/30]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  15 failed (15)
+   Start at  10:09:04
+   Duration  1.79s (transform 444ms, setup 109ms, collect 1.25s, tests 21ms, environment 235ms, prepare 45ms)
+
+error: script "test" exited with code 1

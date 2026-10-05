@@ -1,0 +1,62 @@
+$ vitest run --maxWorkers=1 src/lib/agentStateExtension.test.ts
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/lib/agentStateExtension.test.ts [2m([22m[2m5 tests[22m[2m | [22m[33m5 skipped[39m[2m)[22m[33m 10006[2mms[22m[39m
+   [2m[90m↓[39m[22m ferryx-agent-state extension[2m > [22msubscribes to the events senpi actually emits
+   [2m[90m↓[39m[22m ferryx-agent-state extension[2m > [22ma waiting question publishes blocked with its text, and answering publishes working
+   [2m[90m↓[39m[22m ferryx-agent-state extension[2m > [22ma question the agent keeps working through never publishes blocked
+   [2m[90m↓[39m[22m ferryx-agent-state extension[2m > [22ma host dialog with no question event still blocks and carries its label
+   [2m[90m↓[39m[22m ferryx-agent-state extension[2m > [22msettling the turn clears the blocked detail
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/lib/agentStateExtension.test.ts[2m > [22mferryx-agent-state extension
+[31m[1mError[22m: Hook timed out in 10000ms.
+If this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".[39m
+[36m [2m❯[22m src/lib/agentStateExtension.test.ts:[2m73:3[22m[39m
+    [90m 71| [39m
+    [90m 72| [39m[34mdescribe[39m([32m"ferryx-agent-state extension"[39m[33m,[39m () [33m=>[39m {
+    [90m 73| [39m  [34mbeforeAll[39m([35masync[39m () [33m=>[39m {
+    [90m   | [39m  [31m^[39m
+    [90m 74| [39m    [35mtry[39m {
+    [90m 75| [39m      [34mrmSync[39m([33mSOCKET_PATH[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Unhandled Errors [49m[22m[31m⎯⎯⎯⎯⎯⎯[39m
+[31m[1m
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.[22m[39m
+
+[31m⎯⎯⎯⎯⎯[39m[1m[41m Uncaught Exception [49m[22m[31m⎯⎯⎯⎯⎯[39m
+[31m[1mError[22m: listen EACCES: permission denied /tmp/ferryx-ext-test.sock[39m
+[90m [2m❯[22m Server.setupListenHandle [as _listen2] node:net:[2m2145:21[22m[39m
+[90m [2m❯[22m listenInCluster node:net:[2m2224:12[22m[39m
+[90m [2m❯[22m Server.listen node:net:[2m2361:5[22m[39m
+[36m [2m❯[22m src/lib/agentStateExtension.test.ts:[2m93:49[22m[39m
+    [90m 91| [39m      socket[33m.[39m[34mend[39m()[33m;[39m
+    [90m 92| [39m    })[33m;[39m
+    [90m 93| [39m    await new Promise<void>((resolve) => server.listen(SOCKET_PATH, re…
+    [90m   | [39m                                                [31m^[39m
+    [90m 94| [39m  })[33m;[39m
+    [90m 95| [39m
+[90m [2m❯[22m src/lib/agentStateExtension.test.ts:[2m93:11[22m[39m
+[90m [2m❯[22m node_modules/@vitest/runner/dist/chunk-hooks.js:[2m1897:20[22m[39m
+[90m [2m❯[22m runWithTimeout node_modules/@vitest/runner/dist/chunk-hooks.js:[2m1863:10[22m[39m
+[90m [2m❯[22m runHook node_modules/@vitest/runner/dist/chunk-hooks.js:[2m1436:51[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22m[39m
+[31m[1mSerialized Error:[22m[39m [90m{ code: 'EACCES', errno: -4092, syscall: 'listen', address: '/tmp/ferryx-ext-test.sock', port: -1 }[39m
+[31mThis error originated in "[1msrc/lib/agentStateExtension.test.ts[22m" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.[39m
+[31m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [33m5 skipped[39m[90m (5)[39m
+[2m     Errors [22m [1m[31m1 error[39m[22m
+[2m   Start at [22m 10:10:55
+[2m   Duration [22m 10.42s[2m (transform 46ms, setup 199ms, collect 18ms, tests 10.01s, environment 0ms, prepare 67ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

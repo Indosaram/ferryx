@@ -1,0 +1,97 @@
+[
+  {
+    "host": "linux",
+    "buildExit": 0,
+    "allDependentStartsAfterBuild": true,
+    "listBeforeRun": [
+      {
+        "id": "local_split_reliability_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "pane_liveness_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "qa_barrier",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "handover",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "unix-suspension",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "journal",
+        "listExit": 101,
+        "ordered": true
+      }
+    ],
+    "timedOut": []
+  },
+  {
+    "host": "windows",
+    "buildExit": 0,
+    "allDependentStartsAfterBuild": true,
+    "listBeforeRun": [
+      {
+        "id": "local_split_reliability_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "pane_liveness_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "qa_barrier",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "handover",
+        "listExit": 101,
+        "ordered": true
+      }
+    ],
+    "timedOut": []
+  },
+  {
+    "host": "mac",
+    "buildExit": 0,
+    "allDependentStartsAfterBuild": true,
+    "listBeforeRun": [
+      {
+        "id": "local_split_reliability_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "pane_liveness_",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "qa_barrier",
+        "listExit": 101,
+        "ordered": true
+      },
+      {
+        "id": "handover",
+        "listExit": 101,
+        "ordered": true
+      }
+    ],
+    "timedOut": [],
+    "fullUiPending": true
+  }
+]

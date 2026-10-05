@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "runId": "task-1-remote-verification-r2",
+  "timestamp": "2026-10-03T14:43:02.034Z",
+  "candidateWorktree": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation",
+  "baseCommit": "d82b35e43f208b53adf6310f4e3c89cbde8814f4",
+  "manifestProvenance": {
+    "manifestFile": "manifest-r2.json",
+    "measuredBytes": 20949,
+    "measuredSha256": "63f7f3deb55b57b7fe1b6c769e3cae7328ec6eef809d39e9fe41f15e80fc1cc7",
+    "selectedFilesCount": 21,
+    "allFilesHashVerified": true,
+    "authorMessageDiscrepancyNotes": "Author and reviewer quoted 21570 bytes versus actual on-disk 20949 bytes; SHA-256 63f7f3... verified exact."
+  },
+  "disposableFixtureApplyCheck": {
+    "command": "git apply --check forward.patch",
+    "exitCode": 1,
+    "rejectionVerified": true,
+    "candidateTreeUnchanged": true
+  },
+  "remoteStaging": {
+    "mahoWin": {
+      "host": "sook@100.126.171.58",
+      "sourcePath": "C:\\Users\\sook\\ferryx-pane-completion\\source",
+      "ghosttyJunction": "C:\\Users\\sook\\ferryx-pane-completion\\source\\src-tauri\\vendor\\ghostty -> C:\\Users\\sook\\task2-ghostty-6a508fd5",
+      "ghosttySha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "filesStaged": 21,
+      "pairedFixturesStaged": true
+    },
+    "mahoMac": {
+      "host": "I552267@100.65.239.35",
+      "sourcePath": "/Users/I552267/ferryx-pane-completion/source",
+      "ghosttySymlink": "/Users/I552267/ferryx-pane-completion/source/src-tauri/vendor/ghostty -> /Users/I552267/ferryx-ghostty",
+      "ghosttySha": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "filesStaged": 21,
+      "uiDistStaged": true,
+      "pairedFixturesStaged": true
+    }
+  },
+  "executionGates": {
+    "remoteUiBuild": {
+      "platform": "win32",
+      "command": "bun run --cwd ui build",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "duration": "6.45s",
+      "modulesTransformed": 2227,
+      "logPath": "ui-build-r2.log"
+    },
+    "scopedFrontendVitest": {
+      "platform": "win32",
+      "command": "bun run test src/lib/switchDebug.test.ts src/lib/paneDebugInfo.test.ts src/lib/paneLiveness.test.ts src/lib/nativeTerminalInputQueue.test.ts",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "filesPassed": 4,
+      "testsPassed": 42,
+      "testsFailed": 0,
+      "duration": "2.93s",
+      "logPath": "scoped-vitest-r2.log",
+      "breakdown": {
+        "switchDebug": 9,
+        "paneDebugInfo": 3,
+        "paneLiveness": 13,
+        "nativeTerminalInputQueue": 17
+      }
+    },
+    "canonicalRunnerVitest": {
+      "platform": "win32",
+      "command": "bun ui/node_modules/vitest/vitest.mjs run --config scripts/qa/pane-liveness-vitest.config.mjs scripts/qa/pane-liveness.test.mjs",
+      "nativeExitCode": 0,
+      "status": "PASS",
+      "filesPassed": 1,
+      "testsPassed": 19,
+      "testsFailed": 0,
+      "duration": "541ms",
+      "logPath": "canonical-runner-vitest.log"
+    },
+    "rustPaneLivenessDiagnostics": {
+      "platform": "win32",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib pane_liveness_diagnostics",
+      "nativeExitCode": 101,
+      "status": "BLOCKED_ON_SOURCE_DEFECT",
+      "errorSummary": "Missing DTO fields on DaemonSessionDetails (reader_paused, kernel_stopped, registry_suspended, suspension_source, ::new) due to exclusion of src-tauri/src/daemon/protocol.rs",
+      "logPath": "rust-diag-r2.log",
+      "defectReport": "defect-report-daemon-protocol-omission.md"
+    },
+    "rustQaBarrier": {
+      "platform": "win32",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --features local-split-qa qa_barrier",
+      "nativeExitCode": "UNKNOWN (ssh: 1)",
+      "status": "BLOCKED_ON_SOURCE_DEFECT",
+      "errorSummary": "Blocked on same src/ipc/debug.rs compilation error",
+      "logPath": "rust-diag-r2.log",
+      "measurementNote": "Compiler failure observed via 9 error lines in rust-diag-r2.log; inner exit was not directly measured to a separate .exit file."
+    },
+    "macTestList": {
+      "platform": "darwin",
+      "command": "cargo test --lib --features local-split-qa -- --list",
+      "pipelineExitCode": 0,
+      "innerExitCode": "UNKNOWN",
+      "status": "BLOCKED_ON_SOURCE_DEFECT",
+      "measurementNote": "Pipeline returned 0 due to grep -F 'error[E' finding 9 matching compiler error lines. Inner cargo test compilation failed; zero tests listed.",
+      "logPath": "task-1-mac-list.log"
+    }
+  },
+  "cleanup": {
+    "temporaryScriptsRemoved": [
+      "run-ui-build.ps1",
+      "run-ui-build-r2.ps1",
+      "run-scoped-vitest-r2.ps1",
+      "run-rust-diagnostics.ps1",
+      "run-canonical-runner-vitest.ps1",
+      "verify-19-files.ps1"
+    ],
+    "verifiedGone": true,
+    "retainedDirsForConsumers": [
+      "C:\\Users\\sook\\ferryx-pane-completion",
+      "/Users/I552267/ferryx-pane-completion"
+    ]
+  },
+  "calibrationAddendum": "task-1-exit-measurement-calibration-addendum.md"
+}

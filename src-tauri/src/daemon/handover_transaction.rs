@@ -45,8 +45,6 @@
 //!    (signaling the receiver to close duplicate received FDs). Conflicting content on the
 //!    same sequence produces a protocol conflict error.
 
-#![cfg(unix)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

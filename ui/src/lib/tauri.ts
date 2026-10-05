@@ -6,6 +6,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
+import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
 
 export type {
   AttachTerminalRequest,
@@ -16,7 +17,11 @@ export type {
   NativeTerminalAgentStatePayload,
   NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
   TerminalReplayGap,
@@ -41,7 +46,11 @@ import type {
   NativeTerminalScrollbarPayload,
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
@@ -141,6 +150,9 @@ export type SpawnTerminalRequest = {
     hostId: string;
     remoteWorkspaceId: string;
   } | null;
+  createOnly?: boolean | null;
+  preparedLocalSplit?: import("./types").PreparedLocalSplit | null;
+  remainingMs?: number | null;
 };
 
 export type SpawnTerminalResult = {
@@ -154,11 +166,13 @@ export type SpawnTerminalResult = {
     cols: number;
     rows: number;
     running: boolean;
+    incarnation?: string | null;
   };
 };
 
 export type TerminalDescribeResult = {
   sessionId: string;
+  incarnation?: string | null;
   workspaceId?: string | null;
   worktree?: WorktreeIdentity | null;
   cwd?: string | null;
@@ -171,6 +185,10 @@ export type TerminalDescribeResult = {
   lastOutputAgeMs?: number | null;
   /** Daemon-observed process suspension (kernel stop state). Absent on older daemons. */
   suspended?: boolean;
+  readerPaused?: boolean | null;
+  kernelStopped?: boolean | null;
+  registrySuspended?: boolean | null;
+  suspensionSource?: string | null;
 };
 
 export function isTauriRuntime() {
@@ -470,7 +488,16 @@ function reportUnserializableSpawnRequest(request: SpawnTerminalRequest): void {
   }
 }
 
-export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
+export type LocalSplitCreateOptions = {
+  createOnly?: boolean;
+  preparedLocalSplit?: PreparedLocalSplit | null;
+  remainingMs?: number;
+};
+
+export async function spawnTerminalDetailed(
+  request: SpawnTerminalRequest,
+  options?: LocalSplitCreateOptions,
+): Promise<SpawnTerminalResult> {
   if (!isTauri()) {
     throw {
       code: "INTERNAL_ERROR",
@@ -479,9 +506,19 @@ export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Prom
     } satisfies StructuredIpcError;
   }
   reportUnserializableSpawnRequest(request);
-  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
-    request: sanitizeSpawnRequest(request),
-  });
+  const payload = { request: {
+    ...sanitizeSpawnRequest(request),
+    createOnly: options?.createOnly ?? request.createOnly ?? null,
+    preparedLocalSplit: options?.preparedLocalSplit ?? request.preparedLocalSplit ?? null,
+    remainingMs: options?.remainingMs ?? request.remainingMs ?? null,
+  } };
+  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", payload);
+}
+
+export async function spawnTerminalSplitOperation(
+  request: SplitOperationRequest,
+): Promise<SplitOperationResponse> {
+  return invokeCommand<SplitOperationResponse>("cmd_terminal_spawn_operation", { request });
 }
 
 export type SpawnTerminalBatchEntry = {
@@ -514,6 +551,7 @@ export async function spawnTerminal(request: SpawnTerminalRequest): Promise<stri
 export async function attachTerminal(
   requestOrSessionId: string | AttachTerminalRequest,
   afterSequence?: string | null,
+  splitAttempt?: SplitAttachAttempt | null,
 ): Promise<AttachTerminalResponse> {
   const req: AttachTerminalRequest =
     typeof requestOrSessionId === "string"
@@ -530,10 +568,12 @@ export async function attachTerminal(
       gap: null,
     };
   }
-  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", {
+  const payload: Record<string, unknown> = {
     sessionId: req.sessionId,
     afterSequence: req.afterSequence ?? null,
-  });
+  };
+  if (splitAttempt) payload.splitAttempt = splitAttempt;
+  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", payload);
 }
 
 export async function getTerminalHistorySnapshot(sessionId: string): Promise<string> {
@@ -569,13 +609,15 @@ export async function signalTerminal(request: { sessionId: string; signal: Termi
 
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
-  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
+  const attachTuple = getDurableNativeBinding(sessionId);
+  if (attachTuple) await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 
 export async function hibernateTerminal(sessionId: string) {
   if (!isTauri()) return;
-  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
+  const attachTuple = getDurableNativeBinding(sessionId);
+  if (attachTuple) await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
   await invokeCommand<void>("cmd_terminal_hibernate", { sessionId });
 }
 

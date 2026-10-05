@@ -1,0 +1,674 @@
+#!/usr/bin/env node
+// Task 3 QA runner (local-pane-liveness-root-remediation).
+// Strict native-default CLI:
+//   node scripts/qa/pane-liveness.mjs --scenario NAME --binary ABS \
+//     --evidence-dir ABS --isolation-root ABS
+// `--headless` is accepted ONLY for diagnostic-classifier within Task 3 and
+// records nativeEvidence: deferred-to-task-10; it can never yield native PASS.
+// Production/default runtime roots, preexisting isolation roots, relative
+// paths, unknown flags and unlisted scenarios are rejected nonzero BEFORE
+// any launch. Unsupported native automation fails explicitly (typed exit
+// codes). No fake API or stub PASS exists in this runner: every scenario
+// settles through receipts that echo the unique runId/operationId nonces.
+
+import { randomUUID } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  BUDGETS, EXIT, HarnessError, parseInvocation, preflight,
+  computeCleanupGate, computeSourceDigest, withDeadline,
+  assertPositiveRecovery, BARRIER_ROLES, MonotonicBudget, validateFixtureSetup,
+  requireSevenTupleReceipt, requireFiveTupleReceipt,
+  AppStdioSink, appStdioResult, archiveBarrierHub, BARRIER_ARCHIVE_MAX_BYTES,
+  InstrumentationClock,
+} from '../lib/qa-scenarios/common-harness.mjs';
+import { runHeadlessDiagnosticClassifier, runNativeDiagnosticClassifier, buildIsolatedEnv } from '../lib/qa-scenarios/diagnostic-classifier.mjs';
+import {
+  MARKER_TEXT, assertAxTrustDarwin, assertNativeAutomationSupported, assertScreenCapture,
+  clickSplitRightDarwin, focusWindowByPidDarwin, typeMarkerDarwin,
+  awaitMarkerRecognition, focusWindowWindows, typeMarkerWindows, windowsDriver,
+  awaitOwnedWindowWindows, selectNativeDriver,
+} from '../lib/qa-scenarios/native-driver.mjs';
+import { ensureFrontendServed } from '../lib/qa-scenarios/frontend-server.mjs';
+import { bindPaneSession, createPaneInventoryReader } from '../lib/qa-scenarios/pane-binding.mjs';
+import { admitWindowsInteractiveDesktop, readWindowsRelaunchRecord } from '../lib/qa-scenarios/windows-interactive.mjs';
+import {
+  runSplitHappyScenario,
+  runSplitAttachStallScenario,
+  runSplitCancelScenario,
+  runSplitConcurrentScenario,
+  assertSinglePty,
+} from '../lib/qa-scenarios/split-scenarios.mjs';
+import {
+  runRetainedHandoverScenario,
+  runHandoverAbortScenario,
+  runSuspensionOwnershipScenario,
+  runStaleBindingScenario,
+  assertInvariants,
+} from '../lib/qa-scenarios/lifecycle-scenarios.mjs';
+
+export { requireSevenTupleReceipt, requireFiveTupleReceipt, assertSinglePty, assertInvariants };
+
+const SOURCE_FILES = [
+  'scripts/qa/pane-liveness.mjs',
+  'scripts/lib/qa-scenarios/common-harness.mjs',
+  'scripts/lib/qa-scenarios/native-driver.mjs',
+  'scripts/lib/qa-scenarios/diagnostic-classifier.mjs',
+  'scripts/lib/qa-scenarios/split-scenarios.mjs',
+  'scripts/lib/qa-scenarios/lifecycle-scenarios.mjs',
+  'scripts/lib/qa-scenarios/windows-interactive.mjs',
+  'scripts/lib/qa-scenarios/frontend-server.mjs',
+  'scripts/lib/qa-scenarios/pane-binding.mjs',
+  // The pane step's measured second source: the read-only daemon session
+  // inventory client. It joins SOURCE_FILES so the evidence `sourceDigest`
+  // covers the module that can now settle the pre-split pane's binding.
+  'scripts/lib/qa-scenarios/daemon-inventory.mjs',
+];
+const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
+
+// Per-scenario plan: barriers to pre-arm before launch and the invariants the
+// driver asserts on settled receipts. Barrier semantics are defined by the
+// private channel (task-3-rust-proposal.md); a binary without local-split-qa
+// support fails the registration ACK explicitly (typed BARRIER_ACK_TIMEOUT).
+// Exported so the runner unit suite can replay the pre-launch pre-arm of every
+// scenario without launching a product.
+export const SCENARIO_PLANS = {
+  'diagnostic-classifier': {
+    barriers: ['backend-write', 'presentation'], marker: true, splitMenu: false,
+    // Receipt names are the product's real barrier settlements: the classifier
+    // stages settle on the backend-write/presentation barriers themselves.
+    receipts: ['fixture-setup', 'backend-write', 'presentation', 'marker-output'],
+  },
+  'split-happy': {
+    barriers: [], marker: true, splitMenu: true, pane: true,
+    receipts: ['fixture-setup', 'split-create', 'presentation', 'marker-output'],
+    fiveTuple: true, timings: true, singlePty: true,
+  },
+  'split-attach-stall': {
+    barriers: ['attach-handshake'], barrierHoldMs: 16_000, marker: true, splitMenu: true, pane: true,
+    // The actionable failure settles on the held attach-handshake barrier; there
+    // is no separate `failure-classified` receipt file.
+    receipts: ['fixture-setup', 'split-create', 'attach-handshake'],
+    failureDeadlineMs: BUDGETS.attemptCeilingMs, sameIdRetry: true, singlePty: true,
+  },
+  'split-cancel': {
+    barriers: [], marker: false, splitMenu: true, pane: true,
+    receipts: ['fixture-setup', 'cancel-ack'],
+    cancel: { request: 'split-cancel', phase: 'while-creating' },
+    cancelAckCeilingMs: BUDGETS.cancelAckCeilingMs, singlePty: true,
+  },
+  'split-concurrent': {
+    barriers: ['held-rpc'], marker: true, splitMenu: true, pane: true,
+    receipts: ['fixture-setup', 'held-rpc', 'split-create', 'presentation', 'marker-output'],
+    requireHeldRpc: true, fiveTuple: true, timings: true, singlePty: true,
+  },
+  'retained-handover': {
+    barriers: ['predecessor-export', 'successor-adopt'], marker: true, splitMenu: false,
+    receipts: ['fixture-setup', 'handover-transfer', 'marker-output'],
+    invariants: ['handoverPreservesIncarnation', 'singleReader'],
+  },
+  'handover-abort': {
+    barriers: ['commit', 'abort'], marker: true, splitMenu: false,
+    receipts: ['fixture-setup', 'rollback-relinquishment', 'marker-output'],
+    invariants: ['relinquishmentBeforeResume', 'singleReader', 'noDualRead'],
+  },
+  'suspension-ownership': {
+    barriers: [], marker: true, splitMenu: false,
+    receipts: ['fixture-setup', 'suspension-receipt', 'marker-output'],
+    invariants: ['externalStopsUntouched', 'ownedResumeSameProcess'],
+  },
+  'stale-binding': {
+    barriers: [], marker: true, splitMenu: false,
+    receipts: ['fixture-setup', 'stale-receipt-rejected', 'reattach-marker', 'marker-output'],
+    invariants: ['staleReceiptRejected', 'reattachSameBackend'],
+  },
+};
+
+// Typed native failures keep their identity in result.error.code. The verdict
+// and exit code stay fail-closed and unchanged for the pre-existing codes: an
+// environment/harness block is BLOCKED and nonzero, a product assertion failure
+// is FAIL, and the cleanup gate can still force FAIL - a blocked run never
+// becomes a pass.
+export const BLOCKED_CODES = Object.freeze([
+  'AX_UNTRUSTED', 'CAPTURE_DENIED', 'NATIVE_AUTOMATION_UNSUPPORTED', 'BARRIER_ACK_TIMEOUT',
+  'MARKER_RECOGNITION_UNVERIFIED', 'TASK4_IDENTITY_DEPENDENCY',
+  // Windows interactive-desktop lane (pass-4 blockers): the run could not reach
+  // a state in which it owns a visible window and a unique affordance.
+  'NO_INTERACTIVE_SESSION', 'NO_OWNED_WINDOW', 'INTERACTIVE_RELAUNCH_FAILED',
+  // Pass-18: the delegation is intermittent (the task's cmd.exe is created but
+  // never runs the bat's own first line), so a stalled attempt is detected and
+  // retried a bounded number of times. Every attempt stalling is its own typed
+  // environment block - nonzero and fail-closed, never a pass.
+  'DELEGATION_STALLED',
+  'SPLIT_RIGHT_NOT_FOUND', 'SPLIT_RIGHT_NOT_UNIQUE', 'SPLIT_RIGHT_DISABLED',
+  // Task-9 lane: the debug binary's devUrl was not served by this run (dist
+  // missing, port held by a foreign listener, server not answering with the
+  // app's own root document, or the config's devUrl drifted).
+  'FRONTEND_DIST_MISSING', 'FRONTEND_PORT_OCCUPIED', 'FRONTEND_NOT_SERVED',
+  'FRONTEND_DEVURL_MISMATCH',
+  // Task-9 lane: the app boots empty, so no pane existed to split - either the
+  // pane-creation affordance was absent/ambiguous/disabled, or the pane it
+  // created never presented a session this run could bind.
+  'PANE_AFFORDANCE_NOT_FOUND', 'PANE_AFFORDANCE_NOT_UNIQUE', 'PANE_AFFORDANCE_DISABLED',
+  'PANE_BINDING_UNBOUND', 'PANE_BINDING_AMBIGUOUS',
+]);
+
+export function classifyNativeFailure(code) {
+  const verdict = BLOCKED_CODES.includes(code) ? 'BLOCKED' : 'FAIL';
+  const exitCode = code === 'AX_UNTRUSTED' ? EXIT.axUntrusted
+    : code === 'CAPTURE_DENIED' ? EXIT.captureDenied
+    : code === 'NATIVE_AUTOMATION_UNSUPPORTED' ? EXIT.nativeAutomationUnsupported
+    : code === 'BARRIER_ACK_TIMEOUT' ? EXIT.barrierUnsupported
+    : code === 'MARKER_RECOGNITION_UNVERIFIED' ? EXIT.markerRecognitionUnverified
+    : code === 'TASK4_IDENTITY_DEPENDENCY' ? EXIT.task4IdentityDependency
+    : BLOCKED_CODES.includes(code) ? EXIT.nativeAutomationUnsupported
+    : EXIT.scenarioFailure;
+  return { verdict, exitCode };
+}
+
+// What the correctness ceiling compares (pass-22 audit F2-11 residual). The
+// quantity is the SCENARIO's own time: the raw wall clock from the trigger MINUS
+// the wall clock the measurements inside that window spent, which the runner
+// accumulates per read in an `InstrumentationClock` and reports per read on the
+// read's own evidence action. Nothing about the measurement moved - the reads still
+// sit inside the window at the same moments - so what changed is only what the
+// window is judged against. `exceeded` is the single decision the ceiling makes,
+// and the raw number is reported beside the adjusted one so a reader can always
+// see both. The exclusion cannot run away: each read is capped by the charge it was
+// given (`splitInventoryReadCapMs`), so the wall clock can exceed the ceiling by at
+// most the instrumentation the reads actually spent.
+export const ATTEMPT_CEILING_BASIS = 'scenario-own-time';
+
+export function attemptBudgetAccounting({ budget, instrumentation = null, triggerLabel = null } = {}) {
+  const attemptMs = budget.elapsedMs();
+  const instrumentationMs = instrumentation?.totalMs?.() ?? 0;
+  const scenarioMs = Math.max(0, attemptMs - instrumentationMs);
+  return {
+    triggerLabel,
+    attemptMs,
+    instrumentationMs,
+    scenarioMs,
+    ceilingMs: BUDGETS.attemptCeilingMs,
+    ceilingBasis: ATTEMPT_CEILING_BASIS,
+    exceeded: scenarioMs > BUDGETS.attemptCeilingMs,
+    samples: instrumentation?.samples ?? [],
+  };
+}
+
+async function runNativeScenario(ctx) {
+  const plan = SCENARIO_PLANS[ctx.scenario];
+  const { evidence, barrierHub } = ctx;
+
+  // Permission gates FIRST: typed rejections with no native actions recorded.
+  assertNativeAutomationSupported();
+  // Pass-4 blocker 1: a Windows run launched from an SSH session lands in
+  // session 0, where no window can ever be shown. The admission decision (and,
+  // when it failed, the measured session/interactivity evidence) is recorded
+  // before any launch; a blocked admission never launches and never passes.
+  if (ctx.windowsAdmission) {
+    evidence.action({ action: 'windows-interactive-admission', ...ctx.windowsAdmission.evidence });
+    if (ctx.windowsAdmission.mode === 'blocked') {
+      throw new HarnessError(ctx.windowsAdmission.code, ctx.windowsAdmission.detail);
+    }
+  }
+  if (ctx.windowsRelaunchRecord) {
+    evidence.action({ action: 'windows-interactive-relaunch', ...ctx.windowsRelaunchRecord });
+  }
+  if (ctx.platformPreflight === 'darwin') {
+    await assertAxTrustDarwin(evidence);
+    await assertScreenCapture(evidence);
+  }
+
+  const isolated = buildIsolatedEnv(ctx);
+
+  // Job 1 (task-9 root cause 1): the debug binary boots against its
+  // `devUrl` (`http://127.0.0.1:5173`), and with nothing serving it the webview
+  // renders Chromium's ERR_CONNECTION_REFUSED page - the 29-node UIA tree pass 7
+  // measured and misread as an accessibility defect. The frontend is served HERE,
+  // before the app boots, from the already-built `ui/dist` (deterministic: no
+  // rebuild, no watcher, no HMR) and on this run's own port only: an occupied
+  // port is a typed refusal and a foreign listener is never killed or reused.
+  const frontend = await ensureFrontendServed({
+    rootDir: runnerRoot, registry: ctx.registry, evidence,
+  });
+
+  evidence.action({
+    action: 'launch.binary',
+    binary: ctx.binary,
+    // Where this run's app stdout/stderr land (same paths result.json carries).
+    appStdio: ctx.appStdio.paths(),
+    env: {
+      FERRYX_DATA_DIR: isolated.dirs.dataDir,
+      FERRYX_RUNTIME_DIR: isolated.dirs.runtimeDir,
+      FERRYX_SESSION_DIR: isolated.dirs.sessionDir,
+      FERRYX_QA_BARRIER_DIR: barrierHub.dir,
+      FERRYX_QA_OPERATION_ID: ctx.operationId,
+    },
+  });
+  // The GUI lane installs the private channel from this env at boot and
+  // settles `fixture-setup` line 0 from the real isolated-profile session
+  // inventory before any trigger.
+  const child = ctx.spawnOwned(ctx.binary, [], { env: isolated.env });
+  const pid = child.pid;
+  ctx.pid = pid;
+
+  // Pre-trigger SETUP budget: fixture settlement, window admission, the UI pane
+  // step and barrier registration are setup. The frozen `attemptCeilingMs`
+  // correctness ceiling below measures trigger -> settlement and must not be
+  // spent on them (task 9 added a real UI step here, so this clock exists).
+  const setupBudget = new MonotonicBudget(BUDGETS.setupCeilingMs);
+
+  // Scenario-specific fixture setup validation (never requires all four fixtures for basic split!)
+  const rawFixture = await barrierHub.awaitReceipt('fixture-setup', 0, setupBudget.consume(BUDGETS.stagePrepareCreateStatusMs, 'fixture-setup'));
+  const fixture = validateFixtureSetup(rawFixture, ctx.scenario);
+  evidence.action({ action: 'fixture-setup', sessions: fixture.sessions });
+
+  // Pass-4 blocker 1 (continued): the driver may only address a window this run
+  // really owns and that is really visible. In Windows session 0 the app's
+  // windows are created but can never be shown, so this bounded wait fails
+  // typed (`NO_INTERACTIVE_SESSION` / `NO_OWNED_WINDOW`, with the measured
+  // session id and per-window visibility) instead of letting a driver click a
+  // window it does not own. macOS is unchanged.
+  if (ctx.platformPreflight === 'win32') {
+    await awaitOwnedWindowWindows(evidence, pid, setupBudget.consume(BUDGETS.ownedWindowReadyMs, 'owned-window'));
+  }
+
+  // Job 2 (task-9 root cause 2): with the UI served the app boots to its EMPTY
+  // state ("No open tabs" + "New Terminal" [Button]) - no pane, so no pane
+  // toolbar and no split affordance. Scenarios that split click the app's own
+  // named affordance (which runs the real `cmd_terminal_spawn` path) and then
+  // bind the pane to the session the app ITSELF presents, so every later
+  // assertion refers to a real pane instead of to a phantom one.
+  let paneBinding = null;
+  if (plan.pane) {
+    const driver = selectNativeDriver(ctx);
+    // Honest session identity for the pre-split pane (task-9 pass-13). The
+    // product's own presentation receipt is PREFERRED, but its producer requires
+    // the seven-field attachTuple and `pane_liveness_presentation_receipt`
+    // returns None - emitting nothing at all - without it, while three of those
+    // fields are frontend-owned identities the daemon has no concept of and must
+    // never be invented. So the click is bracketed by two MEASURED, read-only
+    // reads of the isolated daemon's own session inventory (before the click
+    // here, after it on demand inside the binding), and the binding records which
+    // source settled it (`settledBy`). The reads are bounded and non-mutating
+    // (`handshake` + `listSessions` only): a read that cannot be taken leaves a
+    // typed reason in the evidence rather than failing a run whose receipt
+    // settles the binding on its own.
+    const inventory = createPaneInventoryReader({
+      isolationRoot: ctx.isolationRoot,
+      platform: ctx.platform,
+      evidence,
+      budget: setupBudget,
+      // The settled fixture sessions are excluded from EVERY delta this reader
+      // records (F2-14), so the split step's post-click delta can never report a
+      // fixture (re)created inside the click window as the split's own addition.
+      fixture,
+    });
+    const inventoryBefore = await inventory.snapshot('pane-inventory-before');
+    await driver.newPane(evidence, pid);
+    paneBinding = await bindPaneSession({
+      evidence,
+      barrierHub,
+      fixture,
+      inventory: {
+        before: inventoryBefore,
+        readAfter: () => inventory.snapshot('pane-inventory-after'),
+      },
+      timeoutMs: setupBudget.consume(BUDGETS.paneBindingReadyMs, 'pane binding'),
+    });
+    ctx.paneBinding = paneBinding;
+    // The SAME read-only reader is handed to the split step (task-9 pass-22). The
+    // post-click inventory delta the split step measures is only meaningful
+    // against the reading THIS step just took, so both reads come from one reader
+    // whose own last reading is the baseline - there is no second inventory
+    // implementation, and no caller can compare against a stale or invented one.
+    ctx.paneInventory = inventory;
+  }
+
+  // Every armed barrier must be registered by the product before triggers.
+  for (const barrier of plan.barriers) {
+    await barrierHub.awaitRegistered(barrier, setupBudget.consume(BUDGETS.barrierAckTimeoutMs, `register ${barrier}`));
+  }
+  if (plan.barriers.length > 0) evidence.action({ action: 'barriers.registered', barriers: [...plan.barriers] });
+
+  // Monotonic budget tracker for the MEASURED attempt: it starts at the trigger.
+  // The instrumentation clock hands back the wall clock the measurements inside
+  // this window spend, so the window bounds the scenario's own time rather than the
+  // harness's own observability (pass-22 audit F2-11 residual). It is attached to
+  // the context, which is how the split step's reads reach it.
+  const budget = new MonotonicBudget(BUDGETS.attemptCeilingMs);
+  const instrumentation = new InstrumentationClock({ budget });
+  ctx.instrumentation = instrumentation;
+
+  let scenarioResult;
+  let triggerLabel = 'split-menu-click';
+
+  switch (ctx.scenario) {
+    case 'diagnostic-classifier':
+      triggerLabel = 'diagnostic-classifier';
+      scenarioResult = await runNativeDiagnosticClassifier(ctx, plan, budget);
+      break;
+    case 'split-happy':
+      triggerLabel = 'split-menu-click';
+      scenarioResult = await runSplitHappyScenario(ctx, plan, budget);
+      break;
+    case 'split-attach-stall':
+      triggerLabel = 'split-menu-click';
+      scenarioResult = await runSplitAttachStallScenario(ctx, plan, budget);
+      break;
+    case 'split-cancel':
+      triggerLabel = 'cancel-request';
+      scenarioResult = await runSplitCancelScenario(ctx, plan, budget);
+      break;
+    case 'split-concurrent':
+      triggerLabel = 'split-concurrent-trigger';
+      scenarioResult = await runSplitConcurrentScenario(ctx, plan, budget);
+      break;
+    case 'retained-handover':
+      triggerLabel = 'trigger-handover';
+      scenarioResult = await runRetainedHandoverScenario(ctx, plan, budget);
+      break;
+    case 'handover-abort':
+      triggerLabel = 'trigger-handover-abort';
+      scenarioResult = await runHandoverAbortScenario(ctx, plan, budget);
+      break;
+    case 'suspension-ownership':
+      triggerLabel = 'trigger-suspension-check';
+      scenarioResult = await runSuspensionOwnershipScenario(ctx, plan, budget);
+      break;
+    case 'stale-binding':
+      triggerLabel = 'trigger-stale-binding';
+      scenarioResult = await runStaleBindingScenario(ctx, plan, budget);
+      break;
+    default:
+      throw new HarnessError('INVALID_SCENARIO', `unhandled scenario ${ctx.scenario}`);
+  }
+
+  const accounting = attemptBudgetAccounting({ budget, instrumentation, triggerLabel });
+  if (accounting.exceeded) {
+    throw new HarnessError('ASSERTION_FAILURE', `attempt ${accounting.scenarioMs}ms of the scenario's own time (trigger: ${triggerLabel}) exceeds correctness ceiling ${accounting.ceilingMs}ms; ${accounting.instrumentationMs}ms of instrumentation inside the window is excluded from the ${accounting.attemptMs}ms wall clock`);
+  }
+  evidence.action({
+    action: 'attempt-budget',
+    triggerLabel,
+    attemptMs: accounting.attemptMs,
+    instrumentationMs: accounting.instrumentationMs,
+    scenarioMs: accounting.scenarioMs,
+    ceilingMs: accounting.ceilingMs,
+    ceilingBasis: accounting.ceilingBasis,
+    instrumentation: accounting.samples,
+    warmTargetMs: accounting.scenarioMs <= BUDGETS.warmTargetMs ? 'met' : 'exceeded-reportable',
+  });
+
+  // Release any unreleased barriers
+  for (const barrier of plan.barriers) {
+    try { barrierHub.release(barrier); } catch { /* ignore if already released */ }
+  }
+
+  return {
+    attemptMs: accounting.attemptMs,
+    instrumentationMs: accounting.instrumentationMs,
+    scenarioMs: accounting.scenarioMs,
+    deadlineAt: budget.deadlineAt,
+    triggerLabel,
+    markerRecognition: scenarioResult?.markerRecognition ?? null,
+    scenarioResult,
+    paneBinding,
+    frontend: { url: frontend.url, port: frontend.port, distDir: frontend.distDir, indexBytes: frontend.indexBytes },
+  };
+}
+
+// The finalization pass's barrier-hub archive. It is a named seam so the runner
+// suite can drive exactly what the `finally` block drives: a real `main()` run
+// needs a product binary, so this is the runnable entry point for the behaviour
+// (bounded copy into the run's evidence dir, never fatal). See
+// `archiveBarrierHub` in common-harness.mjs for the contract.
+//
+// Two things this seam owes the run (pass-22 audit D3/D4):
+//   * the registry's own processes travel with the copy, so the archive receipt
+//     can say whether the app was still running when it was taken (the copy is
+//     taken BEFORE the reap, so a stream that stops short of a settlement is not
+//     evidence that the settlement never arrived);
+//   * it NEVER throws. It runs in a `finally`, where a throw would escape
+//     `main()` and destroy the run's own result.json - a diagnostic that cannot
+//     be taken must be reported, never fatal.
+export function archiveRunBarrierHub({ barrierHub, evidence, registry = null } = {}) {
+  try {
+    return archiveBarrierHub(barrierHub?.dir ?? null, evidence?.runDir ?? null, {
+      processes: (registry?.processes ?? []).map(process => ({
+        pid: process.pid,
+        label: process.label,
+        child: process.child ?? null,
+      })),
+    });
+  } catch (error) {
+    // Deliberately touches neither argument: a throw raised while reading them
+    // must not be able to throw a second time from the handler.
+    return {
+      sourceDir: null,
+      dir: null,
+      ok: false,
+      reason: `ARCHIVE_SEAM_FAILED: ${error?.message ?? error}`,
+      filesCopied: [],
+      filesSkipped: [],
+      bytes: 0,
+      truncated: false,
+      maxBytes: BARRIER_ARCHIVE_MAX_BYTES,
+    };
+  }
+}
+
+export async function main(argv) {
+  let invocation;
+  try {
+    invocation = parseInvocation(argv);
+  } catch (error) {
+    console.error(JSON.stringify({ verdict: 'REJECTED-BEFORE-LAUNCH', code: error.code, message: error.message }));
+    return EXIT.invalidInvocation;
+  }
+
+  let context;
+  try {
+    context = preflight(invocation);
+  } catch (error) {
+    console.error(JSON.stringify({ verdict: 'REJECTED-BEFORE-LAUNCH', code: error.code, message: error.message }));
+    return EXIT.invalidInvocation;
+  }
+
+  const { EvidenceWriter, ResourceRegistry, BarrierHub, spawnOwned: spawnOwnedFn } = await import('../lib/qa-scenarios/common-harness.mjs');
+
+  // Pass-4 blocker 1: a Windows run launched from an SSH session lands in
+  // session 0, where the app can never own a visible window. Admission probes
+  // the session before anything else; when an active console session is
+  // reachable it re-runs THIS runner with the unchanged argv inside that
+  // session (scheduled task with /it - the mechanism the verifier proved) and
+  // adopts the delegated exit code, so the delegated run owns
+  // result.json/latest.json and this process writes no verdict of its own. A
+  // session that cannot be reached fails typed, never as a pass.
+  const windowsAdmission = await admitWindowsInteractiveDesktop({ invocation, context, rawArgv: argv });
+  if (windowsAdmission?.mode === 'delegated') {
+    process.stderr.write(`${JSON.stringify({
+      verdict: 'DELEGATED-TO-INTERACTIVE-SESSION',
+      code: null,
+      session: windowsAdmission.evidence?.verdict ?? null,
+      delegated: windowsAdmission.relaunch,
+      // Pass-18: how many scheduled-task attempts the delegation needed before
+      // one executed its own first line, and what each attempt did. The full
+      // ledger is in the evidence dir (windows-interactive-delegation.json);
+      // this line is what the launcher's own log reports.
+      delegation: windowsAdmission.delegation ?? null,
+    })}\n`);
+    if (windowsAdmission.innerStdout) process.stdout.write(windowsAdmission.innerStdout);
+    return windowsAdmission.exitCode;
+  }
+
+  // Review blocker 8: exactly ONE evidence writer, registry, barrier hub and
+  // nonce pair, created here and shared with every callee as fullContext.
+  const runId = `qa-run-${randomUUID()}`;
+  const operationId = `qa-op-${randomUUID()}`;
+  const evidence = new EvidenceWriter(context.evidenceDir, context.scenario);
+  const registry = new ResourceRegistry();
+  const barrierHub = new BarrierHub(context.isolationRoot, { runId, operationId });
+  registry.registerDirectory(context.isolationRoot);
+  // App stdio sink (task-9 pass-12 gap): ALWAYS ON for every app this run
+  // spawns. The runner pipes the child's stdout/stderr and previously drained
+  // neither, so the app's own `[cmd_terminal_spawn] stage=... failed code=...`
+  // lines reached no artifact and the investigation was blind. Both streams now
+  // stream to disk under this run's evidence dir - bounded, capped and closed by
+  // the same cleanup pass - and their paths travel in the `launch.binary` action
+  // and in result.json. This is never gated on an env var a future pass would
+  // have to remember to set.
+  const appStdio = new AppStdioSink(evidence.runDir, { label: 'app' });
+  registry.registerLog(appStdio, 'app-stdio');
+  const fullContext = {
+    ...context,
+    evidence, registry, barrierHub, runId, operationId,
+    evidenceRunDir: evidence.runDir,
+    appStdio,
+    platformPreflight: context.platform,
+    windowsAdmission,
+    windowsRelaunchRecord: readWindowsRelaunchRecord(),
+    spawnOwned: (command, args, options) => spawnOwnedFn(registry, command, args, { stdioSink: appStdio, ...options }),
+  };
+
+  const plan = SCENARIO_PLANS[context.scenario];
+  // Pre-arm BEFORE launch (plan: controls arm before trigger).
+  for (const barrier of plan.barriers) {
+    const targetRole = plan.barrierRoles?.[barrier] ?? BARRIER_ROLES[barrier];
+    barrierHub.prearm(barrier, {
+      plan: `${context.scenario}${plan.invariants ? ` (${plan.invariants.join(',')})` : ''}`,
+      targetRole,
+    });
+  }
+  evidence.action({ action: 'barriers.prearmed', barriers: [...plan.barriers], runId, operationId });
+
+  // Review blocker 6: the evidence pointer binds to the exact runner source
+  // bytes via sourceDigest (carried into latest.json by EvidenceWriter.finish).
+  const sourceDigest = computeSourceDigest(SOURCE_FILES.map(p => join(runnerRoot, p)));
+  const result = {
+    schema: 1,
+    scenario: context.scenario,
+    mode: invocation.headless ? 'headless' : 'native',
+    invocation: { argv: [...context.argv, ...argv] },
+    host: { platform: context.platform, release: context.release, arch: context.arch },
+    binary: { path: context.binary, sha256: context.binarySha256 },
+    sourceDigest,
+    runId,
+    operationId,
+    verdict: 'FAIL',
+    nativeEvidence: invocation.headless ? 'deferred-to-task-10' : null,
+  };
+  let exitCode = EXIT.scenarioFailure;
+
+  try {
+    if (invocation.headless) {
+      const classifierStages = await runHeadlessDiagnosticClassifier(fullContext);
+      Object.assign(result, {
+        verdict: 'DEFERRED-NATIVE',
+        classifierStages,
+        barriers: barrierHub.snapshot(),
+        deferred: { reason: 'headless diagnostic-classifier completed barrier/cleanup checks only', satisfiesTask10: false },
+        nativeEvidence: 'deferred-to-task-10',
+      });
+      exitCode = EXIT.nativeDeferredHeadless;
+    } else {
+      const native = await runNativeScenario(fullContext);
+      Object.assign(result, {
+        verdict: 'PASS',
+        nativeEvidence: 'native-receipt',
+        attemptMs: native.attemptMs,
+        instrumentationMs: native.instrumentationMs,
+        scenarioMs: native.scenarioMs,
+        triggerLabel: native.triggerLabel,
+        deadlineAt: native.deadlineAt,
+        markerRecognition: native.markerRecognition,
+        paneBinding: native.paneBinding,
+        frontend: native.frontend,
+        screenshot: join(evidence.runDir, 'screenshot.png'),
+        barriers: barrierHub.snapshot(),
+        commands: barrierHub.commands,
+      });
+      exitCode = 0;
+    }
+  } catch (error) {
+    const code = error.code ?? 'ASSERTION_FAILURE';
+    const classified = classifyNativeFailure(code);
+    result.verdict = classified.verdict;
+    result.error = { code, message: error.message };
+    exitCode = classified.exitCode;
+  } finally {
+    // Evidence persisted BEFORE temporary roots are unlinked; cleanup.json is
+    // always emitted, including on deliberate assertion failures.
+    //
+    // The barrier hub (`<isolationRoot>/barriers`) is where the product settles
+    // every receipt this run read, and it lives INSIDE the isolation root that
+    // this pass removes - so the whole stream used to be discarded, and in pass
+    // 21 a receipt question ("was `split-create` settled?") had to be answered by
+    // inference from the app's stderr instead of by reading the stream. It is
+    // archived into this run's own evidence dir HERE, before the roots go:
+    // bounded, skip-on-failure, and never fatal to the run.
+    const barrierArchive = archiveRunBarrierHub({ barrierHub, evidence, registry });
+    const receipts = await registry.cleanup();
+    const gate = computeCleanupGate(registry, receipts);
+    // Pass-6: when an isolation root is still held after the forced reap of this
+    // run's own tree, the holder (pid + identity evidence) travels with the
+    // verdict instead of being dropped; the gate itself stays false - a held
+    // root is never reported as a clean teardown.
+    const holders = receipts.flatMap(receipt => (receipt.holders ?? []).map(holder => ({ path: receipt.path, ...holder })));
+    // Review blocker 10: cleanup failures can never ride along a PASS/exit-0.
+    // Exit-code decision (deliberate, not incidental): a cleanup failure forces
+    // verdict FAIL and EXIT.scenarioFailure even when the scenario settled on a
+    // typed code. That is the runner's own documented contract ("the cleanup
+    // gate can still force FAIL"), and the typed identity is not lost - it stays
+    // in result.error.code and in the cleanup receipts - so no new mapping is
+    // invented here.
+    if (!gate.ok) {
+      result.verdict = 'FAIL';
+      result.cleanupGate = { ...gate, gateFailed: true, ...(holders.length > 0 ? { holders } : {}) };
+      exitCode = EXIT.scenarioFailure;
+    } else {
+      result.cleanupGate = { ...gate, gateFailed: false };
+    }
+    result.barriers = barrierHub.snapshot();
+    // The app's own stdout/stderr as drained by the sink: the paths a reader
+    // needs to find the app's log without guessing, plus what the cap did.
+    result.appStdio = appStdioResult(appStdio);
+    // Where the barrier hub's own files were preserved (task-9 pass-22): the
+    // receipt says what was copied, what the byte cap left behind, and why.
+    result.barrierArchive = barrierArchive;
+    evidence.write('cleanup.json', {
+      registered: {
+        processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
+        sockets: registry.sockets,
+        directories: registry.directories,
+        // Per-run app-stdio artifacts (the app's own stdout/stderr), closed by
+        // this same cleanup pass and listed here so cleanup.json names them.
+        logs: registry.logs.map(entry => ({ label: entry.label, ...entry.sink.paths(), maxBytes: entry.sink.maxBytes })),
+        // In-process listeners this run opened (the static frontend server on the
+        // debug binary's devUrl). Closed by this same cleanup pass.
+        servers: registry.servers.map(entry => entry.label),
+      },
+      reaped: registry.reaped,
+      receipts,
+      gate,
+      // The barrier hub as it stood at teardown, preserved before the isolation
+      // root (which contains it) was removed.
+      barrierArchive,
+    });
+    evidence.finish(result);
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+  return exitCode;
+}
+
+// Review M6: exact resolved-path comparison; no basename collision and no
+// win32 separator mismatch.
+export function isEntrypoint(argv1 = process.argv[1], importUrl = import.meta.url) {
+  return Boolean(argv1 && fileURLToPath(importUrl) === resolve(argv1));
+}
+
+if (isEntrypoint()) {
+  process.exitCode = await main(process.argv.slice(2));
+}

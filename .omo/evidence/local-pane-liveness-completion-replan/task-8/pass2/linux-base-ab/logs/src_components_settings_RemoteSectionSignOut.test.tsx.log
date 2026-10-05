@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/components/settings/RemoteSectionSignOut.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042339) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/RemoteSectionSignOut.test.tsx (3 tests | 3 failed) 6ms
+   × RemoteSection Sign-out & Auth Error Handling > handleSignOut calls logoutAccountSession with issuer origin and token, and clears credentials 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection Sign-out & Auth Error Handling > keeps account token when listMachines throws untyped 401 (e.g. gateway error code LIST_MACHINES_FAILED) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × RemoteSection Sign-out & Auth Error Handling > clears account token when listMachines throws structured 401 with code UNAUTHORIZED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > handleSignOut calls logoutAccountSession with issuer origin and token, and clears credentials
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > keeps account token when listMachines throws untyped 401 (e.g. gateway error code LIST_MACHINES_FAILED)
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > clears account token when listMachines throws structured 401 with code UNAUTHORIZED
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/RemoteSectionSignOut.test.tsx:28:18
+     26| 
+     27|   beforeEach(() => {
+     28|     localStorage.clear();
+       |                  ^
+     29|     sessionStorage.clear();
+     30|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > handleSignOut calls logoutAccountSession with issuer origin and token, and clears credentials
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > keeps account token when listMachines throws untyped 401 (e.g. gateway error code LIST_MACHINES_FAILED)
+ FAIL  src/components/settings/RemoteSectionSignOut.test.tsx > RemoteSection Sign-out & Auth Error Handling > clears account token when listMachines throws structured 401 with code UNAUTHORIZED
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/RemoteSectionSignOut.test.tsx:35:18
+     33|   afterEach(() => {
+     34|     globalThis.fetch = originalFetch;
+     35|     localStorage.clear();
+       |                  ^
+     36|     sessionStorage.clear();
+     37|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  10:10:47
+   Duration  1.27s (transform 301ms, setup 100ms, collect 765ms, tests 6ms, environment 223ms, prepare 46ms)
+
+error: script "test" exited with code 1

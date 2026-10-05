@@ -1,0 +1,39 @@
+   Compiling ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri)
+error: failed to run custom build command for `ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-79901ecd268fbbac/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rustc-link-search=native=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/ghostty_vt/lib
+  cargo:rustc-link-lib=static=ghostty-vt
+  cargo:include=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/ghostty_vt/include
+  cargo:ghostty_lib_dir=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/ghostty_vt/lib
+  cargo:ghostty_include_dir=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/ghostty_vt/include
+  cargo:ghostty_sha=6a508fd5e34c7e222c052a6d00bb3891ff3feace
+  cargo:ghostty_zig_version=0.16.0
+  cargo:ghostty_target=x86_64-unknown-linux-gnu
+  cargo:ghostty_zig_target=x86_64-linux-gnu
+  cargo:ghostty_artifact=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/ghostty_vt/lib/libghostty-vt.a
+  cargo:rerun-if-changed=native_terminal/build_ghostty.rs
+  cargo:rerun-if-changed=native_terminal/ghostty_source_lock.json
+  cargo:rerun-if-changed=vendor/ghostty/build.zig
+  cargo:rerun-if-changed=vendor/ghostty/src
+  cargo:rerun-if-changed=vendor/ghostty/include
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=HOST
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.conf.json
+  cargo:rerun-if-changed=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/tauri.linux.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=/home/indo/ferryx-pane-completion/source-5464da0d/src-tauri/target/debug/build/ferryx-75a2083d1c72da5e/out/app-manifest/__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=x86_64-unknown-linux-gnu
+  resource path `../ui/dist` doesn't exist

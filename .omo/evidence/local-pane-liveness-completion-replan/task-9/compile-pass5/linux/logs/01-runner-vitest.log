@@ -1,0 +1,13 @@
+VITEST START 2026-10-05T01:57:44+09:00 load=4.20 3.22 3.11
+$ vitest run --maxWorkers=1 --config ../scripts/qa/pane-liveness-vitest.config.mjs
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/source-21dea3c0
+
+ ✓ scripts/qa/pane-liveness.test.mjs (30 tests) 287ms
+
+ Test Files  1 passed (1)
+      Tests  30 passed (30)
+   Start at  01:57:45
+   Duration  526ms (transform 73ms, setup 0ms, collect 86ms, tests 287ms, environment 0ms, prepare 54ms)
+
+VITEST_EXIT=0

@@ -1,0 +1,20 @@
+{
+  "scenario": "split-attach-stall",
+  "runDir": "C:\\Users\\sook\\ferryx-pane-completion\\task9-757f8414\\evidence\\split-attach-stall\\task-3-harness\\split-attach-stall\\run-677a550d-1c37-4e01-a275-3dc22d6b2404",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "sourceDigest": "b81ab4bec14892db798cf3c255d5465c1edd818fb3773810a72550305f760b3e",
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+    "--scenario",
+    "split-attach-stall",
+    "--binary",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "--evidence-dir",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-757f8414\\evidence\\split-attach-stall",
+    "--isolation-root",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-757f8414\\runtime\\split-attach-stall"
+  ],
+  "finishedAt": "2026-10-04T18:36:24.044Z"
+}

@@ -1,0 +1,35 @@
+$ vitest run --maxWorkers=1 src/lib/shellReplacement.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043436) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/shellReplacement.test.ts (5 tests | 1 failed) 9ms
+   ✓ shell replacement > never replaces an SSH shell or agent (null) 3ms
+   ✓ shell replacement > never replaces an SSH shell or agent (claude) 0ms
+   ✓ shell replacement > replaces an exited local shell session when backendSessionId is still set 1ms
+   ✓ shell replacement > allows replacing an exited agent session when clearAgent is true 0ms
+   × shell replacement > replaces an exited paired shell session with pairedDaemon startup 3ms
+     → Cannot read properties of undefined (reading 'setItem')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/shellReplacement.test.ts > shell replacement > replaces an exited paired shell session with pairedDaemon startup
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/lib/shellReplacement.test.ts:51:18
+     49|   it("replaces an exited paired shell session with pairedDaemon startu…
+     50|     const pairedWs = "daemon:111122223333444455556666777788889999aaaab…
+     51|     localStorage.setItem(
+       |                  ^
+     52|       PROJECTS_STORAGE_KEY,
+     53|       JSON.stringify([
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  10:11:02
+   Duration  599ms (transform 104ms, setup 96ms, collect 92ms, tests 9ms, environment 231ms, prepare 48ms)
+
+error: script "test" exited with code 1

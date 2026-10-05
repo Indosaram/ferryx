@@ -1,0 +1,20 @@
+{
+  "scenario": "split-cancel",
+  "runDir": "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\evidence\\split-cancel\\task-3-harness\\split-cancel\\run-d03ac2a7-47a5-4d92-9e00-840f6aca80c9",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "sourceDigest": "5f1f4f1be536abba5a0379a09745dfc92620ea379316fb9a8a875c4c64afe047",
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+    "--scenario",
+    "split-cancel",
+    "--binary",
+    "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "--evidence-dir",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\evidence\\split-cancel",
+    "--isolation-root",
+    "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\runtime\\split-cancel"
+  ],
+  "finishedAt": "2026-10-04T18:14:34.344Z"
+}

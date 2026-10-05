@@ -1,0 +1,4 @@
+$ tsc && vite build
+src/lib/sessionPersistence.ts(2,33): error TS6133: 'LocalSplitIntent' is declared but its value is never read.
+src/state/workspaceStore.ts(773,22): error TS6133: 'layout' is declared but its value is never read.
+src/state/workspaceStore.ts(2695,38): error TS2304: Cannot find name 'isLegacyUnknown'.

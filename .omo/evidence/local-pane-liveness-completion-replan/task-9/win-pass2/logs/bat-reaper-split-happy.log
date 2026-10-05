@@ -1,0 +1,23 @@
+REAP_OWN_FERRYX PID=23464
+성공: PID 23244인 프로세스(PID 3356인 자식 프로세스)가 종료되었습니다.
+성공: PID 20556인 프로세스(PID 3356인 자식 프로세스)가 종료되었습니다.
+성공: PID 7472인 프로세스(PID 3356인 자식 프로세스)가 종료되었습니다.
+성공: PID 2076인 프로세스(PID 3356인 자식 프로세스)가 종료되었습니다.
+성공: PID 10436인 프로세스(PID 3356인 자식 프로세스)가 종료되었습니다.
+성공: PID 2024인 프로세스(PID 23104인 자식 프로세스)가 종료되었습니다.
+성공: PID 23808인 프로세스(PID 23104인 자식 프로세스)가 종료되었습니다.
+성공: PID 3356인 프로세스(PID 23464인 자식 프로세스)가 종료되었습니다.
+성공: PID 23104인 프로세스(PID 23464인 자식 프로세스)가 종료되었습니다.
+성공: PID 23464인 프로세스(PID 22756인 자식 프로세스)가 종료되었습니다.
+
+REAP_OWN_FERRYX PID=23104
+taskkill : 오류: 프로세스 "23104"을(를) 찾을 수 없습니다.
+위치 C:\Users\sook\ferryx-pane-completion\win-reaper.ps1:9 문자:83
++ ...  PID=" + $p.ProcessId); taskkill /T /F /PID $p.ProcessId 2>&1 | Out-S ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (오류: 프로세스 "23104"을(를) 찾을 수 없습니다.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+REAP_AT=2026-10-05T00:17:04.2170768+09:00
+REAPER_DONE

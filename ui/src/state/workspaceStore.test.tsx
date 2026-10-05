@@ -12,16 +12,29 @@ if (typeof window === "undefined") {
 
 import { StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } from "../lib/types";
 import * as browserTauri from "../lib/browserTauri";
+import { setLocalSplitPersistence } from "../lib/localSplitLifecycle";
+import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 import { createLayoutState } from "./layout";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 const { useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
+
+const durableSessions = new Map<string, TerminalSession>();
+beforeEach(() => {
+  durableSessions.clear();
+  resetNativeTerminalLifecycleForTest();
+  setLocalSplitPersistence(async (session) => {
+    await Promise.resolve();
+    durableSessions.set(session.id, structuredClone(session));
+  });
+});
+afterEach(() => { setLocalSplitPersistence(undefined); });
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -55,6 +68,8 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
   const activeByWorktree = new Map<string, string>();
   const worktreeBySession = new Map<string, string>();
   const exits = new Map<string, ExitDeferred>();
+  const cancelled = new Set<string>();
+  const created = new Map<string, string>();
 
   const getExit = (sessionId: string) => {
     const existing = exits.get(sessionId);
@@ -94,6 +109,47 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
     }),
     waitForTerminalExit: vi.fn(async (sessionId) => {
       await getExit(sessionId).promise;
+    }),
+    splitOperation: vi.fn(async (request) => {
+      await Promise.resolve();
+      if (request.action === "prepare") {
+        return { action: "prepare", prepared: {
+          identity: { requestId: request.requestId, originEpoch: "7", expiresAtUnixMs: Date.now() + 600_000 },
+          workspaceId: request.request.workspaceId, worktree: request.request.worktree,
+          cwd: await services.getTerminalCwd(request.request.inheritFromSessionId ?? "") ?? worktree.path,
+          shell: request.request.shell ?? null, cols: 80, rows: 24,
+        } };
+      }
+      if (request.action === "cancel") {
+        cancelled.add(request.identity.requestId);
+        const backend = created.get(request.identity.requestId);
+        if (backend) await services.closeTerminal(backend);
+        return { action: request.action, operation: { state: "cancelled" } };
+      }
+      const backend = created.get(request.identity.requestId);
+      return { action: request.action, operation: cancelled.has(request.identity.requestId)
+        ? { state: "cancelled" } : backend ? {
+          state: "created", sessionId: backend, daemonEpoch: "7", ownership: "created",
+          session: { sessionId: backend, cwd: await services.getTerminalCwd(backend),
+            cols: 80, rows: 24, running: true, incarnation: `life:${backend}` },
+        } : { state: "absent", canCreate: true } };
+    }),
+    splitCreate: vi.fn(async (request) => {
+      const sessionId = await services.spawnTerminal(request);
+      created.set(request.clientRequestId!, sessionId);
+      if (cancelled.has(request.clientRequestId!)) await services.closeTerminal(sessionId);
+      return { sessionId, daemonEpoch: "7", session: {
+        sessionId, cwd: await services.getTerminalCwd(sessionId), cols: 80, rows: 24,
+        running: !cancelled.has(request.clientRequestId!), incarnation: `life:${sessionId}`,
+      } };
+    }),
+    splitAttach: vi.fn(async (request) => {
+      const sessionId = typeof request === "string" ? request : request.sessionId;
+      const attachTuple = getDurableNativeBinding(sessionId)!;
+      expect(durableSessions.get(attachTuple.frontendSessionId)?.spawnIntent?.attachTuple).toEqual(attachTuple);
+      emitNativeTerminalPresentation(attachTuple);
+      return { sessionId, daemonEpoch: "7", historyStartSequence: null,
+        historyEndSequence: null, history: "", gap: null, attachTuple };
     }),
   };
 
@@ -401,8 +457,13 @@ describe("useWorkspaceStore terminal ownership", () => {
       resolveDeferredSpawn = resolve;
     });
 
+    let notifyCreate!: () => void;
+    const createStarted = new Promise<void>((resolve) => { notifyCreate = resolve; });
     const { services } = createServices();
-    (services.spawnTerminal as any).mockImplementation(async () => deferredSpawnPromise);
+    (services.spawnTerminal as any).mockImplementation(async () => {
+      notifyCreate();
+      return deferredSpawnPromise;
+    });
 
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
     act(() => result.current.restoreWorkspace(restoredSplitState()));
@@ -417,6 +478,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(inFlightLeafId).not.toBe("leaf-2");
 
     await act(async () => {
+      await createStarted;
       await result.current.closePane("tab-primary", inFlightLeafId);
     });
 

@@ -1,0 +1,1607 @@
+$ vitest run --maxWorkers=1 src/components/settings/NotificationsSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1038214) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/NotificationsSection.test.tsx (18 tests | 7 failed) 3571ms
+   ✓ NotificationsSection > never paints non-authoritative permission as authorized and refreshes on return 125ms
+   ✓ NotificationsSection > lets an already-authorized user re-request permission without triggering it on mount or focus 58ms
+   ✓ NotificationsSection > offers no request permission action when notifications are unavailable on this platform 24ms
+   ✓ NotificationsSection > passes the selected system sound mode to the native test notification 27ms
+   × NotificationsSection > passes the selected none sound mode to the native test notification 32ms
+     → expected "spy" to be called with arguments: [ true, 'silent' ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[2m    true,[22m
+[32m-   "silent",[90m
+[31m+   "system",[90m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × NotificationsSection > passes the selected custom sound mode to the native test notification 22ms
+     → expected "spy" to be called with arguments: [ true, 'silent' ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[2m    true,[22m
+[32m-   "silent",[90m
+[31m+   "system",[90m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × NotificationsSection > disables send test notification button when notifications are disabled 23ms
+     → [2mexpect([22m[31melement[39m[2m).toBeDisabled()[22m
+
+Received element is not disabled:
+  [31m<button
+  class="inline-flex items-center justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground hover:bg-primary/90 rounded-md no-drag h-7 shrink-0 gap-1.5 px-2.5 text-[11px] font-medium shadow-sm transition-colors"
+  type="button"
+/>[39m
+   × NotificationsSection > disables browse and preview buttons when notifications are disabled with custom sound 1015ms
+     → Unable to find role="button" and name `/browse/i`
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+   ✓ NotificationsSection > requests permission and probes again when a test notification needs permission 26ms
+   × NotificationsSection > requests permission when the master switch is turned on while authorization is not determined 1024ms
+     → expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<section[39m
+        [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [36m<header[39m
+          [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-bell"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+            [36m</span>[39m
+            [0mNotifications[0m
+          [36m</div>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+          [36m>[39m
+            [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+          [36m</p>[39m
+        [36m</header>[39m
+        [36m<h2[39m
+          [33mclass[39m=[32m"sr-only"[39m
+          [33mid[39m=[32m"settings-notifications-heading"[39m
+        [36m>[39m
+          [0mNotifications[0m
+        [36m</h2>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center justify-between"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-center gap-2"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+              [36m>[39m
+                [0mOS Permission Status:[0m
+              [36m</span>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-warning/20 bg-status-warning/10 text-status-warning"[39m
+                [33mdata-permission-state[39m=[32m"not-determined"[39m
+                [33mdata-testid[39m=[32m"notification-permission-status"[39m
+              [36m>[39m
+                [0mnot-determined[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mRequest Permission[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-6"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<h3[39m
+                [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+              [36m>[39m
+                [0mAlerts & Sounds[0m
+              [36m</h3>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-center gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+                [33mtitle[39m=[32m"Reset to defaults"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                  [36m/>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 3v5h5"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+                [0mReset to defaults[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"border-b border-border"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mEnable Notifications[0m
+           ...
+   ✓ NotificationsSection > shows the structured permission error instead of swallowing it 26ms
+   ✓ NotificationsSection > reports why a test notification did not appear when the OS withholds permission 35ms
+   ✓ NotificationsSection > reports a blocked notification instead of silently doing nothing 28ms
+   ✓ NotificationsSection > does not play the backend sound for the built-in system sound 24ms
+   × NotificationsSection > displays warning when custom sound is selected without a file chosen 1014ms
+     → Unable to find role="alert"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+   × NotificationsSection > persists attentionFrame and fires the settings event when toggling the pane attention border switch 24ms
+     → expected true to be false // Object.is equality
+   ✓ NotificationsSection > renders dock badge off hint on macos when dock badge is disabled 20ms
+   ✓ NotificationsSection > shows registered-capability notice when requesting permission while already authorized 22ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > passes the selected none sound mode to the native test notification
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > passes the selected custom sound mode to the native test notification
+AssertionError: expected "spy" to be called with arguments: [ true, 'silent' ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[2m    true,[22m
+[32m-   "silent",[90m
+[31m+   "system",[90m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/components/settings/NotificationsSection.test.tsx:87:46
+     85|     await act(async () => { render(<NotificationsSection />); });
+     86|     await act(async () => { fireEvent.click(screen.getByRole("button",…
+     87|     expect(native.probeNotificationDelivery).toHaveBeenCalledWith(true…
+       |                                              ^
+     88|   });
+     89| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > disables send test notification button when notifications are disabled
+Error: [2mexpect([22m[31melement[39m[2m).toBeDisabled()[22m
+
+Received element is not disabled:
+  [31m<button
+  class="inline-flex items-center justify-center whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground hover:bg-primary/90 rounded-md no-drag h-7 shrink-0 gap-1.5 px-2.5 text-[11px] font-medium shadow-sm transition-colors"
+  type="button"
+/>[39m
+ ❯ src/components/settings/NotificationsSection.test.tsx:96:24
+     94| 
+     95|     const sendButton = await screen.findByRole("button", { name: /send…
+     96|     expect(sendButton).toBeDisabled();
+       |                        ^
+     97|   });
+     98| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > disables browse and preview buttons when notifications are disabled with custom sound
+TestingLibraryElementError: Unable to find role="button" and name `/browse/i`
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/components/settings/NotificationsSection.test.tsx:108:39
+    106|     render(<NotificationsSection />);
+    107| 
+    108|     const browseButton = await screen.findByRole("button", { name: /br…
+       |                                       ^
+    109|     const previewButton = await screen.findByRole("button", { name: /p…
+    110| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > requests permission when the master switch is turned on while authorization is not determined
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<section[39m
+        [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [36m<header[39m
+          [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-bell"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+            [36m</span>[39m
+            [0mNotifications[0m
+          [36m</div>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+          [36m>[39m
+            [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+          [36m</p>[39m
+        [36m</header>[39m
+        [36m<h2[39m
+          [33mclass[39m=[32m"sr-only"[39m
+          [33mid[39m=[32m"settings-notifications-heading"[39m
+        [36m>[39m
+          [0mNotifications[0m
+        [36m</h2>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center justify-between"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-center gap-2"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+              [36m>[39m
+                [0mOS Permission Status:[0m
+              [36m</span>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-warning/20 bg-status-warning/10 text-status-warning"[39m
+                [33mdata-permission-state[39m=[32m"not-determined"[39m
+                [33mdata-testid[39m=[32m"notification-permission-status"[39m
+              [36m>[39m
+                [0mnot-determined[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mRequest Permission[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-6"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+          [36m>[39m
+            [36m<div>[39m
+              [36m<h3[39m
+                [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+              [36m>[39m
+                [0mAlerts & Sounds[0m
+              [36m</h3>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-center gap-2"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+                [33mtitle[39m=[32m"Reset to defaults"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                  [36m/>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 3v5h5"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+                [0mReset to defaults[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"border-b border-border"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"space-y-0.5 max-w-[480px]"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-[13px] font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mEnable Notifications[0m
+           ...
+ ❯ src/components/settings/NotificationsSection.test.tsx:148:52
+    146| 
+    147|     await waitFor(() => {
+    148|       expect(native.requestNotificationPermission).toHaveBeenCalledTim…
+       |                                                    ^
+    149|     });
+    150|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > displays warning when custom sound is selected without a file chosen
+TestingLibraryElementError: Unable to find role="alert"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33maria-labelledby[39m=[32m"settings-notifications-heading"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"mb-8 border-b border-border pb-5"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-2 flex items-center gap-2 text-[15px] font-semibold"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"text-muted-foreground [&>svg]:size-4"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-bell"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M10.268 21a2 2 0 0 0 3.464 0"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</span>[39m
+          [0mNotifications[0m
+        [36m</div>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"max-w-2xl text-[12px] leading-5 text-muted-foreground"[39m
+        [36m>[39m
+          [0mConfigure desktop alerts, audio feedback, and agent completion triggers.[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<h2[39m
+        [33mclass[39m=[32m"sr-only"[39m
+        [33mid[39m=[32m"settings-notifications-heading"[39m
+      [36m>[39m
+        [0mNotifications[0m
+      [36m</h2>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"text-card-foreground shadow mb-6 rounded-lg border border-border bg-card p-4"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex items-center justify-between"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"text-[12px] font-medium text-muted-foreground"[39m
+            [36m>[39m
+              [0mOS Permission Status:[0m
+            [36m</span>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"inline-flex items-center rounded-md border transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 gap-1 px-2 py-0.5 text-[11px] font-medium border-status-success/20 bg-status-success/10 text-status-success"[39m
+              [33mdata-permission-state[39m=[32m"authorized"[39m
+              [33mdata-testid[39m=[32m"notification-permission-status"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-circle-check size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"m9 12 2 2 4-4"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mauthorized[0m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 underline-offset-4 rounded-md h-auto p-0 text-[11px] text-primary hover:underline"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mRequest Permission[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"mb-6"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"mb-4 flex items-center justify-between border-b border-border pb-3"[39m
+        [36m>[39m
+          [36m<div>[39m
+            [36m<h3[39m
+              [33mclass[39m=[32m"text-[13px] font-semibold text-foreground"[39m
+            [36m>[39m
+              [0mAlerts & Sounds[0m
+            [36m</h3>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"flex items-center gap-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background shadow-sm rounded-md no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+              [33mtitle[39m=[32m"Reset to defaults"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-rotate-ccw size-3"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3v5h5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [0mReset to defaults[0m
+        ...
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/components/settings/NotificationsSection.test.tsx:225:32
+    223|     render(<NotificationsSection />);
+    224| 
+    225|     const alert = await screen.findByRole("alert");
+       |                                ^
+    226|     expect(alert).toHaveTextContent("Choose an audio file to enable th…
+    227|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯
+
+ FAIL  src/components/settings/NotificationsSection.test.tsx > NotificationsSection > persists attentionFrame and fires the settings event when toggling the pane attention border switch
+AssertionError: expected true to be false // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- false[39m
+[31m+ true[39m
+
+ ❯ src/components/settings/NotificationsSection.test.tsx:247:57
+    245|       fireEvent.click(toggle);
+    246| 
+    247|       expect(loadNotificationSettings().attentionFrame).toBe(false);
+       |                                                         ^
+    248|       expect(eventFiredWith).not.toBeNull();
+    249|       expect(eventFiredWith.attentionFrame).toBe(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed | 11 passed (18)
+   Start at  10:09:50
+   Duration  4.61s (transform 138ms, setup 111ms, collect 525ms, tests 3.57s, environment 228ms, prepare 47ms)
+
+error: script "test" exited with code 1

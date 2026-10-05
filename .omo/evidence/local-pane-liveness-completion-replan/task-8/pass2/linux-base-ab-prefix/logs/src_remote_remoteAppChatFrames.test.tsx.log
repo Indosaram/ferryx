@@ -1,0 +1,104 @@
+$ vitest run --maxWorkers=1 src/remote/remoteAppChatFrames.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036071) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/remoteAppChatFrames.test.tsx (13 tests | 13 failed) 9ms
+   × remoteAppChatFrames > renders the conversation from the agent-history API, one bubble per turn 4ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > terminal output never becomes a chat message 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > a missing transcript renders a quiet empty state, not an error 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > the terminal socket is still opened for input and the running signal 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > the poll appends only new turns without duplicating or dropping earlier ones 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > a response carrying partial: true and a non-null nextCursor must NOT cause a backwards request 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > switching sessions does not retain the previous conversation 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > an optimistic prompt from the previous session does not leak into the new one 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > an optimistic prompt sent after switching sessions survives the new session's polls 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > switching sessions does not carry the running state into the new session 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > distinguishes composition: toolResult records belong in worked-for disclosure rather than assistant message bodies 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > drops assistant records with empty text so they do not render empty bubbles 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × remoteAppChatFrames > derives worked-for duration from record timestamps across toolResults and assistant turn 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > renders the conversation from the agent-history API, one bubble per turn
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > terminal output never becomes a chat message
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > a missing transcript renders a quiet empty state, not an error
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > the terminal socket is still opened for input and the running signal
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > the poll appends only new turns without duplicating or dropping earlier ones
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > a response carrying partial: true and a non-null nextCursor must NOT cause a backwards request
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > switching sessions does not retain the previous conversation
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > an optimistic prompt from the previous session does not leak into the new one
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > an optimistic prompt sent after switching sessions survives the new session's polls
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > switching sessions does not carry the running state into the new session
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > distinguishes composition: toolResult records belong in worked-for disclosure rather than assistant message bodies
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > drops assistant records with empty text so they do not render empty bubbles
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > derives worked-for duration from record timestamps across toolResults and assistant turn
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/remote/remoteAppChatFrames.test.tsx:106:18
+    104|     originalInnerWidth = window.innerWidth;
+    105|     StubWebSocket.instances = [];
+    106|     localStorage.setItem("ferryx_remote_token", "test-token");
+       |                  ^
+    107|     vi.stubGlobal("WebSocket", StubWebSocket);
+    108|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/26]⎯
+
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > renders the conversation from the agent-history API, one bubble per turn
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > terminal output never becomes a chat message
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > a missing transcript renders a quiet empty state, not an error
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > the terminal socket is still opened for input and the running signal
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > the poll appends only new turns without duplicating or dropping earlier ones
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > a response carrying partial: true and a non-null nextCursor must NOT cause a backwards request
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > switching sessions does not retain the previous conversation
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > an optimistic prompt from the previous session does not leak into the new one
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > an optimistic prompt sent after switching sessions survives the new session's polls
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > switching sessions does not carry the running state into the new session
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > distinguishes composition: toolResult records belong in worked-for disclosure rather than assistant message bodies
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > drops assistant records with empty text so they do not render empty bubbles
+ FAIL  src/remote/remoteAppChatFrames.test.tsx > remoteAppChatFrames > derives worked-for duration from record timestamps across toolResults and assistant turn
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/remoteAppChatFrames.test.tsx:113:18
+    111|     Object.defineProperty(window, "innerWidth", { value: originalInner…
+    112|     cleanup();
+    113|     localStorage.clear();
+       |                  ^
+    114|     vi.unstubAllGlobals();
+    115|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/26]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed (13)
+   Start at  10:09:12
+   Duration  1.24s (transform 295ms, setup 95ms, collect 736ms, tests 9ms, environment 218ms, prepare 48ms)
+
+error: script "test" exited with code 1

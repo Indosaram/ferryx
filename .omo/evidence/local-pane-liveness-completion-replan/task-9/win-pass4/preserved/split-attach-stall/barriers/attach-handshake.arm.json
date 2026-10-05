@@ -1,0 +1,8 @@
+{
+  "name": "attach-handshake",
+  "runId": "qa-run-73f69e58-6ab9-427a-a68c-a7b44509c2cd",
+  "operationId": "qa-op-c5f82297-f654-4754-88c2-11134bc79c3b",
+  "deadlineMs": 15000,
+  "plan": "split-attach-stall",
+  "armedAt": "2026-10-04T16:37:30.294Z"
+}

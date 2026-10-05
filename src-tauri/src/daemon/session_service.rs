@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
@@ -64,6 +65,7 @@ pub(crate) struct MachineSpawn {
     pub check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
+tokio::task_local! { static LOCAL_SPLIT_SPAWN: tokio::time::Instant; }
 
 #[derive(Clone)]
 pub(super) struct SpawnCacheEntry {
@@ -342,6 +344,7 @@ pub struct DaemonSessionService {
     pub(super) handover_manager: Weak<super::handover::HandoverManager>,
     pub(super) remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     pub(super) spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
+    pub(super) split_admission: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(super) spawn_lock: Arc<tokio::sync::Mutex<()>>,
     /// Sole authority shared by socket replacement, input, resize and HTTP close.
     pub(crate) machine_controllers: tokio::sync::Mutex<HashMap<String, MachineController>>,
@@ -356,6 +359,259 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub(crate) fn admission_time_unix_ms(&self) -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    }
+
+    pub(crate) async fn split_status(
+        &self,
+        request_id: &str,
+        origin_epoch: u64,
+        current_epoch: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        let root = self.split_root();
+        let key = Self::split_key(request_id, origin_epoch);
+        let now = self.admission_time_unix_ms();
+        let operation = crate::ipc::run_blocking(move || {
+            use crate::daemon::protocol::{SplitOperationResult as R, SplitUnknownReason};
+            let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                .map_err(crate::ipc::IpcError::internal)?;
+            if cancellations.load(&key).map_err(crate::ipc::IpcError::internal)?.is_some() {
+                return Ok(R::Cancelled);
+            }
+            let mut reserved = false;
+            if root.exists() {
+                for scope in fs::read_dir(&root).map_err(crate::ipc::IpcError::internal)? {
+                    let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                    if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                    let journal = super::split_journal::SplitJournal::open(&scope.path())
+                        .map_err(crate::ipc::IpcError::internal)?;
+                    if let Some(record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                        reserved = true;
+                        if let Some(outcome) = record.outcome {
+                            return Ok(outcome);
+                        }
+                    }
+                }
+            }
+            if reserved {
+                return Ok(R::Unknown { reason: SplitUnknownReason::PublicationUncertain });
+            }
+            if origin_epoch != current_epoch {
+                return Ok(R::Unknown { reason: SplitUnknownReason::EpochChanged });
+            }
+            Ok(R::Absent { can_create: expires_at_unix_ms > now })
+        }).await?;
+        if let crate::daemon::protocol::SplitOperationResult::Created {
+            session_id, session: recorded, ownership, ..
+        } = &operation {
+            match self.handle_describe_session(session_id) {
+                DaemonResponse::DescribeSessionOk { session }
+                    if recorded.incarnation.is_some() && recorded.incarnation == session.incarnation
+                        && recorded.workspace_id == session.workspace_id && recorded.worktree == session.worktree =>
+                {
+                    let rebound = crate::daemon::protocol::SplitOperationResult::Created {
+                        session_id: session_id.clone(), daemon_epoch: current_epoch, session,
+                        ownership: *ownership,
+                    };
+                    let root = self.split_root();
+                    let key = Self::split_key(request_id, origin_epoch);
+                    let outcome = rebound.clone();
+                    let cancelled = crate::ipc::run_blocking(move || {
+                        let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                            .map_err(crate::ipc::IpcError::internal)?;
+                        if cancellations.load(&key).map_err(crate::ipc::IpcError::internal)?.is_some() {
+                            return Ok(true);
+                        }
+                        for scope in fs::read_dir(root).map_err(crate::ipc::IpcError::internal)? {
+                            let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                            if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                            let journal = super::split_journal::SplitJournal::open(&scope.path())
+                                .map_err(crate::ipc::IpcError::internal)?;
+                            if let Some(mut record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                                record.outcome = Some(outcome.clone());
+                                journal.upsert(&record).map_err(crate::ipc::IpcError::internal)?;
+                            }
+                        }
+                        Ok(false)
+                    }).await?;
+                    if cancelled { return Ok(crate::daemon::protocol::SplitOperationResult::Cancelled); }
+                    return Ok(rebound);
+                }
+                _ => return Ok(crate::daemon::protocol::SplitOperationResult::Unknown {
+                    reason: crate::daemon::protocol::SplitUnknownReason::PublicationUncertain,
+                }),
+            }
+        }
+        Ok(operation)
+    }
+
+    fn split_root(&self) -> PathBuf {
+        self.remote_sessions_path.with_file_name("local-split-operations")
+    }
+
+    fn split_key(request: &str, epoch: u64) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{epoch}-{:x}", Sha256::digest(request.as_bytes()))
+    }
+
+    fn split_workspace_dir(&self, workspace: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        self.split_root().join(format!("{:x}", Sha256::digest(workspace.as_bytes())))
+    }
+
+    pub(crate) async fn create_split(
+        &self, request_id: &str, workspace: &str, worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>, cols: u16, rows: u16, shell: Option<String>,
+        envelope: crate::daemon::protocol::LocalSplitEnvelope, current_epoch: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        use crate::daemon::protocol::{SplitOperationResult as R, SplitUnknownReason};
+        if envelope.origin_epoch != current_epoch {
+            return Ok(R::Unknown { reason: SplitUnknownReason::EpochChanged });
+        }
+        if crate::ssh::projects::is_remote(workspace) {
+            return Err(crate::ipc::IpcError::internal("Local split cannot target an SSH workspace"));
+        }
+        let gate = self.split_admission.lock().entry(workspace.into())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(
+            envelope.remaining_ms.min(crate::daemon::protocol::STAGE_CREATE_OR_STATUS_MAX_MS));
+        let _guard = tokio::time::timeout_at(deadline, gate.lock_owned()).await
+            .map_err(|_| crate::ipc::IpcError::internal("Local split admission budget exhausted"))?;
+        let fingerprint = serde_json::to_string(&(workspace, &worktree, &cwd, cols, rows, &shell))
+            .map_err(crate::ipc::IpcError::internal)?;
+        let request_directory = self.split_root().join("requests");
+        let request_key = Self::split_key(request_id, current_epoch);
+        let expected_fingerprint = fingerprint.clone();
+        crate::ipc::run_blocking(move || {
+            let journal = super::split_journal::SplitJournal::open(&request_directory)
+                .map_err(crate::ipc::IpcError::internal)?;
+            if let Some(previous) = journal.load(&request_key).map_err(crate::ipc::IpcError::internal)? {
+                if previous.fingerprint != expected_fingerprint {
+                    return Err(crate::ipc::IpcError::spawn_request_conflict(
+                        "Split request identity was reused with different parameters"));
+                }
+            }
+            Ok(())
+        }).await?;
+        let previous = self.split_status(request_id, envelope.origin_epoch, current_epoch,
+            envelope.expires_at_unix_ms).await?;
+        if !matches!(previous, R::Absent { can_create: true }) { return Ok(previous); }
+        if deadline <= tokio::time::Instant::now() {
+            return Err(crate::ipc::IpcError::internal("Local split create budget exhausted"));
+        }
+        let directory = self.split_workspace_dir(workspace);
+        let key = Self::split_key(request_id, current_epoch);
+        let mut entry = super::split_journal::SplitJournalEntry {
+            request_id: key.clone(),
+            fingerprint,
+            expires_at_unix_ms: envelope.expires_at_unix_ms, session_id: None,
+            cancel_requested: false, tombstone: false, outcome: None,
+        };
+        let begin_dir = self.split_root().join("requests");
+        let begin_entry = entry.clone();
+        let reserved = crate::ipc::run_blocking(move || {
+            super::split_journal::SplitJournal::open(&begin_dir)
+                .and_then(|journal| journal.begin(&begin_entry)).map_err(crate::ipc::IpcError::internal)
+        }).await?;
+        if !reserved {
+            return self.split_status(request_id, current_epoch, current_epoch,
+                envelope.expires_at_unix_ms).await;
+        }
+        let workspace_directory = directory.clone();
+        let workspace_entry = entry.clone();
+        crate::ipc::run_blocking(move || {
+            super::split_journal::SplitJournal::open(&workspace_directory)
+                .and_then(|journal| journal.upsert(&workspace_entry))
+                .map_err(crate::ipc::IpcError::internal)
+        }).await?;
+        let result = LOCAL_SPLIT_SPAWN.scope(deadline, self.handle_spawn(
+            request_id, workspace, worktree, cwd, cols, rows, shell,
+            None, #[cfg(test)] None)).await;
+        entry.outcome = Some(match result {
+            Ok(session_id) => {
+                entry.session_id = Some(session_id.clone());
+                match self.handle_describe_session(&session_id) {
+                    DaemonResponse::DescribeSessionOk { session } => R::Created {
+                        session_id, daemon_epoch: current_epoch, session,
+                        ownership: crate::daemon::protocol::SplitOwnership::Created,
+                    },
+                    _ => R::Unknown { reason: SplitUnknownReason::PublicationUncertain },
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Split creation requires authoritative reconciliation");
+                R::Unknown { reason: SplitUnknownReason::PublicationUncertain }
+            },
+        });
+        let cancellation_root = self.split_root().join("cancelled");
+        let request_root = self.split_root().join("requests");
+        let publish = entry.clone();
+        let cancelled = crate::ipc::run_blocking(move || {
+            let journal = super::split_journal::SplitJournal::open(&directory)
+                .map_err(crate::ipc::IpcError::internal)?;
+            journal.upsert(&publish).map_err(crate::ipc::IpcError::internal)?;
+            super::split_journal::SplitJournal::open(&request_root)
+                .and_then(|journal| journal.upsert(&publish))
+                .map_err(crate::ipc::IpcError::internal)?;
+            let cancelled = super::split_journal::SplitJournal::open(&cancellation_root)
+                .map_err(crate::ipc::IpcError::internal)?.load(&key)
+                .map_err(crate::ipc::IpcError::internal)?.is_some();
+            Ok(cancelled)
+        }).await?;
+        if cancelled {
+            return self.cancel_split(request_id, current_epoch, current_epoch).await;
+        }
+        entry.outcome.ok_or_else(|| crate::ipc::IpcError::internal("Split outcome missing"))
+    }
+
+    pub(crate) async fn cancel_split(
+        &self,
+        request_id: &str,
+        origin_epoch: u64,
+        current_epoch: u64,
+    ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        if origin_epoch != current_epoch {
+            let status = self.split_status(request_id, origin_epoch, current_epoch, 0).await?;
+            if !matches!(status, crate::daemon::protocol::SplitOperationResult::Created { .. }
+                | crate::daemon::protocol::SplitOperationResult::Cancelled)
+            { return Ok(status); }
+        }
+        let root = self.split_root();
+        let key = Self::split_key(request_id, origin_epoch);
+        // Publish intent first, including cancel-before-create. Creation checks this
+        // fence again after publication and closes only its own returned child.
+        let owned = crate::ipc::run_blocking(move || {
+            let cancellations = super::split_journal::SplitJournal::open(&root.join("cancelled"))
+                .map_err(crate::ipc::IpcError::internal)?;
+            cancellations.tombstone(&key, "").map_err(crate::ipc::IpcError::internal)?;
+            let mut owned = Vec::new();
+            for scope in fs::read_dir(root).map_err(crate::ipc::IpcError::internal)? {
+                let scope = scope.map_err(crate::ipc::IpcError::internal)?;
+                if !scope.file_type().map_err(crate::ipc::IpcError::internal)?.is_dir() { continue; }
+                let journal = super::split_journal::SplitJournal::open(&scope.path())
+                    .map_err(crate::ipc::IpcError::internal)?;
+                if let Some(record) = journal.load(&key).map_err(crate::ipc::IpcError::internal)? {
+                    if let Some(session) = record.session_id { owned.push(session); }
+                    journal.tombstone(&key, &record.fingerprint).map_err(crate::ipc::IpcError::internal)?;
+                }
+            }
+            Ok(owned)
+        }).await?;
+        let mut owned = owned;
+        owned.sort_unstable();
+        owned.dedup();
+        for session_id in owned {
+            if self.session_metadata.read().get(&session_id)
+                .is_some_and(|meta| meta.client_request_id == request_id)
+            {
+                self.handle_close(&session_id).await.map_err(crate::ipc::IpcError::internal)?;
+            }
+        }
+        Ok(crate::daemon::protocol::SplitOperationResult::Cancelled)
+    }
+
     pub(crate) fn subscribe_agent_states(&self, session_id: &str) -> crate::daemon::agent_state::AgentStateSubscription {
         self.agent_states.subscribe(session_id)
     }
@@ -1298,6 +1554,9 @@ impl DaemonSessionService {
 
     pub(super) async fn spawn_remote(
         &self,
+        // Held for the whole remote spawn so the handover gate covers a remote
+        // registered-session lifecycle exactly as it covers a local one.
+        _spawn_owner: Option<&super::handover::SpawnOwnerGuard>,
         project: crate::ssh::projects::RemoteProject,
         host: crate::ssh::SshHost,
         request: &str,
@@ -1522,15 +1781,17 @@ impl DaemonSessionService {
                 probe("sessionBeforeSpawnGate");
             }
         }
-        let _spawn_guard = if let Some(machine) = &machine {
-            tokio::time::timeout_at(
+        let _spawn_guard = if LOCAL_SPLIT_SPAWN.try_with(|_| ()).is_ok() {
+            None
+        } else if let Some(machine) = &machine {
+            Some(tokio::time::timeout_at(
                 tokio::time::Instant::from_std(machine.deadline),
                 Arc::clone(&self.spawn_lock).lock_owned(),
             )
             .await
-            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?
+            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?)
         } else {
-            Arc::clone(&self.spawn_lock).lock_owned().await
+            Some(Arc::clone(&self.spawn_lock).lock_owned().await)
         };
 
         let (_spawn_guard, previous) = if let Some(machine) = &machine {
@@ -1616,9 +1877,36 @@ impl DaemonSessionService {
             return Ok(live_session_id);
         }
 
+        // Claim the in-flight spawn slot for the whole registered-session lifecycle so a
+        // handover cannot commit over a spawn that is still creating its session.
+        //
+        // Ordering is load-bearing: the claim sits *below* the idempotency-cache replay
+        // and the machine `previous`-record replay above, and below the live-session
+        // metadata replay just above. A retry of an already-created spawn is not a new
+        // session, so it must still return the session it already created even while a
+        // handover is prepared; taking the claim any earlier turns that retry into a
+        // HANDOVER_BUSY failure and breaks the idempotency contract. Only a request that
+        // is actually about to create a session takes the claim.
+        //
+        // A manager that is merely prepared (not draining) refuses the claim, which is
+        // exactly the HANDOVER_BUSY gate `prepare_handover`, `commit_handover_v4` and
+        // `commit_handover_v5` read. An absent manager (fixtures with no handover owner)
+        // keeps the previous permissive behavior instead of refusing every spawn.
+        let spawn_owner = self
+            .handover_manager
+            .upgrade()
+            .map(|manager| manager.retain_spawn_owner())
+            .transpose()
+            .map_err(|_| {
+                SpawnError::Other(
+                    "Daemon handover is in progress and does not accept new sessions".into(),
+                )
+            })?;
+
         if let Some((project, host)) = remote {
             return self
                 .spawn_remote(
+                    spawn_owner.as_ref(),
                     project,
                     host,
                     client_request_id,
@@ -1669,24 +1957,27 @@ impl DaemonSessionService {
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
         let max_machine_sessions = self.max_machine_sessions();
+        let split_deadline = LOCAL_SPLIT_SPAWN.try_with(|deadline| (*deadline).into_std()).ok();
         crate::ipc::run_blocking(move || {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
-            let deadline = machine.as_ref().map(|m| m.deadline);
+            let deadline = split_deadline.or_else(|| machine.as_ref().map(|m| m.deadline));
             let _workspace_gate = match deadline {
                 Some(deadline) => workspace_gate
                     .try_lock_until(deadline)
                     .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_gate.lock(),
             };
-            let _gate = match deadline {
+            let _gate = if split_deadline.is_some() {
+                None
+            } else { Some(match deadline {
                 Some(deadline) => workspace_service
                     .mutation_gate
                     .try_lock_until(deadline)
                     .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_service.mutation_gate.lock(),
-            };
+            }) };
             let result = (|| -> Result<_, SpawnError> {
                 if let Some(machine) = &machine {
                     (machine.check)()?;
@@ -2332,6 +2623,18 @@ impl DaemonSessionService {
                     end_sequence,
                     last_output_age_ms: None,
                     suspended: false,
+                    // Remote-owned session: its reader/kernel state is not observable from this
+                    // daemon, so these stay unobserved rather than guessed false.
+                    reader_paused: None,
+                    kernel_stopped: None,
+                    registry_suspended: None,
+                    suspension_source: None,
+                    // The remote session's own creation identity: minted by the runtime at spawn,
+                    // persisted with the descriptor, and never shared with a replacement session.
+                    // Reporting `None` here left the attach fence unable to prove identity, so
+                    // remote attach was rejected as unprovable (`Attach binding incarnation cannot
+                    // be proven`, ipc/terminal.rs).
+                    incarnation: Some(d.client_request_id.clone()),
                 },
             };
         }
@@ -2343,6 +2646,10 @@ impl DaemonSessionService {
                     .session_sequence_range(session_id)
                     .unwrap_or((None, None));
                 let running = self.terminal_service.paired().contains(session_id);
+                // The proxy actor's own lifetime incarnation. Reporting `None` here left the
+                // attach fence unable to prove identity, so every paired attach was rejected as
+                // unprovable (`Attach binding incarnation cannot be proven`, ipc/terminal.rs).
+                let incarnation = self.terminal_service.paired().session_incarnation(session_id);
                 return DaemonResponse::DescribeSessionOk {
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
@@ -2356,6 +2663,12 @@ impl DaemonSessionService {
                         end_sequence,
                         last_output_age_ms: None,
                         suspended: false,
+                        // Remote-owned session: not observable from this daemon (see the paired arm).
+                        reader_paused: None,
+                        kernel_stopped: None,
+                        registry_suspended: None,
+                        suspension_source: None,
+                        incarnation,
                     },
                 };
             }
@@ -2414,7 +2727,129 @@ impl DaemonSessionService {
                     || (cfg!(windows)
                         && self.terminal_service.process_state(session_id)
                             == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended)),
+                // Observed from the live PTY session. The presentation-recovery verdict needs
+                // real reader/kernel facts, and this arm has the session in hand.
+                reader_paused: Some(pty_session.is_reader_paused()),
+                kernel_stopped: Some(pty_session.process_stopped()),
+                registry_suspended: None,
+                suspension_source: None,
+                incarnation: pty_session.incarnation().map(str::to_owned),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::server::DaemonServer;
+    use crate::remote::machine_protocol::RemoteTerminalTarget;
+    use crate::scoped_contracts::Epoch;
+    use crate::terminal::output_hub::TerminalOutputHub;
+    use crate::terminal::paired_daemon::{Descriptor, Proxy};
+
+    #[tokio::test]
+    async fn local_split_reliability_conflicting_fingerprint_reuse_is_rejected_without_creating_a_session() {
+        let server = DaemonServer::new();
+        let service = server.session_service();
+        let request_id = "conflict-fingerprint-request";
+        let epoch = 7u64;
+
+        let requests_dir = service.split_root().join("requests");
+        let key = DaemonSessionService::split_key(request_id, epoch);
+        let seeded = crate::daemon::split_journal::SplitJournalEntry {
+            request_id: key.clone(),
+            fingerprint: "fingerprint-from-a-different-parameter-set".to_string(),
+            expires_at_unix_ms: 0,
+            session_id: None,
+            cancel_requested: false,
+            tombstone: false,
+            outcome: None,
+        };
+        crate::daemon::split_journal::SplitJournal::open(&requests_dir)
+            .expect("open the requests journal")
+            .upsert(&seeded)
+            .expect("seed the conflicting record");
+
+        let envelope = crate::daemon::protocol::LocalSplitEnvelope {
+            origin_epoch: epoch,
+            expires_at_unix_ms: 0,
+            remaining_ms: 5_000,
+        };
+        let error = service
+            .create_split(
+                request_id, "ws-conflict-fingerprint", None, None, 80, 24, None,
+                envelope, epoch,
+            )
+            .await
+            .expect_err("a reused request identity with different parameters must be rejected");
+
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::SpawnRequestConflict);
+    }
+
+    /// The paired describe branch must report the proxy actor's own incarnation, because the
+    /// attach fence in `ipc/terminal.rs` proves identity by comparing exactly that value with the
+    /// binding's. Reporting `None` (the previous behaviour) made remote/paired attach impossible:
+    /// every attach was rejected with `Attach binding incarnation cannot be proven`.
+    #[tokio::test]
+    async fn paired_describe_reports_the_incarnation_the_attach_fence_proves() {
+        let server = DaemonServer::new();
+        let descriptor = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "describe-incarnation-machine".into(),
+                daemon_epoch: Epoch(10),
+                session_id: "describe-incarnation-session".into(),
+            },
+            after_sequence: None,
+        };
+        let proxy = Proxy::new(descriptor, Arc::new(TerminalOutputHub::new(32)))
+            .expect("proxy construction");
+        let session_id = server
+            .terminal_service()
+            .paired()
+            .install(proxy)
+            .expect("install paired proxy");
+
+        let describe = |session_id: &str| match server.session_service().handle_describe_session(session_id) {
+            DaemonResponse::DescribeSessionOk { session } => session,
+            other => panic!("a paired session must describe: {other:?}"),
+        };
+
+        let first = describe(&session_id);
+        let incarnation = first
+            .incarnation
+            .clone()
+            .expect("a paired describe must report an incarnation");
+        assert!(!incarnation.is_empty(), "an incarnation must be a real value");
+        assert_eq!(
+            Some(incarnation.clone()),
+            server
+                .terminal_service()
+                .paired()
+                .session_incarnation(&session_id),
+            "the reported incarnation must be the proxy actor's own identity"
+        );
+
+        // Stable for the session's lifetime: a second describe answers the same identity, so the
+        // binding the frontend persisted from the attach response keeps proving identity.
+        assert_eq!(
+            describe(&session_id).incarnation,
+            Some(incarnation),
+            "the incarnation must not change while the actor owns the session"
+        );
+
+        // Once the actor is gone the branch reports no incarnation, so a stale binding cannot pass
+        // the fence and the caller must reattach and re-bind.
+        server
+            .terminal_service()
+            .paired()
+            .force_reap_owner(&session_id);
+        assert_eq!(
+            describe(&session_id).incarnation,
+            None,
+            "a session with no live proxy actor must not report an incarnation"
+        );
     }
 }
