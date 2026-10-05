@@ -929,6 +929,10 @@ async fn ssh_bridge_live_loopback_openssh_connection() {
                     "--nocapture",
                 ])
                 .env(LOOPBACK_SSH_FIXTURE, &sshd.root)
+                // The bridge supervises its transport by re-entering this test binary's ignored
+                // supervisor entry; without the marker `Owner::prepare` refuses to supervise, and
+                // a libtest process never dispatches `run_supervisor_mode` from a main of its own.
+                .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
                 .env("PATH", std::env::join_paths(paths).expect("join PATH"))
                 .kill_on_drop(true)
                 .output(),

@@ -1,7 +1,7 @@
 use super::*;
 use crate::remote::state::{
-    set_test_overlay_proof_override, InterfaceResolver, RemoteGatewayState, RemoteNetworkMode,
-    SystemInterfaceResolver,
+    set_test_overlay_proof_override, test_local_cgnat_address, InterfaceResolver,
+    RemoteGatewayState, RemoteNetworkMode,
 };
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use crate::worktree::WorkspaceRegistry;
@@ -50,13 +50,12 @@ use super::DIRECT_GATE_TEST_MUTEX;
 
 /// A bindable CGNAT address for the overlay gate tests.
 ///
-/// CI provisions a loopback alias (`sudo ifconfig lo0 alias 100.64.1.2`); a workstation with an
-/// active Tailscale interface resolves its own address. The overlay *proof* is injected by
-/// [`OverlayProofGuard`], so neither path needs the Tailscale CLI on PATH.
+/// The overlay *proof* is injected by [`OverlayProofGuard`], so this needs an address the VM
+/// actually owns, not the Tailscale CLI: CI provisions `100.64.1.2` as a loopback alias.
 fn overlay_test_address() -> Ipv4Addr {
-    SystemInterfaceResolver.tailscale_address().unwrap_or_else(|error| {
+    test_local_cgnat_address().unwrap_or_else(|| {
         panic!(
-            "overlay gate tests need a bindable CGNAT address ({error}); \
+            "overlay gate tests need a bindable CGNAT address; \
              provision one with: sudo ifconfig lo0 alias 100.64.1.2"
         )
     })
