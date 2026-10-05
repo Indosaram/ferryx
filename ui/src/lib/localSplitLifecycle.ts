@@ -170,6 +170,13 @@ export class LocalSplitLifecycle {
           remainingMs: Math.max(0, deadline - now),
           delivery: session?.backendSessionId ? "confirmed" : this.intent.createSent ? "ambiguous" : "notSent",
           errorCode: error === undefined ? null : toIpcError(error).code,
+          // The Rust sink keeps only allowlisted detail keys, and `nested` is one of them, so the
+          // failure message rides there. Without it a rejection whose value is not a structured
+          // error (Tauri rejects an argument-deserialization failure with a plain string) is only
+          // ever visible as the code `UNKNOWN`.
+          nested: error === undefined
+            ? null
+            : { errorCode: String(toIpcError(error).message ?? "").slice(0, 300) },
         });
       };
       trace("begin");
@@ -215,7 +222,7 @@ export class LocalSplitLifecycle {
               action: "prepare",
               requestId: this.intent.requestId,
               request,
-              remainingMs: Math.max(0, Math.min(creation, overall) - performance.now()),
+              remainingMs: Math.max(0, Math.floor(Math.min(creation, overall) - performance.now())),
             });
           void preparation.then(async (response) => {
             this.preparing = false;
@@ -256,7 +263,7 @@ export class LocalSplitLifecycle {
             this.services.operation({
               action: "status",
               identity: prepared.identity,
-              remainingMs: Math.max(0, Math.min(creation, overall) - performance.now()),
+              remainingMs: Math.max(0, Math.floor(Math.min(creation, overall) - performance.now())),
             }),
             creation,
             "status",
@@ -307,7 +314,7 @@ export class LocalSplitLifecycle {
             {
               createOnly: true,
               preparedLocalSplit: prepared,
-              remainingMs: Math.max(0, Math.min(creation, overall) - performance.now()),
+              remainingMs: Math.max(0, Math.floor(Math.min(creation, overall) - performance.now())),
             },
           );
 
@@ -400,7 +407,7 @@ export class LocalSplitLifecycle {
           identity: prepared.identity,
           frontendSessionId: session.id,
           generation,
-          remainingMs: Math.max(0, attachDeadline - performance.now()),
+          remainingMs: Math.max(0, Math.floor(attachDeadline - performance.now())),
         }),
         attachDeadline,
         "attach",
