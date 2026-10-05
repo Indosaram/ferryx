@@ -572,7 +572,10 @@ export async function attachTerminal(
     sessionId: req.sessionId,
     afterSequence: req.afterSequence ?? null,
   };
-  if (splitAttempt) payload.splitAttempt = splitAttempt;
+  if (splitAttempt) {
+    payload.splitAttempt = splitAttempt;
+    if (splitAttempt.attachTuple) payload.attachTuple = splitAttempt.attachTuple;
+  }
   return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", payload);
 }
 

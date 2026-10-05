@@ -52,6 +52,9 @@ export interface SplitAttachAttempt {
   readonly frontendSessionId: string;
   readonly generation: number;
   readonly remainingMs: number;
+  /** The durable 7-field binding. `cmd_terminal_attach` requires it for a split attempt: without it
+   *  the command has no pane identity or binding key and refuses with UNSUPPORTED_CAPABILITY. */
+  readonly attachTuple?: PaneAttachTuple;
 }
 
 export type SplitDelivery = "notSent" | "ambiguous" | "confirmed";

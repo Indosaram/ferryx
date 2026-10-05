@@ -408,6 +408,9 @@ export class LocalSplitLifecycle {
           frontendSessionId: session.id,
           generation,
           remainingMs: Math.max(0, Math.floor(attachDeadline - performance.now())),
+          // The durable binding is already built above; the command needs it, because a split
+          // attach without a pane identity and binding key is refused with UNSUPPORTED_CAPABILITY.
+          attachTuple: tuple,
         }),
         attachDeadline,
         "attach",
