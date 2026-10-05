@@ -259,6 +259,7 @@ export type WorkspaceAction =
       backendSessionId: string;
       cwd?: string;
       daemonEpoch?: string | null;
+      incarnation?: string | null;
       clearAgent?: boolean;
       pendingAttachment?: boolean;
     }
@@ -1180,6 +1181,7 @@ export function useWorkspaceStore({
 
       let backendSessionId: string | null = null;
       let daemonEpoch: string | null = null;
+      let incarnation: string | null = null;
       let inheritedCwd = sourceSession.cwd;
       try {
         await services.ensureTerminalEvents();
@@ -1195,6 +1197,7 @@ export function useWorkspaceStore({
           });
           backendSessionId = result.sessionId;
           daemonEpoch = result.daemonEpoch ?? null;
+          incarnation = result.session?.incarnation ?? null;
           inheritedCwd = result.session?.cwd ?? inheritedCwd;
         } else {
           // Mock/test services without detailed spawn: resolve live cwd explicitly.
@@ -1227,6 +1230,7 @@ export function useWorkspaceStore({
             backendSessionId,
             cwd: inheritedCwd,
             ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+            ...(incarnation !== null ? { incarnation } : {}),
           }, owningWorkspaceId);
         } else {
           terminalEventBus.clearSession(backendSessionId);
@@ -2926,6 +2930,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             processState: "running",
             cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
+            ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
             lastOutputSequence: null,
             lifecycle: action.pendingAttachment ? session.lifecycle : "running",
             reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
