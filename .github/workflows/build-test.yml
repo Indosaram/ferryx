@@ -130,7 +130,10 @@ jobs:
             for interface in $(ifconfig -l); do
               case "$interface" in lo*) continue ;; esac
               ifconfig "$interface" | grep -q 'inet ' || continue
-              if sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" up 2>/dev/null; then
+              # macOS rejects a point-to-point alias without a netmask, so try the explicit
+              # host-mask form first and fall back to the bare form.
+              if sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" netmask 255.255.255.255 up 2>/dev/null \
+                || sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" up 2>/dev/null; then
                 echo "PROVISION overlay_interface=$interface"
                 break
               fi

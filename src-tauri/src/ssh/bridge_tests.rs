@@ -841,7 +841,7 @@ impl LoopbackSshd {
         std::fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o UserKnownHostsFile={} \"$@\"\n",
+                "#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o UserKnownHostsFile={} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes -o UpdateHostKeys=no \"$@\"\n",
                 crate::ssh::direct::quote_posix(
                     known_hosts.to_str().expect("UTF-8 known_hosts path")
                 )
