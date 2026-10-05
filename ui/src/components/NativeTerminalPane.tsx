@@ -2459,9 +2459,11 @@ export function NativeTerminalPane({
       switchDebug("terminal.surface.skipped", {
         localSessionId: sessionId,
         backendSessionId: targetSessionId,
-        visible,
-        hasElement: Boolean(element),
-        tauri: isTauri(),
+        // The four operands decide whether a native surface is created at all, and only
+        // `reason` survives the Rust sink's allowlist, so the operands ride there. The yielding
+        // surfaces are included because a DOM dialog suppresses the native surface on Windows
+        // and that suppression is otherwise indistinguishable from a visibility bug.
+        reason: `surfaceVisible=${surfaceVisible} element=${Boolean(element)} tauri=${isTauri()} target=${Boolean(targetSessionId)} yielding=${typeof document === "undefined" ? -1 : document.querySelectorAll('[role="dialog"], [role="search"]').length} which=${typeof document === "undefined" ? "-" : Array.from(document.querySelectorAll('[role="dialog"], [role="search"]')).map((n) => `${n.getAttribute("role")}:${(n.getAttribute("aria-label") ?? n.textContent ?? "").trim().slice(0, 40)}`).join(" | ").slice(0, 200)}`,
       });
       return;
     }

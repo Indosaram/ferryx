@@ -170,13 +170,17 @@ export class LocalSplitLifecycle {
           remainingMs: Math.max(0, deadline - now),
           delivery: session?.backendSessionId ? "confirmed" : this.intent.createSent ? "ambiguous" : "notSent",
           errorCode: error === undefined ? null : toIpcError(error).code,
-          // The Rust sink keeps only allowlisted detail keys, and `nested` is one of them, so the
-          // failure message rides there. Without it a rejection whose value is not a structured
-          // error (Tauri rejects an argument-deserialization failure with a plain string) is only
-          // ever visible as the code `UNKNOWN`.
-          nested: error === undefined
-            ? null
-            : { errorCode: String(toIpcError(error).message ?? "").slice(0, 300) },
+          // The Rust sink keeps only allowlisted detail keys, and `reason` is one of them (a plain
+          // string, not further filtered). The stage, phase and delivery are what attribute a stall,
+          // and a new key would be dropped silently.
+          reason: [
+            `stage=${stage}`,
+            `phase=${phase}`,
+            `delivery=${session?.backendSessionId ? "confirmed" : this.intent.createSent ? "ambiguous" : "notSent"}`,
+            `elapsedMs=${Math.round(now - started)}`,
+            `stageElapsedMs=${Math.round(now - stageStarted)}`,
+            ...(error === undefined ? [] : [`error=${String(toIpcError(error).message ?? "").slice(0, 240)}`]),
+          ].join(" "),
         });
       };
       trace("begin");

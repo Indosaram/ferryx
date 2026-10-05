@@ -63,6 +63,24 @@ export const TAURI_CONF_RELATIVE = join('src-tauri', 'tauri.conf.json');
 // 200 alone is not readiness - the body must be the app's index.
 export const FRONTEND_ROOT_MARKER = 'id="root"';
 
+// The app opens its first-run wizard on a fresh profile, which is correct product behaviour but
+// fatal to a native QA run: the wizard carries `role="dialog"`, `useNativeTerminalVisibilityState`
+// treats any yielding surface as an occlusion, and on Windows an occluded pane never creates its
+// native surface -- so no frame is presented, no presentation receipt is emitted, and every
+// scenario blocks at its presentation barrier. Measured on maho-win: `yielding=1
+// dialog:Welcome to Ferryx` in every skip record, and zero presentation receipts across the whole
+// campaign. The seeded value is the state `dismissed: true`, which is exactly what a user who
+// closed the wizard once would have.
+export const ONBOARDING_STORAGE_KEY = 'ferryx.onboarding.v1';
+export const ONBOARDING_SEEDED_STATE = '{"version":1,"completedSteps":[],"dismissed":true}';
+
+export function seedFirstRunState(html) {
+  const script = `<script>try{localStorage.setItem(${JSON.stringify(ONBOARDING_STORAGE_KEY)},${JSON.stringify(ONBOARDING_SEEDED_STATE)})}catch(e){}</script>`;
+  const head = html.indexOf('<head>');
+  if (head === -1) return script + html;
+  return html.slice(0, head + '<head>'.length) + script + html.slice(head + '<head>'.length);
+}
+
 const CONTENT_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -241,6 +259,7 @@ export function createDistServer(distDir) {
       res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
       return res.end('unreadable');
     }
+    if (target === index) body = Buffer.from(seedFirstRunState(body.toString('utf8')), 'utf8');
     res.writeHead(200, {
       'content-type': contentTypeFor(target),
       'content-length': String(body.length),
