@@ -33,6 +33,7 @@ import {
   LocalSplitLifecycle,
   localSplitIntent,
   registerLocalSplit,
+  unregisterLocalSplit,
   cancelLocalSplit,
   hasLocalSplit,
   type LocalSplitSession,
@@ -782,7 +783,13 @@ export function useWorkspaceStore({
           ensureEvents: services.ensureTerminalEvents,
           read: () => readOwner()?.sessions[session.id],
           publish: (next) => updateOwner({ type: "LOCAL_SPLIT_UPDATE", session: next }),
-          remove: () => updateOwner({ type: "LOCAL_SPLIT_REMOVE", sessionId: session.id }),
+          remove: () => {
+            // Ownership ends here: the registry is consulted by the recovery effect below
+            // (`hasLocalSplit`) and by `retryLocalSplit`, so leaving a dead id in it makes the
+            // session permanently unretryable. `unregisterLocalSplit` had no caller at all.
+            unregisterLocalSplit(session.id);
+            updateOwner({ type: "LOCAL_SPLIT_REMOVE", sessionId: session.id });
+          },
           visible: () => {
             const owner = readOwner();
             const tabId = owner ? findTabIdForSession(owner, session.id) : null;
@@ -2388,6 +2395,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SET_TAB_PINNED":
       return { ...state, layout: layoutReducer(state.layout, action) };
     case "SPLIT_PANE": {
+      const requestedTabLayout = state.layout.layoutsByTabId?.[action.tabId];
+      const requestedLeafIds = requestedTabLayout ? collectLeafIds(requestedTabLayout.root) : null;
+      // `targetLeafId` is optional on this action; normalize so the discriminator below can name
+      // the requested leaf without widening `includes` to `string | undefined`.
+      const requestedTargetLeafId = action.targetLeafId ?? "";
       const layout = layoutReducer(state.layout, {
         type: "SPLIT_PANE",
         tabId: action.tabId,
@@ -2398,7 +2410,26 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         content: action.content,
         sessionId: action.session.id,
       });
-      if (layout === state.layout) return state;
+      if (layout === state.layout) {
+        // The layout refused the split, so the session is deliberately not inserted below and the
+        // caller's lifecycle reads `undefined` and returns. That refusal used to be invisible:
+        // `splitPane` logs `split.pane.dispatched` unconditionally, so a no-op here is
+        // indistinguishable from a split that succeeded and whose backend call went missing.
+        switchDebug("split.pane.layout-noop", {
+          reason: !requestedTabLayout
+            ? `tab-not-in-layout:${action.tabId}`
+            : !requestedLeafIds?.includes(requestedTargetLeafId)
+              ? `target-leaf-not-in-layout:${requestedTargetLeafId}`
+              : requestedLeafIds?.includes(action.newLeafId)
+                ? `new-leaf-already-present:${action.newLeafId}`
+                : "layout-unchanged",
+          tabId: action.tabId,
+          targetLeafId: action.targetLeafId,
+          newLeafId: action.newLeafId,
+          existingLeafIds: requestedLeafIds ? requestedLeafIds.join("|") : "-",
+        });
+        return state;
+      }
       return {
         ...state,
         sessions: { ...state.sessions, [action.session.id]: action.session },

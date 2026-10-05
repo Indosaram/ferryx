@@ -193,7 +193,18 @@ export class LocalSplitLifecycle {
     try {
       let session = this.services.read();
       let binding: Partial<LocalSplitSession> = {};
-      if (!session || this.intent.cancelRequested || this.stopped) return;
+      if (!session || this.intent.cancelRequested || this.stopped) {
+        // A silent return here is indistinguishable from a split that never started: the caller
+        // (`splitPane`) has already logged `split.pane.dispatched` unconditionally, and nothing
+        // downstream of this point emits anything. Name the reason so a stalled split is
+        // attributable instead of being read as "the backend call went missing".
+        switchDebug("terminal.localSplit.earlyReturn", {
+          requestId: this.intent.requestId,
+          stage: "pre-flow",
+          reason: !session ? "session-not-readable" : this.intent.cancelRequested ? "cancel-requested" : "stopped",
+        });
+        return;
+      }
 
       {
         this.publish({ reconnectLifecycle: session.backendSessionId ? "validating" : "spawning", reconnectError: null });
@@ -230,7 +241,14 @@ export class LocalSplitLifecycle {
         }
 
         const prepared = this.intent.prepared;
-        if (!prepared) return;
+        if (!prepared) {
+          switchDebug("terminal.localSplit.earlyReturn", {
+            requestId: this.intent.requestId,
+            stage: "post-prepare",
+            reason: "no-prepared-identity",
+          });
+          return;
+        }
         let canCreate = !session.backendSessionId && !this.intent.createSent && request !== undefined && generation === 1;
         if (!canCreate) {
           if (!current() || performance.now() >= creation) throw failure("status");
