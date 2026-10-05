@@ -747,18 +747,22 @@ impl QaBarrierChannel {
                     }
                     // A control with the wrong identity is rejected on record;
                     // the hold keeps waiting for the correlated release.
-                    let _ = write_json_atomic(
-                        &self.dir,
-                        &format!("{}.rejected-control.json", spec.name),
-                        &json!({
-                            "runId": self.run_id,
-                            "operationId": spec.operation_id,
-                            "producer": PRODUCER_ID,
-                            "producerPid": self.pid,
-                            "rejectedAtMs": now_ms(),
-                            "reason": "run-or-operation-identity-mismatch",
-                        }),
-                    );
+                    // The rejected-control record is a synchronous write; it runs on the
+                    // blocking pool so this poll cadence never stalls a runtime worker.
+                    let rejected_dir = self.dir.clone();
+                    let rejected_file = format!("{}.rejected-control.json", spec.name);
+                    let rejected_value = json!({
+                        "runId": self.run_id,
+                        "operationId": spec.operation_id,
+                        "producer": PRODUCER_ID,
+                        "producerPid": self.pid,
+                        "rejectedAtMs": now_ms(),
+                        "reason": "run-or-operation-identity-mismatch",
+                    });
+                    let _ = crate::ipc::run_blocking(move || {
+                        Ok(write_json_atomic(&rejected_dir, &rejected_file, &rejected_value))
+                    })
+                    .await;
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1775,12 +1779,30 @@ pub(crate) fn verdict_str(verdict: PaneLivenessVerdict) -> String {
     format!("{verdict:?}")
 }
 
+/// Off-runtime receipt append: the channel's append is synchronous file I/O, so
+/// it runs on the blocking pool instead of a worker of the runtime that serves
+/// the QA producer. Mirrors the private wrapper in `terminal/qa_liveness.rs`.
+async fn append_receipt_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    name: &str,
+    operation_id: &str,
+    settlement: Value,
+) {
+    let channel = Arc::clone(channel);
+    let name = name.to_string();
+    let operation_id = operation_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        channel.append_receipt(&name, &operation_id, settlement)
+    })
+    .await;
+}
+
 /// Hold the REAL backend-write stage: called from
 /// `send_native_terminal_input_with_stage_logging` after the
 /// `backend_write_start` stage event and before the write future is awaited.
 /// Returns `Some(outcome)` only when this exact operation drove the barrier.
 pub(crate) async fn hold_backend_write_barrier(
-    channel: &QaBarrierChannel,
+    channel: &Arc<QaBarrierChannel>,
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
     operation_id: Option<&str>,
@@ -1818,7 +1840,8 @@ pub(crate) async fn hold_backend_write_barrier(
             "classifierVerdict": verdict_str(held_verdict),
         }),
     );
-    channel.append_receipt(
+    append_receipt_off_runtime(
+        channel,
         WRITE_BARRIER,
         operation_id,
         json!({
@@ -1828,7 +1851,8 @@ pub(crate) async fn hold_backend_write_barrier(
             "writePendingMs": pending_ms,
             "snapshot": QaBarrierChannel::snapshot_json(&held_snapshot),
         }),
-    );
+    )
+    .await;
     Some(channel.wait_for_release(&spec).await)
 }
 
@@ -1842,8 +1866,9 @@ pub(crate) async fn hold_backend_write_barrier(
 /// facts, which this layer does not own. When a QA daemon client is installed
 /// (the GUI lane) they are observed for real before the receipt is written;
 /// without one (the headless lane) the settlement is written exactly as before
-/// and `daemonFacts` is `null`.
-pub(crate) fn settle_backend_write_barrier(
+/// and `daemonFacts` is `null`. The settlement's receipt append is synchronous
+/// file I/O, so this entry point is `async` and awaits the off-runtime wrapper.
+pub(crate) async fn settle_backend_write_barrier(
     channel: &Arc<QaBarrierChannel>,
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
@@ -1879,7 +1904,8 @@ pub(crate) fn settle_backend_write_barrier(
                 duration_ms,
                 outcome,
                 Some(facts),
-            );
+            )
+            .await;
         });
         return;
     }
@@ -1892,14 +1918,17 @@ pub(crate) fn settle_backend_write_barrier(
         duration_ms,
         outcome,
         None,
-    );
+    )
+    .await;
 }
 
 /// One `backend-write` settlement line: the fresh collector snapshot, the real
 /// classifier verdict over it, and the daemon facts that were really observed
 /// (`null` when this process holds no daemon client, e.g. the headless lane).
-fn append_backend_write_settlement(
-    channel: &QaBarrierChannel,
+/// The receipt append itself is synchronous file I/O, so it is awaited through
+/// the off-runtime wrapper rather than executed on a runtime worker.
+async fn append_backend_write_settlement(
+    channel: &Arc<QaBarrierChannel>,
     operation_id: &str,
     session_id: &str,
     fresh_snapshot: PaneLivenessSnapshot,
@@ -1910,7 +1939,8 @@ fn append_backend_write_settlement(
 ) {
     let verdict = classify_pane_liveness(&fresh_snapshot);
     let missing = QaBarrierChannel::evidence_missing_fields(&fresh_snapshot);
-    channel.append_receipt(
+    append_receipt_off_runtime(
+        channel,
         WRITE_BARRIER,
         operation_id,
         json!({
@@ -1929,7 +1959,8 @@ fn append_backend_write_settlement(
                 .map(|facts| serde_json::to_value(facts).unwrap_or(Value::Null)),
             "snapshot": QaBarrierChannel::snapshot_json(&fresh_snapshot),
         }),
-    );
+    )
+    .await;
 }
 
 /// Headless dispatch entry: `ferryx diagnostic-classifier --headless`.
@@ -2932,8 +2963,8 @@ mod tests {
     // Without a daemon client (the headless lane) the write settlement reports no
     // daemon facts at all instead of defaulted ones, and keeps the honest
     // non-pass.
-    #[test]
-    fn backend_write_settlement_reports_no_unobserved_daemon_facts() {
+    #[tokio::test]
+    async fn backend_write_settlement_reports_no_unobserved_daemon_facts() {
         assert!(
             qa_daemon_client().is_none(),
             "this test asserts the no-client path; no test may install a client first"
@@ -2954,7 +2985,8 @@ mod tests {
             Some(ReleaseOutcome::Released),
             true,
             12.5,
-        );
+        )
+        .await;
 
         let lines = read_lines(&dir, WRITE_BARRIER);
         assert_eq!(lines.len(), 1);

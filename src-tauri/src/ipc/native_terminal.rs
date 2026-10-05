@@ -1661,7 +1661,8 @@ where
             qa_write_release_outcome,
             write_result.is_ok(),
             duration_ms,
-        );
+        )
+        .await;
     }
     write_result
 }

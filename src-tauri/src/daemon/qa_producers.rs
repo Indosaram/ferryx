@@ -387,7 +387,21 @@ async fn run_held_rpc_watcher(
     let mut handled: Option<String> = None;
     loop {
         tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
-        let Some(request) = read_command_file(&dir, TRIGGER_REMOTE_RPC, &channel) else {
+        // The command read is synchronous filesystem I/O; it runs on the blocking
+        // pool so this poll cadence never stalls a worker of the runtime serving it.
+        let Some(request) = {
+            let polled_dir = dir.clone();
+            let polled_channel = Arc::clone(&channel);
+            match crate::ipc::run_blocking(move || {
+                Ok(read_command_file(&polled_dir, TRIGGER_REMOTE_RPC, &polled_channel))
+            })
+            .await
+            {
+                Ok(request) => request,
+                // A blocking read that cannot complete is "no evidence observed yet", never a pass.
+                Err(_) => None,
+            }
+        } else {
             continue;
         };
         let issued = request
@@ -530,7 +544,20 @@ async fn hold_unrelated_remote_rpc(
     let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.deadline_ms);
     let mut released = false;
     loop {
-        if release_present(dir, &spec) {
+        // The release read is synchronous filesystem I/O; it runs on the blocking
+        // pool so this poll cadence never stalls a worker of the runtime serving it.
+        let polled_dir = dir.to_path_buf();
+        let polled_spec = spec.clone();
+        let present = match crate::ipc::run_blocking(move || {
+            Ok(release_present(&polled_dir, &polled_spec))
+        })
+        .await
+        {
+            Ok(present) => present,
+            // A blocking read that cannot complete is "no evidence observed yet", never a pass.
+            Err(_) => false,
+        };
+        if present {
             released = true;
             break;
         }
@@ -539,7 +566,18 @@ async fn hold_unrelated_remote_rpc(
         }
         tokio::time::sleep(Duration::from_millis(WATCH_TICK_MS)).await;
     }
-    let split_settled_while_held = local_split_settled(dir);
+    // The split-settlement read is synchronous filesystem I/O; it runs on the
+    // blocking pool like every other read in this producer.
+    let polled_dir = dir.to_path_buf();
+    let split_settled_while_held = match crate::ipc::run_blocking(move || {
+        Ok(local_split_settled(&polled_dir))
+    })
+    .await
+    {
+        Ok(settled) => settled,
+        // A blocking read that cannot complete is "no evidence observed yet", never a pass.
+        Err(_) => false,
+    };
 
     let mut response = Vec::new();
     let mut buffer = [0u8; 4096];
