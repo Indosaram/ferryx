@@ -348,6 +348,108 @@ pub fn note_successor_adopt(channel: &QaBarrierChannel, session_id: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Off-runtime wrappers for the handover producers.
+//
+// Each emitter writes with synchronous file I/O (the receipt append, or the
+// bound-ack write behind `bind_target_session`) and keeps its sync signature for
+// its genuinely synchronous callers - the headless lane and the unit tests. The
+// daemon's async handover path awaits these wrappers instead, so the writes never
+// run on a worker of the runtime serving the handover. A failed blocking hop is
+// the same non-event the sync fn already reports when it cannot correlate a
+// settlement: `false` for an emitter (no line written, never a pass) and no
+// binding for the `note_*` pair.
+// ---------------------------------------------------------------------------
+
+pub async fn emit_handover_transfer_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    transfer_id: &str,
+    legacy_path: &Path,
+    successor_epoch: u64,
+    accounting: HandoverAccounting,
+    commit_latency_ms: u64,
+    records: &[HandoverSessionRecord],
+) -> bool {
+    let channel = Arc::clone(channel);
+    let transfer_id = transfer_id.to_string();
+    let legacy_path = legacy_path.to_path_buf();
+    let records = records.to_vec();
+    match crate::ipc::run_blocking(move || {
+        Ok(emit_handover_transfer(
+            &channel,
+            &transfer_id,
+            &legacy_path,
+            successor_epoch,
+            accounting,
+            commit_latency_ms,
+            &records,
+        ))
+    })
+    .await
+    {
+        Ok(emitted) => emitted,
+        Err(_) => false,
+    }
+}
+
+pub async fn emit_rollback_relinquishment_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    transfer_id: &str,
+    legacy_path: &Path,
+    successor_epoch: u64,
+    records: &[HandoverSessionRecord],
+    predecessor_resume_confirmed: bool,
+    abort_reason: &str,
+) -> bool {
+    let channel = Arc::clone(channel);
+    let transfer_id = transfer_id.to_string();
+    let legacy_path = legacy_path.to_path_buf();
+    let records = records.to_vec();
+    let abort_reason = abort_reason.to_string();
+    match crate::ipc::run_blocking(move || {
+        Ok(emit_rollback_relinquishment(
+            &channel,
+            &transfer_id,
+            &legacy_path,
+            successor_epoch,
+            &records,
+            predecessor_resume_confirmed,
+            &abort_reason,
+        ))
+    })
+    .await
+    {
+        Ok(emitted) => emitted,
+        Err(_) => false,
+    }
+}
+
+pub async fn note_predecessor_export_off_runtime(
+    channel: Option<&Arc<QaBarrierChannel>>,
+    session_id: &str,
+) {
+    let channel = channel.map(Arc::clone);
+    let session_id = session_id.to_string();
+    let _ = crate::ipc::run_blocking(move || {
+        note_predecessor_export(channel.as_deref(), &session_id);
+        Ok(())
+    })
+    .await;
+}
+
+pub async fn note_successor_adopt_off_runtime(
+    channel: &Arc<QaBarrierChannel>,
+    session_id: &str,
+) {
+    let channel = Arc::clone(channel);
+    let session_id = session_id.to_string();
+    let _ = crate::ipc::run_blocking(move || {
+        note_successor_adopt(&channel, &session_id);
+        Ok(())
+    })
+    .await;
+}
+
 pub fn adopted_reader_live(
     terminal_service: &Arc<crate::terminal::TerminalService>,
     session_id: &str,

@@ -2964,10 +2964,11 @@ impl DaemonServer {
                                 );
                             adopted_records.push(record);
                             if let Some(channel) = crate::daemon::qa_producers::channel().await {
-                                crate::daemon::qa_producers::note_successor_adopt(
+                                crate::daemon::qa_producers::note_successor_adopt_off_runtime(
                                     &channel,
                                     &session_id,
-                                );
+                                )
+                                .await;
                             }
                         }
                         // The receiver must be held and pumped for as long as the adopted child runs.
@@ -3024,7 +3025,7 @@ impl DaemonServer {
                                     &self.terminal_service,
                                     &mut adopted_records,
                                 );
-                                crate::daemon::qa_producers::emit_handover_transfer(
+                                crate::daemon::qa_producers::emit_handover_transfer_off_runtime(
                                     &channel,
                                     &transfer_id,
                                     &legacy_path,
@@ -3036,7 +3037,8 @@ impl DaemonServer {
                                     },
                                     commit_latency_ms,
                                     &adopted_records,
-                                );
+                                )
+                                .await;
                             }
                         }
                         if let Err(error) = self
@@ -3067,7 +3069,7 @@ impl DaemonServer {
                                             &self.terminal_service,
                                             &mut adopted_records,
                                         );
-                                        crate::daemon::qa_producers::emit_rollback_relinquishment(
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment_off_runtime(
                                             &channel,
                                             &transfer_id,
                                             &legacy_path,
@@ -3075,7 +3077,8 @@ impl DaemonServer {
                                             &adopted_records,
                                             false,
                                             &reason,
-                                        );
+                                        )
+                                        .await;
                                     }
                                 }
                                 return Err(format!("{reason}; recorded decision: {decision:?}"));
@@ -3108,7 +3111,7 @@ impl DaemonServer {
                                             &self.terminal_service,
                                             &mut adopted_records,
                                         );
-                                        crate::daemon::qa_producers::emit_rollback_relinquishment(
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment_off_runtime(
                                             &channel,
                                             &transfer_id,
                                             &legacy_path,
@@ -3116,7 +3119,8 @@ impl DaemonServer {
                                             &adopted_records,
                                             true,
                                             &reason,
-                                        );
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -4327,10 +4331,11 @@ impl DaemonServer {
                                                         count += 1;
                                                         seq += 1;
                                                         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-                                                        crate::daemon::qa_producers::note_predecessor_export(
-                                                            crate::ipc::qa_barrier::active_channel().as_deref(),
+                                                        crate::daemon::qa_producers::note_predecessor_export_off_runtime(
+                                                            crate::ipc::qa_barrier::active_channel().as_ref(),
                                                             &session_id,
-                                                        );
+                                                        )
+                                                        .await;
                                                     }
                                                     Err(error) => {
                                                         tracing::error!(

@@ -2459,6 +2459,34 @@ mod qa_split_producers {
         })
     }
 
+    /// One retry settlement line. The append itself is synchronous file I/O, so
+    /// it is awaited through the off-runtime wrapper instead of running on the
+    /// runtime worker that drove the retry.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_retry(
+        channel: &Arc<QaBarrierChannel>,
+        command: &RetryCommand,
+        record: &RecordedSplit,
+        previous: Option<&RecordedAttempt>,
+        operation_id: &str,
+        outcome: &str,
+        refusal: Option<&str>,
+        state: Option<&str>,
+        session: Option<&DaemonSessionDetails>,
+        epoch: Option<u64>,
+        history: Option<(Option<u64>, Option<u64>)>,
+    ) {
+        qa_barrier::append_receipt_off_runtime(
+            channel,
+            RETRY,
+            operation_id,
+            retry_payload(
+                command, record, previous, outcome, refusal, state, session, epoch, history,
+            ),
+        )
+        .await;
+    }
+
     /// Performs the REAL same-ID retry through the product's own client path:
     /// the durable journal is asked first (status before any action), and the
     /// retry then re-attaches the SAME backend session. The attachment is
@@ -2478,31 +2506,22 @@ mod qa_split_producers {
         let previous = lock_recorded_attempt().clone();
         let deadline =
             tokio::time::Instant::now() + Duration::from_millis(RETRY_ATTACH_BUDGET_MS);
-        let settle = |outcome: &str,
-                      refusal: Option<&str>,
-                      state: Option<&str>,
-                      session: Option<&DaemonSessionDetails>,
-                      epoch: Option<u64>,
-                      history: Option<(Option<u64>, Option<u64>)>| {
-            channel.append_receipt(
-                RETRY,
-                &operation_id,
-                retry_payload(
-                    command,
-                    &record,
-                    previous.as_ref(),
-                    outcome,
-                    refusal,
-                    state,
-                    session,
-                    epoch,
-                    history,
-                ),
-            );
-        };
 
         if let Err(reason) = retry_fence(command, &record, previous.as_ref()) {
-            settle("refused", Some(reason.as_str()), None, None, None, None);
+            settle_retry(
+                channel,
+                command,
+                &record,
+                previous.as_ref(),
+                &operation_id,
+                "refused",
+                Some(reason.as_str()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
             eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
             return Ok(());
         }
@@ -2524,7 +2543,20 @@ mod qa_split_producers {
                     "retry requires a journal-confirmed creation of '{}'; the durable status is {state}",
                     command.backend_session_id
                 );
-                settle("refused", Some(reason.as_str()), Some(state.as_str()), None, None, None);
+                settle_retry(
+                    channel,
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    &operation_id,
+                    "refused",
+                    Some(reason.as_str()),
+                    Some(state.as_str()),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
                 eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
                 return Ok(());
             }
@@ -2533,7 +2565,20 @@ mod qa_split_producers {
                     "retry status reconciliation failed: {} ({:?})",
                     error.message, error.code
                 );
-                settle("refused", Some(reason.as_str()), None, None, None, None);
+                settle_retry(
+                    channel,
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    &operation_id,
+                    "refused",
+                    Some(reason.as_str()),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
                 eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
                 return Ok(());
             }
@@ -2549,7 +2594,20 @@ mod qa_split_producers {
                 let reason = format!(
                     "retry incarnation '{carried}' differs from the authoritative owner '{live}'"
                 );
-                settle("refused", Some(reason.as_str()), Some(status_state), session.as_ref(), None, None);
+                settle_retry(
+                    channel,
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    &operation_id,
+                    "refused",
+                    Some(reason.as_str()),
+                    Some(status_state),
+                    session.as_ref(),
+                    None,
+                    None,
+                )
+                .await;
                 eprintln!("FERRYX_QA_RETRY_REFUSED: {reason}");
                 return Ok(());
             }
@@ -2563,14 +2621,20 @@ mod qa_split_producers {
                 let epoch = attachment.epoch;
                 let history = (attachment.start_sequence, attachment.end_sequence);
                 attachment.stream_task.abort();
-                settle(
+                settle_retry(
+                    channel,
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    &operation_id,
                     "reattached",
                     None,
                     Some(status_state),
                     session.as_ref(),
                     Some(epoch),
                     Some(history),
-                );
+                )
+                .await;
                 Ok(())
             }
             Err(error) => {
@@ -2578,14 +2642,20 @@ mod qa_split_producers {
                     "same-ID retry attach failed: {} ({:?})",
                     error.message, error.code
                 );
-                settle(
+                settle_retry(
+                    channel,
+                    command,
+                    &record,
+                    previous.as_ref(),
+                    &operation_id,
                     "attach-failed",
                     Some(reason.as_str()),
                     Some(status_state),
                     session.as_ref(),
                     None,
                     None,
-                );
+                )
+                .await;
                 eprintln!("FERRYX_QA_RETRY_UNSETTLED: {reason}");
                 Ok(())
             }
