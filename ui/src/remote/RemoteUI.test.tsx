@@ -9,6 +9,18 @@ import { afterEach, beforeEach, describe, expect, it, onTestFailed, vi } from "v
  * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
  * assertion error is untouched.
  */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
 function reportFetchOrder(label: string, ...mocks: unknown[]): void {
   try {
     mocks.forEach((mock, mockIndex) => {
@@ -25,7 +37,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      console.log(
+      emitLine(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -33,7 +45,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
     // A diagnostic must never change the outcome of the test it reports on.
   }
@@ -53,17 +65,20 @@ import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./acco
  * terminal asks for it explicitly through the mode switch the header always offers.
  */
 async function switchToTerminalMode(): Promise<void> {
-  // Timer-free readiness. The mode switch lives in the header's status cluster, which mounts once
-  // the paired host's token and the first state read have landed; a bare render can reach this
-  // point before that. Flushing the pending microtasks inside act() is the exact readiness step -
-  // it lets the mocked read settle - and it must NOT be a polling wait: several tests here (and in
-  // sibling suites) run under vi.useFakeTimers(), where a polling helper never sees its own timers
-  // fire and hangs the test instead of switching it. A switch that is genuinely missing now throws
-  // loudly here rather than silently leaving chat up.
+  // Timer-free readiness, then switch ONLY when the chat surface is actually showing.
+  //
+  // Flushing the pending microtasks inside act() is the exact readiness step - it lets the mocked
+  // state read settle - and it must NOT be a polling wait: several tests here run under
+  // vi.useFakeTimers(), where a polling helper never sees its own timers fire and hangs the test.
+  //
+  // The switch is idempotent on purpose. Calling it twice must not toggle back to chat (a caller
+  // that already switched would otherwise silently end up in chat and fail a terminal assertion for
+  // the wrong reason), and a screen that legitimately offers no switch - the sign-in screen a magic
+  // link lands on - must not fail here: the test's own terminal assertion decides that.
   await act(async () => {});
-  const toggle = screen.getByTestId("remote-view-mode-terminal");
+  if (screen.queryByTestId("mobile-chat-workspace") === null) return;
   await act(async () => {
-    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
 }
 

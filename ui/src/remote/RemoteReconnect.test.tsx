@@ -8,6 +8,18 @@ import { afterEach, expect, it, onTestFailed, vi } from "vitest";
  * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
  * assertion error is untouched.
  */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
 function reportFetchOrder(label: string, ...mocks: unknown[]): void {
   try {
     mocks.forEach((mock, mockIndex) => {
@@ -24,7 +36,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      console.log(
+      emitLine(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -32,7 +44,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
     // A diagnostic must never change the outcome of the test it reports on.
   }

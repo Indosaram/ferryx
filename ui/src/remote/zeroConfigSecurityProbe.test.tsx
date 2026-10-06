@@ -9,6 +9,18 @@ import { afterEach, beforeEach, expect, it, onTestFailed, vi } from "vitest";
  * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
  * assertion error is untouched.
  */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
 function reportFetchOrder(label: string, ...mocks: unknown[]): void {
   try {
     mocks.forEach((mock, mockIndex) => {
@@ -25,7 +37,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      console.log(
+      emitLine(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -33,7 +45,7 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
     // A diagnostic must never change the outcome of the test it reports on.
   }
@@ -42,8 +54,29 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
 import { remoteHostStore, remoteHostKey } from "../state/remoteHostStore";
 import { RemoteApp } from "./RemoteApp";
 
+/** A deadline that fails loudly and names what never arrived; never a synchronization delay. */
+async function bounded<T>(signal: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      signal,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${what}`)), 2000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 class Socket {
   static instances: Socket[] = [];
+  /**
+   * Waiters for the next terminal socket. The terminal is loaded lazily and the socket is opened
+   * asynchronously, so a caller must subscribe BEFORE the action that opens it and await the event,
+   * instead of reading Socket.instances immediately afterwards.
+   */
+  static waiters: Array<(socket: Socket) => void> = [];
   static readonly OPEN = 1;
   readyState = 0;
   binaryType = "arraybuffer";
@@ -53,7 +86,19 @@ class Socket {
   onmessage: ((event: MessageEvent) => void) | null = null;
   close = vi.fn();
   send = vi.fn();
-  constructor(readonly url: string) { Socket.instances.push(this); }
+  constructor(readonly url: string) {
+    Socket.instances.push(this);
+    if (url.includes("/terminal/")) {
+      const waiters = Socket.waiters;
+      Socket.waiters = [];
+      for (const resolve of waiters) resolve(this);
+    }
+  }
+
+  /** Resolves with the next terminal socket, whenever it opens. Subscribe before triggering. */
+  static whenTerminalOpened(): Promise<Socket> {
+    return new Promise<Socket>((resolve) => { Socket.waiters.push(resolve); });
+  }
 }
 
 function fetcher() {
@@ -101,6 +146,7 @@ afterEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
   Socket.instances = [];
+  Socket.waiters = [];
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -146,12 +192,15 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
   const fetch = fetcher();
   onTestFailed(() => reportFetchOrder("zero-config terminal socket URL", fetch));
   await mount(fetch);
-  // Chat is the default surface: the real terminal socket is only opened in terminal mode.
-  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  // Chat is the default surface: the real terminal socket is only opened in terminal mode. The
+  // open is asynchronous, so subscribe to the exact event BEFORE triggering the switch and await
+  // it - reading Socket.instances straight after the click races the lazy terminal chunk.
+  const socketOpened = Socket.whenTerminalOpened();
   await act(async () => {});
   await act(async () => {
     fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
+  await bounded(socketOpened, "the terminal socket to open");
   const socket = Socket.instances.find(({ url }) => url.includes("/terminal/"));
   expect(socket).toBeDefined();
   const url = new URL(socket!.url);
