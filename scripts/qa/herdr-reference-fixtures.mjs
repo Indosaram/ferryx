@@ -1281,8 +1281,79 @@ export function connectDaemonControl(transport, options) {
   return deadline(
     new Promise((resolveConnect, rejectConnect) => {
       const socket = createConnection(connection);
-      const lines = createInterface({ input: socket });
+      // `crlfDelay` only affects line splitting; the important part is that the Interface's
+      // own `error` event is subscribed BELOW, before anything can emit it. readline re-emits
+      // a socket error on the Interface, and an Interface with no error listener makes Node
+      // throw the raw stream error ("Unhandled 'error' event ... on Interface instance"),
+      // which kills the process with a trace instead of a typed reason. That is the crash this
+      // client used to have.
+      const lines = createInterface({ input: socket, crlfDelay: Infinity });
       const pending = [];
+      // Every event this connection observed, in order. Diagnostics for evidence only - it
+      // never carries the transport token or any other secret.
+      const events = [];
+      const note = (event, detail) => {
+        events.push({ at: new Date().toISOString(), event, detail: detail === undefined ? null : String(detail) });
+        if (events.length > 64) events.shift();
+      };
+      // Settled exactly once. The first cause wins; later events are recorded as diagnostics
+      // and cannot re-settle anything, so a reset followed by a close (or the reverse) is one
+      // outcome, not two.
+      let settled = false;
+      const settleAll = (code, message) => {
+        if (settled) {
+          note("settle-ignored", code);
+          return false;
+        }
+        settled = true;
+        note("settled", code + " inflight=" + pending.length);
+        const failure = (entry) =>
+          entry.resolve({
+            type: "error",
+            code,
+            message,
+            requestKind: entry.requestKind || "unknown",
+            requestId: entry.requestId || null,
+          });
+        while (pending.length > 0) failure(pending.shift());
+        return true;
+      };
+      // Registered before any I/O is attempted: both the socket and the readline Interface
+      // have an error listener from the start, so no stream error can ever be unhandled.
+      //
+      // The Interface is not a detail. readline re-emits the socket's error on the Interface,
+      // and an Interface with no `error` listener makes Node throw the raw stream error
+      // ("Unhandled 'error' event ... Emitted 'error' event on Interface instance"), which
+      // killed this provisioner with a stream trace instead of a typed reason. That is the
+      // crash this file used to have, and the Interface listener is what closes it.
+      lines.on("error", (error) => {
+        const code = transportErrorCode(error);
+        note("interface-error", code);
+        // Socket lifetime: an Interface error means the stream underneath is unusable, so the
+        // socket is torn down here rather than left half-open with nothing reading it.
+        settleAll(code, endpoint + " " + String(error && error.message ? error.message : error));
+        rejectConnect(gatewayBlocked(code, endpoint + " " + String(error)));
+        socket.destroy();
+      });
+      socket.on("error", (error) => {
+        const code = transportErrorCode(error);
+        note("socket-error", code);
+        settleAll(code, endpoint + " " + String(error && error.message ? error.message : error));
+        rejectConnect(gatewayBlocked(code, endpoint + " " + String(error)));
+      });
+      socket.on("close", (hadError) => {
+        note("socket-close", hadError ? "had-error" : "clean");
+        // A close with requests in flight settles them structurally rather than with `null`:
+        // a caller that receives `null` cannot tell a reset from a malformed reply.
+        settleAll("daemon-transport-closed", endpoint + " closed with requests in flight");
+        // Socket lifetime again: the Interface holds the socket's readers, so it is closed
+        // with it. A dangling Interface could still emit after the connection is gone.
+        try {
+          lines.close();
+        } catch {
+          /* Already closed. */
+        }
+      });
       lines.on("line", (line) => {
         let message;
         try {
@@ -1291,23 +1362,36 @@ export function connectDaemonControl(transport, options) {
           return;
         }
         const next = pending.shift();
-        if (next) next(message);
+        if (next) next.resolve(message);
       });
-      socket.once("error", (error) => {
-        rejectConnect(gatewayBlocked("daemon-transport-error", endpoint + " " + String(error)));
-      });
-      socket.once("close", () => {
-        while (pending.length > 0) pending.shift()(null);
-      });
-      const send = (line) =>
+      const send = (line, meta) =>
         new Promise((resolveCall) => {
-          pending.push(resolveCall);
+          if (settled) {
+            resolveCall({
+              type: "error",
+              code: "daemon-transport-closed",
+              message: endpoint + " is no longer connected",
+              requestKind: (meta && meta.requestKind) || "unknown",
+              requestId: (meta && meta.requestId) || null,
+            });
+            return;
+          }
+          pending.push({
+            resolve: resolveCall,
+            requestKind: (meta && meta.requestKind) || null,
+            requestId: (meta && meta.requestId) || null,
+          });
           socket.write(line);
         });
-      const call = (payload) => send(JSON.stringify(payload) + "\n");
+      const call = (payload, meta) =>
+        send(JSON.stringify(payload) + "\n", meta || { requestKind: payload && payload.type ? payload.type : null });
       socket.once("connect", async () => {
         try {
-          const handshake = await send(daemonHandshakeFrame(resolved, token));
+          note("connected", resolved.kind);
+          const handshake = await send(daemonHandshakeFrame(resolved, token), {
+            requestKind: "handshake",
+            requestId: "handshake",
+          });
           if (!handshake || handshake.type !== "handshakeOk") {
             socket.destroy();
             const unauthorized = Boolean(handshake) && handshake.code === "TRANSPORT_UNAUTHORIZED";
@@ -1319,6 +1403,7 @@ export function connectDaemonControl(transport, options) {
             );
             return;
           }
+          note("handshake-ok", "epoch=" + String(handshake.epoch));
           resolveConnect({
             transportKind: resolved.kind,
             endpoint,
@@ -1328,6 +1413,10 @@ export function connectDaemonControl(transport, options) {
             // shut down awaits that close instead of polling for the process to die.
             onClose(listener) {
               socket.once("close", listener);
+            },
+            // What this connection saw and how it ended, for evidence. Never a secret.
+            diagnostics() {
+              return { endpoint, transportKind: resolved.kind, settled, events: events.slice() };
             },
             close() {
               lines.close();
@@ -1345,7 +1434,50 @@ export function connectDaemonControl(transport, options) {
   );
 }
 
-/** One bounded JSON request against the gateway, with the failure kept verbatim. */
+/**
+ * The structured failure of a settled daemon request, or null for a real reply.
+ *
+ * A transport that ends mid-request settles every in-flight request with this shape, so a
+ * caller reads a code and the request it belonged to instead of an opaque null. The message
+ * carries no secret: the transport token never travels in a response or a diagnostic.
+ */
+export function daemonRequestFailure(response) {
+  if (!response || typeof response !== "object" || response.type !== "error") return null;
+  return {
+    code: typeof response.code === "string" && response.code.length > 0 ? response.code : "daemon-transport-error",
+    message: typeof response.message === "string" ? response.message : "",
+    requestKind: typeof response.requestKind === "string" ? response.requestKind : "unknown",
+    requestId: response.requestId === undefined ? null : response.requestId,
+  };
+}
+
+/**
+ * A one-line, secret-free description of a settled daemon request failure, for a typed
+ * blocker detail: the code, the request kind, the request id and the endpoint message.
+ */
+export function describeDaemonRequestFailure(failure) {
+  if (!failure) return "";
+  return failure.code + " " + failure.requestKind +
+    (failure.requestId ? "#" + failure.requestId : "") + " " + failure.message;
+}
+
+/**
+ * The typed code for a stream error, derived from the errno the OS reported. The message is
+ * never used as the discriminator: a caller parses the code, and the raw error text travels
+ * only as a detail.
+ */
+export function transportErrorCode(error) {
+  const errno = error && typeof error.code === "string" ? error.code : null;
+  if (errno === "ECONNRESET") return "daemon-transport-reset";
+  if (errno === "ECONNREFUSED") return "daemon-transport-refused";
+  if (errno === "EPIPE") return "daemon-transport-pipe-closed";
+  if (errno === "ENOENT") return "daemon-transport-missing";
+  if (errno === "ETIMEDOUT") return "daemon-transport-timed-out";
+  return "daemon-transport-error";
+}
+
+/**
+ * One bounded JSON request against the gateway, with the failure kept verbatim. */
 async function gatewayJson(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1419,6 +1551,11 @@ export async function launchIsolatedGateway(options) {
   // as gateway-not-running, carrying that daemon's own status and stderr tail rather than a
   // guess.
 
+  // The daemon's OWN log file, inside this run's isolated profile (daemon/logging.rs opens
+  // <FERRYX_DATA_DIR>/logs/daemon.log, and setupIsolatedProfile sets FERRYX_DATA_DIR to
+  // <profile>/data). It is destroyed with the profile, so it must be captured before cleanup.
+  const daemonLogPath = join(profile.paths.data, "logs", "daemon.log");
+
   const child = spawn(binary, ["--daemon"], {
     cwd: settings.cwd || repoRoot,
     env,
@@ -1429,13 +1566,25 @@ export async function launchIsolatedGateway(options) {
     ? settings.ledger.record(child, { ...(settings.extra || {}), launchArgs: ["--daemon"], remoteConfig: configPath })
     : { pid: child.pid, executablePath: child.spawnfile, argv: child.spawnargs };
 
+  // The daemon's own output, bounded and kept for evidence. A reset is not diagnosable
+  // without it: the last thing the daemon wrote before the connection dropped is what
+  // attributes the failure, and this harness does not get to assert a cause it did not
+  // observe. 64 KiB per stream is enough for a boot trace and bounded on purpose.
+  const OUTPUT_LIMIT = 64 * 1024;
   let stderr = "";
   child.stderr.on("data", (data) => {
-    stderr = (stderr + data.toString()).slice(-16000);
+    stderr = (stderr + data.toString()).slice(-OUTPUT_LIMIT);
   });
   const exited = new Promise((resolveExit) => {
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+    child.once("exit", (code, signal) => {
+      noteDaemonExit({ code, signal });
+      resolveExit({ code, signal });
+    });
   });
+  let exitInfo = null;
+  const noteDaemonExit = (info) => {
+    exitInfo = { at: new Date().toISOString(), code: info.code, signal: info.signal };
+  };
   // The daemon's own readiness line, buffered rather than sampled: the line is checked on
   // arrival and once on attach, so a line that lands before the listener attaches is not
   // missed. No sleep and no retry.
@@ -1447,7 +1596,7 @@ export async function launchIsolatedGateway(options) {
       resolveReady(true);
     };
     const onData = (data) => {
-      stdout = (stdout + data.toString()).slice(-16000);
+      stdout = (stdout + data.toString()).slice(-OUTPUT_LIMIT);
       inspect();
     };
     child.stdout.on("data", onData);
@@ -1638,9 +1787,56 @@ export async function launchIsolatedGateway(options) {
         capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
       remoteStatus: status,
       stderrTail: () => stderr,
+      // Everything needed to attribute a later transport failure: what the daemon wrote, how
+      // it exited, and what the control connection observed. No secret is included - the
+      // transport token never reaches these buffers.
+      daemonOutput() {
+        return {
+          pid: child.pid,
+          executablePath: entry.executablePath,
+          exit: exitInfo,
+          stdout: stdout.slice(-OUTPUT_LIMIT),
+          stderr: stderr.slice(-OUTPUT_LIMIT),
+          diagnostics: control ? control.diagnostics() : null,
+        };
+      },
+      // Persisted QA evidence: written when this handle is stopped and on any failure, so the
+      // next run can read why the daemon connection ended instead of guessing.
+      evidenceName: settings.evidenceName || null,
+      persistDaemonOutput(dir, name) {
+        return persistDaemonOutput(
+          dir,
+          name || settings.evidenceName || "daemon-output.log",
+          child,
+          entry,
+          exitInfo,
+          stdout,
+          stderr,
+          control,
+          daemonLogPath,
+        );
+      },
       stop: stopOwnedDaemon,
     };
   } catch (error) {
+    // The daemon's own output is captured BEFORE it is stopped: after the shutdown its final
+    // lines are gone, and a reset cannot be attributed without them. This is evidence, not a
+    // claim about the cause.
+    try {
+      persistDaemonOutput(
+        settings.evidenceDir,
+        settings.evidenceName || "daemon-output.log",
+        child,
+        entry,
+        exitInfo,
+        stdout,
+        stderr,
+        control,
+        daemonLogPath,
+      );
+    } catch {
+      /* Evidence that cannot be written must not replace the failure it explains. */
+    }
     // A gateway this run started is never left running behind a failure, and its throwaway
     // profile is removed only once the process is gone.
     const outcome = await stopOwnedDaemon().catch(() => ({ stopped: false }));
@@ -1649,6 +1845,16 @@ export async function launchIsolatedGateway(options) {
         control.close();
       } catch {
         /* The socket dies with the daemon. */
+      }
+    }
+    // The failure detail carries what the connection observed, so a BLOCKED line names the
+    // request that was in flight when the transport ended.
+    if (control && typeof control.diagnostics === "function") {
+      try {
+        const trail = control.diagnostics();
+        error.detail = (error.detail ? error.detail + " " : "") + "diagnostics=" + JSON.stringify(trail.events.slice(-4));
+      } catch {
+        /* Diagnostics are best-effort. */
       }
     }
     if (outcome.stopped) {
@@ -1662,6 +1868,70 @@ export async function launchIsolatedGateway(options) {
     }
     throw error;
   }
+}
+
+/**
+ * The last `limit` bytes of a file, or a short explanation of why it is not there.
+ *
+ * Bounded on purpose: a daemon log can grow without limit, and evidence that cannot be read
+ * in one pass is not evidence. A missing file is reported as missing rather than as empty,
+ * because "the daemon wrote nothing" and "the daemon log was never there" are different
+ * findings.
+ */
+export function readBoundedTail(path, limit) {
+  if (!isNonEmptyString(path)) return "<no path>";
+  if (!existsSync(path)) return "<absent: " + path + ">";
+  try {
+    const raw = readFileSync(path, "utf8");
+    const bound = typeof limit === "number" && limit > 0 ? limit : 64 * 1024;
+    return raw.length > bound ? "<truncated to last " + bound + " bytes>\n" + raw.slice(-bound) : raw;
+  } catch (error) {
+    return "<unreadable: " + String(error) + ">";
+  }
+}
+
+/**
+ * Persist a launched or adopted daemon's own output as bounded QA evidence.
+ *
+ * The point is attribution: when a control connection resets, the daemon's last lines and the
+ * connection's own event trail are what say whether it exited, refused, or is still running.
+ * This function asserts nothing about the cause - it records what was observed, and it redacts
+ * anything token-shaped so a log can be kept beside other evidence safely.
+ *
+ * Returns the path written, or null when no evidence directory was supplied.
+ */
+export function persistDaemonOutput(dir, name, child, entry, exitInfo, stdout, stderr, control, daemonLogPath) {
+  if (!isNonEmptyString(dir)) return null;
+  const redact = (value) =>
+    String(value === undefined || value === null ? "" : value)
+      .replace(/"(?:token|deviceToken|machineToken|pairingToken|authorization)"\s*:\s*"[^"]*"/gi, '"redacted":"<REDACTED>"')
+      .replace(/Bearer\s+[A-Za-z0-9._-]{12,}/g, "Bearer <REDACTED>");
+  const lines = [
+    "# launched daemon output (bounded QA evidence)",
+    "pid=" + String(child && child.pid !== undefined ? child.pid : "unknown"),
+    "executablePath=" + String((entry && entry.executablePath) || "unknown"),
+    "exit=" + (exitInfo ? JSON.stringify(exitInfo) : "still-running-or-not-observed"),
+    "diagnostics=" + (control ? JSON.stringify(control.diagnostics()) : "none"),
+    "",
+    "## stdout",
+    redact(stdout),
+    "",
+    "## stderr",
+    redact(stderr),
+    "",
+    "## daemon log (" + String(daemonLogPath || "not-configured") + ")",
+    redact(readBoundedTail(daemonLogPath, 128 * 1024)),
+    "",
+  ];
+  const target = join(dir, name);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(target, lines.join("\n"));
+  } catch (error) {
+    // Evidence that cannot be written must not replace the failure it was meant to explain.
+    return "unwritable:" + String(error);
+  }
+  return target;
 }
 
 /**
@@ -1781,6 +2051,9 @@ export async function adoptOwnedGateway(ownership, options) {
     },
   };
   const transport = daemonControlTransport(profile, { platform: ownership.platform });
+  // The adopted daemon's own log file, inside the profile this record names. It is destroyed
+  // with the profile, so it is captured before any cleanup.
+  const daemonLogPath = join(ownership.profileRoot, "data", "logs", "daemon.log");
   let control = null;
 
   const stopAdopted = async () => {
@@ -1905,9 +2178,53 @@ export async function adoptOwnedGateway(ownership, options) {
         capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
       remoteStatus: status,
       stderrTail: () => "",
+      // The adopted daemon's own output is not this process's pipe, but its log file is
+      // reachable and is the run's record; expose it the same way a launched handle does, so
+      // the caller's cleanup captures it before the profile is removed.
+      evidenceName: settings.evidenceName || null,
+      daemonOutput() {
+        return {
+          pid: ownership.daemonPid,
+          executablePath: ownership.daemonExecutablePath,
+          exit: null,
+          stdout: "",
+          stderr: "",
+          diagnostics: control ? control.diagnostics() : null,
+        };
+      },
+      persistDaemonOutput(dir, name) {
+        return persistDaemonOutput(
+          dir,
+          name || settings.evidenceName || "daemon-output-adopted.log",
+          { pid: ownership.daemonPid },
+          { executablePath: ownership.daemonExecutablePath },
+          null,
+          "",
+          "",
+          control,
+          daemonLogPath,
+        );
+      },
       stop: stopAdopted,
     };
   } catch (error) {
+    // The adopted daemon's own log is captured BEFORE anything is stopped or removed: it is
+    // the only record of why the adoption failed, and it lives inside the profile.
+    try {
+      persistDaemonOutput(
+        settings.evidenceDir,
+        settings.evidenceName || "daemon-output-adopted.log",
+        { pid: ownership.daemonPid },
+        { executablePath: ownership.daemonExecutablePath },
+        null,
+        "",
+        "",
+        control,
+        daemonLogPath,
+      );
+    } catch {
+      /* Evidence that cannot be written must not replace the failure it explains. */
+    }
     // Ownership was proven before any signal: reap only then, and otherwise leave the
     // process alone while naming exactly what must be reaped and by when.
     if (identityProven) {

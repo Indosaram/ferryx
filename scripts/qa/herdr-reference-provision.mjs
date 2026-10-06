@@ -67,6 +67,8 @@ import {
   captureSourceProvenance,
   connectDaemonControl,
   daemonControlTransport,
+  daemonRequestFailure,
+  describeDaemonRequestFailure,
   hostAccessContract,
   killExactPid,
   launchIsolatedGateway,
@@ -566,6 +568,11 @@ async function startIsolatedGateway(config, host, ledger, args, lease) {
       ledger,
       timeoutMs: args.timeoutMs,
       lease,
+      // The launched daemon's own output is QA evidence: a transport failure during the run
+      // is only attributable if its last lines survive the run. Bounded, redacted, written
+      // under --out so it travels with the other receipts.
+      evidenceDir: args.out,
+      evidenceName: "daemon-output-" + String(host.id).replace(/[^A-Za-z0-9._-]/g, "_") + ".log",
       extra: { hostId: host.id, transport: host.transport, launchedBy: "herdr-reference-provision.mjs" },
     });
   } catch (error) {
@@ -634,6 +641,13 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
       startup: session.startup || null,
     });
     if (!response || response.type !== "spawnOk") {
+      // A transport that ended mid-request settles this call with a structured failure: the
+      // code names what happened (reset, closed, refused), and the request kind/id name which
+      // request it was. That is a BLOCKED dependency, not an interaction bug in this script.
+      const failure = daemonRequestFailure(response);
+      if (failure) {
+        throw blocked(failure.code, describeDaemonRequestFailure(failure));
+      }
       throw new ProvisionError(EXIT.INTERACTION, "spawn-refused", JSON.stringify(response));
     }
     const details = response.session || {};
@@ -1150,6 +1164,11 @@ async function main() {
     // and it is named in the receipt by exact PID, executable and lease instead.
     for (const gateway of retainedGateways) {
       const retainedPid = gateway.ownership.daemonPid;
+      try {
+        gateway.persistDaemonOutput(args.out, "daemon-output-" + String(retainedPid) + ".log");
+      } catch {
+        /* Evidence that cannot be written must not replace the failure it explains. */
+      }
       ledger.entries = ledger.entries.filter((entry) => entry.pid !== retainedPid);
       ledger.receipts.push({
         pid: retainedPid,
@@ -1174,6 +1193,14 @@ async function main() {
     }
     for (const gateway of startedGateways) {
       if (retainedGateways.has(gateway)) continue;
+      // Persist the daemon's own output BEFORE it is stopped: this is what attributes a
+      // mid-run transport failure, and it is the only place the whole run's daemon log is
+      // still available. Bounded and redacted by the writer.
+      try {
+        gateway.persistDaemonOutput(args.out, gateway.evidenceName || ("daemon-output-" + String(gateway.entry.pid) + ".log"));
+      } catch {
+        /* Evidence that cannot be written must not replace the failure it explains. */
+      }
       try {
         await gateway.stop();
       } catch {

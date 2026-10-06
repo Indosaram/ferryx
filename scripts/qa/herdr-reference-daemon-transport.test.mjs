@@ -10,7 +10,10 @@
  */
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { after } from 'node:test';
+import { createServer } from 'node:net';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   DAEMON_CONTROL_PROTOCOL_VERSION,
@@ -23,9 +26,13 @@ import {
   REFERENCE_HOST_ACCESS_KINDS,
   REFERENCE_NONLOCAL_TRANSPORTS,
   adoptOwnedGateway,
+  connectDaemonControl,
   daemonControlTransport,
   daemonHandshakeFrame,
+  daemonRequestFailure,
   daemonSocketPath,
+  describeDaemonRequestFailure,
+  transportErrorCode,
   executablePathMatches,
   hostAccessContract,
   normalizeExecutablePath,
@@ -307,5 +314,185 @@ test('adoption requires explicit authorization, and checks it before the record'
       return true;
     },
   );
+});
+
+// ---- live control-transport behaviour ---------------------------------------
+// These drive the REAL client against a loopback listener this file owns, because the defect
+// they cover is an unhandled stream event: a handler that is missing does not fail an
+// assertion, it kills the process with "Unhandled 'error' event ... on Interface instance".
+// Passing these tests is itself the assertion that both the socket and the readline Interface
+// are subscribed.
+//
+// No sleep and no polling anywhere: every step waits on the event it needs (the server's
+// listener, the client's own close notification, or the settled promise).
+
+const liveTransports = [];
+const startFakeDaemon = async (onConnection) => {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-transport-test-'));
+  const runtime = join(dir, 'runtime');
+  mkdirSync(runtime, { recursive: true });
+  const server = createServer(onConnection);
+  await new Promise((resolveListening) => server.listen(0, '127.0.0.1', resolveListening));
+  const port = server.address().port;
+  writeFileSync(join(runtime, 'daemon.port'), String(port));
+  writeFileSync(join(runtime, 'daemon.token'), 'qa-transport-token');
+  // The Windows descriptor is chosen deliberately: it is the transport the reset was reported
+  // on, and it exercises the token read on every host.
+  const transport = daemonControlTransport({ root: dir, paths: { runtime } }, { platform: 'win32' });
+  const handle = {
+    transport,
+    dir,
+    port,
+    server,
+    close() {
+      return new Promise((resolveClosed) => server.close(resolveClosed));
+    },
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+  liveTransports.push(handle);
+  return handle;
+};
+
+after(() => {
+  for (const handle of liveTransports) handle.cleanup();
+});
+
+/** Serve the handshake, then hand the connection to `afterHandshake`. */
+const handshakeThen = (afterHandshake) => (socket) => {
+  let buffered = '';
+  let shook = false;
+  socket.on('data', (chunk) => {
+    buffered += chunk.toString();
+    const lines = buffered.split('\n');
+    buffered = lines.pop();
+    for (const line of lines) {
+      if (line.trim().length === 0) continue;
+      if (!shook) {
+        shook = true;
+        socket.write(JSON.stringify({ type: 'handshakeOk', version: 5, pid: 4242, epoch: 7 }) + '\n');
+        continue;
+      }
+      afterHandshake(socket, line);
+    }
+  });
+};
+
+test('a reset while a request is in flight settles it with a structured failure', async () => {
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket) => {
+      // Force a real RST: a plain destroy() closes without an error, which would test the
+      // close path instead of the reset path this defect is about.
+      if (typeof socket.resetAndDestroy === 'function') socket.resetAndDestroy();
+      else socket.destroy(new Error('reset'));
+    }),
+  );
+  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  const response = await client.call({ type: 'remoteGetStatus' });
+  const failure = daemonRequestFailure(response);
+  assert.ok(failure, 'a transport that ends mid-request must settle with a structured failure, not null');
+  assert.ok(
+    ['daemon-transport-reset', 'daemon-transport-closed'].includes(failure.code),
+    'unexpected code: ' + failure.code,
+  );
+  assert.equal(failure.requestKind, 'remoteGetStatus', 'the failure names the request kind');
+  assert.ok(typeof failure.message === 'string' && failure.message.length > 0);
+  // One settlement, however many stream events fired: the trail records the first cause and
+  // marks the rest as ignored.
+  const trail = client.diagnostics();
+  assert.equal(trail.settled, true);
+  assert.equal(trail.events.filter((entry) => entry.event === 'settled').length, 1);
+  client.close();
+});
+
+test('once the connection has ended, a request with nothing pending is refused structurally', async () => {
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket) => {
+      if (typeof socket.resetAndDestroy === 'function') socket.resetAndDestroy();
+      else socket.destroy(new Error('reset'));
+    }),
+  );
+  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  // The close notification is registered while the connection is still healthy, so it cannot
+  // be missed: the server only ends the socket once it receives the probe below.
+  const closed = new Promise((resolveClosed) => client.onClose(resolveClosed));
+  const probe = await client.call({ type: 'remoteGetStatus' });
+  assert.ok(daemonRequestFailure(probe), 'the probe must settle as a failure');
+  await closed;
+  // Nothing is pending now. This is the idle case: the request must be refused immediately
+  // with a structured failure, and it must not throw, hang, or resolve null.
+  const idle = await client.call({ type: 'remoteGetStatus' });
+  const failure = daemonRequestFailure(idle);
+  assert.ok(failure, 'a request on a dead connection must not hang or resolve null');
+  assert.equal(failure.code, 'daemon-transport-closed');
+  assert.equal(failure.requestKind, 'remoteGetStatus');
+  assert.equal(client.diagnostics().events.filter((entry) => entry.event === 'settled').length, 1);
+  client.close();
+});
+
+test('close and reset are distinguishable, and neither settles twice', async () => {
+  const resetDaemon = await startFakeDaemon(
+    handshakeThen((socket) => {
+      if (typeof socket.resetAndDestroy === 'function') socket.resetAndDestroy();
+      else socket.destroy(new Error('reset'));
+    }),
+  );
+  const resetClient = await connectDaemonControl(resetDaemon.transport, { timeoutMs: 5000 });
+  const resetResponse = await resetClient.call({ type: 'remoteGetStatus' });
+  const resetFailure = daemonRequestFailure(resetResponse);
+  assert.ok(resetFailure);
+  // The trail must show at most one settlement and must have observed a close as well: the
+  // two events arrive in either order and only the first decides the outcome.
+  const resetTrail = resetClient.diagnostics();
+  assert.equal(resetTrail.events.filter((entry) => entry.event === 'settled').length, 1);
+  assert.ok(resetTrail.events.some((entry) => entry.event === 'socket-close'));
+  assert.ok(
+    resetTrail.events.some((entry) => entry.event === 'socket-error' || entry.event === 'interface-error'),
+    'a reset must be observed as a stream error, not only as a close',
+  );
+  resetClient.close();
+
+  // A clean close with a request in flight is the other outcome: the same shape, the closed
+  // code, and still exactly one settlement.
+  const closeDaemon = await startFakeDaemon(
+    handshakeThen((socket) => socket.end()),
+  );
+  const closeClient = await connectDaemonControl(closeDaemon.transport, { timeoutMs: 5000 });
+  const closeResponse = await closeClient.call({ type: 'remoteGetStatus' });
+  const closeFailure = daemonRequestFailure(closeResponse);
+  assert.ok(closeFailure, 'a clean close must settle in flight requests too');
+  assert.equal(closeFailure.code, 'daemon-transport-closed');
+  assert.equal(closeClient.diagnostics().events.filter((entry) => entry.event === 'settled').length, 1);
+  closeClient.close();
+});
+
+test('the failure detail names the request without leaking the transport token', async () => {
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket) => {
+      if (typeof socket.resetAndDestroy === 'function') socket.resetAndDestroy();
+      else socket.destroy(new Error('reset'));
+    }),
+  );
+  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  const response = await client.call({ type: 'spawn', clientRequestId: 'qa-1' });
+  const failure = daemonRequestFailure(response);
+  const described = describeDaemonRequestFailure(failure);
+  assert.ok(described.includes(failure.code));
+  assert.ok(described.includes('spawn'), 'the description names the request kind');
+  const trail = JSON.stringify(client.diagnostics());
+  assert.equal(trail.includes('qa-transport-token'), false, 'diagnostics must not carry the token');
+  client.close();
+});
+
+test('a stream error maps to a typed code from the errno, never from the message', () => {
+  assert.equal(transportErrorCode({ code: 'ECONNRESET' }), 'daemon-transport-reset');
+  assert.equal(transportErrorCode({ code: 'ECONNREFUSED' }), 'daemon-transport-refused');
+  assert.equal(transportErrorCode({ code: 'EPIPE' }), 'daemon-transport-pipe-closed');
+  assert.equal(transportErrorCode({ code: 'ENOENT' }), 'daemon-transport-missing');
+  assert.equal(transportErrorCode({ code: 'ETIMEDOUT' }), 'daemon-transport-timed-out');
+  assert.equal(transportErrorCode({ code: 'EWHATEVER' }), 'daemon-transport-error');
+  assert.equal(transportErrorCode(new Error('read ECONNRESET')), 'daemon-transport-error');
+  assert.equal(transportErrorCode(null), 'daemon-transport-error');
 });
 

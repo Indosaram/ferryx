@@ -830,6 +830,10 @@ async function main() {
       const gateway = await adoptOwnedGateway(localHost.ownedGateway, {
         timeoutMs: args.timeoutMs,
         allowHost: args.allowHost,
+        // The adopted daemon's own log lives inside the profile the record names, so it is
+        // captured into this run's evidence before that profile is removed.
+        evidenceDir: args.evidenceDir,
+        evidenceName: "daemon-output-adopted.log",
       });
       ctx.gateways.push(gateway);
       localHost.url = gateway.url;
@@ -1022,6 +1026,13 @@ async function main() {
     // Teardown is paired and recorded. Only PIDs whose live executable still matches the
     // spawn-recorded one are killed; anything else is reported.
     for (const gateway of ctx.gateways) {
+      // Persist before stopping: the daemon's final lines are the only thing that attributes
+      // a mid-run transport failure, and they are gone once it exits.
+      try {
+        gateway.persistDaemonOutput(args.evidenceDir, "daemon-output.log");
+      } catch {
+        /* Evidence that cannot be written must not replace the failure it explains. */
+      }
       try {
         await gateway.stop();
       } catch {
@@ -1283,6 +1294,10 @@ async function startIsolatedGateway(args, candidateRaw, ledger) {
       uiDist: candidateRaw.uiDist,
       ledger,
       timeoutMs: args.timeoutMs,
+      // The daemon's own output travels with this run's evidence, so a transport failure
+      // during the scenarios is attributable instead of being inferred from a reset.
+      evidenceDir: args.evidenceDir,
+      evidenceName: "daemon-output.log",
       extra: { launchedBy: "herdr-reference-chat.mjs" },
     });
   } catch (error) {
