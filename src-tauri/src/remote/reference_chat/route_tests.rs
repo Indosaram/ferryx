@@ -132,10 +132,11 @@ async fn fixture() -> ReferenceRouteFixture {
         .auth_manager
         .exchange_pairing_code(&control_pin, "reference-route-control")
         .expect("control token");
-    let view_pin = state
-        .auth_manager
-        .create_scoped_pairing_code(DevicePermission::View, DeviceAccessScope::Machine)
-        .expect("view pin");
+    // A view-only device is a Mirror-scope device, and that is the only legitimate door: a
+    // Machine-scope grant is refused for anything but Control ("Machine access requires Control
+    // permission"), so a Machine-scope View pin cannot be minted at all. The reads below need
+    // only a valid token; every mutation route asks for Control and must answer this device 403.
+    let view_pin = state.auth_manager.create_pairing_code(DevicePermission::View);
     let (view, _) = state
         .auth_manager
         .exchange_pairing_code(&view_pin, "reference-route-view")

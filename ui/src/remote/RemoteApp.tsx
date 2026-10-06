@@ -1937,7 +1937,9 @@ export const RemoteHostConnection: React.FC<{
   }, [chatTargetKey]);
 
   /* The newest page. A late answer for another generation is dropped, and an identity refusal
-     clears the lane rather than browsing another transcript. */
+     clears the lane rather than browsing another transcript. The provider session the owning
+     host published for this pane is part of the binding tuple, so learning it re-reads the page
+     under the identity the route compares against instead of waiting for the next poll. */
   useEffect(() => {
     if (viewMode !== "chat") return;
     const target = chatReferenceTarget;
@@ -2024,7 +2026,7 @@ export const RemoteHostConnection: React.FC<{
       controller.abort();
       clearInterval(timer);
     };
-  }, [chatAgentType, chatTargetKey, effectiveSessionId, refreshChatIdentity, resetChatLane, token, transportBaseUrl, viewMode]);
+  }, [chatAgentType, chatProviderSession, chatTargetKey, effectiveSessionId, refreshChatIdentity, resetChatLane, token, transportBaseUrl, viewMode]);
 
   /* The prompt the original pane waits on. A pane whose reader the reference does not have keeps
      no card: an unknown menu is answered in the terminal, never guessed from here. */

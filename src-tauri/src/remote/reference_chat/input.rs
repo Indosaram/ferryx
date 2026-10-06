@@ -75,7 +75,9 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::scoped_contracts::{DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode};
+use crate::scoped_contracts::{
+    DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode, ATTACHMENT_MAX_FILE_BYTES,
+};
 
 use super::types::{
     reference_draft_key, ReferenceStopCapability, ReferenceStopPayload, ReferenceSubmitOrigin,
@@ -100,12 +102,22 @@ pub const REFERENCE_SUBMIT_ENTER: &[u8] = b"\r";
 
 /// How many bytes one shaped submit may put on the wire.
 ///
-/// The composer cap is [REFERENCE_SUBMIT_MAX_CHARS] CHARACTERS, but the transport carries BYTES:
-/// the remote gateway refuses a text frame past 16 KiB (remote/server.rs: text.len() > 16 * 1024).
-/// A multibyte message that fits the character cap and not this byte budget is refused with
-/// PAYLOAD_TOO_LARGE BEFORE anything is written, which is the contract's rule and the reason this
-/// check cannot live in the composer alone.
-pub const REFERENCE_SUBMIT_MAX_BYTES: usize = 16 * 1024;
+/// The composer cap is [REFERENCE_SUBMIT_MAX_CHARS] CHARACTERS, but the transport carries BYTES,
+/// so a multibyte message can fit the character cap and still be refused by the gateway: the
+/// byte budget is checked BEFORE anything is written, which is the contract's rule and the
+/// reason this check cannot live in the composer alone.
+///
+/// The budget is this path's own transport bound, derived from the frozen attachment limit the
+/// way the owning host and the relay derive it for a reference-chat body
+/// (`REFERENCE_CHAT_MUTATION_MAX_BYTES` in `remote/server.rs`, `REFERENCE_CHAT_RELAY_BODY_MAX`
+/// in `remote/relay_server.rs`): `(ATTACHMENT_MAX_FILE_BYTES / 3) * 4 + 64 KiB`. The fixed
+/// 16 KiB this replaces was wrong twice over - that figure is the CONTROL-JSON bound
+/// (`machine_protocol.rs` `CONTROL_JSON_MAX_BYTES`, enforced on `Message::Text` at
+/// `server.rs:2249`), not the bound on a submit, and it sits BELOW the 20,000-character cap,
+/// so a message the composer admits could never be shaped at all
+/// ('shaping_refuses_text_past_the_composer_cap_before_anything_is_written', input.rs:1026).
+pub const REFERENCE_SUBMIT_MAX_BYTES: usize =
+    (ATTACHMENT_MAX_FILE_BYTES as usize / 3) * 4 + 64 * 1024;
 
 /// The gap the pane sees between a submit's text and its Enter (index.ts SUBMIT_DELAY_MS).
 ///
@@ -475,7 +487,7 @@ impl ReferenceInputQueue {
             }
         };
 
-        let key = record_key(request.target, request.request_id);
+        let key = submit_record_key(request.target, request.request_id);
         let fingerprint = reference_submit_fingerprint(request.payload);
         match self.claim(&key, &fingerprint) {
             Claim::Fresh => {}
@@ -517,7 +529,7 @@ impl ReferenceInputQueue {
             }
         };
 
-        let key = record_key(request.target, request.request_id);
+        let key = stop_record_key(request.target, request.request_id);
         let fingerprint = reference_stop_fingerprint(request.payload);
         match self.claim(&key, &fingerprint) {
             Claim::Fresh => {}
@@ -782,6 +794,22 @@ enum Claim {
 
 fn record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
     format!("{}\u{1f}{request_id}", reference_draft_key(target))
+}
+
+/// The record key for a SUBMIT's dedupe/conflict rule.
+///
+/// A submit and a Stop are different mutations, so they must not share one record: the dedupe
+/// rule answers a RETRY of the same request, and a Stop that happens to carry the same request
+/// id as a submit is not that retry. Sharing the key answered the Stop with the submit's
+/// recorded state instead of pressing Escape ('a stop is a different mutation than a submit',
+/// input.rs:1580). Each kind keeps its own fingerprint, conflict and in-flight rules unchanged.
+fn submit_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
+    format!("submit\u{1f}{}", record_key(target, request_id))
+}
+
+/// The record key for a STOP's dedupe/conflict rule.
+fn stop_record_key(target: &ReferenceTargetRef, request_id: &str) -> String {
+    format!("stop\u{1f}{}", record_key(target, request_id))
 }
 
 #[cfg(test)]

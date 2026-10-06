@@ -221,6 +221,10 @@ export const MobileChatComposer = React.forwardRef<
   }, [editingHeldId, editingHeldText, onEditHeld]);
 
   const canSubmit = text.trim().length > 0 && !disabled;
+  // A prompt waiting on the original pane is a question this box answers, so the box keeps Send
+  // beside Stop while one is up. Without a prompt, a running pane shows Stop alone.
+  const answersWaitingPrompt = promptCard !== undefined && promptCard !== null;
+  const showsSend = !isRunning || answersWaitingPrompt;
 
   return (
     <div
@@ -436,7 +440,7 @@ export const MobileChatComposer = React.forwardRef<
           <Mic className="size-4" />
         </button>
 
-        {isRunning ? (
+        {isRunning && (
           <button
             type="button"
             data-testid="stop-button"
@@ -446,7 +450,8 @@ export const MobileChatComposer = React.forwardRef<
           >
             <Square className="size-4 fill-current" />
           </button>
-        ) : (
+        )}
+        {showsSend && (
           <button
             type="button"
             data-testid="send-button"

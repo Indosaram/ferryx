@@ -511,3 +511,316 @@ async fn machine_session_capacity_limit_is_configurable() {
     std::env::remove_var("FERRYX_MAX_MACHINE_SESSIONS");
     assert_eq!(service.max_machine_sessions(), 64);
 }
+
+// ---------------------------------------------------------------------------------------------
+// F1: desktop GUI session projection (project_desktop_gui_session).
+//
+// The projector resolves this machine's durable identity through canonical_identity_dir(), which
+// reads process environment (FERRYX_DATA_DIR, else HOME), and DaemonSessionService exposes no
+// injection seam for it. These cases therefore run in a child test process whose identity
+// environment points at a private fixture - the same shape as
+// provider_resume_uses_only_remote_validated_identity - so the parent process never reads or
+// creates the real machine identity, and no process-global env is mutated. Every assertion runs
+// against the real projector, the real workspace registry/catalog and a real PTY; nothing is
+// mocked away and production semantics are unchanged.
+//
+// Known gap: the remote/SSH branch of the projector (served from RemoteRuntime::details) is not
+// covered here. TerminalService builds its RemoteRuntime with the real SshConnector and exposes
+// no seam to seed a session entry, so an authentic no-network SSH fixture does not exist under
+// test-only scope; that branch remains source-read only.
+
+const PROJECTOR_CHILD_ROOT: &str = "FERRYX_PROJECTOR_CHILD_ROOT";
+
+fn projector_child(name: &str, root: &std::path::Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", name, "--nocapture"])
+        .env(PROJECTOR_CHILD_ROOT, root)
+        .env("FERRYX_DATA_DIR", root.join("data"))
+        .env("FERRYX_RUNTIME_DIR", root.join("runtime"))
+        .env("HOME", root)
+        .env("USERPROFILE", root)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.env("SHELL", "/bin/sh");
+    command
+}
+
+/// Runs one projector case in a private child process and proves the case actually ran.
+async fn projector_child_case(name: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let output = projector_child(name, root.path()).output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let receipt = root.path().to_owned();
+    root.close().unwrap();
+    assert!(
+        output.status.success(),
+        "{name} failed: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("F1-PROJECTOR") || stderr.contains("F1-PROJECTOR"),
+        "{name} never reached the projector assertion: stdout={stdout:?} stderr={stderr:?}"
+    );
+    eprintln!(
+        "F1-PROJECTOR parent {name}: private root={} removed={}",
+        receipt.display(),
+        !receipt.exists()
+    );
+}
+
+fn projector_child_root() -> PathBuf {
+    PathBuf::from(std::env::var_os(PROJECTOR_CHILD_ROOT).expect("child runs with a private root"))
+}
+
+/// Private fixture: a registered plain workspace plus a daemon whose durable identity, catalog and
+/// session metadata all live inside the child's own root.
+async fn projector_child_fixture() -> (PathBuf, DaemonServer, Arc<DaemonSessionService>, PathBuf) {
+    let root = projector_child_root();
+    let project = root.join("project");
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    let owner = DaemonServer::new_with_paths(
+        Some(root.join("data/config")),
+        Some(root.join("data/auth")),
+    );
+    let service = owner.session_service.clone();
+    service
+        .workspace_service
+        .register("projector-ws", project.to_str().unwrap())
+        .unwrap();
+    (root, owner, service, project)
+}
+
+async fn projector_child_spawn(
+    service: &Arc<DaemonSessionService>,
+    request_id: &str,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> String {
+    service
+        .handle_spawn(request_id, "projector-ws", None, cwd, cols, rows, None, None, None)
+        .await
+        .unwrap()
+}
+
+async fn projector_child_cleanup(service: &Arc<DaemonSessionService>) {
+    for id in service.terminal_service.list_sessions() {
+        service.terminal_service.close_session(&id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn projector_desktop_gui_child_canonical_local_target() {
+    let (root, owner, service, project) = projector_child_fixture().await;
+    let epoch = Epoch(4_242);
+    let id = projector_child_spawn(
+        &service,
+        "projector-request-sub",
+        Some(project.join("sub").to_string_lossy().into_owned()),
+        100,
+        30,
+    )
+    .await;
+    let catalog = service.workspace_service.catalog().unwrap();
+    let projected = service
+        .project_desktop_gui_session(&id, epoch, &catalog)
+        .unwrap();
+    assert_eq!(projected.target.session_id, id);
+    assert_eq!(projected.target.daemon_epoch, epoch);
+    assert_eq!(projected.workspace_id, "projector-ws");
+    assert_eq!(projected.cwd, "sub");
+    assert_eq!(projected.worktree, None);
+    assert_eq!((projected.cols, projected.rows), (100, 30));
+    assert!(projected.running);
+    assert!(projected.end_sequence.0 >= projected.start_sequence.0);
+    assert!(uuid::Uuid::parse_str(&projected.target.machine_id).is_ok());
+    assert_ne!(projected.target.machine_id, id);
+    // The served identity is this machine's durable one, persisted inside the fixture, not
+    // derived from the session id or a journal record.
+    let identity_path = crate::remote::auth::canonical_identity_dir()
+        .unwrap()
+        .join("identity.json");
+    assert!(
+        identity_path.starts_with(&root),
+        "{identity_path:?} escaped the fixture"
+    );
+    let identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    assert_eq!(
+        identity["machineId"].as_str().unwrap(),
+        projected.target.machine_id
+    );
+    // A session sitting at the workspace root projects as ".", not an absolute host path.
+    let at_root = projector_child_spawn(&service, "projector-request-root", None, 80, 24).await;
+    let projected_root = service
+        .project_desktop_gui_session(&at_root, epoch, &catalog)
+        .unwrap();
+    assert_eq!(projected_root.cwd, ".");
+    assert_eq!((projected_root.cols, projected_root.rows), (80, 24));
+    projector_child_cleanup(&service).await;
+    drop(service);
+    drop(owner);
+    eprintln!(
+        "F1-PROJECTOR canonical: session={id} machine_id={} cwd=sub root_cwd={} fixture_root={}",
+        projected.target.machine_id,
+        projected_root.cwd,
+        root.display()
+    );
+}
+
+#[tokio::test]
+async fn projector_desktop_gui_child_foreign_workspace() {
+    let (_root, owner, service, _project) = projector_child_fixture().await;
+    let epoch = Epoch(4_243);
+    let id = projector_child_spawn(&service, "projector-request-owner", None, 80, 24).await;
+    let catalog = service.workspace_service.catalog().unwrap();
+    assert!(service
+        .project_desktop_gui_session(&id, epoch, &catalog)
+        .is_ok());
+    // A worktree identity naming another workspace is an ownership change, not a path to serve.
+    let mut meta = service.session_metadata.read().get(&id).cloned().unwrap();
+    meta.worktree = Some(crate::worktree::WorktreeIdentity {
+        ws_id: "another-ws".into(),
+        slug: "detached".into(),
+    });
+    service.session_metadata.write().insert(id.clone(), meta);
+    assert_eq!(
+        service
+            .project_desktop_gui_session(&id, epoch, &catalog)
+            .unwrap_err(),
+        "SESSION_OWNERSHIP_CHANGED"
+    );
+    // A session naming a workspace the catalog does not hold is refused, not served from a guess.
+    let mut meta = service.session_metadata.read().get(&id).cloned().unwrap();
+    meta.worktree = None;
+    meta.workspace_id = "unregistered-ws".into();
+    service.session_metadata.write().insert(id.clone(), meta);
+    assert_eq!(
+        service
+            .project_desktop_gui_session(&id, epoch, &catalog)
+            .unwrap_err(),
+        "SESSION_NOT_FOUND"
+    );
+    projector_child_cleanup(&service).await;
+    drop(service);
+    drop(owner);
+    eprintln!(
+        "F1-PROJECTOR foreign workspace: session={id} worktree-mismatch=refused unregistered=refused"
+    );
+}
+
+#[tokio::test]
+async fn projector_desktop_gui_child_root_escape() {
+    let (root, owner, service, project) = projector_child_fixture().await;
+    let epoch = Epoch(4_244);
+    let id = projector_child_spawn(
+        &service,
+        "projector-request-escape",
+        Some(project.join("sub").to_string_lossy().into_owned()),
+        80,
+        24,
+    )
+    .await;
+    let catalog = service.workspace_service.catalog().unwrap();
+    // The resolved workspace root is the fence: a cwd above it is refused.
+    let mut meta = service.session_metadata.read().get(&id).cloned().unwrap();
+    meta.cwd = root.clone();
+    service.session_metadata.write().insert(id.clone(), meta);
+    assert_eq!(
+        service
+            .project_desktop_gui_session(&id, epoch, &catalog)
+            .unwrap_err(),
+        "SESSION_OWNERSHIP_CHANGED"
+    );
+    // A cwd that cannot be resolved is refused rather than served raw.
+    let mut meta = service.session_metadata.read().get(&id).cloned().unwrap();
+    meta.cwd = project.join("does-not-exist");
+    service.session_metadata.write().insert(id.clone(), meta);
+    assert_eq!(
+        service
+            .project_desktop_gui_session(&id, epoch, &catalog)
+            .unwrap_err(),
+        "INVALID_PATH"
+    );
+    projector_child_cleanup(&service).await;
+    drop(service);
+    drop(owner);
+    eprintln!(
+        "F1-PROJECTOR root escape: session={id} outside-root=refused missing-cwd=refused"
+    );
+}
+
+#[tokio::test]
+async fn projector_desktop_gui_child_non_ready_workspace() {
+    let (_root, owner, service, _project) = projector_child_fixture().await;
+    let epoch = Epoch(4_245);
+    let id = projector_child_spawn(&service, "projector-request-nonready", None, 80, 24).await;
+    let ready = service.workspace_service.catalog().unwrap();
+    assert!(service
+        .project_desktop_gui_session(&id, epoch, &ready)
+        .is_ok());
+    let set_availability = |availability: Availability| {
+        service
+            .workspace_service
+            .catalog
+            .lock()
+            .as_mut()
+            .unwrap()
+            .workspaces
+            .get_mut("projector-ws")
+            .unwrap()
+            .availability = availability;
+    };
+    set_availability(Availability::Missing);
+    let non_ready = service.workspace_service.catalog().unwrap();
+    assert_eq!(
+        service
+            .project_desktop_gui_session(&id, epoch, &non_ready)
+            .unwrap_err(),
+        "SESSION_NOT_FOUND"
+    );
+    set_availability(Availability::Ready);
+    let restored = service.workspace_service.catalog().unwrap();
+    assert!(service
+        .project_desktop_gui_session(&id, epoch, &restored)
+        .is_ok());
+    projector_child_cleanup(&service).await;
+    drop(service);
+    drop(owner);
+    eprintln!(
+        "F1-PROJECTOR non-ready: session={id} availability=missing-refused ready-projectable"
+    );
+}
+
+#[tokio::test]
+async fn projector_projects_canonical_local_target_identity_and_cwd() {
+    projector_child_case(
+        "daemon::session_service::machine_tests::projector_desktop_gui_child_canonical_local_target",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn projector_refuses_foreign_workspace_ownership() {
+    projector_child_case(
+        "daemon::session_service::machine_tests::projector_desktop_gui_child_foreign_workspace",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn projector_refuses_cwd_outside_workspace_root() {
+    projector_child_case(
+        "daemon::session_service::machine_tests::projector_desktop_gui_child_root_escape",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn projector_refuses_non_ready_workspace() {
+    projector_child_case(
+        "daemon::session_service::machine_tests::projector_desktop_gui_child_non_ready_workspace",
+    )
+    .await;
+}

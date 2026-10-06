@@ -405,8 +405,11 @@ pub fn claude_model_list_waits(screen: &str) -> bool {
 ///
 /// Only Claude's own footer goes, and only where it sits directly under the panel's hint.
 pub fn without_claude_tasks(shown: &[String]) -> Vec<String> {
+    // the screen's lines as the pinned reader sees them (every line through `cleanLine`), so a
+    // caller that hands them as drawn still gets Claude's own footer taken off
+    let shown: Vec<String> = shown.iter().map(|line| clean_line(line)).collect();
     let mut end = shown.len();
-    if let Some(head) = find_last_index(shown, |line, _| claude_tasks_head().is_match(line)) {
+    if let Some(head) = find_last_index(&shown, |line, _| claude_tasks_head().is_match(line)) {
         let total = claude_tasks_head()
             .captures(&shown[head])
             .and_then(|captures| captures.get(1))
@@ -985,7 +988,9 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
     {
         top -= 1;
     }
-    let panel: Vec<String> = lines[top as usize + 1..start as usize]
+    // upstream's `lines.slice(top + 1, start)`: with no rule above the rows `top` is -1, and
+    // the panel then starts at the screen's own first line
+    let panel: Vec<String> = lines[(top + 1) as usize..start as usize]
         .iter()
         .map(|line| clean_line(line))
         .filter(|line| !line.is_empty())
@@ -1681,8 +1686,16 @@ fn without_preview(lines: &[String], from: usize, to: usize) -> Vec<String> {
         let line = &lines[index];
         if let Some(corner) = preview_corner().find(line) {
             // upstream slices to 'corner.index + corner[0].length - 1': the corner's own last
-            // character is the box's first column, not the column after it
-            column = display_width(&line[..corner.end() - 1]) as i64;
+            // character is the box's first column, not the column after it. It is dropped by
+            // character, never by byte: a box-drawing corner is three bytes wide, and a byte
+            // index inside it is not a char boundary.
+            let corner_width = corner
+                .as_str()
+                .chars()
+                .next_back()
+                .expect("the preview corner match ends in its own corner character")
+                .len_utf8();
+            column = display_width(&line[..corner.end() - corner_width]) as i64;
         }
         index += 1;
     }

@@ -24,6 +24,8 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createConnection, createServer } from "node:net";
+import { createInterface } from "node:readline";
 import {
   existsSync,
   mkdirSync,
@@ -33,7 +35,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -679,6 +681,519 @@ export function daemonSocketPath(profile) {
     return join(profile.paths.runtime, "daemon.sock");
   }
   return join(profile.paths.runtime, "daemon.sock");
+}
+
+/* ==========================================================================
+ * Isolated gateway launch (QA only)
+ *
+ * The product has exactly two launch modes - GUI (no arguments) and headless
+ * (--daemon) - and NOTHING prints a JSON readiness line carrying a gateway URL and a
+ * token. The launch contract implemented here is the product's own, each step read from
+ * source:
+ *
+ *   1. --daemon is the only headless mode            cli.rs parse_launch_mode
+ *      and it announces FERRYX_DAEMON_READY on stdout  cli.rs run_daemon_headless
+ *   2. the daemon starts the gateway at boot from the
+ *      persisted config <data>/remote/remote-config.json when mode != Off
+ *                                                    daemon/server.rs boot restore
+ *   3. the gateway ALWAYS binds a loopback listener; the
+ *      non-loopback listener is gated behind
+ *      FERRYX_ALLOW_INSECURE_DIRECT/_LAN, so leaving both
+ *      unset keeps the isolated gateway on 127.0.0.1 only  remote/server.rs
+ *   4. the loopback port is FIXED by the product: the
+ *      daemon forces REMOTE_GATEWAY_PORT on config load
+ *      and again on configure, so a persisted port is
+ *      ignored and no per-instance port seam exists
+ *                                      remote/state.rs, daemon/server.rs
+ *   5. the bound address is read back from the daemon
+ *      (RemoteGetStatus) and is the ONLY authority for
+ *      the URL this harness dials                  daemon/protocol.rs
+ *   6. the bearer token comes from the real pairing flow over the daemon's own control
+ *      socket - RemoteCreatePairingCode (control) -> PIN, then
+ *      POST /api/v1/pair/exchange -> device token. The auth store is this profile's;
+ *      nothing is hand-written into it and no production credential is read.
+ *
+ * THE FIXED PORT IS A REQUIREMENT, NOT A CHOICE. Because the product pins it, this
+ * gateway cannot run beside another listener on 127.0.0.1:REMOTE_GATEWAY_PORT, and the
+ * harness must not manufacture that condition by stopping or reconfiguring whatever holds
+ * the port. It is therefore pre-flighted BEFORE the spawn: an occupied port refuses the
+ * launch as BLOCKED with the errno, and nothing is touched. A seeded port is never assumed
+ * to take effect - it is written because the persisted shape carries one, while the URL
+ * still comes from the daemon's own status. A dedicated free host is the supported way to
+ * run this; the harness never widens the bind to find one.
+ *
+ * Readiness is event-driven and bounded: the daemon's own ready line, then one status
+ * read. There is no fixed sleep and no retry poll anywhere on this path.
+ * ========================================================================== */
+
+/** The daemon's own headless readiness line (src-tauri/src/cli.rs). */
+export const DAEMON_READY_LINE = "FERRYX_DAEMON_READY";
+
+/** The daemon control protocol this harness speaks (src-tauri/src/daemon/protocol.rs). */
+export const DAEMON_CONTROL_PROTOCOL_VERSION = 5;
+
+/**
+ * The gateway port the product FORCES (src-tauri/src/remote/state.rs REMOTE_GATEWAY_PORT,
+ * applied when the persisted config is loaded and again by daemon/server.rs
+ * handle_remote_configure). A persisted port is therefore ignored and there is no
+ * port-isolation seam to configure around, which makes a free
+ * 127.0.0.1:<this port> a REQUIREMENT of the isolated launch - pre-flighted below, and the
+ * reason this harness runs on a dedicated host. It never builds the URL: that comes from
+ * the bound address the daemon itself reports.
+ */
+export const REMOTE_GATEWAY_PORT = 43821;
+
+/** The contract id every isolated-gateway handle reports. */
+export const ISOLATED_GATEWAY_CONTRACT = "ferryx-herdr-reference.isolated-gateway/1";
+
+/** The file inside the isolated profile that holds the device token this run obtained. */
+export const ISOLATED_CREDENTIAL_FILENAME = "reference-chat-token";
+
+const GATEWAY_PAIR_EXCHANGE_PATH = "/api/v1/pair/exchange";
+
+/**
+ * The variables that widen the gateway's bind beyond loopback. An isolated QA gateway
+ * must never be reachable from a shared host's network, so the launcher refuses to start
+ * when the environment it inherits would open it.
+ */
+const LAN_EXPOSURE_ENV = ["FERRYX_ALLOW_INSECURE_DIRECT", "FERRYX_ALLOW_INSECURE_LAN"];
+
+/** A launch-contract failure. The caller reports it as BLOCKED, never as a pass. */
+export class IsolatedGatewayError extends Error {
+  constructor(reason, detail) {
+    super(reason + (detail ? ": " + detail : ""));
+    this.name = "IsolatedGatewayError";
+    this.reason = reason;
+    this.detail = detail || "";
+  }
+}
+
+const gatewayBlocked = (reason, detail) => new IsolatedGatewayError(reason, detail);
+
+/**
+ * Seed the persisted remote gateway config the daemon restores at boot.
+ *
+ * Shape is PersistedRemoteGatewayConfig (remote/state.rs, camelCase). mode must be
+ * non-Off or the daemon leaves the gateway off. `port` is written for shape completeness
+ * and is NOT authoritative: the product overrides it with REMOTE_GATEWAY_PORT, so nothing
+ * downstream may assume a seeded port took effect. localNetwork is the one non-Off mode that
+ * can yield a loopback-only gateway: it resolves the host's LAN address and then refuses
+ * to bind it because the insecure-direct gate is closed, while the always-on loopback
+ * listener keeps serving. On a host with no non-loopback IPv4 the resolution itself
+ * fails, the daemon logs a warning, and the status read below reports it.
+ */
+export function seedIsolatedRemoteConfig(profile) {
+  const path = join(profile.paths.data, "remote", "remote-config.json");
+  writeJson(path, {
+    mode: "localNetwork",
+    port: REMOTE_GATEWAY_PORT,
+    allowControl: true,
+    restartPolicy: "restoreListener",
+    relayUrl: null,
+  });
+  return path;
+}
+
+/**
+ * Pre-flight: is the port the product forces free on loopback?
+ *
+ * The probe only OBSERVES. A port held by anything else is a refusal, never something to
+ * free up: stopping or reconfiguring an unrelated listener would be an unowned action on
+ * a host this harness does not own, and an existing Ferryx service may be exactly what is
+ * holding it.
+ *
+ * It is a guard, not a reservation: the socket is released before the daemon is spawned, so
+ * a listener that appears in that window still wins the bind, and the launch then reports
+ * gateway-not-running from the daemon's own status instead of silently sharing a port.
+ */
+function probeLoopbackPort(port) {
+  return new Promise((resolveProbe) => {
+    const server = createServer();
+    server.once("error", (error) => {
+      resolveProbe({ free: false, code: error && error.code ? error.code : null, reason: String(error) });
+    });
+    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+      server.close(() => resolveProbe({ free: true, code: null, reason: null }));
+    });
+  });
+}
+
+/** The loopback URL the daemon reports it bound, or null for anything else. */
+export function parseLoopbackBoundAddress(boundAddress) {
+  if (typeof boundAddress !== "string") return null;
+  const match = boundAddress.trim().match(/^(\[[0-9a-fA-F:]+\]|[0-9.]+):(\d{1,5})$/);
+  if (!match) return null;
+  const host = match[1].replace(/^\[/, "").replace(/\]$/, "");
+  const port = Number.parseInt(match[2], 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  if (host !== "::1" && host !== "localhost" && !host.startsWith("127.")) return null;
+  return { host: "127.0.0.1", port };
+}
+
+/**
+ * One connection to a daemon control socket (newline-delimited JSON, protocol v5). On
+ * unix the socket's ownership and mode are the authentication, so no token is sent.
+ * A socket that closes with requests in flight resolves them as null, which every caller
+ * already treats as a protocol failure.
+ */
+export function connectDaemonControl(socketPath, options) {
+  const settings = options || {};
+  const timeoutMs = typeof settings.timeoutMs === "number" ? settings.timeoutMs : 30000;
+  return deadline(
+    new Promise((resolveConnect, rejectConnect) => {
+      const socket = createConnection({ path: socketPath });
+      const lines = createInterface({ input: socket });
+      const pending = [];
+      lines.on("line", (line) => {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return;
+        }
+        const next = pending.shift();
+        if (next) next(message);
+      });
+      socket.once("error", (error) => {
+        rejectConnect(gatewayBlocked("daemon-socket-error", socketPath + " " + String(error)));
+      });
+      socket.once("close", () => {
+        while (pending.length > 0) pending.shift()(null);
+      });
+      const call = (payload) =>
+        new Promise((resolveCall) => {
+          pending.push(resolveCall);
+          socket.write(JSON.stringify(payload) + "\n");
+        });
+      socket.once("connect", async () => {
+        try {
+          const handshake = await call({
+            type: "handshake",
+            version: DAEMON_CONTROL_PROTOCOL_VERSION,
+            ...(settings.token ? { token: settings.token } : {}),
+          });
+          if (!handshake || handshake.type !== "handshakeOk") {
+            socket.destroy();
+            rejectConnect(gatewayBlocked("daemon-handshake-refused", socketPath + " " + JSON.stringify(handshake)));
+            return;
+          }
+          resolveConnect({
+            handshake,
+            call,
+            close() {
+              lines.close();
+              socket.destroy();
+            },
+          });
+        } catch (error) {
+          socket.destroy();
+          rejectConnect(error);
+        }
+      });
+    }),
+    "daemon control handshake",
+    timeoutMs,
+  );
+}
+
+/** One bounded JSON request against the gateway, with the failure kept verbatim. */
+async function gatewayJson(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const text = await response.text();
+    let json = null;
+    try {
+      json = text.length > 0 ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    return { status: response.status, json, text };
+  } catch (error) {
+    throw gatewayBlocked("gateway-request-failed", url + " " + String(error));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Launch one isolated, authenticated gateway on a throwaway profile.
+ *
+ * options: { binary, label, uiDist, env, cwd, ledger, timeoutMs, extra }. The returned
+ * handle's url and token come from the running daemon and its own auth store; stop()
+ * shuts that daemon down in band and falls back to the exact PID this run spawned. Every
+ * failure is an IsolatedGatewayError for the caller to report as BLOCKED.
+ */
+export async function launchIsolatedGateway(options) {
+  const settings = options || {};
+  const timeoutMs = typeof settings.timeoutMs === "number" ? settings.timeoutMs : 30000;
+  const binary = settings.binary ? resolve(settings.binary) : null;
+  if (!binary || !existsSync(binary)) {
+    throw gatewayBlocked("gateway-binary-missing", String(settings.binary || ""));
+  }
+
+  const profile = setupIsolatedProfile(settings.label || "gateway");
+  const configPath = seedIsolatedRemoteConfig(profile);
+  const socketPath = daemonSocketPath(profile);
+  const env = { ...profile.env };
+  if (settings.uiDist) env.FERRYX_UI_DIST_DIR = resolve(settings.uiDist);
+  for (const [key, value] of Object.entries(settings.env || {})) env[key] = String(value);
+  for (const name of LAN_EXPOSURE_ENV) {
+    const value = env[name];
+    if (typeof value === "string" && value.trim().length > 0 && value.trim() !== "0") {
+      throw gatewayBlocked(
+        "isolated-gateway-lan-exposure",
+        name + "=" + value.trim() + " would bind the isolated gateway beyond loopback",
+      );
+    }
+  }
+
+  // The product forces the port, so this launch REQUIRES 127.0.0.1:REMOTE_GATEWAY_PORT to be
+  // free. It is checked here, before anything is spawned, and an occupied port refuses the
+  // launch without touching whatever holds it.
+  const portProbe = await probeLoopbackPort(REMOTE_GATEWAY_PORT);
+  if (!portProbe.free) {
+    throw gatewayBlocked(
+      portProbe.code === "EADDRINUSE" ? "gateway-port-occupied" : "gateway-port-unusable",
+      "127.0.0.1:" + REMOTE_GATEWAY_PORT + " is not free (" + (portProbe.code || portProbe.reason) +
+        "); the product forces that port, so no isolated gateway can start here. Nothing was " +
+        "stopped, reconfigured or reused; run this on a dedicated free host.",
+    );
+  }
+
+  // The seeded port is neither assumed to take effect nor used to build the URL: the bound
+  // address the daemon reports below is the only authority. A bind that still fails surfaces
+  // as gateway-not-running, carrying that daemon's own status and stderr tail rather than a
+  // guess.
+
+  const child = spawn(binary, ["--daemon"], {
+    cwd: settings.cwd || repoRoot,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const entry = settings.ledger
+    ? settings.ledger.record(child, { ...(settings.extra || {}), launchArgs: ["--daemon"], remoteConfig: configPath })
+    : { pid: child.pid, executablePath: child.spawnfile, argv: child.spawnargs };
+
+  let stderr = "";
+  child.stderr.on("data", (data) => {
+    stderr = (stderr + data.toString()).slice(-16000);
+  });
+  const exited = new Promise((resolveExit) => {
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+  // The daemon's own readiness line, buffered rather than sampled: the line is checked on
+  // arrival and once on attach, so a line that lands before the listener attaches is not
+  // missed. No sleep and no retry.
+  let stdout = "";
+  const ready = new Promise((resolveReady) => {
+    const inspect = () => {
+      if (!stdout.includes(DAEMON_READY_LINE)) return;
+      child.stdout.off("data", onData);
+      resolveReady(true);
+    };
+    const onData = (data) => {
+      stdout = (stdout + data.toString()).slice(-16000);
+      inspect();
+    };
+    child.stdout.on("data", onData);
+    inspect();
+  });
+
+  let control = null;
+  const stopOwnedDaemon = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return { stopped: true, graceful: true, alreadyExited: true, pid: child.pid, executablePath: entry.executablePath };
+    }
+    if (control) {
+      // In-band shutdown: the daemon persists remote sessions and exits 0
+      // (daemon/server.rs Shutdown). Its reply is not awaited - that handler exits the
+      // process - so the exit event is the receipt.
+      control.call({ type: "shutdown" }).catch(() => null);
+      try {
+        const result = await deadline(exited, "isolated gateway shutdown", timeoutMs);
+        return { stopped: true, graceful: true, pid: child.pid, executablePath: entry.executablePath, exit: result };
+      } catch {
+        /* The daemon did not stop in band; fall through to the exact-PID fallback. */
+      }
+    }
+    // The exact PID this run spawned, re-identified before it is signalled: a PID whose
+    // live executable no longer matches the spawn-recorded one is reported, never killed.
+    const live = probeProcessIdentity(child.pid);
+    const recorded = entry.executablePath;
+    const recordedName = recorded ? basename(recorded) : null;
+    const identityMatches = Boolean(
+      live.alive && live.executable && recorded &&
+        (live.executable === recorded ||
+          live.executable.endsWith("/" + recordedName) ||
+          live.executable.endsWith("\\" + recordedName)),
+    );
+    if (!identityMatches) {
+      return {
+        stopped: false,
+        graceful: false,
+        killed: false,
+        killSkipped: "live executable does not match the spawn-recorded executable",
+        pid: child.pid,
+        executablePath: recorded,
+        live,
+      };
+    }
+    let killed = false;
+    let killError = null;
+    try {
+      killExactPid(child.pid);
+      killed = true;
+    } catch (error) {
+      killError = String(error);
+    }
+    let exit = null;
+    try {
+      exit = await deadline(exited, "isolated gateway termination", 10000);
+    } catch {
+      exit = null;
+    }
+    return {
+      stopped: exit !== null,
+      graceful: false,
+      killed,
+      killError,
+      pid: child.pid,
+      executablePath: entry.executablePath,
+      exit,
+    };
+  };
+
+  try {
+    await deadline(
+      new Promise((resolveReady, rejectReady) => {
+        ready.then(() => resolveReady(true));
+        exited.then((result) =>
+          rejectReady(gatewayBlocked("gateway-exited-before-ready", JSON.stringify(result) + " " + stderr.slice(-2000))),
+        );
+      }),
+      "isolated gateway readiness",
+      timeoutMs,
+    );
+
+    // The accept loop starts only after the boot restore of the persisted remote config,
+    // so a completed handshake already implies the gateway restore has run; the single
+    // status read below is therefore authoritative and needs no polling.
+    control = await connectDaemonControl(socketPath, { timeoutMs });
+    const statusResponse = await control.call({ type: "remoteGetStatus" });
+    if (!statusResponse || statusResponse.type !== "remoteStatusOk") {
+      throw gatewayBlocked("gateway-status-unreadable", JSON.stringify(statusResponse));
+    }
+    const status = statusResponse.status || null;
+    if (!status || status.isRunning !== true) {
+      throw gatewayBlocked("gateway-not-running", JSON.stringify(status) + " " + stderr.slice(-2000));
+    }
+    const bound = parseLoopbackBoundAddress(status.boundAddress);
+    if (!bound) {
+      throw gatewayBlocked("gateway-bound-address-not-loopback", String(status.boundAddress));
+    }
+    const url = "http://" + bound.host + ":" + bound.port;
+
+    // The real pairing flow, over the daemon's own control socket and the gateway's own
+    // exchange route: nothing is hand-written into the auth store.
+    const pinResponse = await control.call({ type: "remoteCreatePairingCode", permission: "control" });
+    if (!pinResponse || pinResponse.type !== "remotePairingCodeOk" || !/^\d{6}$/.test(String(pinResponse.code || ""))) {
+      throw gatewayBlocked("pairing-code-unavailable", JSON.stringify(pinResponse));
+    }
+    const exchanged = await gatewayJson(
+      url + GATEWAY_PAIR_EXCHANGE_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code: String(pinResponse.code),
+          deviceName: "herdr-reference-qa",
+          installationId: "herdr-reference-" + basename(profile.root),
+        }),
+      },
+      timeoutMs,
+    );
+    if (exchanged.status !== 200 || !exchanged.json || typeof exchanged.json.token !== "string" || exchanged.json.token.length === 0) {
+      throw gatewayBlocked(
+        "pairing-exchange-refused",
+        "POST " + GATEWAY_PAIR_EXCHANGE_PATH + " -> " + exchanged.status + " " + String(exchanged.text).slice(0, 500),
+      );
+    }
+    const token = exchanged.json.token;
+    const credentialFile = join(profile.paths.data, ISOLATED_CREDENTIAL_FILENAME);
+    writeFileSync(credentialFile, token + "\n", { mode: 0o600 });
+
+    // Fail closed if the URL derived above does not belong to the daemon this run started:
+    // a token from this profile's store must authenticate there, or the run must not
+    // proceed with an endpoint someone else owns.
+    const capabilities = await gatewayJson(
+      url + REFERENCE_CAPABILITIES_PATH,
+      { headers: { accept: "application/json", authorization: "Bearer " + token } },
+      timeoutMs,
+    );
+    if (capabilities.status !== 200) {
+      throw gatewayBlocked(
+        "gateway-token-refused",
+        "GET " + REFERENCE_CAPABILITIES_PATH + " -> " + capabilities.status + " " + String(capabilities.text).slice(0, 500),
+      );
+    }
+
+    return {
+      contract: ISOLATED_GATEWAY_CONTRACT,
+      profile,
+      entry,
+      url,
+      port: bound.port,
+      boundAddress: status.boundAddress,
+      pinnedPort: REMOTE_GATEWAY_PORT,
+      portRequirement: {
+        fixed: true,
+        port: REMOTE_GATEWAY_PORT,
+        authority: "remote/state.rs REMOTE_GATEWAY_PORT, forced on config load and on configure",
+        urlAuthority: "the daemon's own RemoteGetStatus boundAddress",
+      },
+      token,
+      credentialFile,
+      daemonSocketPath: socketPath,
+      daemonPid: typeof control.handshake.pid === "number" ? control.handshake.pid : null,
+      daemonEpoch:
+        control.handshake.epoch === undefined || control.handshake.epoch === null
+          ? null
+          : String(control.handshake.epoch),
+      deviceId: exchanged.json.device && exchanged.json.device.id ? exchanged.json.device.id : null,
+      devicePermission:
+        exchanged.json.device && exchanged.json.device.permission ? exchanged.json.device.permission : null,
+      machineId: exchanged.json.machineId || null,
+      referenceHostId:
+        capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
+      remoteStatus: status,
+      stderrTail: () => stderr,
+      stop: stopOwnedDaemon,
+    };
+  } catch (error) {
+    // A gateway this run started is never left running behind a failure, and its throwaway
+    // profile is removed only once the process is gone.
+    const outcome = await stopOwnedDaemon().catch(() => ({ stopped: false }));
+    if (control) {
+      try {
+        control.close();
+      } catch {
+        /* The socket dies with the daemon. */
+      }
+    }
+    if (outcome.stopped) {
+      try {
+        profile.cleanup();
+      } catch {
+        /* A leftover temp profile is reported by the ledger, not hidden. */
+      }
+    } else {
+      error.detail = (error.detail ? error.detail + " " : "") + "profile-left-behind=" + profile.root + " pid=" + child.pid;
+    }
+    throw error;
+  }
 }
 
 /* ==========================================================================

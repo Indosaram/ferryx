@@ -1718,7 +1718,11 @@ mod tests {
             .expect("the page is served");
         assert!(page.can_reach_provider_read(&stream.owner));
 
-        let unbound = identity("omo", "sess-1");
+        // The same store, with no provider identity: `transcript_path_for_session` matches a
+        // store by the session id in its own file name, so the backend session id that resolves
+        // this store is the id the store is named with (`aaa`) — the daemon's backend session id
+        // is the agent's own session id in the common case.
+        let unbound = identity("omo", "aaa");
         let stream = resolve_reference_history_stream(home.path(), &unbound, &[])
             .expect("the backend session id resolves the same store");
         let page = reference_history_page_from_bytes(&stream, &unbound, THREE_TURNS.as_bytes(), 5, None)

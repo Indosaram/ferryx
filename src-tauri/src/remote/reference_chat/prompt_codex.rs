@@ -2436,7 +2436,13 @@ mod tests {
             parse_reference_codex_prompt(MODEL_LIST).map(|parsed| parsed.responder),
             codex_queued_prompt(
                 QUEUED_COLLAPSED,
-                &[queued_question("call_c:0", "Which dataset?", &["LM-O"])],
+                // the collapsed screen counts two questions, and a card is built only from the
+                // newest `count` unanswered ones: the rollout must hold both, as the fixture's
+                // own count says (`queued_question_count(QUEUED_COLLAPSED) == 2`)
+                &[
+                    queued_question("call_c:0", "Which dataset?", &["LM-O"]),
+                    queued_question("call_c:1", "Any notes?", &[]),
+                ],
                 None,
             )
             .map(|parsed| parsed.responder),

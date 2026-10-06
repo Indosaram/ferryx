@@ -102,7 +102,14 @@ function installFetch(handler: (url: string, init?: RequestInit) => Response | u
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
     }
     if (url.includes("/api/v1/sessions")) {
-      return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: DAEMON_EPOCH, running: true }] });
+      // The host's inventory names every pane it serves, with the incarnation that serves it:
+      // the lane binds a pane's target by that epoch, so an omitted pane cannot be read at all.
+      return jsonResponse({
+        sessions: [
+          { sessionId: "sess-main", daemonEpoch: DAEMON_EPOCH, running: true },
+          { sessionId: "sess-second", daemonEpoch: DAEMON_EPOCH, running: true },
+        ],
+      });
     }
     const handled = handler(url, init);
     if (handled) return handled;
@@ -149,7 +156,8 @@ describe("remoteAppChatFrames", () => {
     render(<RemoteApp />);
 
     expect(await screen.findByTestId("user-message-bubble")).toHaveTextContent("what changed in the parser?");
-    expect(await screen.findByTestId("assistant-message-body")).toHaveTextContent("The parser now streams line by line.");
+    // a reference turn's prose is drawn by the reference body, never by the legacy body
+    expect(await screen.findByTestId("assistant-reference-body")).toHaveTextContent("The parser now streams line by line.");
     expect(harness.calls.some((url) => url.includes("/api/v1/agent-history/"))).toBe(false);
   });
 
@@ -160,7 +168,7 @@ describe("remoteAppChatFrames", () => {
       return historyFor(page([turn("assistant", "steady")]))(url);
     });
     render(<RemoteApp />);
-    await screen.findByTestId("assistant-message-body");
+    await screen.findByTestId("assistant-reference-body");
 
     await waitFor(() => {
       // the workspace event socket is not a terminal socket

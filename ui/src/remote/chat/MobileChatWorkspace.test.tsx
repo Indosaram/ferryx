@@ -254,7 +254,6 @@ describe("MobileChatWorkspace", () => {
     );
     expect(screen.getByTestId("chat-composer-prompt")).toHaveTextContent("waiting");
   });
-});
 
   it("16. keeps the reader's place when an older page lands above them", () => {
     const firstPage: MobileChatMessageProps[] = Array.from({ length: 4 }, (_, idx) => ({
@@ -309,4 +308,5 @@ describe("MobileChatWorkspace", () => {
     // at the bottom the view follows the newest turn rather than being pinned to a stale offset
     expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   });
+});
 

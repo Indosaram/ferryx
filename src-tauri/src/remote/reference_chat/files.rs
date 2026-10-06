@@ -139,8 +139,11 @@ pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode>
 /// Is this mention path safe to hand to a program as a relative path?
 ///
 /// Refuses an absolute path, a Windows drive prefix, a home-relative path, a backslash
-/// separator, a control byte, a parent or current-directory component, and an empty or
-/// whitespace-padded path.
+/// separator, a control byte, an empty or whitespace-padded path, and any `.` or `..`
+/// component - refused whether it is written as its own segment (`sub/./shot.png`, `a/../b`)
+/// or spelled with a leading dot (`./shot.png`, `../x`). The TS twin
+/// (`ui/src/remote/chat/referenceFiles.ts`, `referenceMentionPathIsSafe`) applies the same
+/// segment rule; a divergence between the two guards is a defect in its own right.
 pub fn reference_mention_path_is_safe(relative: &str) -> bool {
     if relative.is_empty() || relative.trim() != relative {
         return false;
@@ -155,9 +158,13 @@ pub fn reference_mention_path_is_safe(relative: &str) -> bool {
     if reference_has_drive_prefix(relative) {
         return false;
     }
-    Path::new(relative)
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+    // A name is a NAME: every segment must be a real one, so `.` and `..` are refused both as
+    // their own segment (`sub/./shot.png`, `a/../b`) and when they lead the path. The host
+    // component walk this replaces rejected a leading dot only when a separator followed it,
+    // so an interior `/./` slipped through while the TS twin refused it.
+    relative
+        .split('/')
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 fn reference_has_drive_prefix(path: &str) -> bool {

@@ -151,7 +151,10 @@ pub struct OmpPromptCard {
     /// The public card. Its `id` is what [`reference_answer_keys`] looks the card up by.
     pub prompt: ReferencePrompt,
     pub responder: OmpPromptResponder,
-    /// Every menu row's label, in order, as `parseBorderMenu` read it (`:282`).
+    /// Every menu row's label, in order, as the card offers it: a row's `(Recommended)` suffix
+    /// is stripped exactly as the option list strips it, so one row is named alike in both.
+    /// (Divergence: upstream's `menuLabels` (`:282`) keeps the suffix; no pinned matcher
+    /// compares this list against another reader's.)
     pub menu_labels: Vec<String>,
     /// The row the cursor is on (`:277`).
     pub selected_index: usize,
@@ -599,7 +602,12 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
             fallback: None,
         },
         responder: OmpPromptResponder::Question,
-        menu_labels: rows.iter().map(|row| row.label.clone()).collect(),
+        // a row's label as the card offers it: the pinned `(Recommended)` strip (`:279`) is not
+        // the option list's alone, so `menu_labels` and `options` name the row alike
+        menu_labels: rows
+            .iter()
+            .map(|row| patterns.recommended.replace(&row.label, "").to_string())
+            .collect(),
         selected_index,
         checked_option_indices: option_rows
             .iter()

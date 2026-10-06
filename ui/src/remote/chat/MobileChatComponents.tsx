@@ -688,6 +688,37 @@ const REFERENCE_TASK_STATUS_ICONS: Record<
   React.ComponentType<{ className?: string; "aria-hidden"?: boolean | "true" | "false" }>
 > = { completed: CircleCheck, failed: CircleX, cancelled: CircleSlash };
 
+/**
+ * The prose vocabulary of a rich turn. It is hoisted because a map built inside the component
+ * hands ReactMarkdown a NEW component identity on every render: React then unmounts and remounts
+ * the rendered prose instead of updating it in place, which drops the reader's selection and
+ * detaches any node a caller already holds (an assertion on the prose element fails on the next
+ * re-render).
+ */
+const REFERENCE_PROSE_COMPONENTS = {
+  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
+  a: ({ href, children }: any) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-chat-link underline underline-offset-2 decoration-chat-link/60 hover:decoration-chat-link"
+    >
+      {children}
+    </a>
+  ),
+  pre: ({ children }: any) => (
+    <pre className="my-2 overflow-x-auto rounded-lg border border-chat-border bg-chat-screen/70 p-2 font-mono text-[11px] scrollbar-sleek">
+      {children}
+    </pre>
+  ),
+  code: ({ children }: any) => (
+    <code className="rounded bg-chat-surface-raised px-1 py-0.5 font-mono text-xs text-chat-code">
+      {children}
+    </code>
+  ),
+};
+
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
 const ReferenceProse: React.FC<{ text: string; className?: string }> = ({ text, className }) => (
   <div
@@ -698,29 +729,7 @@ const ReferenceProse: React.FC<{ text: string; className?: string }> = ({ text, 
   >
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      components={{
-        p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
-        a: ({ href, children }: any) => (
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-chat-link underline underline-offset-2 decoration-chat-link/60 hover:decoration-chat-link"
-          >
-            {children}
-          </a>
-        ),
-        pre: ({ children }: any) => (
-          <pre className="my-2 overflow-x-auto rounded-lg border border-chat-border bg-chat-screen/70 p-2 font-mono text-[11px] scrollbar-sleek">
-            {children}
-          </pre>
-        ),
-        code: ({ children }: any) => (
-          <code className="rounded bg-chat-surface-raised px-1 py-0.5 font-mono text-xs text-chat-code">
-            {children}
-          </code>
-        ),
-      }}
+      components={REFERENCE_PROSE_COMPONENTS}
     >
       {text}
     </ReactMarkdown>

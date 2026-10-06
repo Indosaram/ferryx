@@ -39,7 +39,7 @@
  *     [--capture-native] [--allow-host true] [--timeout-ms 30000]
  */
 
-import { spawn } from "node:child_process";
+
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import {
@@ -55,6 +55,7 @@ import { fileURLToPath } from "node:url";
 import {
   CANDIDATE_SCHEMA,
   FIXTURE_SCHEMA,
+  IsolatedGatewayError,
   OwnedProcessLedger,
   REFERENCE_REGISTRY_ROWS,
   REFERENCE_TRANSPORTS,
@@ -63,12 +64,12 @@ import {
   captureSourceProvenance,
   daemonSocketPath,
   killExactPid,
+  launchIsolatedGateway,
   probeProcessIdentity,
   redactUrl,
   repoRoot,
   sha256Bytes,
   sha256File,
-  setupIsolatedProfile,
   validateRegistryRows,
   writeJson,
 } from "./herdr-reference-fixtures.mjs";
@@ -441,48 +442,28 @@ function readTranscriptVersion(config, session) {
  * ========================================================================== */
 
 /**
- * Start one isolated gateway for a host, on a throwaway profile, and record its PID and
- * executable at spawn time. Nothing here reuses a production data directory.
+ * Start one isolated gateway for a host through the product's own headless launch
+ * contract (--daemon + a persisted isolated remote config, the bound address read back
+ * from that daemon, and a token from its own auth store). Nothing here reuses a
+ * production data directory, and nothing waits for a JSON ready line the binary never
+ * writes.
  */
 async function startIsolatedGateway(config, host, ledger, args) {
-  const candidate = config.candidate || {};
-  if (!candidate.binary || !existsSync(candidate.binary)) {
-    throw blocked("gateway-binary-missing", String(candidate.binary || ""));
+  try {
+    return await launchIsolatedGateway({
+      binary: config.candidate && config.candidate.binary,
+      label: host.id,
+      uiDist: config.candidate && config.candidate.uiDist,
+      env: host.env || {},
+      cwd: config.source && config.source.root ? config.source.root : repoRoot,
+      ledger,
+      timeoutMs: args.timeoutMs,
+      extra: { hostId: host.id, transport: host.transport, launchedBy: "herdr-reference-provision.mjs" },
+    });
+  } catch (error) {
+    if (error instanceof IsolatedGatewayError) throw blocked(error.reason, error.detail);
+    throw error;
   }
-  const profile = setupIsolatedProfile(host.id);
-  const env = { ...profile.env };
-  if (candidate.uiDist) env.FERRYX_UI_DIST_DIR = resolve(candidate.uiDist);
-  for (const [key, value] of Object.entries(host.env || {})) env[key] = String(value);
-  const child = spawn(resolve(candidate.binary), host.gatewayArgs || [], {
-    cwd: config.source && config.source.root ? config.source.root : repoRoot,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  const entry = ledger.record(child, { hostId: host.id, transport: host.transport });
-  let stderr = "";
-  child.stderr.on("data", (data) => {
-    stderr = (stderr + data.toString()).slice(-16000);
-  });
-  const exited = new Promise((resolveExit) => {
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
-  });
-  return {
-    hostId: host.id,
-    profile,
-    entry,
-    stderrTail: () => stderr,
-    exited,
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return { alreadyExited: true };
-      child.kill("SIGTERM");
-      const result = await Promise.race([
-        exited,
-        new Promise((resolveTimeout) => setTimeout(() => resolveTimeout({ code: null, signal: "timeout" }), 10000)),
-      ]);
-      return result;
-    },
-  };
 }
 
 /**
@@ -711,9 +692,40 @@ async function main() {
         });
       }
       if (host.transport === "local" && args.allowHost && config.candidate && config.candidate.binary) {
-        const gateway = await startIsolatedGateway(config, host, ledger, args);
-        startedGateways.push(gateway);
-        record.started = true;
+        // A launch that cannot honour the contract is a blocker with the launcher's own
+        // reason, never a silently unstarted host.
+        try {
+          const gateway = await startIsolatedGateway(config, host, ledger, args);
+          startedGateways.push(gateway);
+          record.started = true;
+          // Recorded as EVIDENCE of this launch, not as the fixture's host url: this
+          // gateway lives only for the provisioning run and is stopped when the run
+          // ends, so a fixture pointing at it would hand the runner a dead URL. The
+          // runner launches its own (host.startLocal) or is given an external host.
+          record.gateway = {
+            contract: gateway.contract,
+            urlRedacted: redactUrl(gateway.url),
+            boundAddress: gateway.boundAddress,
+            pinnedPort: gateway.pinnedPort,
+            portRequirement: gateway.portRequirement,
+            pid: gateway.entry.pid,
+            executablePath: gateway.entry.executablePath,
+            daemonSocketPath: gateway.daemonSocketPath,
+            daemonPid: gateway.daemonPid,
+            daemonEpoch: gateway.daemonEpoch,
+            devicePermission: gateway.devicePermission,
+            referenceHostId: gateway.referenceHostId,
+          };
+        } catch (error) {
+          if (!(error instanceof ProvisionError)) throw error;
+          blockers.push({
+            kind: "gateway-launch",
+            hostId: host.id,
+            transport: host.transport,
+            reason: error.reason,
+            detail: error.detail,
+          });
+        }
       }
       hosts.push(record);
     }

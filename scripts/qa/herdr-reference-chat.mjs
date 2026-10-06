@@ -23,6 +23,18 @@
  *   - It never kills a process it did not spawn. Teardown re-reads each recorded PID's live
  *     executable and kills only an exact match; anything else is reported.
  *
+ * ISOLATED GATEWAY
+ *   A host that declares startLocal is launched as the product's own headless daemon
+ *   (--daemon) on a throwaway profile with a persisted isolated remote config; its URL
+ *   and device token come from that daemon and its own auth store. There is no JSON ready
+ *   line to wait for - the daemon's ready line is plain text and the bound address is
+ *   read back over the control socket.
+ *
+ *   The product FORCES the gateway port, so an isolated launch requires that fixed
+ *   127.0.0.1 port to be free on this host: the launcher pre-flights it and refuses as
+ *   BLOCKED when something else holds it, without touching that service. Run the harness
+ *   on a dedicated free host; a configured external host still needs no launch at all.
+ *
  * EXIT CODES
  *   0  every selected branch passed
  *   2  BLOCKED: a real dependency (host, credential, device, driver, transcript) is missing
@@ -50,6 +62,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
+  IsolatedGatewayError,
   OwnedProcessLedger,
   REFERENCE_HISTORY_DEFAULT_LIMIT,
   REFERENCE_HISTORY_MAX_LIMIT,
@@ -65,6 +78,7 @@ import {
   deadline,
   deviceReceiptPath,
   killExactPid,
+  launchIsolatedGateway,
   mutationEnvelope,
   probeProcessIdentity,
   readCredentialToken,
@@ -78,7 +92,6 @@ import {
   scenarioById,
   sessionMissingIdentity,
   sessionsForHost,
-  setupIsolatedProfile,
   sha256File,
   validateCandidateManifest,
   validateFixtureManifest,
@@ -720,13 +733,22 @@ async function main() {
       ctx.gateways.push(gateway);
       localHost.url = gateway.url;
       localHost.gatewayUrl = gateway.url;
-      const credentialPath = join(gateway.profile.paths.data, "reference-chat-token");
-      writeFileSync(credentialPath, gateway.token);
-      localHost.credentialFile = credentialPath;
+      // The credential file the launcher wrote inside the isolated profile: this runner
+      // never invents a token and never reads a production one.
+      localHost.credentialFile = gateway.credentialFile;
       result.localGateway = {
+        contract: gateway.contract,
         urlRedacted: redactUrl(gateway.url),
+        port: gateway.port,
+        boundAddress: gateway.boundAddress,
+        portRequirement: gateway.portRequirement,
         pid: gateway.entry.pid,
         executablePath: gateway.entry.executablePath,
+        daemonSocketPath: gateway.daemonSocketPath,
+        daemonPid: gateway.daemonPid,
+        daemonEpoch: gateway.daemonEpoch,
+        devicePermission: gateway.devicePermission,
+        referenceHostId: gateway.referenceHostId,
       };
     }
 
@@ -1114,77 +1136,30 @@ function verifyShippedSelectors(candidateRaw, uiDist) {
  * ========================================================================== */
 
 /**
- * Start one isolated local gateway on a throwaway profile and wait for its health endpoint
- * to answer. The wait is condition-driven with a deadline, never a fixed sleep.
+ * Launch the frozen candidate as an isolated gateway and obtain its URL and device token.
+ *
+ * The contract is the product's own headless daemon, not a JSON ready line it never
+ * writes: --daemon plus the persisted isolated remote config, the bound address read back
+ * from that daemon, and a token from the real pairing flow. launchIsolatedGateway in
+ * herdr-reference-fixtures.mjs carries the source each step is read from.
  */
 async function startIsolatedGateway(args, candidateRaw, ledger) {
-  const binary = candidateRaw.binary && candidateRaw.binary.path;
-  if (!binary || !existsSync(binary)) throw blocked("gateway-binary-missing", String(binary));
   if (!args.allowHost) {
     throw blocked("host-authorization", "starting a local gateway requires --allow-host true");
   }
-  const profile = setupIsolatedProfile("chat");
-  const env = { ...profile.env };
-  if (candidateRaw.uiDist) env.FERRYX_UI_DIST_DIR = resolve(candidateRaw.uiDist);
-  const child = spawn(resolve(binary), [], {
-    cwd: repoRoot,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  ledger.record(child, { role: "isolated-gateway" });
-  let stderr = "";
-  child.stderr.on("data", (data) => {
-    stderr = (stderr + data.toString()).slice(-16000);
-  });
-  const exited = new Promise((resolveExit) => {
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
-  });
-  // The gateway prints its bound address as JSON on stdout; the first such line is the
-  // authority for the URL, so the runner never assumes a port.
-  const bound = await deadline(
-    new Promise((resolveBound, rejectBound) => {
-      let buffer = "";
-      child.stdout.on("data", (data) => {
-        buffer += data.toString();
-        for (const line of buffer.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("{")) continue;
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (parsed && (parsed.gatewayUrl || parsed.url) && (parsed.token || parsed.deviceToken)) {
-              resolveBound(parsed);
-              return;
-            }
-          } catch {
-            /* Not a ready line. */
-          }
-        }
-        const tail = buffer.slice(-8192);
-        buffer = tail;
-      });
-      exited.then((result) => rejectBound(blocked("gateway-exited", JSON.stringify(result) + " " + stderr)));
-    }),
-    "gateway readiness",
-    args.timeoutMs,
-  );
-  return {
-    profile,
-    entry: ledger.entries[ledger.entries.length - 1],
-    url: bound.gatewayUrl || bound.url,
-    token: bound.token || bound.deviceToken,
-    deviceId: bound.deviceId || null,
-    hostId: bound.hostId || null,
-    stderrTail: () => stderr,
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill("SIGTERM");
-      await Promise.race([
-        exited,
-        new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(null), 10000)),
-      ]);
-    },
-  };
+  try {
+    return await launchIsolatedGateway({
+      binary: candidateRaw.binary && candidateRaw.binary.path,
+      label: "chat",
+      uiDist: candidateRaw.uiDist,
+      ledger,
+      timeoutMs: args.timeoutMs,
+      extra: { launchedBy: "herdr-reference-chat.mjs" },
+    });
+  } catch (error) {
+    if (error instanceof IsolatedGatewayError) throw blocked(error.reason, error.detail);
+    throw error;
+  }
 }
 
 function createContext(args, fixtureRaw, candidateRaw, fixture, candidate, ledger) {

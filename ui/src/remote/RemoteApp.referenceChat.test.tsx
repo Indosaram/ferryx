@@ -92,6 +92,23 @@ function nativePage(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
+/** SHA-256 of the staged fixture's own bytes ("abc"): the lane refuses a receipt it cannot prove. */
+const NOTES_TXT_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+/**
+ * A File the staging lane can read. jsdom implements no 'Blob.arrayBuffer' at all, and the lane
+ * reads the bytes it is handed through its 'ReferenceFileSource' seam, so the fixture supplies
+ * them: the same contents the File declares, read the way a browser File answers.
+ */
+function readableFile(contents: string, name: string, type: string): File {
+  const file = new File([contents], name, { type });
+  Object.defineProperty(file, "arrayBuffer", {
+    configurable: true,
+    value: async () => new TextEncoder().encode(contents).buffer,
+  });
+  return file;
+}
+
 interface Harness {
   readonly calls: { readonly url: string; readonly method: string; readonly body: unknown }[];
 }
@@ -157,7 +174,7 @@ function installFetch(options: {
       return jsonResponse((options.files ?? (() => ({
         ok: true,
         data: {
-          receipt: { hostId: "local", attachmentId: "att-1", sha256: "abc", sizeBytes: 3, mediaType: "text/plain" },
+          receipt: { hostId: "local", attachmentId: "att-1", sha256: NOTES_TXT_SHA256, sizeBytes: 3, mediaType: "text/plain" },
           displayName: "notes.txt",
           mentionText: "@notes.txt ",
         },
@@ -278,8 +295,12 @@ describe("reference chat lane (task 12)", () => {
     expect(body.params.text).toBe("please review");
     expect(body.params.origin).toBe("chat");
     expect(body.params.attachmentIds).toEqual([]);
-    // the echo is the user's own words; nothing is invented for the assistant
-    expect(screen.getByTestId("user-message-bubble")).toHaveTextContent("please review");
+    // Two legitimate messages, not one rendered twice: the transcript's own turn, then the echo
+    // of the user's words. Both texts are pinned, and so is their order.
+    const bubbles = screen.getAllByTestId("user-message-bubble");
+    expect(bubbles).toHaveLength(2);
+    expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
+    expect(bubbles[1]).toHaveTextContent("please review");
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
   });
 
@@ -297,7 +318,10 @@ describe("reference chat lane (task 12)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("keep me");
     });
-    expect(screen.queryByTestId("user-message-bubble")).not.toBeInTheDocument();
+    // the echo stopped claiming it was sent: only the transcript's own turn is left
+    const bubbles = screen.getAllByTestId("user-message-bubble");
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
   });
 
   it("QA-06: Stop goes through /stop with the pane's own interrupt, never Ctrl-C", async () => {
@@ -343,8 +367,10 @@ describe("reference chat lane (task 12)", () => {
     render(<RemoteApp />);
 
     const card = await screen.findByTestId("reference-prompt-card");
+    // A two-option approval is drawn by the existing approval shell, not by the ported option
+    // list ('ReferencePromptCard.test.tsx' pins that shape), so index 0 is the shell's confirm.
     await act(async () => {
-      fireEvent.click(within(card).getByTestId("reference-prompt-option-0"));
+      fireEvent.click(within(card).getByRole("button", { name: /Yes, proceed/ }));
     });
 
     const answer = harness.calls.find((call) => call.url.includes("/answer"));
@@ -394,7 +420,7 @@ describe("reference chat lane (task 12)", () => {
     render(<RemoteApp />);
     await screen.findByTestId("chat-composer-textarea");
 
-    const file = new File(["abc"], "notes.txt", { type: "text/plain" });
+    const file = readableFile("abc", "notes.txt", "text/plain");
     await act(async () => {
       fireEvent.change(screen.getByTestId("file-upload-input"), { target: { files: [file] } });
     });
@@ -590,7 +616,7 @@ describe("reference chat lane (task 12)", () => {
     const textarea = await screen.findByTestId("chat-composer-textarea");
     fireEvent.change(textarea, { target: { value: "keep this draft" } });
 
-    const file = new File(["too big"], "huge.bin", { type: "text/plain" });
+    const file = readableFile("too big", "huge.bin", "text/plain");
     await act(async () => {
       fireEvent.change(screen.getByTestId("file-upload-input"), { target: { files: [file] } });
     });

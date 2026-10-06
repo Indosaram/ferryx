@@ -563,10 +563,13 @@ pub fn omo_form_on_screen(screen: &str) -> bool {
 
 /// Is an omo form on this screen the form itself, or a pane herdr names something else?
 ///
-/// Upstream reads an omo form for a pane it names `omo`, `pi` or nothing at all, and for a pane
-/// it names `claude` only while that pane is blocked. Upstream `readKnownPrompt:2476`.
+/// A pane herdr names `omo`, `pi` or nothing at all reads an omo form on its own: the form's own
+/// text is the evidence, and `omo_reads_forms` is what keeps every other agent out. A pane it
+/// names `claude` reads one only while herdr reports it waiting on the user, because a claude pane
+/// draws dialogs of its own. Upstream `readKnownPrompt:2476` also gates an unnamed pane on that
+/// status; this lane reads it on the form's own text, which is the reader set the MANIFEST records.
 pub fn omo_form_is_trusted(agent: &str, agent_status: Option<&str>) -> bool {
-    (agent != "claude" && !agent.is_empty()) || agent_status == Some("blocked")
+    agent != "claude" || agent_status == Some("blocked")
 }
 
 /// Does the reference read an omo form on a pane this agent names?
@@ -1073,7 +1076,9 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
     let shown_labels: Vec<String> = view
         .rows
         .iter()
-        .map(|row| join_wrapped(&row.label, width, Some(current_marker_re())))
+        // A row's label is joined with its number (and the cursor's marker) cut off the front,
+        // as the reference's joinWrapped lead does: the card names the option, not its row.
+        .map(|row| join_wrapped(&row.label, width, Some(row_prefix_re())))
         .collect();
     let own_line = clean_line(&lines[own_index]);
     let current_answered = shown_labels.iter().any(|label| ends_with_answered(label))
@@ -1507,7 +1512,9 @@ fn parse_omo_pending(lines: &[String], pending: &[OmoAsk]) -> Option<OmoCard> {
         body: None,
         options,
         multi_select: asked.multi_select,
-        custom_option_index: if asked.multi_select { None } else { Some(option_count as u32) },
+        // The widget's own-answer row ("Type your reply") sits one past the options, where the
+        // reference's menu labels put it; the form it opens shows OmO's own row instead.
+        custom_option_index: if asked.multi_select { None } else { Some(option_count as u32 + 1) },
         steps: omo_steps(&tabs, Some(ask)),
         responder: OmoResponder::Pending,
         call: Some(ask.id.as_str()),
@@ -1670,7 +1677,10 @@ pub fn omo_card_for_screen(
                 .flatten()
             })
             .collect();
-        if matched.len() == 1 {
+        // No card from the open calls leaves the widget below in the chain: the form the folded
+        // widget opens is still being drawn under its hint while the widget itself is on screen.
+        // Several matches mean the screen says nothing about which call it answers.
+        if matched.len() <= 1 {
             candidates.extend(matched);
         }
     }
@@ -1828,6 +1838,12 @@ pub fn omo_answer_plan(card: &OmoCard, answer: &ReferencePromptAnswer) -> Result
             return Err(ScopeErrorCode::InvalidRequest);
         }
         let plan = card.custom_plan.as_ref().ok_or(ScopeErrorCode::InvalidRequest)?;
+        // The folded widget's plans are empty on purpose: the route opens the form with its own
+        // key and plans from the opened form, so an answer here sends no keys at all. Upstream
+        // `customSteps: () => []` for `omo-pending` (`prompt.ts:2674-2702`).
+        if card.responder == OmoResponder::Pending {
+            return Ok(Vec::new());
+        }
         let mut steps = plan.lead.clone();
         steps.push(ReferenceKeyStep::typed(text));
         steps.extend(plan.tail.iter().cloned());
@@ -1847,6 +1863,10 @@ pub fn omo_answer_plan(card: &OmoCard, answer: &ReferencePromptAnswer) -> Result
             return Err(ScopeErrorCode::InvalidRequest);
         }
         let multi = card.multi_plan.as_ref().ok_or(ScopeErrorCode::InvalidRequest)?;
+        // Validation only, as above: the folded widget's `multiSteps` is `() => []`.
+        if card.responder == OmoResponder::Pending {
+            return Ok(Vec::new());
+        }
         let mut keys: Vec<&'static str> = vec!["backspace"];
         let mut at = multi.cursor;
         let mut sorted = choices.clone();

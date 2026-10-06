@@ -1142,8 +1142,21 @@ mod tests {
             self.log().iter().map(|bytes| String::from_utf8_lossy(bytes).to_string()).collect()
         }
 
+        /// The distinct sessions these keys reached, in the order they were first written to.
+        ///
+        /// A plan's steps are separate writes to the one pane an answer targets (`pane.send_keys`
+        /// carries key names one at a time, and the route keeps its own gap between steps), so the
+        /// raw per-write record would answer "how many writes" instead of what an answer's session
+        /// assertion asks: *which* pane's session the keys reached. A step that went to another
+        /// session still appears here.
         fn sessions(&self) -> Vec<String> {
-            self.sessions.lock().unwrap().clone()
+            let mut distinct: Vec<String> = Vec::new();
+            for session in self.sessions.lock().unwrap().iter() {
+                if !distinct.contains(session) {
+                    distinct.push(session.clone());
+                }
+            }
+            distinct
         }
     }
 
