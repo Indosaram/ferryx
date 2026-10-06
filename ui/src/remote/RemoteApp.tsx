@@ -2486,6 +2486,13 @@ export const RemoteHostConnection: React.FC<{
   );
 
   const chatPartContext = useMemo<ReferencePartRenderContext>(
+    () => ({
+      resolveImageUrl: (image: ReferenceImageRef) =>
+        referenceChatRoute(chatSessionIdRef.current ?? "", `files/${encodeURIComponent(image.ref)}`),
+    }),
+    [],
+  );
+
   /** The disclosure for this page's source; null when the page is a native transcript. */
   const chatPageDisclosure = useMemo<string | null>(
     () => (chatPage === null ? null : referenceHistoryNotice(chatPage)),
@@ -2529,12 +2536,6 @@ export const RemoteHostConnection: React.FC<{
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
 
-    () => ({
-      resolveImageUrl: (image: ReferenceImageRef) =>
-        referenceChatRoute(chatSessionIdRef.current ?? "", `files/${encodeURIComponent(image.ref)}`),
-    }),
-    [],
-  );
 
 
   /* Declared above the auth early return so the hook count is identical on the
