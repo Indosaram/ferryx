@@ -771,13 +771,12 @@ async fn projector_child_case(name: &str) {
         "not needed: the child exited inside the bound".to_owned()
     };
     // The wait after a signal is bounded too, and a child still unreaped after it is reported as
-    // unreaped rather than reaped: this parent only claims a cleanup it actually observed.
+    // unreaped rather than reaped: this parent only claims a cleanup it actually observed. Both
+    // arms keep the wait's own result, so a wait that failed is reported as that failure instead
+    // of being flattened into a timeout that never happened.
     let reaped = match waited {
         Ok(status) => Some(status),
-        Err(_) => tokio::time::timeout(PROJECTOR_CLEANUP_BOUND, child.wait())
-            .await
-            .ok()
-            .and_then(Result::ok),
+        Err(_) => tokio::time::timeout(PROJECTOR_CLEANUP_BOUND, child.wait()).await.ok(),
     };
     let drained = tokio::time::timeout(PROJECTOR_DRAIN_BOUND, async {
         let _ = (&mut stdout_task).await;
@@ -796,21 +795,28 @@ async fn projector_child_case(name: &str) {
     let stage = projector_child_last_stage(&combined);
     let receipt = root.path().to_owned();
     root.close().unwrap();
-    let cleanup = if reaped.is_none() {
-        "CLEANUP FAILED: still unreaped after the bounded wait"
-    } else if !drained {
-        "drain cut short: a descendant still held the pipes, captured text preserved"
-    } else {
-        "reaped and drained"
+    let cleanup = match &reaped {
+        None => "CLEANUP FAILED: still unreaped after the bounded wait".to_owned(),
+        Some(Err(error)) => format!("CLEANUP FAILED: the bounded wait failed: {error}"),
+        Some(Ok(_)) if !drained => {
+            "drain cut short: a descendant still held the pipes, captured text preserved".to_owned()
+        }
+        Some(Ok(_)) => "reaped and drained".to_owned(),
     };
     assert!(
         !timed_out,
         "{name} (pid {pid:?}) exceeded {PROJECTOR_CHILD_BOUND:?}; last stage={stage}; teardown={teardown}; cleanup={cleanup}; stdout={stdout:?} stderr={stderr:?}"
     );
-    // The exit must be observed, not assumed: a child whose wait failed is a cleanup failure and
-    // is reported as one instead of being read as a pass.
-    let Some(status) = reaped else {
-        panic!("{name}: the child (pid {pid:?}) was not observed to exit inside the bounded wait")
+    // The exit must be observed, not assumed: a wait that failed and a wait that never returned
+    // are each reported as themselves, so neither can be read as a pass.
+    let status = match reaped {
+        Some(Ok(status)) => status,
+        Some(Err(error)) => {
+            panic!("{name}: waiting for the child (pid {pid:?}) failed: {error}")
+        }
+        None => panic!(
+            "{name}: the child (pid {pid:?}) was not observed to exit inside the bounded wait"
+        ),
     };
     assert!(
         status.success(),
