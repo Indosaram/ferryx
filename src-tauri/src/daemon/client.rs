@@ -1271,6 +1271,30 @@ impl DaemonClient {
             .map_err(|_| IpcError::new(IpcErrorCode::InvalidArgument, "Invalid split origin epoch"))?;
         match self.local_split_status_until(identity, deadline).await? {
             SplitOperationResult::Created { session_id, daemon_epoch, session, .. } => {
+                // A recorded creation answers this request only when it was created from the SAME
+                // parameters. Returning it unconditionally made the journal's fingerprint check
+                // unreachable for a reused identity: this path short-circuits before the daemon
+                // ever compares fingerprints, so a conflicting-fingerprint request was answered
+                // with the other request's session instead of being rejected. Measured:
+                // `conflictRejected=0` with all eight conflicting requests settling onto one
+                // session. A true duplicate still matches every field and keeps its idempotent
+                // answer; only a genuine mismatch is a conflict.
+                //
+                // `cwd` is deliberately not compared: the daemon records the canonicalized path
+                // while `prepared.cwd` is the pre-canonicalization string, so a textual compare
+                // would reject honest duplicates on Windows (`\\?\` prefixes).
+                let geometry_differs =
+                    session.cols != prepared.cols || session.rows != prepared.rows;
+                let workspace_differs = session
+                    .workspace_id
+                    .as_deref()
+                    .is_some_and(|recorded| recorded != prepared.workspace_id);
+                let worktree_differs = session.worktree != prepared.worktree;
+                if geometry_differs || workspace_differs || worktree_differs {
+                    return Err(IpcError::spawn_request_conflict(
+                        "Split request identity was reused with different parameters",
+                    ));
+                }
                 return Ok(DaemonSpawnResult { session_id, epoch: daemon_epoch, session });
             }
             SplitOperationResult::Absent { can_create: true } => {}
