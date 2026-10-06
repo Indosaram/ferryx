@@ -1050,6 +1050,118 @@ export function daemonHandshakeFrame(transport, token, version) {
 }
 
 /* ==========================================================================
+ * Workspace registration (the owning daemon's own contract)
+ *
+ * A daemon does not accept a spawn for a workspace it has never heard of: `Spawn` carries a
+ * non-optional `workspaceId` (daemon/protocol.rs) and the daemon answers `Workspace '<id>' is
+ * not registered` for an id nothing created. The headless daemon registers ONE startup
+ * workspace from its process working directory (`ipc/project::initial_project`), and that id is
+ * derived - from the cwd, its git top level and the launch route - so a config cannot rely on it
+ * to produce the id the config itself names. The bridge is the daemon's own explicit request:
+ *
+ *   RegisterWorkspace { workspaceId, repoRoot }  ->  RegisterWorkspaceOk
+ *
+ * The daemon validates it (daemon/workspace_service.rs `register`): the id must pass
+ * `WorkspaceRegistry::validate_workspace_id`, and `repoRoot` must be an absolute path that
+ * canonicalizes to a directory which IS the canonical repository root. This harness therefore
+ * mirrors the id rules and checks the root exists BEFORE sending, so a config error is reported
+ * as a config error instead of as an opaque daemon refusal.
+ * ========================================================================== */
+
+/**
+ * The workspace id rules the daemon enforces (`WorktreeRegistry::validate_workspace_id`).
+ * Returns null when the id is acceptable, or the reason it is not.
+ */
+export function workspaceIdRefusal(workspaceId) {
+  if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
+    return "the session names no workspaceId; the daemon refuses a spawn for an unnamed workspace";
+  }
+  const id = workspaceId.trim();
+  if (id.startsWith("daemon:") || id.includes(":")) {
+    return "workspaceId "" + id + "" is a daemon/remote namespace, which the local registry refuses";
+  }
+  if (id.startsWith("-") || id.includes("/") || id.includes("\\")) {
+    return "workspaceId "" + id + "" contains a character the registry refuses";
+  }
+  if ([...id].some((ch) => ch.trim().length === 0 || /[\u0000-\u001f\u007f]/.test(ch))) {
+    return "workspaceId "" + id + "" contains whitespace or a control character";
+  }
+  return null;
+}
+
+/**
+ * The repository root a session's workspace must be registered against, or a typed refusal.
+ *
+ * The root is DECLARED, never inferred. The daemon's startup registration derives an id from its
+ * working directory, which is exactly the incidental behaviour this harness must not depend on,
+ * and the daemon requires the canonical repository root - not a subdirectory, not a symlink
+ * spelling. `session.repoRoot` (or the host's, for a host that declares one) is that value; a
+ * missing or unusable one is reported as the exact missing field.
+ */
+export function workspaceRootFor(host, session) {
+  const declared = (session && session.repoRoot) || (host && host.repoRoot) || null;
+  if (!isNonEmptyString(declared)) {
+    return { ok: false, reason: "workspace-repo-root-missing", detail: "declare session.repoRoot (or host.repoRoot) for " + ((session && session.workspaceId) || "the session") };
+  }
+  if (!isAbsolute(declared)) {
+    return { ok: false, reason: "workspace-repo-root-not-absolute", detail: declared };
+  }
+  if (!existsSync(declared)) {
+    return { ok: false, reason: "workspace-repo-root-absent", detail: declared };
+  }
+  let canonical = declared;
+  try {
+    canonical = realpathSync.native ? realpathSync.native(declared) : realpathSync(declared);
+  } catch {
+    /* Unreachable now: the declared spelling is still the best available root. */
+  }
+  return { ok: true, repoRoot: canonical, declared };
+}
+
+/**
+ * The `RegisterWorkspace` frame for one session's workspace, or a typed refusal describing what
+ * the config is missing. Nothing here is guessed: the id rules and the root requirements are the
+ * daemon's own.
+ */
+export function workspaceRegistrationFor(host, session) {
+  const idRefusal = workspaceIdRefusal(session && session.workspaceId);
+  if (idRefusal) return { ok: false, reason: "workspace-id-invalid", detail: idRefusal };
+  const root = workspaceRootFor(host, session);
+  if (!root.ok) return root;
+  return {
+    ok: true,
+    workspaceId: String(session.workspaceId).trim(),
+    repoRoot: root.repoRoot,
+    declaredRoot: root.declared,
+    request: { type: "registerWorkspace", workspaceId: String(session.workspaceId).trim(), repoRoot: root.repoRoot },
+  };
+}
+
+/**
+ * Register one workspace on the daemon this run owns, over the same control connection that will
+ * spawn in it. The request is sent BEFORE the spawn, so the workspace exists by the time the spawn
+ * names it.
+ *
+ * Returns `{ ok: true }` on `registerWorkspaceOk`, and otherwise a structured refusal: a typed
+ * transport failure, or the daemon's own rejection with its message. A workspace already
+ * registered against the same root is accepted by the daemon, so re-running is safe.
+ */
+export async function registerWorkspaceOnDaemon(client, registration, meta) {
+  const response = await client.call(registration.request, {
+    requestKind: "registerWorkspace",
+    requestId: (meta && meta.requestId) || registration.workspaceId,
+  });
+  const failure = daemonRequestFailure(response);
+  if (failure) {
+    return { ok: false, reason: failure.code, detail: describeDaemonRequestFailure(failure) };
+  }
+  if (!response || response.type !== "registerWorkspaceOk") {
+    return { ok: false, reason: "workspace-registration-refused", detail: JSON.stringify(response) };
+  }
+  return { ok: true, workspaceId: registration.workspaceId, repoRoot: registration.repoRoot };
+}
+
+/* ==========================================================================
  * Isolated gateway launch (QA only)
  *
  * The product has exactly two launch modes - GUI (no arguments) and headless
@@ -1300,6 +1412,10 @@ export function connectDaemonControl(transport, options) {
       // and cannot re-settle anything, so a reset followed by a close (or the reverse) is one
       // outcome, not two.
       let settled = false;
+      // Whether this connection's resources are released. A socket that died on its own is
+      // already released; this exists so a caller (and a test's cleanup hook) can tell a live
+      // handle from a dead one without probing the process table.
+      let closed = false;
       const settleAll = (code, message) => {
         if (settled) {
           note("settle-ignored", code);
@@ -1343,6 +1459,7 @@ export function connectDaemonControl(transport, options) {
       });
       socket.on("close", (hadError) => {
         note("socket-close", hadError ? "had-error" : "clean");
+        closed = true;
         // A close with requests in flight settles them structurally rather than with `null`:
         // a caller that receives `null` cannot tell a reset from a malformed reply.
         settleAll("daemon-transport-closed", endpoint + " closed with requests in flight");
@@ -1416,9 +1533,15 @@ export function connectDaemonControl(transport, options) {
             },
             // What this connection saw and how it ended, for evidence. Never a secret.
             diagnostics() {
-              return { endpoint, transportKind: resolved.kind, settled, events: events.slice() };
+              return { endpoint, transportKind: resolved.kind, settled, closed, events: events.slice() };
+            },
+            // True once the socket is gone, whether this handle closed it or the peer did.
+            get closed() {
+              return closed;
             },
             close() {
+              if (closed) return;
+              closed = true;
               lines.close();
               socket.destroy();
             },

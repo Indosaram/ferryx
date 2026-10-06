@@ -73,6 +73,8 @@ import {
   killExactPid,
   launchIsolatedGateway,
   ownerHostReceiptRequirement,
+  registerWorkspaceOnDaemon,
+  workspaceRegistrationFor,
   probeProcessIdentity,
   redactUrl,
   repoRoot,
@@ -625,11 +627,28 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
   // producer guessed. The spawn request and the `spawnOk` response shape are unchanged.
   const client = await connectHostDaemon(transport, args.timeoutMs);
   try {
+    // The workspace this session names must EXIST on the daemon before the spawn that names it:
+    // the daemon answers `Workspace '<id>' is not registered` otherwise, and its startup
+    // registration derives an id from the launch cwd, which is not this config's id. So the
+    // registration is explicit, over this same connection, and it happens FIRST.
+    const registration = workspaceRegistrationFor(host, session);
+    if (!registration.ok) {
+      throw blocked(registration.reason, registration.detail);
+    }
+    const registered = await registerWorkspaceOnDaemon(client, registration, {
+      requestId: session.workspaceId,
+    });
+    if (!registered.ok) {
+      throw blocked(registered.reason, registered.detail);
+    }
     const requestId = session.clientRequestId || ("herdr-ref-" + session.backendSessionId);
     const response = await client.call({
       type: "spawn",
       clientRequestId: requestId,
-      workspaceId: session.workspaceId,
+      // The id that was just REGISTERED, not the raw config value: the registrar trims it, so
+      // naming the untrimmed string here would ask the daemon for a workspace this run never
+      // created. Registering and spawning must name the same id.
+      workspaceId: registered.workspaceId,
       worktree: session.worktree || null,
       cwd: session.cwd || null,
       cols: session.cols,
@@ -682,6 +701,14 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
       rows: details.rows,
       running: details.running,
       daemonTransport: describeDaemonTransport(transport, client.endpoint),
+      // Recorded so the receipt proves the workspace existed before the spawn that named it,
+      // and against which root.
+      workspaceRegistration: {
+        workspaceId: registration.workspaceId,
+        repoRoot: registration.repoRoot,
+        declaredRoot: registration.declaredRoot,
+        request: "registerWorkspace",
+      },
     };
   } finally {
     client.close();
@@ -1014,6 +1041,7 @@ async function main() {
           row.rows = spawned.rows;
           row.daemonPid = spawned.daemonPid;
           row.daemonTransport = spawned.daemonTransport;
+          row.workspaceRegistration = spawned.workspaceRegistration;
           row.spawnedByThisRun = true;
           row.ptyIdentity = spawned.ptyIdentity;
           row.ptyIdentityPath = spawned.ptyIdentityPath;

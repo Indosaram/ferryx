@@ -1,5 +1,43 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, onTestFailed, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* keep the marker: the raw value is never printed */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      console.log(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    // A diagnostic must never change the outcome of the test it reports on.
+  }
+}
+
 import { RemoteApp } from "./RemoteApp";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -50,11 +88,14 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
     sessions: [],
   })));
   vi.stubGlobal("fetch", ticketed(fetcher));
+  onTestFailed(() => reportFetchOrder("reconnect keeps pairing", fetcher));
   let unmount = () => {};
   await act(async () => { unmount = render(<RemoteApp />).unmount; });
   // Chat is the default surface: the mirrored terminal is asked for explicitly.
+  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  await act(async () => {});
   await act(async () => {
-    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   expect(screen.getByTestId("session").textContent).toBe("before-outage");
   const first = EventSocket.instances[0];

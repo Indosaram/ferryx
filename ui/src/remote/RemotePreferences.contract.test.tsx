@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 import { RemoteTerminal } from "./RemoteTerminal";
@@ -114,8 +114,10 @@ it("migrates real scoped auth and loads only the selected host's preferences acr
   });
   await act(async () => { render(<RemoteApp />); });
   // The terminal (and its preferences request) is only mounted once the terminal mode is chosen.
+  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  await act(async () => {});
   await act(async () => {
-    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   await bounded(local.arrived.promise);
   expect(getRemoteAuthToken()).toBeNull();

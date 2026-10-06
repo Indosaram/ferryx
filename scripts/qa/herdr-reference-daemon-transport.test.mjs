@@ -31,14 +31,18 @@ import {
   daemonHandshakeFrame,
   daemonRequestFailure,
   daemonSocketPath,
+  deadline,
   describeDaemonRequestFailure,
-  transportErrorCode,
   executablePathMatches,
   hostAccessContract,
   normalizeExecutablePath,
   ownerHostReceiptRequirement,
   parseDaemonPortFile,
   parseDaemonTransportToken,
+  registerWorkspaceOnDaemon,
+  transportErrorCode,
+  workspaceIdRefusal,
+  workspaceRegistrationFor,
 } from './herdr-reference-fixtures.mjs';
 
 const root = resolve('herdr-transport-fixture');
@@ -327,11 +331,29 @@ test('adoption requires explicit authorization, and checks it before the record'
 // listener, the client's own close notification, or the settled promise).
 
 const liveTransports = [];
+const liveClients = [];
+
+/** Connect a tracked client, so a test that throws mid-way still gets its socket closed. */
+const openClient = async (transport) => {
+  const client = await connectDaemonControl(transport, { timeoutMs: 5000 });
+  liveClients.push(client);
+  return client;
+};
+
 const startFakeDaemon = async (onConnection) => {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-transport-test-'));
   const runtime = join(dir, 'runtime');
   mkdirSync(runtime, { recursive: true });
-  const server = createServer(onConnection);
+  // The sockets this fixture accepts are owned by the fixture and tracked as exact objects.
+  // net.Server has no closeAllConnections - that is an http.Server API - so teardown destroys
+  // precisely these sockets and only then awaits server.close(). Nothing here calls a method
+  // that may not exist, and nothing waits on a connection this fixture does not own.
+  const accepted = new Set();
+  const server = createServer((socket) => {
+    accepted.add(socket);
+    socket.once('close', () => accepted.delete(socket));
+    onConnection(socket);
+  });
   await new Promise((resolveListening) => server.listen(0, '127.0.0.1', resolveListening));
   const port = server.address().port;
   writeFileSync(join(runtime, 'daemon.port'), String(port));
@@ -339,13 +361,29 @@ const startFakeDaemon = async (onConnection) => {
   // The Windows descriptor is chosen deliberately: it is the transport the reset was reported
   // on, and it exercises the token read on every host.
   const transport = daemonControlTransport({ root: dir, paths: { runtime } }, { platform: 'win32' });
+  let closed = false;
   const handle = {
     transport,
     dir,
     port,
     server,
-    close() {
-      return new Promise((resolveClosed) => server.close(resolveClosed));
+    get closed() {
+      return closed;
+    },
+    // A listening server is a live handle: it holds the event loop open, so a test that never
+    // closes one leaves node with nothing to do and no reason to exit - which is exactly how
+    // this file printed its outcomes and then sat idle instead of reporting. Closing is
+    // awaited, and it is idempotent so a second close is not an error.
+    async close() {
+      if (closed) return;
+      closed = true;
+      // Destroy the exact sockets this server accepted, then close the listener. A plain
+      // close() waits for existing connections, so without this the await below would block on
+      // a connection no test owns - the hang this fixture exists to avoid. Destroying an
+      // already-ended socket is harmless, which is why this is unconditional.
+      for (const socket of accepted) socket.destroy();
+      accepted.clear();
+      await new Promise((resolveClosed) => server.close(resolveClosed));
     },
     cleanup() {
       rmSync(dir, { recursive: true, force: true });
@@ -355,8 +393,40 @@ const startFakeDaemon = async (onConnection) => {
   return handle;
 };
 
-after(() => {
-  for (const handle of liveTransports) handle.cleanup();
+// The safety net is awaited and it CLOSES both owned resources, not just their directories:
+// removing a temp dir leaves the listener running and the process alive, and an assertion that
+// throws mid-test skips the test's own cleanup. That second case is why this hook closes
+// clients too - a client socket holds the event loop open exactly like a listener does.
+//
+// It also reports, in one bounded line, which handles a test left open. That is evidence for the
+// next merged run: a suite that prints its outcomes and then sits idle with no summary has an
+// unclosed handle, and this line names it instead of leaving the cause to be guessed.
+after(async () => {
+  const openServers = liveTransports.filter((handle) => !handle.closed).map((handle) => handle.port);
+  const openClients = liveClients.filter((client) => !client.closed).map((client) => client.endpoint);
+  for (const client of liveClients) {
+    try {
+      client.close();
+    } catch {
+      /* A client whose socket already died has nothing to close. */
+    }
+  }
+  for (const handle of liveTransports) {
+    try {
+      await handle.close();
+    } catch {
+      /* A server that never listened has nothing to close. */
+    }
+    handle.cleanup();
+  }
+  if (openServers.length > 0 || openClients.length > 0) {
+    // Bounded on purpose: counts and endpoints, never a full handle dump.
+    process.stdout.write(
+      "# owned handles left open by tests: servers=" + openServers.length +
+        " [" + openServers.join(",") + "] clients=" + openClients.length +
+        " [" + openClients.join(",") + "] (closed by this hook)\n",
+    );
+  }
 });
 
 /** Serve the handshake, then hand the connection to `afterHandshake`. */
@@ -388,7 +458,7 @@ test('a reset while a request is in flight settles it with a structured failure'
       else socket.destroy(new Error('reset'));
     }),
   );
-  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  const client = await openClient(daemon.transport);
   const response = await client.call({ type: 'remoteGetStatus' });
   const failure = daemonRequestFailure(response);
   assert.ok(failure, 'a transport that ends mid-request must settle with a structured failure, not null');
@@ -404,6 +474,7 @@ test('a reset while a request is in flight settles it with a structured failure'
   assert.equal(trail.settled, true);
   assert.equal(trail.events.filter((entry) => entry.event === 'settled').length, 1);
   client.close();
+  await daemon.close();
 });
 
 test('once the connection has ended, a request with nothing pending is refused structurally', async () => {
@@ -413,7 +484,7 @@ test('once the connection has ended, a request with nothing pending is refused s
       else socket.destroy(new Error('reset'));
     }),
   );
-  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  const client = await openClient(daemon.transport);
   // The close notification is registered while the connection is still healthy, so it cannot
   // be missed: the server only ends the socket once it receives the probe below.
   const closed = new Promise((resolveClosed) => client.onClose(resolveClosed));
@@ -429,42 +500,77 @@ test('once the connection has ended, a request with nothing pending is refused s
   assert.equal(failure.requestKind, 'remoteGetStatus');
   assert.equal(client.diagnostics().events.filter((entry) => entry.event === 'settled').length, 1);
   client.close();
+  await daemon.close();
 });
 
-test('close and reset are distinguishable, and neither settles twice', async () => {
+// The DISTINCTION under test is: a reset surfaces as a stream error, a graceful end never does.
+// What is deliberately NOT asserted is the ORDER in which the error and the close arrive: after
+// a reset, Node may deliver close on a later tick than the error that settles the request, so an
+// assertion that close has already happened at settle time is an ordering claim the platform
+// does not make (it failed on Windows AND on macOS for exactly that reason). The close is
+// asserted where it is observable - awaited, with a bound - and the code is asserted to follow
+// whichever cause was observed FIRST, which is the contract this client actually implements.
+test('a reset and a graceful close are distinguishable, and neither settles twice', async () => {
   const resetDaemon = await startFakeDaemon(
     handshakeThen((socket) => {
+      // Force a real RST: a plain destroy() closes without an error, which would exercise the
+      // close path instead of the reset path this test is about.
       if (typeof socket.resetAndDestroy === 'function') socket.resetAndDestroy();
       else socket.destroy(new Error('reset'));
     }),
   );
-  const resetClient = await connectDaemonControl(resetDaemon.transport, { timeoutMs: 5000 });
+  const resetClient = await openClient(resetDaemon.transport);
+  // Armed BEFORE the trigger, so the close cannot be missed however late it arrives.
+  const resetClosed = new Promise((resolveClosed) => resetClient.onClose(resolveClosed));
   const resetResponse = await resetClient.call({ type: 'remoteGetStatus' });
   const resetFailure = daemonRequestFailure(resetResponse);
-  assert.ok(resetFailure);
-  // The trail must show at most one settlement and must have observed a close as well: the
-  // two events arrive in either order and only the first decides the outcome.
+  assert.ok(resetFailure, 'a reset must settle the in-flight request');
   const resetTrail = resetClient.diagnostics();
+  const firstError = resetTrail.events.findIndex(
+    (entry) => entry.event === 'socket-error' || entry.event === 'interface-error',
+  );
+  const firstClose = resetTrail.events.findIndex((entry) => entry.event === 'socket-close');
+  assert.notEqual(firstError, -1, 'a reset must be observed as a stream error, not only as a close');
+  // The first observed cause decides the code - the same rule the client implements, stated in
+  // terms that hold whichever order the platform chose.
+  const expectedCode =
+    firstClose === -1 || firstError < firstClose ? 'daemon-transport-reset' : 'daemon-transport-closed';
+  assert.equal(resetFailure.code, expectedCode, 'the first observed cause decides the code');
   assert.equal(resetTrail.events.filter((entry) => entry.event === 'settled').length, 1);
-  assert.ok(resetTrail.events.some((entry) => entry.event === 'socket-close'));
+  // The close itself, where it is actually observable: awaited and bounded, never assumed.
+  await deadline(resetClosed, 'the reset connection must close', 5000);
   assert.ok(
-    resetTrail.events.some((entry) => entry.event === 'socket-error' || entry.event === 'interface-error'),
-    'a reset must be observed as a stream error, not only as a close',
+    resetClient.diagnostics().events.some((entry) => entry.event === 'socket-close'),
+    'the reset connection must have observed its close',
+  );
+  assert.equal(
+    resetClient.diagnostics().events.filter((entry) => entry.event === 'settled').length,
+    1,
+    'a close that arrives after the error must not settle the request a second time',
   );
   resetClient.close();
+  await resetDaemon.close();
 
-  // A clean close with a request in flight is the other outcome: the same shape, the closed
-  // code, and still exactly one settlement.
+  // A graceful end is the other outcome: the same structured failure, the closed code, exactly
+  // one settlement - and NO stream error, which is what makes the two distinguishable.
   const closeDaemon = await startFakeDaemon(
     handshakeThen((socket) => socket.end()),
   );
-  const closeClient = await connectDaemonControl(closeDaemon.transport, { timeoutMs: 5000 });
+  const closeClient = await openClient(closeDaemon.transport);
   const closeResponse = await closeClient.call({ type: 'remoteGetStatus' });
   const closeFailure = daemonRequestFailure(closeResponse);
   assert.ok(closeFailure, 'a clean close must settle in flight requests too');
   assert.equal(closeFailure.code, 'daemon-transport-closed');
+  assert.equal(
+    closeClient.diagnostics().events.some(
+      (entry) => entry.event === 'socket-error' || entry.event === 'interface-error',
+    ),
+    false,
+    'a graceful end must NOT surface as a stream error; that absence is the discriminator',
+  );
   assert.equal(closeClient.diagnostics().events.filter((entry) => entry.event === 'settled').length, 1);
   closeClient.close();
+  await closeDaemon.close();
 });
 
 test('the failure detail names the request without leaking the transport token', async () => {
@@ -474,7 +580,7 @@ test('the failure detail names the request without leaking the transport token',
       else socket.destroy(new Error('reset'));
     }),
   );
-  const client = await connectDaemonControl(daemon.transport, { timeoutMs: 5000 });
+  const client = await openClient(daemon.transport);
   const response = await client.call({ type: 'spawn', clientRequestId: 'qa-1' });
   const failure = daemonRequestFailure(response);
   const described = describeDaemonRequestFailure(failure);
@@ -483,6 +589,123 @@ test('the failure detail names the request without leaking the transport token',
   const trail = JSON.stringify(client.diagnostics());
   assert.equal(trail.includes('qa-transport-token'), false, 'diagnostics must not carry the token');
   client.close();
+  await daemon.close();
+});
+
+// ---- workspace registration contract -----------------------------------------
+// A daemon refuses a spawn for a workspace nothing registered, and its own startup registration
+// derives an id from the launch cwd - which is why the config's id must be registered explicitly.
+// These pin the frame, the id rules the daemon enforces, and the exact refusal when the config
+// cannot supply what registration needs.
+
+test('the workspace id rules mirror the registry, and name why an id is refused', () => {
+  for (const good of ['prov-d51e2085', 'ws-123', 'a', 'ws_1.2']) {
+    assert.equal(workspaceIdRefusal(good), null, good);
+  }
+  assert.ok(workspaceIdRefusal(''), 'an empty id must be refused');
+  assert.ok(workspaceIdRefusal('   '), 'a whitespace-only id must be refused');
+  assert.ok(workspaceIdRefusal(undefined), 'a missing id must be refused');
+  assert.ok(workspaceIdRefusal(null));
+  assert.ok(workspaceIdRefusal('-leading-dash'));
+  assert.ok(workspaceIdRefusal('has/slash'));
+  assert.ok(workspaceIdRefusal('has\\backslash'));
+  assert.ok(workspaceIdRefusal('has space'));
+  assert.ok(workspaceIdRefusal('has\ttab'));
+  assert.ok(workspaceIdRefusal('daemon:ws'), 'the daemon namespace is refused by the local registry');
+  assert.ok(workspaceIdRefusal('remote:host/ws'));
+});
+
+test('a registration names the config root explicitly, never an inferred one', () => {
+  const root = mkdtempSync(join(tmpdir(), 'herdr-ws-root-'));
+  try {
+    const ok = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'prov-d51e2085', repoRoot: root });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.workspaceId, 'prov-d51e2085');
+    // The frame is the daemon's own wire shape: camelCase fields under a camelCase type tag.
+    assert.deepEqual(ok.request, {
+      type: 'registerWorkspace',
+      workspaceId: 'prov-d51e2085',
+      repoRoot: ok.repoRoot,
+    });
+    assert.equal(Object.hasOwn(ok.request, 'workspace_id'), false, 'the wire uses camelCase');
+
+    // A host-level root is accepted as the fallback, and the id is trimmed onto the wire.
+    const hostRoot = workspaceRegistrationFor({ id: 'h', repoRoot: root }, { workspaceId: '  ws-1  ' });
+    assert.equal(hostRoot.ok, true);
+    assert.equal(hostRoot.workspaceId, 'ws-1');
+    assert.equal(hostRoot.request.workspaceId, 'ws-1');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a config that cannot supply a usable root is refused by field, not by daemon error', () => {
+  const missing = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'ws-1' });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'workspace-repo-root-missing');
+
+  const relative = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'ws-1', repoRoot: 'relative/dir' });
+  assert.equal(relative.ok, false);
+  assert.equal(relative.reason, 'workspace-repo-root-not-absolute');
+
+  const absent = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'ws-1', repoRoot: join(root, 'absent-root') });
+  assert.equal(absent.ok, false);
+  assert.equal(absent.reason, 'workspace-repo-root-absent');
+
+  // The id is checked first: an unusable id is reported even when the root is also missing.
+  const badId = workspaceRegistrationFor({ id: 'h' }, { workspaceId: '', repoRoot: join(root, 'absent-root') });
+  assert.equal(badId.reason, 'workspace-id-invalid');
+});
+
+test('the registrar sends the frame and reports the daemon reply', async () => {
+  const seen = [];
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket, line) => {
+      seen.push(JSON.parse(line));
+      socket.write(JSON.stringify({ type: 'registerWorkspaceOk' }) + '\n');
+    }),
+  );
+  const client = await openClient(daemon.transport);
+  const registration = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'prov-d51e2085', repoRoot: root });
+  assert.equal(registration.ok, false, 'this root does not exist, so the fixture needs a real one');
+  const realRoot = mkdtempSync(join(tmpdir(), 'herdr-ws-root-'));
+  try {
+    const usable = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'prov-d51e2085', repoRoot: realRoot });
+    assert.equal(usable.ok, true);
+    const result = await registerWorkspaceOnDaemon(client, usable, { requestId: 'prov-d51e2085' });
+    assert.deepEqual(result, { ok: true, workspaceId: 'prov-d51e2085', repoRoot: usable.repoRoot });
+    assert.equal(seen.length, 1, 'exactly one registration frame');
+    assert.equal(seen[0].type, 'registerWorkspace');
+    assert.equal(seen[0].workspaceId, 'prov-d51e2085');
+    assert.equal(typeof seen[0].repoRoot, 'string');
+  } finally {
+    rmSync(realRoot, { recursive: true, force: true });
+  }
+  client.close();
+  await daemon.close();
+});
+
+test('a refused registration is reported with the daemon message, not as a success', async () => {
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket) => {
+      socket.write(
+        JSON.stringify({ type: 'error', message: "Workspace 'prov-d51e2085' is not registered" }) + '\n',
+      );
+    }),
+  );
+  const client = await openClient(daemon.transport);
+  const realRoot = mkdtempSync(join(tmpdir(), 'herdr-ws-root-'));
+  try {
+    const usable = workspaceRegistrationFor({ id: 'h' }, { workspaceId: 'prov-d51e2085', repoRoot: realRoot });
+    const result = await registerWorkspaceOnDaemon(client, usable, {});
+    assert.equal(result.ok, false);
+    assert.ok(result.detail.includes('not registered'), 'the daemon message is carried through');
+    assert.ok(result.detail.includes('registerWorkspace'), 'the failure names the request kind');
+  } finally {
+    rmSync(realRoot, { recursive: true, force: true });
+  }
+  client.close();
+  await daemon.close();
 });
 
 test('a stream error maps to a typed code from the errno, never from the message', () => {

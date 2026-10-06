@@ -1022,6 +1022,13 @@ mod tests {
     #[test]
     fn the_planner_refuses_an_unparsed_prompt_and_an_ambiguous_answer() {
         let single = card(QUESTION_SINGLE);
+        // The planner answers only a card this lane itself registered: `reference_answer_keys`
+        // reads the registry `detect_omp_prompt` fills, and the route re-detects - so
+        // re-registers - right before it answers (`docs/chat/herdr-port-contract.md` §5).
+        // `card()` parses without registering, so the card the test plans with is registered
+        // here rather than taken from a sibling test's insertion: that cross-test dependency on
+        // a process-global registry is what made this assertion depend on thread scheduling.
+        remember_omp_prompt(&single);
         // A prompt this lane did not detect: no internal state, no keys.
         let mut foreign = single.prompt.clone();
         foreign.id = "0123456789ab".to_string();

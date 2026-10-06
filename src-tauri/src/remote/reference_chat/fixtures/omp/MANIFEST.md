@@ -36,7 +36,7 @@ exercises it. A variant with no fixture would be an unexplained gap, so there is
 | 26 | A tool result whose content is a plain string | `transcript-records.ts:9-10` | `partial-and-malformed.jsonl` (p4) |
 | 27 | A tool result's `error` flag | `transcript-records.ts:50` | `basic-session.jsonl` (m7) |
 | 28 | A result for a call this page never saw is ignored | `transcript-records.ts:232` | `partial-and-malformed.jsonl` (p5) |
-| 29 | A tool result: block-level `output` / `result` spellings | `transcript-records.ts:31`, `:33-35` | `basic-session.jsonl` (m7), `record-aliases.jsonl` (r5) |
+| 29 | A tool result block: `output` / `result` spellings, read only inside `content` | `transcript-records.ts:31`, `:33-35` | `record-aliases.jsonl` (r5) |
 | 30 | Output cut at the page limit, with a fetch ref and size | `tool-output.ts:14-20` | `history_omp.rs` test (constructed) |
 | 31 | A goal call's output kept whole up to the longer limit | `tool-output.ts:10-11` | `history_omp.rs` test (constructed) |
 | 32 | `stopReason: "stop"` ends its turn | `transcript-records.ts:182,296` | `settled-turn-boundary.jsonl` (b2) |

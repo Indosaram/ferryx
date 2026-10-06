@@ -293,8 +293,24 @@ async fn dropped_http_reply_replays_original_process_and_controller_fences_close
     }
     *service.workspace_service.transaction_probe.write() = None;
     for id in service.terminal_service.list_sessions() {
+        let pty = service.terminal_service.get_session(&id);
         service.terminal_service.close_session(&id).await.unwrap();
-        service.wait_machine_lifecycle(&id).await.unwrap();
+        // The lifecycle signal is sent only after the PTY exit, the metadata task and the exit
+        // record. The bounded wait still fails the test, but it now reports which of those the
+        // session shows, so the next run names the stalled stage instead of only its timeout.
+        if let Err(error) = service.wait_machine_lifecycle(&id).await {
+            let reaped = pty.as_ref().is_some_and(|session| session.is_reaped());
+            let exit_recorded = service
+                .workspace_service
+                .journal
+                .session(&id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| record.exit.is_some());
+            panic!(
+                "wait_machine_lifecycle failed for {id}: {error}; pty_reaped={reaped}; exit_recorded={exit_recorded}"
+            );
+        }
     }
     stop.send(()).unwrap();
     server.await.unwrap();
@@ -563,6 +579,8 @@ const PROJECTOR_CHILD_BOUND: Duration = Duration::from_secs(90);
 /// may be reported as a success.
 const PROJECTOR_CLEANUP_BOUND: Duration = Duration::from_secs(10);
 const PROJECTOR_DRAIN_BOUND: Duration = Duration::from_secs(10);
+/// Bound for waiting on the PTY reader tasks a close must end before the child may exit.
+const PROJECTOR_READER_BOUND: Duration = Duration::from_secs(10);
 
 /// Stage markers the child prints and flushes, so a blocked child names the phase it did not
 /// complete instead of leaving the next reader to guess at ConPTY or a lock. The markers are
@@ -803,9 +821,18 @@ async fn projector_child_case(name: &str) {
         }
         Some(Ok(_)) => "reaped and drained".to_owned(),
     };
+    // Distinguish a scenario stall from a shutdown stall: the child prints its scenario sentinel
+    // only after its assertions, so a sentinel plus a timeout means the body finished and the
+    // process did not exit - the stage the earlier revision could not name.
+    let body = if combined.contains("F1-PROJECTOR") && !combined.contains("F1-PROJECTOR-SKIPPED")
+    {
+        "body completed, the process did not exit"
+    } else {
+        "body did not complete"
+    };
     assert!(
         !timed_out,
-        "{name} (pid {pid:?}) exceeded {PROJECTOR_CHILD_BOUND:?}; last stage={stage}; teardown={teardown}; cleanup={cleanup}; stdout={stdout:?} stderr={stderr:?}"
+        "{name} (pid {pid:?}) exceeded {PROJECTOR_CHILD_BOUND:?}; last stage={stage}; body={body}; teardown={teardown}; cleanup={cleanup}; stdout={stdout:?} stderr={stderr:?}"
     );
     // The exit must be observed, not assumed: a wait that failed and a wait that never returned
     // are each reported as themselves, so neither can be read as a pass.
@@ -906,8 +933,32 @@ async fn projector_child_spawn(
 
 async fn projector_child_cleanup(service: &Arc<DaemonSessionService>) {
     projector_child_stage("teardown");
+    // Hold each session so its reader state can still be read once the close removes it.
+    let readers: Vec<_> = service
+        .terminal_service
+        .list_sessions()
+        .into_iter()
+        .filter_map(|id| service.terminal_service.get_session(&id))
+        .collect();
     for id in service.terminal_service.list_sessions() {
         service.terminal_service.close_session(&id).await.unwrap();
+    }
+    // A PTY reader is a blocking task, and blocking tasks cannot be aborted - `PtySession::drop`
+    // calls `abort()` on one that is already running, which does nothing. A reader still parked
+    // in its blocking read therefore survives the close, keeps the runtime's blocking pool busy,
+    // and is invisible until the runtime shuts down after the test body. Wait for the readers
+    // under a bound and name which happened, so a post-body stall reports its own cause.
+    let deadline = Instant::now() + PROJECTOR_READER_BOUND;
+    loop {
+        if readers.iter().all(|session| session.is_reader_finished()) {
+            projector_child_stage("reader-finished");
+            break;
+        }
+        if Instant::now() >= deadline {
+            projector_child_stage("reader-pending");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -965,6 +1016,9 @@ async fn projector_desktop_gui_child_canonical_local_target() {
     projector_child_cleanup(&service).await;
     drop(service);
     drop(owner);
+    // Printed last, so a timeout that still shows this stage proves the body returned and the
+    // process failed to exit after it - a shutdown stall, not a scenario stall.
+    projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR canonical: session={id} machine_id={} cwd=sub root_cwd={} fixture_root={}",
         projected.target.machine_id,
@@ -1012,6 +1066,9 @@ async fn projector_desktop_gui_child_foreign_workspace() {
     projector_child_cleanup(&service).await;
     drop(service);
     drop(owner);
+    // Printed last, so a timeout that still shows this stage proves the body returned and the
+    // process failed to exit after it - a shutdown stall, not a scenario stall.
+    projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR foreign workspace: session={id} worktree-mismatch=refused unregistered=refused"
     );
@@ -1056,6 +1113,9 @@ async fn projector_desktop_gui_child_root_escape() {
     projector_child_cleanup(&service).await;
     drop(service);
     drop(owner);
+    // Printed last, so a timeout that still shows this stage proves the body returned and the
+    // process failed to exit after it - a shutdown stall, not a scenario stall.
+    projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR root escape: session={id} outside-root=refused missing-cwd=refused"
     );
@@ -1101,6 +1161,9 @@ async fn projector_desktop_gui_child_non_ready_workspace() {
     projector_child_cleanup(&service).await;
     drop(service);
     drop(owner);
+    // Printed last, so a timeout that still shows this stage proves the body returned and the
+    // process failed to exit after it - a shutdown stall, not a scenario stall.
+    projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR non-ready: session={id} availability=missing-refused ready-projectable"
     );

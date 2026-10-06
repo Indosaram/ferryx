@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { createRemoteHostStore, remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
 import { hostTransportUrl, remoteSocketUrl } from "./remoteClient";
@@ -94,8 +94,9 @@ it("switches API and event sockets to the selected host without reusing local cr
     { headers: { Authorization: "Bearer host-b-token" } },
   ]);
   expect(EventSocket.instances.at(-1)?.url).toBe("ws://192.168.1.9:8787/api/v1/events?ticket=ui-test-ticket");
+  await act(async () => {});
   await act(async () => {
-    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   expect(screen.getByTestId("terminal-transport").textContent).toBe("http://192.168.1.9:8787");
 });
@@ -218,8 +219,9 @@ it("parses fragment PIN and hints separately and keeps transport on the relay", 
   // A reachable-but-unverified LAN hint must NOT capture the terminal transport: a
   // health 200 proves reachability only, so the credential-bearing transport stays
   // on the relay origin.
+  await act(async () => {});
   await act(async () => {
-    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   expect(screen.getByTestId("terminal-transport").textContent).toBe(window.location.origin);
 

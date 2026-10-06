@@ -66,6 +66,26 @@ impl ReferenceRouteServer {
         token: Option<&str>,
         body: Option<&str>,
     ) -> (u16, String) {
+        match self.request_observed(method, path, token, body).await {
+            Ok(response) => response,
+            // A bare transport error cannot say whether the router was still serving, so the
+            // failure carries the diagnosis instead of only the reqwest error.
+            Err(diagnosis) => panic!("{diagnosis}"),
+        }
+    }
+
+    /// Send one request, and on transport failure report what this fixture could still observe.
+    ///
+    /// The request, its bound and every caller's assertions are unchanged; only the text of the
+    /// failure is. What it adds is the discrimination a bare `TimedOut` cannot make: whether the
+    /// bound router was still answering, and what the owning daemon had published meanwhile.
+    async fn request_observed(
+        &self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(u16, String), String> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(15))
@@ -86,10 +106,74 @@ impl ReferenceRouteServer {
                 .header("content-type", "application/json")
                 .body(body.to_string());
         }
-        let response = builder.send().await.expect("a response");
+        let started = std::time::Instant::now();
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(self.transport_diagnosis(method, path, started, &error).await);
+            }
+        };
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
-        (status, text)
+        Ok((status, text))
+    }
+
+    /// What is still observable after this fixture's own request failed to complete.
+    ///
+    /// One fresh, independently bounded probe of the same bound router is the discriminator: an
+    /// accept loop that answers it is still serving, so a request that did not complete is a
+    /// handler that has not finished rather than a router that is gone. The sessions the gateway
+    /// can see and the sessions this host's terminal service owns (with each pane's output-hub
+    /// sequence range) are reported alongside, so a spawn that happened without a response is
+    /// visible too. This is a report, not an assertion: nothing here changes a test's verdict.
+    async fn transport_diagnosis(
+        &self,
+        method: &str,
+        path: &str,
+        started: std::time::Instant,
+        error: &reqwest::Error,
+    ) -> String {
+        let liveness = match reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(probe) => {
+                match probe
+                    .get(format!("http://{}/api/v1/capabilities", self.addr))
+                    .send()
+                    .await
+                {
+                    Ok(response) => format!(
+                        "a fresh probe of the same router answered {}",
+                        response.status().as_u16()
+                    ),
+                    Err(probe_error) => format!(
+                        "a fresh probe of the same router did not answer either: {probe_error}"
+                    ),
+                }
+            }
+            Err(build_error) => format!("the probe client could not be built: {build_error}"),
+        };
+        let backend_sessions = self.state.session_backend.list_sessions().await;
+        let hub = self.state.terminal_service.output_hub();
+        let owned_sessions: Vec<(String, Option<(Option<u64>, Option<u64>)>)> = self
+            .state
+            .terminal_service
+            .list_sessions()
+            .into_iter()
+            .map(|id| {
+                let range = hub.session_sequence_range(&id);
+                (id, range)
+            })
+            .collect();
+        format!(
+            "{method} http://{addr}{path} did not complete after {elapsed} ms ({error}); {liveness}; \
+             sessions this gateway can see: {backend_sessions:?}; sessions this host's terminal \
+             service owns, with their output-hub sequence ranges: {owned_sessions:?}",
+            addr = self.addr,
+            elapsed = started.elapsed().as_millis(),
+        )
     }
 
     async fn stop(mut self) {
@@ -248,6 +332,30 @@ impl ReferenceRouteFixture {
         (details.cols, details.rows)
     }
 
+    /// What this host can say about the pane when a bounded wait on its output did not complete.
+    ///
+    /// Cause-neutral on purpose: it reports what separates "the pane never produced a byte" from
+    /// "the pane produced output the reader never carried" from "the pane is gone", and asserts
+    /// none of them.
+    async fn pane_diagnosis(&self) -> String {
+        let details = self
+            .state
+            .session_backend
+            .describe_session(&self.session_id)
+            .await;
+        let range = self
+            .state
+            .terminal_service
+            .output_hub()
+            .session_sequence_range(&self.session_id);
+        let owned = self.state.terminal_service.list_sessions();
+        format!(
+            "session {id}: details {details:?}; output-hub sequence range {range:?}; this host's \
+             terminal service owns {owned:?}",
+            id = self.session_id,
+        )
+    }
+
     /// Type one line through the reference submit route and wait for the pane to run it.
     ///
     /// The subscription is taken BEFORE the trigger, and the wait is bounded by an event, never by
@@ -260,11 +368,13 @@ impl ReferenceRouteFixture {
     /// the shell the resolver picks, with the marker split across that shell's own literals so the
     /// contiguous string exists only in the output (the convention `terminal/pty.rs` records:
     /// "write a command whose OUTPUT marker is split so the echoed input never contains it").
-    /// Second, this harness is the pane's terminal client: on Windows ConPTY asks it for the cursor
-    /// position and does not start the shell until it answers (see `remote/relay_server.rs` and the
-    /// ssh helper fixtures). Unattended, that query leaves the pane silent forever, which is
-    /// indistinguishable from a serving bug. Unix shells never ask, and the command below is
-    /// unchanged in meaning there.
+    /// Second, this harness is the pane's terminal client: a shell that asks its terminal for the
+    /// cursor position before it starts is answered here (Windows ConPTY does; no unix shell is
+    /// known to - see `remote/relay_server.rs` and the ssh helper fixtures). That mechanism is NOT
+    /// offered as the cause of a failure on another platform. The wait's failure instead reports
+    /// the observations that discriminate - the first output seen, whether a cursor query was
+    /// detected and answered, whether a write failed, and what the host says about the pane - and
+    /// none of them is asserted to be the cause.
     async fn submit_and_await_marker(&self, marker: &str) {
         const CURSOR_QUERY: &[u8] = b"\x1b[6n";
         const CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
@@ -276,13 +386,26 @@ impl ReferenceRouteFixture {
         } else {
             format!("printf '{prefix}_%s\\n' '{suffix}'\n")
         };
-        let mut watch = self
+        let attachment = self
             .state
             .session_backend
             .attach_with_sequence(&self.session_id, None)
             .await
-            .expect("attach the pane")
-            .receiver;
+            .expect("attach the pane");
+        // The attach's own replay is the pane's first word, and it is the only way to hear it:
+        // this harness attaches after the fixture created the session, so anything the pane
+        // emitted in between was published before any subscription existed, and a live-only
+        // reader can never be told about it. (On Windows that includes ConPTY's cursor query,
+        // which leaves the shell unstarted until it is answered; on any platform it includes the
+        // shell's own first output.) `output_hub::subscribe_with_sequence` takes the snapshot and
+        // the subscription in one critical section, so seeded from the snapshot the window below
+        // covers the pane from its first byte onward, in either order of the reader and this
+        // attach. That is why the window is seeded; it is not offered as the cause of a failure
+        // on any particular platform.
+        let mut seen: Vec<u8> = attachment.snapshot.history;
+        let seeded = seen.len();
+        let gap = attachment.snapshot.gap.is_some();
+        let mut watch = attachment.receiver;
         let request_id = uuid::Uuid::new_v4().to_string();
         let (status, body) = self
             .server
@@ -297,9 +420,10 @@ impl ReferenceRouteFixture {
             )
             .await;
         assert_eq!(status, 200, "submit: {body}");
+        let mut queries = 0usize;
+        let mut answered = 0usize;
+        let mut last_write_error: Option<String> = None;
         let observed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            let mut seen: Vec<u8> = Vec::new();
-            let mut answered = 0usize;
             loop {
                 match watch.recv().await {
                     Ok(chunk) => {
@@ -310,23 +434,27 @@ impl ReferenceRouteFixture {
                         {
                             return true;
                         }
-                        // The pane is waiting for its terminal to report the cursor; without the
-                        // report its shell never starts and no output can arrive.
-                        let queries = seen
+                        // A shell that asks its terminal for the cursor before it starts is
+                        // answered here. Whether this host's pane asks is not assumed: the count
+                        // and the dispatch are reported in the failure below.
+                        let detected = seen
                             .windows(CURSOR_QUERY.len())
                             .filter(|window| *window == CURSOR_QUERY)
                             .count();
+                        if detected > queries {
+                            queries = detected;
+                        }
                         while answered < queries {
-                            let reported = self
+                            if let Err(error) = self
                                 .state
                                 .session_backend
                                 .write_input(&self.session_id, CURSOR_REPORT)
                                 .await
-                                .is_ok();
-                            answered += 1;
-                            if !reported {
+                            {
+                                last_write_error = Some(error);
                                 return false;
                             }
+                            answered += 1;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -335,11 +463,16 @@ impl ReferenceRouteFixture {
             }
         })
         .await;
-        assert_eq!(
-            observed.ok(),
-            Some(true),
-            "the pane must run {marker} and print it within the deadline"
-        );
+        if observed.ok() != Some(true) {
+            let pane = self.pane_diagnosis().await;
+            panic!(
+                "the pane must run {marker} and print it within the deadline: {} bytes observed \
+                 ({seeded} replayed at the attach, replay gap {gap}), {queries} cursor query(ies) \
+                 detected, {answered} answer(s) dispatched, last write error {last_write_error:?}; \
+                 {pane}",
+                seen.len()
+            );
+        }
     }
 }
 

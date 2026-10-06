@@ -60,8 +60,10 @@ it("sends the backend session identity when selecting an SSH session", async () 
   );
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ workspaceId: "ssh:build", sessionId: "ssh-two" });
   // Chat is the default surface: the mirrored terminal is asked for explicitly.
+  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  await act(async () => {});
   await act(async () => {
-    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   expect(screen.getByTestId("session").textContent).toBe("ssh-two");
 });

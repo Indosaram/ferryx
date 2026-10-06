@@ -1,6 +1,44 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useId } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFailed, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* keep the marker: the raw value is never printed */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      console.log(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    // A diagnostic must never change the outcome of the test it reports on.
+  }
+}
+
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
@@ -15,11 +53,15 @@ import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./acco
  * terminal asks for it explicitly through the mode switch the header always offers.
  */
 async function switchToTerminalMode(): Promise<void> {
-  // The mode switch lives in the header's status cluster, which only renders once the paired
-  // host's token is known; a bare render can reach this point before it is on the page. Wait for
-  // it (the suite's own test timeout bounds the wait) instead of silently leaving chat up, which
-  // would make a terminal assertion fail for the wrong reason.
-  const toggle = await screen.findByTestId("remote-view-mode-terminal");
+  // Timer-free readiness. The mode switch lives in the header's status cluster, which mounts once
+  // the paired host's token and the first state read have landed; a bare render can reach this
+  // point before that. Flushing the pending microtasks inside act() is the exact readiness step -
+  // it lets the mocked read settle - and it must NOT be a polling wait: several tests here (and in
+  // sibling suites) run under vi.useFakeTimers(), where a polling helper never sees its own timers
+  // fire and hangs the test instead of switching it. A switch that is genuinely missing now throws
+  // loudly here rather than silently leaving chat up.
+  await act(async () => {});
+  const toggle = screen.getByTestId("remote-view-mode-terminal");
   await act(async () => {
     fireEvent.click(toggle);
   });
@@ -791,6 +833,7 @@ describe("Remote UI Components", () => {
         .mockResolvedValue(jsonResponse(focusedState));
       vi.stubGlobal("fetch", ticketed(fetchMock));
       vi.stubGlobal("WebSocket", EventWebSocket);
+      onTestFailed(() => reportFetchOrder("recovers from a desktop that never confirms", fetchMock));
 
       render(<RemoteApp />);
 
@@ -837,6 +880,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(secondFocusedState));
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
+    onTestFailed(() => reportFetchOrder("refreshes the mirrored terminal on unsolicited focus", fetchMock));
 
     render(<RemoteApp />);
     await switchToTerminalMode();

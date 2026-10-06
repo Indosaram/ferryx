@@ -1,4 +1,42 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, onTestFailed, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* keep the marker: the raw value is never printed */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      console.log(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    console.log(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    // A diagnostic must never change the outcome of the test it reports on.
+  }
+}
+
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { storeAccountSessionToken, clearStoredAccountSessionToken } from "./accountSession";
@@ -189,6 +227,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     let currentHostWorkspace = "ws-ferryx";
     let currentHostSlug = "main";
     let currentHostSessionId = "term-sess-77";
+    onTestFailed(() => reportFetchOrder("accountSession: renders top context selector", globalThis.fetch));
 
     const mockTunnelTransport = {
       fetchLike: vi.fn().mockImplementation((path: string, init?: RequestInit) => {
@@ -273,6 +312,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       }),
       close: vi.fn(),
     };
+    onTestFailed(() => reportFetchOrder("accountSession: tunnel transport", mockTunnelTransport.fetchLike));
 
     vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
       transport: mockTunnelTransport as any,
