@@ -137,4 +137,106 @@ describe("SSH recovery", () => {
     expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ status: { state: "legacyLost" } });
     recovery.stop();
   });
+
+  // A details-bearing status for the parked-transport cases below: `attempts` at the daemon's
+  // reconnect budget and a transport failure is exactly the shape a session parks in.
+  const parkedDetails = (state: string, generation: number) => ({
+    type: "remoteSessionDetailsOk" as const, legacyDirectSsh: false,
+    details: { state, generation, failure: state === "disconnected" ? { kind: "transport", message: "SSH setup error" } : null,
+      replayGap: null, attempts: state === "disconnected" ? 5 : 0, pid: 10,
+      descriptor: { backendSessionId: "stable", target: { hostId: "h", ownerId: "o", backendSessionId: "remote", epoch: "1" },
+        config: {}, clientRequestId: "request", remoteCursor: "0", cols: 80, rows: 24 } },
+  });
+  it("re-arms a transport the daemon parked in disconnected and settles on the recovered status", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    const status = vi.fn()
+      .mockResolvedValueOnce(parkedDetails("disconnected", 257))
+      .mockResolvedValueOnce(parkedDetails("connected", 258));
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+      subscribe: async () => () => {}, status: status as any, retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    // The daemon's own loop already gave up on this session, so one re-arm is what revives it.
+    expect(retry).toHaveBeenCalledExactlyOnceWith("stable");
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ type: "SESSION_REMOTE_STATUS", daemonEpoch: "new",
+      status: { sessionId: "stable", state: "connected", generation: 258 } });
+    recovery.stop();
+  });
+  /** The handler re-arms off the status stream, so let its awaits settle without wall-clock waiting. */
+  const drain = () => new Promise(resolve => setTimeout(resolve, 0));
+  const outageStream = () => {
+    let emit: (status: any) => void = () => {};
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    // Every re-probe still reports a park: the outage outlives each re-armed budget.
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+      subscribe: async handler => { emit = handler; return () => {}; },
+      status: (async () => parkedDetails("disconnected", 400)) as any, retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    return { recovery, emit, retry, dispatch };
+  };
+  const park = { sessionId: "stable", state: "disconnected" as const, generation: 5, failure: null, replayGap: null };
+  const reconnect = { sessionId: "stable", state: "reconnecting" as const, generation: 6, failure: null, replayGap: null };
+  it("re-arms on each new park and ignores repeats of the same one", async () => {
+    const { recovery, emit, retry } = outageStream();
+    await recovery.subscribed;
+    emit(park);
+    await drain();
+    expect(retry).toHaveBeenCalledTimes(1);
+    // A repeat of the same park is not a new outage.
+    emit(park);
+    await drain();
+    expect(retry).toHaveBeenCalledTimes(1);
+    emit(reconnect);
+    await drain();
+    emit({ ...park, generation: 7 });
+    await drain();
+    expect(retry).toHaveBeenCalledTimes(2);
+    recovery.stop();
+  });
+  it("stops re-arming after the bounded number of automatic attempts", async () => {
+    const { recovery, emit, retry } = outageStream();
+    await recovery.subscribed;
+    for (let i = 0; i < 8; i += 1) {
+      emit({ ...reconnect, generation: 10 + i * 2 });
+      await drain();
+      emit({ ...park, generation: 11 + i * 2 });
+      await drain();
+    }
+    // A long outage must not keep dialing the host forever; the manual button remains.
+    expect(retry).toHaveBeenCalledTimes(5);
+    recovery.stop();
+  });
+  it("resets the re-arm budget once the transport recovers", async () => {
+    const { recovery, emit, retry } = outageStream();
+    await recovery.subscribed;
+    for (let i = 0; i < 6; i += 1) {
+      emit({ ...reconnect, generation: 20 + i * 2 });
+      await drain();
+      emit({ ...park, generation: 21 + i * 2 });
+      await drain();
+    }
+    expect(retry).toHaveBeenCalledTimes(5);
+    emit({ sessionId: "stable", state: "connected", generation: 60, failure: null, replayGap: null });
+    await drain();
+    emit({ ...park, generation: 61 });
+    await drain();
+    expect(retry).toHaveBeenCalledTimes(6);
+    recovery.stop();
+  });
+  it("never re-arms a session whose remote process is gone", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+      subscribe: async () => () => {}, status: (async () => parkedDetails("expired", 9)) as any, retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    expect(retry).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ status: { sessionId: "stable", state: "expired" } });
+    recovery.stop();
+  });
 });
