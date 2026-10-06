@@ -2998,7 +2998,16 @@ mod qa_split_producers {
     ) -> Vec<BatchOutcome> {
         let mut futures = Vec::with_capacity(wave.requests as usize);
         for _ in 0..wave.requests {
-            let variant = prepared.clone();
+            // The wave's own geometry IS the request's fingerprint input: a conflict wave exists
+            // only because it asks for different `cols` than the wave that established the record.
+            // Without this the variant kept the template's geometry, every wave sent an identical
+            // fingerprint, and the journal's conflict check could never fire - the batch then
+            // reported `conflictRejected: 0` and the scenario could not verify the rejection at
+            // all. The plan was already correct and a unit test asserted its `cols`, which is why
+            // only the behaviour was wrong.
+            let mut variant = prepared.clone();
+            variant.cols = wave.cols;
+            variant.rows = wave.rows;
             let request_id = wave.request_id.clone();
             let kind = wave.kind;
             futures.push(async move {
