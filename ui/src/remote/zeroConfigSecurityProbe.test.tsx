@@ -21,7 +21,13 @@ function emitLine(line: string): void {
   }
 }
 
-function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
   try {
     mocks.forEach((mock, mockIndex) => {
       const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
@@ -31,13 +37,13 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         try {
           pathname = new URL(raw, "http://localhost").pathname;
         } catch {
-          /* keep the marker: the raw value is never printed */
+          /* never print the raw value */
         }
         const init = args[1] as RequestInit | undefined;
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      emitLine(
+      lines.push(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -45,10 +51,29 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
-    // A diagnostic must never change the outcome of the test it reports on.
+    /* a diagnostic must never change the outcome of the test it reports on */
   }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
+/** Freeze the report now and emit it only if the test fails - for boundaries that normally pass. */
+function captureOnFailure(label: string, ...mocks: unknown[]): void {
+  const frozen = buildFailureTrace(label, ...mocks);
+  onTestFailed(() => {
+    for (const line of frozen) emitLine(line);
+  });
 }
 
 import { remoteHostStore, remoteHostKey } from "../state/remoteHostStore";
@@ -190,7 +215,6 @@ it("processes a new pairing link while a host is active and upserts rather than 
 it("retains the machine prefix, ticket and grid geometry in the real terminal socket URL", async () => {
   paired();
   const fetch = fetcher();
-  onTestFailed(() => reportFetchOrder("zero-config terminal socket URL", fetch));
   await mount(fetch);
   // Chat is the default surface: the real terminal socket is only opened in terminal mode. The
   // open is asynchronous, so subscribe to the exact event BEFORE triggering the switch and await
@@ -201,6 +225,7 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
     fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
   await bounded(socketOpened, "the terminal socket to open");
+  captureOnFailure("zero-config terminal socket URL", fetch);
   const socket = Socket.instances.find(({ url }) => url.includes("/terminal/"));
   expect(socket).toBeDefined();
   const url = new URL(socket!.url);

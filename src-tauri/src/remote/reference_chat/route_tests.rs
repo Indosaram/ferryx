@@ -38,6 +38,40 @@ const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
 /// the gateway does not invent a second owner concept it cannot verify.
 const ROUTE_TEST_OWNER: &str = "owner-reference-route";
 
+/// How many create-path phases one fixture's hook retains. Bounded on purpose: the log is a
+/// diagnostic, and the create path emits a fixed, small set of phases.
+const ROUTE_PHASE_LIMIT: usize = 16;
+
+/// How many of a pane's observed bytes a failure message renders before it stops.
+const ROUTE_SEEN_DUMP_LIMIT: usize = 256;
+
+/// The phases this fixture's daemon reported, with the ms since the hook was armed.
+///
+/// A plain shared leaf: the daemon's hook captures only this, never the fixture and never the
+/// gateway, so arming it cannot form a reference cycle back into the state that owns it.
+type RoutePhaseLog = Arc<std::sync::Mutex<Vec<(String, u128)>>>;
+
+/// A bounded, escaped rendering of the bytes a pane produced.
+///
+/// Printable ASCII stands for itself and every other byte becomes `\xNN`, so a cursor query, a
+/// fragment of one, a prompt or an echo of the typed line is readable in a failure message instead
+/// of being summarised as a count.
+fn escaped_bytes(bytes: &[u8], cap: usize) -> String {
+    let shown = bytes.len().min(cap);
+    let mut rendered = String::with_capacity(shown * 4);
+    for byte in &bytes[..shown] {
+        if byte.is_ascii_graphic() || *byte == b' ' {
+            rendered.push(*byte as char);
+        } else {
+            rendered.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    if bytes.len() > shown {
+        rendered.push_str(&format!("... ({} more bytes)", bytes.len() - shown));
+    }
+    rendered
+}
+
 /// One bound gateway, serving the production router on a loopback port.
 struct ReferenceRouteServer {
     addr: SocketAddr,
@@ -45,6 +79,8 @@ struct ReferenceRouteServer {
     /// that same process still observes. `start` hands the router its reference; this is the
     /// second one it keeps.
     state: Arc<RemoteGatewayState>,
+    /// The create-path phases this fixture's daemon reported, in order (see [RoutePhaseLog]).
+    phases: RoutePhaseLog,
     tasks: tokio::task::JoinSet<()>,
 }
 
@@ -58,12 +94,30 @@ impl ReferenceRouteServer {
         // The router keeps exactly the reference it was handed; this struct retains a second one,
         // so a request that fails to complete can still be diagnosed against that same gateway.
         let router_state = Arc::clone(&state);
+        // The create path already reports its phases through the daemon's own test hook
+        // (`DaemonWorkspaceService::transaction_probe`, `#[cfg(test)]`, `None` until armed).
+        // Arming it here is what turns "the create did not complete" into a located stage: the
+        // hook captures only the log below - never the fixture, never the gateway - so nothing
+        // here points back at the state that owns the hook.
+        let phases: RoutePhaseLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let armed_at = std::time::Instant::now();
+        let sink = Arc::clone(&phases);
+        let hook: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |phase: &str| {
+            if let Ok(mut log) = sink.lock() {
+                if log.len() < ROUTE_PHASE_LIMIT {
+                    log.push((phase.to_string(), armed_at.elapsed().as_millis()));
+                }
+            }
+        });
+        if let Some(services) = state.machine_services.as_ref() {
+            *services.workspaces.transaction_probe.write() = Some(hook);
+        }
         tasks.spawn(async move {
             axum::serve(listener, create_remote_router(router_state))
                 .await
                 .expect("serve");
         });
-        Self { addr, state, tasks }
+        Self { addr, state, phases, tasks }
     }
 
     async fn request(
@@ -177,10 +231,34 @@ impl ReferenceRouteServer {
         format!(
             "{method} http://{addr}{path} did not complete after {elapsed} ms ({error}); {liveness}; \
              sessions this gateway can see: {backend_sessions:?}; sessions this host's terminal \
-             service owns, with their output-hub sequence ranges: {owned_sessions:?}",
+             service owns, with their output-hub sequence ranges: {owned_sessions:?}; {timeline}",
             addr = self.addr,
             elapsed = started.elapsed().as_millis(),
+            timeline = self.phase_timeline(),
         )
+    }
+
+    /// The create-path phases this fixture's daemon reported, in order, bounded by the hook.
+    ///
+    /// Read on failure only. An empty log means the create path never reached its first phase,
+    /// which is itself the answer for a request that never completed.
+    fn phase_timeline(&self) -> String {
+        match self.phases.lock() {
+            Ok(log) if log.is_empty() => {
+                "create-path phases: none reported (the hook was never reached)".to_string()
+            }
+            Ok(log) => {
+                let rendered: Vec<String> = log
+                    .iter()
+                    .map(|(phase, ms)| format!("{phase}@{ms}ms"))
+                    .collect();
+                format!(
+                    "create-path phases (ms since the hook was armed): {}",
+                    rendered.join(", ")
+                )
+            }
+            Err(_) => "create-path phases: the log could not be read".to_string(),
+        }
     }
 
     async fn stop(mut self) {
@@ -358,8 +436,9 @@ impl ReferenceRouteFixture {
         let owned = self.state.terminal_service.list_sessions();
         format!(
             "session {id}: details {details:?}; output-hub sequence range {range:?}; this host's \
-             terminal service owns {owned:?}",
+             terminal service owns {owned:?}; {phases}",
             id = self.session_id,
+            phases = self.server.phase_timeline(),
         )
     }
 
@@ -472,11 +551,14 @@ impl ReferenceRouteFixture {
         .await;
         if observed.ok() != Some(true) {
             let pane = self.pane_diagnosis().await;
+            // The bytes are the one datum a count cannot carry: a query, a fragment of one, a
+            // prompt and an echo of the typed line are all "some bytes and no marker".
+            let dump = escaped_bytes(&seen, ROUTE_SEEN_DUMP_LIMIT);
             panic!(
                 "the pane must run {marker} and print it within the deadline: {} bytes observed \
-                 ({seeded} replayed at the attach, replay gap {gap}), {queries} cursor query(ies) \
-                 detected, {answered} answer(s) dispatched, last write error {last_write_error:?}; \
-                 {pane}",
+                 ({seeded} replayed at the attach, replay gap {gap}), observed bytes: {dump}; \
+                 {queries} cursor query(ies) detected, {answered} answer(s) dispatched, last write \
+                 error {last_write_error:?}; {pane}",
                 seen.len()
             );
         }

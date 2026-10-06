@@ -1612,6 +1612,197 @@ export function describeDaemonRequestFailure(failure) {
     (failure.requestId ? "#" + failure.requestId : "") + " " + failure.message;
 }
 
+/* ==========================================================================
+ * Read-only session diagnostics (evidence for a PTY that never recorded)
+ *
+ * When a spawned session's identity never appears, the question is what the session itself is
+ * doing - and the ONLY honest way to answer it is to read what the daemon already holds: its own
+ * session details and its attach replay. Nothing here writes, resizes, answers a query or waits:
+ * every call is a read the daemon answers immediately, so a capture cannot change the run's
+ * timing and cannot turn a failure into a success.
+ *
+ * The bytes a PTY produced are not trustworthy text: they are arbitrary, may be large, and may
+ * contain whatever the shell printed. They are therefore bounded, base64-encoded (lossless) AND
+ * escaped (readable), and token-shaped content is redacted before anything is recorded.
+ * ========================================================================== */
+
+/** How many bytes of PTY output a diagnostic keeps. Bounded on purpose. */
+export const DIAGNOSTIC_BYTE_LIMIT = 4096;
+
+/**
+ * The ONE total bound on the whole diagnostic capture, in milliseconds.
+ *
+ * The control client has no per-request timeout: `call` settles only when a reply arrives or the
+ * connection ends, so a daemon that accepts a request and never answers would leave a diagnostic
+ * read pending forever - turning a bounded identity failure into a hang, which is strictly worse
+ * than the failure it was gathered to explain. This bound covers the capture as a whole (both
+ * reads together), and it is deliberately separate from the identity wait and from any product
+ * timeout: it neither extends the run's readiness window nor changes what the product does. It
+ * applies only on the failure path, after the identity wait has already expired.
+ */
+export const DIAGNOSTIC_CAPTURE_TIMEOUT_MS = 2000;
+
+/** Redact token-shaped content from diagnostic text before it is recorded anywhere. */
+export function redactDiagnosticText(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/"(?:token|deviceToken|machineToken|pairingToken|apiKey|authorization)"\s*:\s*"[^"]*"/gi, '"redacted":"<REDACTED>"')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{12,}/g, "Bearer <REDACTED>");
+}
+
+/**
+ * A byte buffer as evidence: bounded, losslessly base64-encoded, and escaped for reading.
+ *
+ * `escaped` renders printable ASCII as itself and everything else as \\xNN, so a control-code
+ * probe is visible as `\\x1b[6n` instead of being lost in an invisible string. `truncated` says
+ * whether the bound cut anything, so a short capture is never mistaken for a silent PTY.
+ */
+export function boundedBytesReport(bytes, limit) {
+  const bound = typeof limit === "number" && limit > 0 ? limit : DIAGNOSTIC_BYTE_LIMIT;
+  const all = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "", "base64");
+  const kept = all.subarray(0, bound);
+  let escaped = "";
+  for (const byte of kept) {
+    if (byte === 0x0a) escaped += "\\n";
+    else if (byte === 0x0d) escaped += "\\r";
+    else if (byte === 0x09) escaped += "\\t";
+    else if (byte >= 0x20 && byte <= 0x7e) escaped += String.fromCharCode(byte);
+    else escaped += "\\x" + byte.toString(16).padStart(2, "0");
+  }
+  const redacted = redactDiagnosticText(escaped);
+  return {
+    byteLength: all.length,
+    keptBytes: kept.length,
+    truncated: all.length > kept.length,
+    redactionApplied: redacted !== escaped,
+    // base64 encodes the REDACTED representation, never the raw stream. Encoding the raw bytes
+    // would let a secret that redaction removed from `escaped` ride out intact inside the base64
+    // field, which is the same disclosure by another door. Decoding this field therefore yields
+    // exactly what `escaped` shows.
+    base64: Buffer.from(redacted, "utf8").toString("base64"),
+    escaped: redacted,
+  };
+}
+
+/**
+ * The daemon's own report about a session, reduced to the fields that discriminate a PTY that
+ * never started from one that started and failed. `lastOutputAgeMs` is the decisive one: null
+ * means the daemon has never seen output from this session at all.
+ */
+export function sessionDiagnostics(session) {
+  if (!session || typeof session !== "object") return null;
+  return {
+    sessionId: session.sessionId === undefined ? null : session.sessionId,
+    workspaceId: session.workspaceId === undefined ? null : session.workspaceId,
+    cwd: session.cwd === undefined ? null : session.cwd,
+    cols: session.cols === undefined ? null : session.cols,
+    rows: session.rows === undefined ? null : session.rows,
+    running: session.running === undefined ? null : session.running,
+    suspended: session.suspended === undefined ? null : session.suspended,
+    lastOutputAgeMs: session.lastOutputAgeMs === undefined ? null : session.lastOutputAgeMs,
+    startSequence: session.startSequence === undefined ? null : session.startSequence,
+    endSequence: session.endSequence === undefined ? null : session.endSequence,
+  };
+}
+
+/**
+ * Read what the daemon already holds about a spawned session: its own details, and the attach
+ * replay snapshot.
+ *
+ * ORDER MATTERS. `Attach` starts streaming frames on this connection, and the shared client
+ * matches replies to requests in order, so the details are read FIRST and the attach is issued
+ * LAST. The replay cursor is null on purpose: the startup probe is published when the session is
+ * created, i.e. before any attach, so the snapshot is where a probe that predates this connection
+ * is visible.
+ *
+ * No request here mutates anything: no Write, no Resize, no answer to any query. A failure to
+ * capture is reported as unavailable rather than raised, because a diagnostic must never replace
+ * the failure it was gathered to explain.
+ */
+export async function captureSessionDiagnostics(client, sessionId, options) {
+  const settings = options || {};
+  const limit = typeof settings.byteLimit === "number" ? settings.byteLimit : DIAGNOSTIC_BYTE_LIMIT;
+  const timeoutMs =
+    typeof settings.timeoutMs === "number" && settings.timeoutMs > 0
+      ? settings.timeoutMs
+      : DIAGNOSTIC_CAPTURE_TIMEOUT_MS;
+  const report = {
+    sessionId,
+    capturedAt: new Date().toISOString(),
+    session: null,
+    sessionFailure: null,
+    replay: null,
+    replayFailure: null,
+    attach: null,
+    // Set when the bound below expires. A capture that ran out of time is NOT a capture that
+    // found nothing: it is unavailable, and it says so.
+    diagnosticUnavailable: null,
+  };
+  // The reads themselves. Kept in one place so the bound below wraps them as a unit, and written
+  // so they cannot reject: a diagnostic must never surface as an error of its own.
+  const read = async () => {
+    try {
+      const described = await client.call({ type: "describeSession", sessionId }, { requestKind: "describeSession", requestId: sessionId });
+      const failure = daemonRequestFailure(described, { requestKind: "describeSession", requestId: sessionId });
+      if (failure) report.sessionFailure = describeDaemonRequestFailure(failure);
+      else if (described && described.type === "describeSessionOk") report.session = sessionDiagnostics(described.session);
+      else report.sessionFailure = "unexpected reply " + JSON.stringify(described);
+    } catch (error) {
+      report.sessionFailure = String(error && error.message ? error.message : error);
+    }
+    try {
+      const attached = await client.call({ type: "attach", sessionId, afterSequence: null }, { requestKind: "attach", requestId: sessionId });
+      const failure = daemonRequestFailure(attached, { requestKind: "attach", requestId: sessionId });
+      if (failure) report.replayFailure = describeDaemonRequestFailure(failure);
+      else if (attached && attached.type === "attachOk") {
+        const bytes = Buffer.from(attached.history || "", "base64");
+        report.attach = {
+          epoch: attached.epoch === undefined ? null : attached.epoch,
+          startSequence: attached.startSequence === undefined ? null : attached.startSequence,
+          endSequence: attached.endSequence === undefined ? null : attached.endSequence,
+          gap: attached.gap === undefined ? null : attached.gap,
+          ptyCols: attached.ptyCols === undefined ? null : attached.ptyCols,
+          ptyRows: attached.ptyRows === undefined ? null : attached.ptyRows,
+        };
+        report.replay = boundedBytesReport(bytes, limit);
+      } else report.replayFailure = "unexpected reply " + JSON.stringify(attached);
+    } catch (error) {
+      report.replayFailure = String(error && error.message ? error.message : error);
+    }
+  };
+
+  // One bound for the whole capture. Both branches of the race are observed, so the losing one
+  // can never surface as an unhandled rejection; when the bound wins, the caller cancels the
+  // pending reads by closing the connection it owns, which settles them harmlessly.
+  let timer = null;
+  const outcome = await Promise.race([
+    read().then(() => "done"),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (outcome === "timeout") {
+    report.diagnosticUnavailable = "the diagnostic capture did not complete within " + timeoutMs + "ms";
+  }
+  return report;
+}
+
+/** A one-line, bounded summary of a diagnostics report, for a failure detail. */
+export function summarizeSessionDiagnostics(report) {
+  if (!report) return "none";
+  const session = report.session || {};
+  const replay = report.replay || {};
+  return [
+    "running=" + String(session.running),
+    "suspended=" + String(session.suspended),
+    "lastOutputAgeMs=" + String(session.lastOutputAgeMs),
+    "replayBytes=" + String(replay.byteLength === undefined ? "unavailable" : replay.byteLength),
+    "replayEscaped=" + JSON.stringify(String(replay.escaped === undefined ? "" : replay.escaped).slice(0, 400)),
+    report.diagnosticUnavailable ? "diagnosticUnavailable=" + JSON.stringify(report.diagnosticUnavailable) : null,
+    report.sessionFailure ? "sessionFailure=" + JSON.stringify(report.sessionFailure) : null,
+    report.replayFailure ? "replayFailure=" + JSON.stringify(report.replayFailure) : null,
+  ].filter(Boolean).join(" ");
+}
+
 /**
  * The typed code for a stream error, derived from the errno the OS reported. The message is
  * never used as the discriminator: a caller parses the code, and the raw error text travels
@@ -2417,6 +2608,28 @@ function requireFields(errors, owner, value, fields) {
 }
 
 /**
+ * A process id as the producer writes it: a positive integer NUMBER.
+ *
+ * Deliberately stricter than "finite" and stricter than a string. A pid is a kernel-assigned
+ * integer; `Number.isFinite(0.5)` and `Number.isFinite(-1)` are both true, and accepting a string
+ * would accept "3211174x". `Number.isInteger` rejects the fractional case and the positivity check
+ * rejects zero and negatives, so a value that passes is a pid and not merely a number.
+ */
+function isPositiveInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+/**
+ * A field that is present and non-null, whatever its type. Used where the CONTRACT is "the producer
+ * wrote this", with the type checked separately and specifically (a pid by `isPositiveInteger`, a
+ * string by `isNonEmptyString`). This is not a loosening of `requireFields`: it is the same
+ * presence requirement applied to a field whose type is not a string.
+ */
+function isPresent(value) {
+  return value !== undefined && value !== null;
+}
+
+/**
  * Validate the fixture manifest the provisioner wrote. The runner validates rather than
  * guessing defaults: a missing host, session, device or ledger row is an error the caller
  * reports, never a value the runner invents.
@@ -2431,6 +2644,15 @@ export function validateFixtureManifest(value) {
   const hosts = Array.isArray(value.hosts) ? value.hosts : [];
   if (hosts.length === 0) errors.push("fixture manifest names no host");
   for (const host of hosts) {
+    // `url` and `credentialFile` are required of EVERY host, local included.
+    //
+    // That is not a formality: the provisioner publishes them for a local host exactly when it
+    // RETAINED the gateway it launched (the retained handoff is what keeps the same daemon and
+    // the same sessions across provisioning and the scenario run). A launch it stopped at exit is
+    // recorded as evidence only, because its url would be dead by the time the runner read it.
+    // So a local host with no url/credentialFile means the run did not retain - and accepting it
+    // here would hand the runner a host with no endpoint, which is the state this check exists to
+    // refuse.
     requireFields(errors, "host", host, ["id", "transport", "url", "credentialFile"]);
     if (!REFERENCE_TRANSPORTS.includes(host.transport)) {
       errors.push("host " + host.id + " has an unknown transport: " + String(host.transport));
@@ -2454,13 +2676,21 @@ export function validateFixtureManifest(value) {
     if (isNonEmptyString(session.providerSessionId) && !isNonEmptyString(session.nativeSessionId)) {
       session.nativeSessionId = session.providerSessionId;
     }
-    requireFields(errors, "session", session, [
-      "hostId",
-      "backendSessionId",
-      "provider",
-      "pid",
-      "executablePath",
-    ]);
+    requireFields(errors, "session", session, ["hostId", "backendSessionId", "executablePath"]);
+    // The pid the producer records is a positive integer NUMBER. `requireFields` tests for a
+    // non-empty STRING, so it reported "missing pid" for a pid that was present - the type
+    // mismatch that made the runner reject a valid manifest.
+    if (!isPresent(session.pid)) errors.push("session is missing pid");
+    else if (!isPositiveInteger(session.pid)) {
+      errors.push("session pid is not a positive integer: " + JSON.stringify(session.pid));
+    }
+    // `provider` is a string the CONFIG must supply. It is never defaulted here: a provider the
+    // producer could not read is an absent fact, and inventing one would attribute a transcript
+    // to a provider this run never observed.
+    if (!isPresent(session.provider)) errors.push("session is missing provider");
+    else if (!isNonEmptyString(session.provider)) {
+      errors.push("session provider is not a non-empty string: " + JSON.stringify(session.provider));
+    }
     if (!hostIds.has(session.hostId)) {
       errors.push("session " + session.backendSessionId + " names an unknown host " + session.hostId);
     }

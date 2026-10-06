@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, onTestFailed, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
@@ -19,7 +19,13 @@ function emitLine(line: string): void {
   }
 }
 
-function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
   try {
     mocks.forEach((mock, mockIndex) => {
       const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
@@ -29,13 +35,13 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         try {
           pathname = new URL(raw, "http://localhost").pathname;
         } catch {
-          /* keep the marker: the raw value is never printed */
+          /* never print the raw value */
         }
         const init = args[1] as RequestInit | undefined;
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      emitLine(
+      lines.push(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -43,10 +49,21 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
-    // A diagnostic must never change the outcome of the test it reports on.
+    /* a diagnostic must never change the outcome of the test it reports on */
   }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
 }
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -239,7 +256,6 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     let currentHostWorkspace = "ws-ferryx";
     let currentHostSlug = "main";
     let currentHostSessionId = "term-sess-77";
-    onTestFailed(() => reportFetchOrder("accountSession: renders top context selector", globalThis.fetch));
 
     const mockTunnelTransport = {
       fetchLike: vi.fn().mockImplementation((path: string, init?: RequestInit) => {
@@ -324,7 +340,6 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       }),
       close: vi.fn(),
     };
-    onTestFailed(() => reportFetchOrder("accountSession: tunnel transport", mockTunnelTransport.fetchLike));
 
     vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
       transport: mockTunnelTransport as any,
@@ -378,9 +393,18 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       );
     });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
-    });
+    try {
+      await waitFor(() => {
+        expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
+      });
+    } catch (error) {
+      emitFailureTrace(
+        "accountSession: grid after worktree selection",
+        globalThis.fetch,
+        mockTunnelTransport.fetchLike,
+      );
+      throw error;
+    }
   });
 
   it("does not prematurely mount old terminal when chosen target is wsB while host state remains wsA", async () => {

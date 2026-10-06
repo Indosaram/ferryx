@@ -307,8 +307,18 @@ async fn dropped_http_reply_replays_original_process_and_controller_fences_close
                 .ok()
                 .flatten()
                 .is_some_and(|record| record.exit.is_some());
+            // Two flags with opposite directions, reported side by side so neither is read as the
+            // other: `reader_finished` is read on the PTY session and says the reader thread has
+            // not finished - a prediction, never a location, since a false flag cannot say where
+            // the thread waits. `hub_holds_session` is read on the output hub and says the pump
+            // has not drained the entry. Nothing here reports the metadata task, which has no
+            // accessor, so a stall cannot be placed before or after it from these fields alone.
+            let reader_finished = pty
+                .as_ref()
+                .is_some_and(|session| session.is_reader_finished());
+            let hub_holds_session = service.terminal_service.output_hub().has_session(&id);
             panic!(
-                "wait_machine_lifecycle failed for {id}: {error}; pty_reaped={reaped}; exit_recorded={exit_recorded}"
+                "wait_machine_lifecycle failed for {id}: {error}; pty_reaped={reaped}; exit_recorded={exit_recorded}; reader_finished={reader_finished}; hub_holds_session={hub_holds_session}"
             );
         }
     }

@@ -21,7 +21,13 @@ function emitLine(line: string): void {
   }
 }
 
-function reportFetchOrder(label: string, ...mocks: unknown[]): void {
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
   try {
     mocks.forEach((mock, mockIndex) => {
       const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
@@ -31,13 +37,13 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
         try {
           pathname = new URL(raw, "http://localhost").pathname;
         } catch {
-          /* keep the marker: the raw value is never printed */
+          /* never print the raw value */
         }
         const init = args[1] as RequestInit | undefined;
         return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
       });
       const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
-      emitLine(
+      lines.push(
         `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
       );
     });
@@ -45,10 +51,29 @@ function reportFetchOrder(label: string, ...mocks: unknown[]): void {
       .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
       .join(", ");
     const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
-    emitLine(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
   } catch {
-    // A diagnostic must never change the outcome of the test it reports on.
+    /* a diagnostic must never change the outcome of the test it reports on */
   }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
+/** Freeze the report now and emit it only if the test fails - for boundaries that normally pass. */
+function captureOnFailure(label: string, ...mocks: unknown[]): void {
+  const frozen = buildFailureTrace(label, ...mocks);
+  onTestFailed(() => {
+    for (const line of frozen) emitLine(line);
+  });
 }
 
 import { resolveAgentLogo } from "../lib/agentIcon";
@@ -76,7 +101,16 @@ async function switchToTerminalMode(): Promise<void> {
   // the wrong reason), and a screen that legitimately offers no switch - the sign-in screen a magic
   // link lands on - must not fail here: the test's own terminal assertion decides that.
   await act(async () => {});
-  if (screen.queryByTestId("mobile-chat-workspace") === null) return;
+  // Already showing the terminal: clicking the switch again would toggle back to chat.
+  if (screen.queryByTestId("remote-terminal") !== null || screen.queryByTestId("remote-terminal-grid") !== null) {
+    return;
+  }
+  // The sign-in screen legitimately offers no switch and no terminal; the caller's own assertion
+  // decides that case.
+  if (screen.queryByRole("heading", { name: /sign in to ferryx/i }) !== null) return;
+  // Anything else must offer the switch, so this throws loudly instead of silently leaving chat up.
+  // Deliberately NOT keyed on the chat surface: it is a lazily imported chunk, so on the first
+  // render of a file it is absent - keying on it made a necessary switch a silent no-op.
   await act(async () => {
     fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
@@ -463,7 +497,13 @@ describe("selection request lifetime", () => {
         await host.postA.promise;
       });
       expect(target).toBeDisabled();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+      try {
+        expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+      } catch (error) {
+        // Snapshot at the failure boundary, before afterEach cleanup clears the DOM and the mocks.
+        emitFailureTrace("selection lifetime: releases when the request never settles", globalThis.fetch);
+        throw error;
+      }
       await act(async () => { await vi.advanceTimersByTimeAsync(5999); });
       expect(target).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
@@ -506,7 +546,12 @@ describe("selection request lifetime", () => {
       });
       const targetB = within(await openWorktreeSheet()).getByRole("tab", { name: "editor" });
       expect(targetB).toBeEnabled();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      try {
+        expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      } catch (error) {
+        emitFailureTrace(`selection lifetime: obsolete response (${outcome}, acceptedB=${acceptedB})`, globalThis.fetch);
+        throw error;
+      }
       await act(async () => {
         fireEvent.click(targetB);
         await host.postB.promise;
@@ -848,7 +893,6 @@ describe("Remote UI Components", () => {
         .mockResolvedValue(jsonResponse(focusedState));
       vi.stubGlobal("fetch", ticketed(fetchMock));
       vi.stubGlobal("WebSocket", EventWebSocket);
-      onTestFailed(() => reportFetchOrder("recovers from a desktop that never confirms", fetchMock));
 
       render(<RemoteApp />);
 
@@ -895,11 +939,11 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(secondFocusedState));
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
-    onTestFailed(() => reportFetchOrder("refreshes the mirrored terminal on unsolicited focus", fetchMock));
 
     render(<RemoteApp />);
     await switchToTerminalMode();
 
+    captureOnFailure("refreshes the mirrored terminal on unsolicited focus", fetchMock);
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
       "focused-terminal",

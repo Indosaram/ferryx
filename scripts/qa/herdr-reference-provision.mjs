@@ -26,6 +26,13 @@
  *   - It never assumes a control transport. A host's daemon is dialled over the transport
  *     the product publishes on that platform - a unix socket, or on Windows the loopback
  *     daemon.port/daemon.token pair whose token the first frame must carry.
+ *   - It never manufactures evidence. When a spawned session's identity does not appear, the
+ *     run records only what the daemon already holds (its session details and the attach
+ *     replay) with read-only requests, bounded and redacted. It does not write to the PTY,
+ *     answer a terminal query, extend a deadline, or turn the failure into a success.
+ *   - It never lets a diagnostic outlive its purpose. The capture runs under one total bound and
+ *     is cancelled by closing the owned connection when that bound expires, so a daemon that
+ *     accepts a request without answering cannot turn a bounded identity failure into a hang.
  *   - It never kills a process it did not spawn. Teardown re-reads each recorded PID's live
  *     executable and kills only an exact match; anything else is reported.
  *
@@ -65,6 +72,8 @@ import {
   SPAWN_LEDGER_SCHEMA,
   captureArtifact,
   captureSourceProvenance,
+  DIAGNOSTIC_CAPTURE_TIMEOUT_MS,
+  captureSessionDiagnostics,
   connectDaemonControl,
   daemonControlTransport,
   daemonRequestFailure,
@@ -80,6 +89,7 @@ import {
   repoRoot,
   sha256Bytes,
   sha256File,
+  summarizeSessionDiagnostics,
   validateRegistryRows,
   writeJson,
 } from "./herdr-reference-fixtures.mjs";
@@ -678,7 +688,66 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
       );
     }
     const daemonPid = client.handshake.pid;
-    const record = await readPtyIdentity(identityPath, args.timeoutMs);
+    // The identity file is this run's proof that the wrapper EXECUTED. A created process is not a
+    // process that ran: `spawnOk` says the daemon started a child, and says nothing about whether
+    // that child is alive, idle, or already dead. So when the identity never appears, the failure
+    // is captured together with what the daemon ALREADY knows - its own session details and the
+    // attach replay - and nothing else changes.
+    let record;
+    try {
+      record = await readPtyIdentity(identityPath, args.timeoutMs);
+    } catch (identityError) {
+      // Read-only: no Write, no Resize, no answer to any query, and no waiting. The capture cannot
+      // alter the run's timing and cannot convert this failure into a success - the same error is
+      // rethrown with the same code, carrying evidence it did not have before.
+      let report = null;
+      try {
+        report = await captureSessionDiagnostics(client, response.sessionId, {
+          timeoutMs: DIAGNOSTIC_CAPTURE_TIMEOUT_MS,
+        });
+      } catch (captureError) {
+        report = {
+          sessionId: response.sessionId,
+          captureFailure: String(captureError && captureError.message ? captureError.message : captureError),
+        };
+      }
+      if (report && report.diagnosticUnavailable) {
+        // The bound expired. Cancel the reads that are still pending by closing the connection
+        // this run owns: closing settles them, so nothing is left in flight, and close() is
+        // idempotent so the teardown below is unaffected. The capture is then reported as
+        // UNAVAILABLE - never as an empty session, which would read as a silent PTY.
+        try {
+          client.close();
+        } catch {
+          /* The socket is already gone. */
+        }
+      }
+      let diagnosticsPath = null;
+      try {
+        diagnosticsPath = join(resolve(args.out), "pty-identity-diagnostics", String(requestId).replace(/[^A-Za-z0-9._-]/g, "_") + ".json");
+        writeJson(diagnosticsPath, {
+          ...report,
+          spawn: {
+            sessionId: response.sessionId,
+            epoch: String(response.epoch),
+            daemonPid,
+            requestedCols: session.cols,
+            requestedRows: session.rows,
+            reportedCols: details.cols,
+            reportedRows: details.rows,
+            reportedRunning: details.running,
+          },
+        });
+      } catch {
+        // A diagnostic that cannot be written must not replace the failure it explains.
+        diagnosticsPath = null;
+      }
+      identityError.detail =
+        identityError.message +
+        " | sessionDiagnostics: " + summarizeSessionDiagnostics(report) +
+        (diagnosticsPath ? " | diagnosticsFile=" + diagnosticsPath : " | diagnosticsFile=unwritable");
+      throw identityError;
+    }
     const validated = validatePtyIdentity(record, { shell: realShell }, probeProcessIdentity);
     if (!validated.ok) {
       throw new ProvisionError(EXIT.ASSERTION, "pty-identity-invalid", validated.errors.join("; "));

@@ -3,10 +3,11 @@
  * `<runtime>/daemon.sock` on Windows, where the product publishes `daemon.port` +
  * `daemon.token` instead, so every provisioning run died with a bare ENOENT).
  *
- * Static and pure assertions: no socket is opened, no daemon is started, nothing is written,
- * and the only host query is a read-only process-table probe (the same one the launcher's
- * identity check uses) with a PID that cannot exist. The platform is injected, so the Windows
- * branch is exercised on every host rather than only where the defect was found.
+ * Mostly static and pure assertions. A handful drive the REAL client against a loopback listener
+ * this file owns, because the behaviour they cover is a stream event: a missing handler does not
+ * fail an assertion, it kills the process. Every listener and client a test starts is closed by
+ * that test or by the hook below, so the suite can exit on its own. The platform is injected, so
+ * the Windows branch is exercised on every host rather than only where the defect was found.
  */
 
 import assert from 'node:assert/strict';
@@ -18,6 +19,8 @@ import { join, resolve } from 'node:path';
 import {
   DAEMON_CONTROL_PROTOCOL_VERSION,
   DAEMON_LOOPBACK_HOST,
+  DIAGNOSTIC_BYTE_LIMIT,
+  DIAGNOSTIC_CAPTURE_TIMEOUT_MS,
   DAEMON_TRANSPORT_FILES,
   DAEMON_TRANSPORT_KINDS,
   ISOLATED_GATEWAY_OWNERSHIP_CONTRACT,
@@ -26,6 +29,8 @@ import {
   REFERENCE_HOST_ACCESS_KINDS,
   REFERENCE_NONLOCAL_TRANSPORTS,
   adoptOwnedGateway,
+  boundedBytesReport,
+  captureSessionDiagnostics,
   connectDaemonControl,
   daemonControlTransport,
   daemonHandshakeFrame,
@@ -41,6 +46,7 @@ import {
   parseDaemonTransportToken,
   registerWorkspaceOnDaemon,
   transportErrorCode,
+  validateFixtureManifest,
   workspaceIdRefusal,
   workspaceRegistrationFor,
 } from './herdr-reference-fixtures.mjs';
@@ -717,5 +723,246 @@ test('a stream error maps to a typed code from the errno, never from the message
   assert.equal(transportErrorCode({ code: 'EWHATEVER' }), 'daemon-transport-error');
   assert.equal(transportErrorCode(new Error('read ECONNRESET')), 'daemon-transport-error');
   assert.equal(transportErrorCode(null), 'daemon-transport-error');
+});
+
+// ---- fixture manifest contract (producer -> validator -> consumer) -----------
+// ONE defect, and one NON-defect that must not be "fixed" by loosening a check.
+//
+// The defect: the producer writes a pid as a NUMBER (`record.ptyChild.pid`) while the validator
+// tested it with a non-empty-STRING predicate, so it reported "session is missing pid" for a pid
+// that was present. That is the contract mismatch these tests pin.
+//
+// The non-defect: a local host's url/credentialFile being null was NOT a validator bug. The
+// provisioner publishes those fields for a local host exactly when it RETAINED the gateway
+// (`--retain-gateway`), which is what keeps the same daemon and sessions across the two runs; a
+// stopped launch is recorded as evidence only because its url would be dead. A null there means the
+// run did not retain, so the check that refuses it is correct and must stay strict.
+
+const manifestFor = (host, session) => ({
+  schema: 'ferryx-herdr-reference.fixtures/1',
+  // A fresh host object per manifest, so no test can couple to another through shared state.
+  hosts: [{ ...host }],
+  sessions: [{
+    hostId: host.id,
+    backendSessionId: 'sess-1',
+    executablePath: '/opt/ferryx/ferryx',
+    pid: 3211174,
+    provider: 'omo',
+    ...(session || {}),
+  }],
+  devices: [],
+  spawnLedger: { schema: 'ferryx-herdr-reference.spawn-ledger/1', entries: [] },
+});
+
+// A valid local host now declares the retained access: url + credentialFile. The credential path
+// is RELATIVE on purpose - the validator's existence check applies to absolute paths only, so a
+// relative one keeps these fixtures hermetic (no filesystem dependency, no temp dir to clean up).
+const LOCAL_HOST = {
+  id: 'local-win',
+  transport: 'local',
+  url: 'http://127.0.0.1:43821',
+  credentialFile: 'creds/local-token',
+  startLocal: true,
+};
+
+test('a numeric pid is accepted, and only a positive integer counts as one', () => {
+  const ok = validateFixtureManifest(manifestFor(LOCAL_HOST));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  // The producer writes this shape; requiring a string was the defect.
+  assert.equal(ok.errors.includes('session is missing pid'), false);
+  for (const [pid, why] of [
+    ['3211174', 'a string pid is not a pid'],
+    [0, 'zero is not a pid'],
+    [-1, 'a negative pid is not a pid'],
+    [12.5, 'a fractional pid is not a pid'],
+    [Number.NaN, 'NaN is not a pid'],
+    [Number.POSITIVE_INFINITY, 'infinity is not a pid'],
+    [undefined, 'an absent pid is missing'],
+  ]) {
+    const verdict = validateFixtureManifest(manifestFor(LOCAL_HOST, { pid }));
+    assert.equal(verdict.ok, false, why);
+    assert.ok(
+      verdict.errors.some((e) => e.includes('pid')),
+      why + ' -> ' + JSON.stringify(verdict.errors),
+    );
+  }
+});
+
+test('a local host must declare the retained gateway access, and a dead or null url is refused', () => {
+  // The producer publishes url + credentialFile for a local host exactly when it RETAINED the
+  // gateway it launched - that handoff is what keeps the same daemon and sessions across the two
+  // runs. A launch it stopped at exit is evidence only, because its url is dead by the time the
+  // runner reads it. So null here means "not retained", and it must be refused, not waived.
+  const retained = validateFixtureManifest(manifestFor({
+    id: 'local-win',
+    transport: 'local',
+    url: 'http://127.0.0.1:43821',
+    credentialFile: 'creds/local-token',
+    ownedGateway: { contract: 'ferryx-herdr-reference.isolated-gateway-ownership/1' },
+  }));
+  assert.equal(retained.ok, true, JSON.stringify(retained.errors));
+
+  for (const [host, why] of [
+    [{ id: 'local-win', transport: 'local', url: null, credentialFile: null }, 'neither field'],
+    [{ id: 'local-win', transport: 'local', url: null, credentialFile: 'creds/t' }, 'null url'],
+    [{ id: 'local-win', transport: 'local', url: 'http://127.0.0.1:43821', credentialFile: null }, 'null credential'],
+    [{ id: 'local-win', transport: 'local', url: '', credentialFile: '' }, 'empty strings'],
+    // A retained gateway whose credential file is gone is a dead access path: the manifest names
+    // it, and the validator refuses a credential it cannot read.
+    [{ id: 'local-win', transport: 'local', url: 'http://127.0.0.1:43821', credentialFile: join(root, 'absent-token') }, 'absent credential file'],
+  ]) {
+    const verdict = validateFixtureManifest(manifestFor(host));
+    assert.equal(verdict.ok, false, why);
+    assert.ok(
+      verdict.errors.some((e) => e.includes('url') || e.includes('credential')),
+      why + ' -> ' + JSON.stringify(verdict.errors),
+    );
+  }
+});
+
+test('a non-local host still must declare its endpoint and credential', () => {
+  for (const transport of REFERENCE_NONLOCAL_TRANSPORTS) {
+    const bare = validateFixtureManifest(manifestFor({ id: 'h-' + transport, transport, url: null, credentialFile: null }));
+    assert.equal(bare.ok, false, transport);
+    assert.ok(bare.errors.some((e) => e.includes('url')), transport + ' -> ' + JSON.stringify(bare.errors));
+    assert.ok(bare.errors.some((e) => e.includes('credentialFile')), transport);
+    const declared = validateFixtureManifest(manifestFor({
+      id: 'h-' + transport,
+      transport,
+      url: 'http://192.0.2.10:43821',
+      credentialFile: 'creds/token',
+    }));
+    assert.equal(declared.ok, true, transport + ' -> ' + JSON.stringify(declared.errors));
+  }
+});
+
+test('a provider is required and is never defaulted by the validator', () => {
+  const missing = validateFixtureManifest(manifestFor(LOCAL_HOST, { provider: undefined }));
+  assert.equal(missing.ok, false);
+  assert.ok(missing.errors.includes('session is missing provider'), JSON.stringify(missing.errors));
+  const empty = validateFixtureManifest(manifestFor(LOCAL_HOST, { provider: '   ' }));
+  assert.equal(empty.ok, false);
+  assert.ok(empty.errors.some((e) => e.includes('provider is not a non-empty string')));
+  // The validator reports the absence; it does not substitute a provider of its own.
+  const ok = validateFixtureManifest(manifestFor(LOCAL_HOST, { provider: 'codex' }));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.equal(ok.sessions[0].provider, 'codex');
+});
+
+// ---- diagnostic capture -----------------------------------------------------
+// The capture exists to explain a failure without becoming one: it is bounded, it is cancelled by
+// closing the connection the run owns, and every encoding of the bytes it keeps is derived from the
+// REDACTED form. These reuse the deterministic fake daemon above - a server that completes the
+// handshake and then either answers or never does. A never-answering server makes the bound the only
+// possible outcome, so there is no sleep and no polling anywhere in these tests.
+
+const SECRET_JSON = '{"token":"s3cr3t-value-1234"}';
+const SECRET_BEARER = 'Authorization: Bearer abcdefghijklmnopqrst';
+
+test('a kept byte range is bounded and says so when it truncated', () => {
+  const report = boundedBytesReport(Buffer.alloc(DIAGNOSTIC_BYTE_LIMIT + 512, 0x61));
+  assert.equal(report.byteLength, DIAGNOSTIC_BYTE_LIMIT + 512);
+  assert.equal(report.keptBytes, DIAGNOSTIC_BYTE_LIMIT);
+  assert.equal(report.truncated, true);
+  assert.equal(Buffer.from(report.base64, 'base64').length, DIAGNOSTIC_BYTE_LIMIT);
+  // A capture shorter than the bound is not marked truncated, so a small read is never mistaken
+  // for a clipped one - and control bytes stay visible instead of vanishing into invisible text.
+  const small = boundedBytesReport(Buffer.from('\x1b[6n', 'utf8'));
+  assert.equal(small.truncated, false);
+  assert.equal(small.escaped, '\\x1b[6n');
+});
+
+test('a secret is absent from the escaped text and from the decoded base64', () => {
+  const report = boundedBytesReport(Buffer.from(SECRET_JSON + ' ' + SECRET_BEARER, 'utf8'));
+  assert.equal(report.redactionApplied, true);
+  assert.equal(report.escaped.includes('s3cr3t-value-1234'), false);
+  assert.equal(report.escaped.includes('abcdefghijklmnopqrst'), false);
+  const decoded = Buffer.from(report.base64, 'base64').toString('utf8');
+  assert.equal(decoded.includes('s3cr3t-value-1234'), false, 'base64 must derive from the redacted form');
+  assert.equal(decoded.includes('abcdefghijklmnopqrst'), false);
+  // One representation, not two: decoding the field yields exactly what the readable form shows.
+  assert.equal(decoded, report.escaped);
+  assert.ok(decoded.includes('<REDACTED>'));
+});
+
+test('a completed capture reports the daemon details and the escaped replay', async () => {
+  const probe = Buffer.from('\x1b[6n', 'utf8');
+  const daemon = await startFakeDaemon(
+    handshakeThen((socket, line) => {
+      const request = JSON.parse(line);
+      if (request.type === 'describeSession') {
+        socket.write(JSON.stringify({
+          type: 'describeSessionOk',
+          session: {
+            sessionId: 'sess-1',
+            workspaceId: 'ws-1',
+            running: true,
+            suspended: false,
+            lastOutputAgeMs: null,
+            cols: 80,
+            rows: 24,
+          },
+        }) + '\n');
+        return;
+      }
+      if (request.type === 'attach') {
+        socket.write(JSON.stringify({
+          type: 'attachOk',
+          epoch: 7,
+          sessionId: 'sess-1',
+          startSequence: 1,
+          endSequence: 1,
+          history: probe.toString('base64'),
+          ptyCols: 80,
+          ptyRows: 24,
+        }) + '\n');
+      }
+    }),
+  );
+  const client = await openClient(daemon.transport);
+  const report = await captureSessionDiagnostics(client, 'sess-1');
+  assert.equal(report.diagnosticUnavailable, null);
+  assert.equal(report.session.running, true);
+  assert.equal(report.session.lastOutputAgeMs, null, 'no output observed yet is null, not zero');
+  assert.equal(report.session.cols, 80);
+  assert.equal(report.attach.epoch, 7);
+  assert.equal(report.replay.byteLength, probe.length);
+  assert.equal(report.replay.escaped, '\\x1b[6n');
+  client.close();
+  await daemon.close();
+});
+
+test('the bound expires as diagnosticUnavailable, never as an empty session', async () => {
+  assert.ok(DIAGNOSTIC_CAPTURE_TIMEOUT_MS > 0 && DIAGNOSTIC_CAPTURE_TIMEOUT_MS <= 10000);
+  // The server completes the handshake and then never answers, so the bound is the only outcome.
+  const daemon = await startFakeDaemon(handshakeThen(() => {}));
+  const client = await openClient(daemon.transport);
+  const report = await captureSessionDiagnostics(client, 'sess-1', { timeoutMs: 40 });
+  assert.ok(report.diagnosticUnavailable, 'an expired capture must report itself unavailable');
+  assert.equal(report.session, null, 'nothing was read, so nothing may be reported as a session');
+  assert.equal(report.sessionFailure, null);
+  assert.equal(report.replay, null);
+  // It resolves. A diagnostic that rejected would displace the failure it was gathered to explain.
+  client.close();
+  await daemon.close();
+});
+
+test('closing the owned connection settles the reads it cancelled', async () => {
+  const daemon = await startFakeDaemon(handshakeThen(() => {}));
+  const client = await openClient(daemon.transport);
+  const pending = client.call({ type: 'describeSession', sessionId: 'sess-1' });
+  client.close();
+  const settled = await pending;
+  const failure = daemonRequestFailure(settled);
+  assert.ok(failure, 'a pending read must settle structurally when the owned connection closes');
+  assert.equal(failure.code, 'daemon-transport-closed');
+  assert.equal(client.closed, true);
+  // And a capture issued afterwards still resolves, so the original identity error is retained:
+  // the unreadable details are REPORTED, never thrown over the caller's own failure.
+  const report = await captureSessionDiagnostics(client, 'sess-1');
+  assert.equal(report.session, null);
+  assert.ok(report.sessionFailure, 'unreadable details are reported, not raised');
+  assert.ok(report.replayFailure);
+  await daemon.close();
 });
 
