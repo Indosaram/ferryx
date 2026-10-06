@@ -13,6 +13,7 @@ pub mod file_link;
 pub mod file_open_with;
 pub mod file_preview;
 pub mod file_preview_contract;
+pub mod github_issue;
 pub mod native_menu;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
@@ -64,6 +65,7 @@ pub use dag::*;
 pub use debug::*;
 pub use diagnostics::*;
 pub use error::*;
+pub use github_issue::*;
 pub use native_menu::*;
 #[cfg(feature = "native-terminal")]
 pub use native_terminal::*;

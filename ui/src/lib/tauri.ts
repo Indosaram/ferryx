@@ -85,6 +85,16 @@ export type LocalBranch = {
   isCurrent: boolean;
 };
 
+export type GitHubIssuePreview = {
+  number: number;
+  title: string;
+  url: string;
+  body: string;
+  bodyTruncated: boolean;
+  repository: string;
+  suggestedSlug: string;
+};
+
 export type TerminalThemeColors = {
   background: string;
   foreground: string;
@@ -235,6 +245,17 @@ export async function bootTrace(
 
 export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
+}
+
+/// Reads one GitHub issue through the already authenticated `gh` executable.
+/// The result is inert preview data: Ferryx never runs or submits issue text.
+export async function previewGitHubIssue(request: {
+  workspaceId: string;
+  issueRef: string;
+}) {
+  return invokeCommand<GitHubIssuePreview>("cmd_github_issue_preview", {
+    request: { workspaceId: request.workspaceId, issueRef: request.issueRef },
+  });
 }
 
 export async function getTerminalPreferences(remote?: RemotePreferenceTarget): Promise<TerminalPreferences> {
