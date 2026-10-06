@@ -40,7 +40,16 @@ export function buildIsolatedEnv(context) {
   // `docs/evidence/windows-terminal-20260912/windows-environment.md:13`
   // ("Set BOTH FERRYX_SESSION_DIR and FERRYX_RUNTIME_DIR to unique QA paths").
   const sessionDir = join(context.isolationRoot, 'session');
-  for (const dir of [dataDir, runtimeDir, homeDir, sessionDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Windows app data is NOT covered by HOME. WebView2 keeps its profile (and therefore the
+  // frontend's localStorage) under %LOCALAPPDATA%\<bundle-id>\EBWebView, and the app's own
+  // Roaming data sits under %APPDATA%. Leaving those unset made the QA app share the host user's
+  // real profile: the measured symptom was a pane/split spawned with `shell: "wsl"` (the host
+  // user's stored shell preference) on a host where WSL is not installed, so the shell never
+  // started and the marker was never observed, while the daemon-side fixture spawn - which does
+  // not read frontend settings - correctly used the default shell.
+  const appDataDir = join(context.isolationRoot, 'appdata');
+  const localAppDataDir = join(context.isolationRoot, 'localappdata');
+  for (const dir of [dataDir, runtimeDir, homeDir, sessionDir, appDataDir, localAppDataDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   // Review M5: allowlist ONLY. The child env is a fresh literal object, so no
   // ambient variable (FERRYX_MACHINE_TOKEN, account tokens, proxy settings,
   // ...) can leak into the isolated app; the QA barrier/run nonces are added
@@ -51,6 +60,8 @@ export function buildIsolatedEnv(context) {
   const env = {
     PATH: process.env.PATH,
     HOME: homeDir,
+    APPDATA: appDataDir,
+    LOCALAPPDATA: localAppDataDir,
     FERRYX_DATA_DIR: dataDir,
     FERRYX_RUNTIME_DIR: runtimeDir,
     FERRYX_SESSION_DIR: sessionDir,
@@ -68,7 +79,7 @@ export function buildIsolatedEnv(context) {
   }
   return {
     env,
-    dirs: { dataDir, runtimeDir, homeDir, sessionDir },
+    dirs: { dataDir, runtimeDir, homeDir, sessionDir, appDataDir, localAppDataDir },
   };
 }
 
