@@ -158,8 +158,9 @@ export function validateReferenceFileName(rawName: string): string {
 /**
  * Is this mention path safe to hand to a program as a relative path?
  *
- * Refuses an absolute path, a Windows drive prefix, a home-relative path, a control byte, a
- * parent or current-directory component, and an empty or whitespace-padded path.
+ * Refuses an absolute path, a Windows drive prefix, a home-relative path, a backslash
+ * separator, a control byte, a parent or current-directory component, and an empty or
+ * whitespace-padded path.
  */
 export function referenceMentionPathIsSafe(relativePath: string): boolean {
   if (relativePath.length === 0 || relativePath.trim() !== relativePath) return false;
@@ -169,7 +170,7 @@ export function referenceMentionPathIsSafe(relativePath: string): boolean {
   }
   if (
     relativePath.startsWith("/") ||
-    relativePath.startsWith(REFERENCE_BACKSLASH) ||
+    relativePath.includes(REFERENCE_BACKSLASH) ||
     relativePath.startsWith("~")
   ) {
     return false;

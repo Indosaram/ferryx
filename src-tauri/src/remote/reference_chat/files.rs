@@ -138,8 +138,9 @@ pub fn validate_reference_file_name(raw: &str) -> Result<String, ScopeErrorCode>
 
 /// Is this mention path safe to hand to a program as a relative path?
 ///
-/// Refuses an absolute path, a Windows drive prefix, a home-relative path, a control byte, a
-/// parent or current-directory component, and an empty or whitespace-padded path.
+/// Refuses an absolute path, a Windows drive prefix, a home-relative path, a backslash
+/// separator, a control byte, a parent or current-directory component, and an empty or
+/// whitespace-padded path.
 pub fn reference_mention_path_is_safe(relative: &str) -> bool {
     if relative.is_empty() || relative.trim() != relative {
         return false;
@@ -147,7 +148,7 @@ pub fn reference_mention_path_is_safe(relative: &str) -> bool {
     if relative.chars().any(char::is_control) {
         return false;
     }
-    if relative.starts_with('/') || relative.starts_with(char::from(92)) || relative.starts_with('~')
+    if relative.starts_with('/') || relative.contains(char::from(92)) || relative.starts_with('~')
     {
         return false;
     }
