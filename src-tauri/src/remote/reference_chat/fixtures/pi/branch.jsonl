@@ -1,0 +1,12 @@
+{"type":"session","version":"0.87.1","cwd":"/Users/dev/project","timestamp":"2026-10-06T10:00:00.000Z"}
+{"type":"message","id":"a1","parentId":"session","timestamp":"2026-10-06T10:00:01.000Z","message":{"role":"user","content":"First question."}}
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-10-06T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"First answer."}],"stopReason":"stop"}}
+{"type":"message","id":"b1","parentId":"a2","timestamp":"2026-10-06T10:00:03.000Z","message":{"role":"user","content":"Second question (kept)."}}
+{"type":"message","id":"b2","parentId":"b1","timestamp":"2026-10-06T10:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Second answer (kept)."},{"type":"toolCall","toolCallId":"call_b1","toolName":"bash","toolInput":{"command":"cargo test"}}],"stopReason":"stop"}}
+{"type":"message","id":"b3","parentId":"b2","timestamp":"2026-10-06T10:00:05.000Z","message":{"role":"toolResult","toolCallId":"call_b1","toolName":"bash","content":[{"type":"text","text":"kept output"}]}}
+{"type":"message","id":"x1","parentId":"b1","timestamp":"2026-10-06T10:00:06.000Z","message":{"role":"user","content":"Alternative question (abandoned)."}}
+{"type":"message","id":"x2","parentId":"x1","timestamp":"2026-10-06T10:00:07.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Alternative answer (abandoned)."},{"type":"toolCall","toolCallId":"call_x1","toolName":"bash","toolInput":{"command":"cargo test"}}],"stopReason":"stop"}}
+{"type":"message","id":"x3","parentId":"x2","timestamp":"2026-10-06T10:00:08.000Z","message":{"role":"toolResult","toolCallId":"call_x1","toolName":"bash","content":[{"type":"text","text":"abandoned output"}]}}
+{"type":"branch_summary","id":"s1","parentId":"b3","timestamp":"2026-10-06T10:00:09.000Z","summary":"Chose the direct path over the alternative."}
+{"type":"message","id":"c1","parentId":"s1","timestamp":"2026-10-06T10:00:10.000Z","message":{"role":"user","content":"Third question on the chosen path."}}
+{"type":"message","id":"c2","parentId":"c1","timestamp":"2026-10-06T10:00:11.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Third answer on the chosen path."}],"stopReason":"stop"}}

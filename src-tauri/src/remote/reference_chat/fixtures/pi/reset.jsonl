@@ -1,0 +1,8 @@
+{"type":"session","version":"0.87.1","cwd":"/Users/dev/project","timestamp":"2026-10-06T09:30:00.000Z"}
+{"type":"message","id":"r1","parentId":"session","timestamp":"2026-10-06T09:30:01.000Z","message":{"role":"user","content":"Before the reset."}}
+{"type":"message","id":"r2","parentId":"r1","timestamp":"2026-10-06T09:30:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Answer before the reset."}],"stopReason":"stop"}}
+{"type":"custom","id":"r3","parentId":"r2","timestamp":"2026-10-06T09:30:03.000Z","customType":"model_change"}
+{"type":"custom","id":"r4","parentId":"r3","timestamp":"2026-10-06T09:30:04.000Z","customType":"context_clear"}
+{"type":"message","id":"r5","parentId":"r4","timestamp":"2026-10-06T09:30:05.000Z","message":{"role":"user","content":"After the reset."}}
+{"type":"message","id":"r6","parentId":"r5","timestamp":"2026-10-06T09:30:06.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Answer after the reset."}],"stopReason":"stop"}}
+{"type":"message","id":"r7","parentId":"r6","display":false,"timestamp":"2026-10-06T09:30:07.000Z","message":{"role":"user","content":"Hidden by the display flag."}}

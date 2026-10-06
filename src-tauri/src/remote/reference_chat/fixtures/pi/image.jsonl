@@ -1,0 +1,5 @@
+{"type":"session","version":"0.87.1","cwd":"/Users/dev/project","timestamp":"2026-10-06T09:10:00.000Z"}
+{"type":"message","id":"i1","parentId":"session","timestamp":"2026-10-06T09:10:01.000Z","message":{"role":"user","content":"Look at this screenshot."}}
+{"type":"message","id":"i2","parentId":"i1","timestamp":"2026-10-06T09:10:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","toolCallId":"call_img","toolName":"view","toolInput":{"path":"/tmp/shot.png"}}],"stopReason":null}}
+{"type":"message","id":"i3","parentId":"i2","timestamp":"2026-10-06T09:10:03.000Z","message":{"role":"toolResult","toolCallId":"call_img","toolName":"view","content":[{"type":"text","text":"a 2x2 screenshot"},{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="}]}}
+{"type":"message","id":"i4","parentId":"i3","timestamp":"2026-10-06T09:10:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"It renders correctly."}],"stopReason":"stop"}}

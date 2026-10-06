@@ -1,0 +1,10 @@
+{"type":"model_change","id":"mc1","modelId":"","provider":"anthropic","timestamp":"2026-10-06T01:00:00.000Z"}
+{"type":"thinking_level_change","id":"tl1","thinkingLevel":"high","timestamp":"2026-10-06T01:00:00.100Z"}
+{"type":"message","id":"m1","timestamp":"2026-10-06T01:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"list the files"}]}}
+{"type":"message","id":"m2","timestamp":"2026-10-06T01:00:02.000Z","message":{"role":"assistant","model":"","stopReason":"toolUse","content":[{"type":"thinking","thinking":"I should read the directory"},{"type":"text","text":"Listing now."},{"type":"toolCall","id":"c1","name":"bash","intent":"list files","arguments":{"command":"ls -la"}}]}}
+{"type":"message","id":"m3","timestamp":"2026-10-06T01:00:03.000Z","message":{"role":"toolResult","toolName":"bash","toolCallId":"c1","content":[{"type":"text","text":"total 8\nfile-a.txt"}]}}
+{"type":"message","id":"m4","timestamp":"2026-10-06T01:00:04.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"One file: file-a.txt"}]}}
+{"type":"message","id":"m5","timestamp":"2026-10-06T01:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"now show its contents"}]}}
+{"type":"message","id":"m6","timestamp":"2026-10-06T01:00:06.000Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"c2","name":"read","arguments":{"path":"file-a.txt"}}]}}
+{"type":"message","id":"m7","timestamp":"2026-10-06T01:00:07.000Z","message":{"role":"toolResult","toolCallId":"c2","isError":true,"output":[{"type":"text","text":"permission denied"}]}}
+{"type":"message","id":"m8","timestamp":"2026-10-06T01:00:08.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Cannot read it."}]}}

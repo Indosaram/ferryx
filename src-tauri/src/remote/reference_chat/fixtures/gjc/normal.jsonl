@@ -1,0 +1,10 @@
+{"type":"title","v":1,"title":"GJC reference chat parity"}
+{"type":"session","version":3,"id":"gjc-2f0c1d","cwd":"/home/dev/project","timestamp":"2026-10-06T09:00:00.000Z"}
+{"type":"header_patch","patch":{"title":"GJC reference chat parity","titleSource":"auto"}}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-10-06T09:00:01.000Z","message":{"role":"user","attribution":"user","content":[{"type":"text","text":"터미널 주소좀 줘봐"}]}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-10-06T09:00:02.000Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","text":"internal reasoning stays private"},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"ss -tlnp"},"intent":"Checking listening ports"},{"type":"toolCall","id":"call_2","name":"read","arguments":{"path":"/etc/hosts"},"intent":"Reading the hosts file"},{"type":"toolResult","toolCallId":"call_2","content":[{"type":"text","text":"127.0.0.1 localhost"}]}]}}
+{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-10-06T09:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","isError":false,"content":[{"type":"text","text":"LISTEN 0 512 100.123.228.51:7317"}]}}
+{"type":"message","id":"a2","parentId":"t1","timestamp":"2026-10-06T09:00:05.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"http://100.123.228.51:7317"}]}}
+{"type":"message","id":"u2","parentId":"a2","timestamp":"2026-10-06T09:01:00.000Z","message":{"role":"user","content":[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUg=="}]}}
+{"type":"message","id":"u3","parentId":"a2","timestamp":"2026-10-06T09:01:30.000Z","message":{"role":"user","content":"plain string prompt"}}
+{"type":"message","id":"a3","parentId":"u3","timestamp":"2026-10-06T09:01:31.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Ack."}]}}

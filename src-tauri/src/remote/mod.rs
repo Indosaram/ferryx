@@ -22,6 +22,7 @@ pub mod machine_protocol;
 pub mod mirror;
 pub mod protocol;
 pub mod push;
+pub mod reference_chat;
 pub mod relay_client;
 pub mod sealed_offer;
 pub mod session_transport;

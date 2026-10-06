@@ -1,0 +1,2 @@
+{"type":"message","message":{"role":"user","content":"go"}}
+{"type":"message","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"401 unauthorized"}}

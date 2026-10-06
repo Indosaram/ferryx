@@ -1,0 +1,6 @@
+{"type":"session","id":"sess-omo-clear","cwd":"/home/dev/app"}
+{"type":"message","message":{"role":"user","content":"first"}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]}}
+{"type":"custom","customType":"context_clear"}
+{"type":"message","message":{"role":"user","content":"second"}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]}}

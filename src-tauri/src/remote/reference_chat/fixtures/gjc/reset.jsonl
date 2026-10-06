@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"gjc-reset","cwd":"/home/dev/project"}
+{"type":"message","id":"u1","timestamp":"2026-10-06T11:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"first question"}]}}
+{"type":"message","id":"a1","timestamp":"2026-10-06T11:00:01.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first answer"}]}}
+{"type":"custom","customType":"context_clear","timestamp":"2026-10-06T11:00:02.000Z","data":{}}
+{"type":"message","id":"u2","timestamp":"2026-10-06T11:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"after the reset"}]}}
+{"type":"message","id":"a2","timestamp":"2026-10-06T11:01:01.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"fresh answer"}]}}
+{"type":"compaction","id":"c1","timestamp":"2026-10-06T11:05:00.000Z","summary":"Folded the earlier debugging session."}
+{"type":"message","id":"u3","timestamp":"2026-10-06T11:06:00.000Z","message":{"role":"user","content":[{"type":"text","text":"carry on"}]}}

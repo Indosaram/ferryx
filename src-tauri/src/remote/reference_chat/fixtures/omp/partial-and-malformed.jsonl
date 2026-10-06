@@ -1,0 +1,14 @@
+{"type":"message","id":"p1","timestamp":"2026-10-06T04:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"first"}]}}
+{"type":"message","id":"p2","display":false,"timestamp":"2026-10-06T04:00:01.500Z","message":{"role":"assistant","content":[{"type":"text","text":"hidden by the entry flag"}]}}
+not json at all
+[]
+null
+{"type":"message","id":"p3","timestamp":"2026-10-06T04:00:02.000Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","text":"via the text field"},{"type":"text","text":""},{"type":"toolCall","id":"c3","name":"bash","arguments":{"command":"echo hi"}},{"type":"toolCall","name":"bash","arguments":{"command":"no id"}},{"type":"toolCall","id":"c4","name":"weird","arguments":["a"]},{"type":"unknownBlock","value":1}]}}
+{"type":"message","id":"p4","timestamp":"2026-10-06T04:00:03.000Z","message":{"role":"toolResult","toolName":"bash","toolCallId":"c3","content":"plain string output"}}
+{"type":"message","id":"p5","timestamp":"2026-10-06T04:00:04.000Z","message":{"role":"toolResult","toolName":"bash","toolCallId":"never-seen","content":[{"type":"text","text":"orphan"}]}}
+{"type":"message","id":"p6","timestamp":"2026-10-06T04:00:05.000Z","message":{"role":"user","content":[{"type":"image","mimeType":"image/png","data":"AAAA"}]}}
+{"type":"message","id":"p7","timestamp":"2026-10-06T04:00:06.000Z","message":{"role":"assistant","stopReason":"error","errorMessage":"401 unauthorized","content":[{"type":"text","text":"partial"}]}}
+{"type":"message","id":"p8","timestamp":"2026-10-06T04:00:07.000Z","message":{"role":"assistant","stopReason":"error","errorMessage":"","content":[]}}
+{"type":"message","id":"p9","timestamp":"2026-10-06T04:00:07.500Z","message":{"role":"assistant"}}
+{"type":"message","id":"p10","timestamp":"2026-10-06T04:00:08.000Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final answer"}]}}
+{"type":"message","id":"p11","timestamp":"2026-10-06T04

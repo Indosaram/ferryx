@@ -1,0 +1,31 @@
+MIT License
+
+Copyright (c) 2026 devswha
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This copy is the upstream license of `devswha/herdr-web-ui`, pinned at commit
+`54e5a1f67090cb09552d182e7e30dd0ecc314918`, from which Ferryx ports reference
+chat behavior (native transcript readers, prompt detection, original-pane
+submit/Stop, owner-host files, drafts and held messages). It is reproduced here
+unmodified; every ported Ferryx source file carries a header naming the
+upstream file it derives from, and `docs/chat/herdr-port-contract.md` records
+the pinned revision and per-file SHA-256 of every file read for the port.
