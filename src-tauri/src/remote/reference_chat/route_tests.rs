@@ -41,6 +41,10 @@ const ROUTE_TEST_OWNER: &str = "owner-reference-route";
 /// One bound gateway, serving the production router on a loopback port.
 struct ReferenceRouteServer {
     addr: SocketAddr,
+    /// The gateway this server serves, retained so the fixture's own failure path can report what
+    /// that same process still observes. `start` hands the router its reference; this is the
+    /// second one it keeps.
+    state: Arc<RemoteGatewayState>,
     tasks: tokio::task::JoinSet<()>,
 }
 
@@ -51,12 +55,15 @@ impl ReferenceRouteServer {
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let mut tasks = tokio::task::JoinSet::new();
+        // The router keeps exactly the reference it was handed; this struct retains a second one,
+        // so a request that fails to complete can still be diagnosed against that same gateway.
+        let router_state = Arc::clone(&state);
         tasks.spawn(async move {
-            axum::serve(listener, create_remote_router(state))
+            axum::serve(listener, create_remote_router(router_state))
                 .await
                 .expect("serve");
         });
-        Self { addr, tasks }
+        Self { addr, state, tasks }
     }
 
     async fn request(

@@ -1078,13 +1078,13 @@ export function workspaceIdRefusal(workspaceId) {
   }
   const id = workspaceId.trim();
   if (id.startsWith("daemon:") || id.includes(":")) {
-    return "workspaceId "" + id + "" is a daemon/remote namespace, which the local registry refuses";
+    return "workspaceId \"" + id + \"" is a daemon/remote namespace, which the local registry refuses";
   }
   if (id.startsWith("-") || id.includes("/") || id.includes("\\")) {
-    return "workspaceId "" + id + "" contains a character the registry refuses";
+    return "workspaceId \"" + id + \"" contains a character the registry refuses";
   }
   if ([...id].some((ch) => ch.trim().length === 0 || /[\u0000-\u001f\u007f]/.test(ch))) {
-    return "workspaceId "" + id + "" contains whitespace or a control character";
+    return "workspaceId \"" + id + \"" contains whitespace or a control character";
   }
   return null;
 }
