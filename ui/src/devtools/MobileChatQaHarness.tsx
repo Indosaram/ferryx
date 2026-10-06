@@ -185,9 +185,6 @@ export const MobileChatQaHarness: React.FC = () => {
         isRunning={isRunning}
         onSendMessage={handleSend}
         onStopExecution={() => setIsRunning(false)}
-        sessionId="01a0e38e-bdc1-78e2-82c9-2219d1062b6d"
-        token="qa-token"
-        transportUrl="ws://127.0.0.1:9/qa"
       />
     </div>
   );

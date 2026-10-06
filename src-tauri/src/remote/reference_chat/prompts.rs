@@ -88,7 +88,7 @@ use super::prompt_omo::{
     REFERENCE_OMO_OPEN_FORM_KEY,
 };
 use super::prompt_omp::{detect_omp_prompt_card, remember_omp_prompt, OmpPromptCard};
-use super::prompt_pi::{pi_answer_error_code, plan_pi_answer, PI_AGENT};
+use super::prompt_pi::{parse_pi_prompt, pi_answer_error_code, plan_pi_answer, PI_AGENT};
 use super::types::{
     reference_draft_key, ReferenceKeyStep, ReferencePrompt, ReferencePromptAnswer,
     ReferencePromptAnswerPayload, ReferencePromptDetector, ReferencePromptKind,
@@ -943,7 +943,7 @@ fn answer_ledger_key(request: &ReferenceAnswerRequest<'_>) -> String {
 }
 
 /// The backend session an answer's keys are typed into.
-fn session_id(request: &ReferenceAnswerRequest<'_>) -> &str {
+fn session_id<'a>(request: &ReferenceAnswerRequest<'a>) -> &'a str {
     request.target.target.backend_session_id.as_str()
 }
 

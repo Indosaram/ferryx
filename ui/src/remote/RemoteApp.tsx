@@ -30,10 +30,9 @@ import {
   parseReferenceHistoryPage,
   referenceHistoryCursorForStream,
   referenceHistoryErrorIsIdentity,
+  referenceHistoryFence,
   referenceHistoryNotice,
-  type ReferenceHistoryCursor,
   type ReferenceHistoryFence,
-  type ReferenceHistoryPage,
 } from "./agentConversation";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import { referenceDrafts } from "./chat/referenceDraft";
@@ -42,12 +41,9 @@ import { ReferencePromptCard } from "./chat/ReferencePromptCard";
 import {
   ReferenceFileError,
   cancelReferenceChatFile,
-  referenceFileMutationEnvelope,
-  referenceMentionFor,
   referenceMentionInsertion,
   referenceMentionPathOf,
   stageReferenceChatFile,
-  type ReferenceFileReceipt,
   type ReferenceFileStagingTransport,
 } from "./chat/referenceFiles";
 import {
@@ -60,13 +56,16 @@ import {
   referenceAnswerIsSingleChoice,
   referenceChatRoute,
   referenceIsOutcomeUnknown,
+  referenceMentionFor,
   referenceNativeKindFromRegistryId,
   referenceNativeKindIsNative,
   referencePromptNeedsConfirmation,
   sameReferenceTarget,
   referenceTargetKey,
+  type ReferenceFileReceipt,
+  type ReferenceHistoryCursor,
+  type ReferenceHistoryPage,
   type ReferenceImageRef,
-  type ReferencePartRenderContext,
   type ReferencePrompt,
   type ReferencePromptAnswer,
   type ReferencePromptAnswerPayload,
@@ -76,8 +75,16 @@ import {
   type ReferenceTargetRef,
   type ReferenceTurn,
 } from "./chat/referenceTypes";
-import { formatReferenceDuration } from "./chat/MobileChatComponents";
-import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
+import {
+  formatReferenceDuration,
+  type ReferencePartRenderContext,
+} from "./chat/MobileChatComponents";
+import {
+  hostTransportUrl,
+  remoteApiUrl,
+  remoteApiUrl as apiUrl,
+  remoteSocketUrl,
+} from "./remoteClient";
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import {
@@ -107,7 +114,7 @@ import {
   createAccountConnection,
   type AccountConnection,
 } from "./accountSession";
-import type { TunnelWebSocket } from "./attachTunnel";
+import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
@@ -507,11 +514,7 @@ export function chatDaemonEpochFromRows(rows: readonly unknown[], sessionId: str
 export async function fetchChatSessionRows(args: {
   baseUrl: string;
   token: string;
-  tunnel: {
-    transport: {
-      fetchLike(path: string, init?: RequestInit): Promise<{ status: number; body: ArrayBuffer }>;
-    };
-  } | null;
+  tunnel: { transport: TunnelTransport } | null;
   signal?: AbortSignal;
 }): Promise<unknown[]> {
   const readRows = (data: unknown): unknown[] => {

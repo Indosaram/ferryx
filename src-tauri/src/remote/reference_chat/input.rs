@@ -259,7 +259,7 @@ fn reference_fingerprint(parts: &[&[u8]]) -> String {
 }
 
 /// What happened to one ordered input transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReferenceInputOutcome {
     /// Every byte the transaction writes was accepted by the writer.
@@ -792,6 +792,7 @@ mod tests {
 
     use tokio::sync::oneshot;
 
+    use super::super::types::{reference_is_outcome_unknown, reference_stage_at_least};
     use crate::scoped_contracts::{Epoch, TargetRef};
 
     fn target(backend: &str) -> ReferenceTargetRef {
@@ -1368,30 +1369,25 @@ mod tests {
         let authorize = allow();
         let alive = alive();
 
-        let submit = queue.submit(
-            &ReferenceSubmitRequest {
-                target: &target,
-                request_id: "r1",
-                payload: &payload,
-                bracketed_paste: true,
-                blocked_prompt: None,
-                arrived_at_ms: 0,
-                last_typed_at_ms: None,
-                authorize: &authorize,
-            },
-            writer.as_ref(),
-            &clock,
-        );
-        let stop = queue.stop(
-            &ReferenceStopRequest {
-                target: &target,
-                request_id: "r2",
-                payload: &stop_payload,
-                authorize: &authorize,
-                alive: &alive,
-            },
-            writer.as_ref(),
-        );
+        let submit_request = ReferenceSubmitRequest {
+            target: &target,
+            request_id: "r1",
+            payload: &payload,
+            bracketed_paste: true,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let submit = queue.submit(&submit_request, writer.as_ref(), &clock);
+        let stop_request = ReferenceStopRequest {
+            target: &target,
+            request_id: "r2",
+            payload: &stop_payload,
+            authorize: &authorize,
+            alive: &alive,
+        };
+        let stop = queue.stop(&stop_request, writer.as_ref());
 
         let tapped = async {
             started.await.expect("the message's paste write started");
@@ -1437,20 +1433,17 @@ mod tests {
         let other_payload = submit_payload("two");
         let authorize = allow();
 
-        let held_submit = queue.submit(
-            &ReferenceSubmitRequest {
-                target: &held,
-                request_id: "r1",
-                payload: &held_payload,
-                bracketed_paste: true,
-                blocked_prompt: None,
-                arrived_at_ms: 0,
-                last_typed_at_ms: None,
-                authorize: &authorize,
-            },
-            writer.as_ref(),
-            &clock,
-        );
+        let held_request = ReferenceSubmitRequest {
+            target: &held,
+            request_id: "r1",
+            payload: &held_payload,
+            bracketed_paste: true,
+            blocked_prompt: None,
+            arrived_at_ms: 0,
+            last_typed_at_ms: None,
+            authorize: &authorize,
+        };
+        let held_submit = queue.submit(&held_request, writer.as_ref(), &clock);
         let other_submit = async {
             started.await.expect("the held target's paste write started");
             let outcome = tokio::time::timeout(

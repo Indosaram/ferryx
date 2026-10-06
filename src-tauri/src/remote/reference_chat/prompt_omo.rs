@@ -841,7 +841,7 @@ fn join_wrapped(raw: &[String], width: usize, lead: Option<&Regex>) -> String {
     for line in raw {
         let cleaned = if text.is_empty() {
             match lead {
-                Some(lead) => lead.replace(clean_line(line), "").to_string(),
+                Some(lead) => lead.replace(clean_line(line).as_str(), "").to_string(),
                 None => clean_line(line),
             }
         } else {
@@ -855,7 +855,7 @@ fn join_wrapped(raw: &[String], width: usize, lead: Option<&Regex>) -> String {
         let glued = !text.is_empty()
             && char_width(last_of_previous) == 2
             && (char_width(first) == 2 || matches!(first, '.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '…'))
-            && omo_string_width(previous.trim_end()) + char_width(first) > width as i64 - 1;
+            && (omo_string_width(previous.trim_end()) + char_width(first)) as i64 > width as i64 - 1;
         if text.is_empty() || glued {
             text.push_str(&cleaned);
         } else {
@@ -1464,7 +1464,8 @@ fn parse_omo_pending(lines: &[String], pending: &[OmoAsk]) -> Option<OmoCard> {
     if hint_index - status_index > 12 {
         return None;
     }
-    let status = pending_status_re().captures(&clean_line(&lines[status_index]))?;
+    let status_line = clean_line(&lines[status_index]);
+    let status = pending_status_re().captures(&status_line)?;
     let unanswered = status.get(1).map(|value| value.as_str().to_string());
     let shown = lines.get(status_index + 1).map(String::as_str).map(clean_line).unwrap_or_default();
     let (header, question_text) = split_em_dash(&shown)?;
@@ -1755,7 +1756,7 @@ fn prompt_tail_is_active(responder: OmoResponder, screen: &str) -> bool {
     }) else {
         return false;
     };
-    let Some(box) = clean_lines
+    let Some(box_index) = clean_lines
         .iter()
         .enumerate()
         .find(|(index, line)| *index > at && empty_box_re().is_match(line))
@@ -1763,10 +1764,10 @@ fn prompt_tail_is_active(responder: OmoResponder, screen: &str) -> bool {
     else {
         return false;
     };
-    if box - at > 60 || !clean_lines[box - 1].starts_with('─') {
+    if box_index - at > 60 || !clean_lines[box_index - 1].starts_with('─') {
         return false;
     }
-    footer_is_omo(&clean_lines[box + 1..])
+    footer_is_omo(&clean_lines[box_index + 1..])
 }
 
 /// Nothing but OmO's own footer: blank lines, one rule, then a few short footer lines.
@@ -2194,7 +2195,7 @@ mod tests {
         assert!(omo_form_on_screen(FORM_TABBED), "the hint is what makes a pane's session worth reading");
         assert!(omo_form_on_screen(WIDGET_PENDING));
         assert!(!omo_form_on_screen("hello world"));
-        assert!(!omo_form_on_screen(FORM_STALE.lines().take(2).collect::<Vec<_>>().join("\n")));
+        assert!(!omo_form_on_screen(&FORM_STALE.lines().take(2).collect::<Vec<_>>().join("\n")));
     }
 
     #[test]

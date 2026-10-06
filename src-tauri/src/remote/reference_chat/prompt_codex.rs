@@ -531,8 +531,10 @@ pub fn parse_codex_question(screen: &str) -> Option<ReferenceCodexPrompt> {
     let progress = lines[rows[0].line_index.saturating_sub(6)..rows[0].line_index]
         .iter()
         .map(|line| clean_line(line))
-        .find_map(|line| re_question_progress().captures(&line))
-        .map(|captures| (captures[1].to_string(), captures[2].to_string()));
+        .find_map(|line| {
+            let captures = re_question_progress().captures(&line)?;
+            Some((captures[1].to_string(), captures[2].to_string()))
+        });
     let title = match &progress {
         Some((asked, total)) if total != "1" => format!("Question {asked} of {total}"),
         _ => "Question".to_string(),
@@ -1379,7 +1381,7 @@ fn codex_model_header(
     }
     Some(CodexModelHeader {
         title: whole,
-        model: matched.and_then(|captures| captures.get(1).map(|value| value.to_string())),
+        model: matched.and_then(|captures| captures.get(1).map(|value| value.as_str().to_string())),
         notes,
     })
 }

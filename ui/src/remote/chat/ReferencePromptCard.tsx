@@ -320,7 +320,7 @@ export function ReferencePromptCard({
               role={prompt.multiSelect ? "group" : undefined}
               aria-label={prompt.multiSelect ? prompt.question : undefined}
             >
-              {prompt.options.map((option, index) => {
+              {prompt.options.map((_, index) => {
                 if (index === customIndex) return null;
                 if (prompt.multiSelect) {
                   const checked = selected.includes(index);

@@ -559,7 +559,7 @@ async fn reference_chat_reads_serve_the_pane_screen_and_an_honest_history_page()
         "droid",
         &fixture.daemon_epoch,
         &reference_files::reference_host_id(),
-        &[("limit".to_string(), "50".to_string())],
+        &[("limit", "50".to_string())],
     );
     let (status, body) = fixture
         .server

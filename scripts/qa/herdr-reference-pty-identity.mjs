@@ -315,6 +315,14 @@ export function validatePtyIdentity(record, expected, probe) {
 
 /** Remove a stale record so a previous run's identity can never be read as this run's. */
 export function clearPtyIdentity(outputPath) {
+  for (const path of [outputPath, outputPath + ".tmp"]) {
+    try {
+      if (existsSync(path)) unlinkSync(path);
+    } catch {
+      /* Absent is the goal. */
+    }
+  }
+}
 
 /**
  * The survivor assertion: the original session's PTY child must still be the SAME process,
@@ -365,15 +373,6 @@ export function ptyIdentitySurvived(record, probe) {
     expectedExecutable,
     execPreservesPid: Boolean(record.sessionShell && record.sessionShell.execPreservesPid),
   };
-}
-
-  for (const path of [outputPath, outputPath + ".tmp"]) {
-    try {
-      if (existsSync(path)) unlinkSync(path);
-    } catch {
-      /* Absent is the goal. */
-    }
-  }
 }
 
 /**

@@ -110,8 +110,6 @@ describe("MobileChatWorkspace", () => {
       <MobileChatWorkspace
         messages={[]}
         onSendMessage={vi.fn()}
-        sessionId="sess-123"
-        token="tok-456"
         onOpenTerminal={onOpenTerminal}
       />
     );

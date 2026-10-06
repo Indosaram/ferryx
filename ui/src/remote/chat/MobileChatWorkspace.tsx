@@ -8,6 +8,7 @@ import {
   ReferenceDisclosureBanner,
   ReferenceOlderPageControl,
   ReferenceOlderState,
+  ReferencePartRenderContext,
 } from "./MobileChatComponents";
 import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
 import { MobileChatComposer } from "./MobileChatComposer";
@@ -15,7 +16,6 @@ import type { HeldMessage } from "./referenceQueue";
 import type {
   ReferenceAbandonedBranch,
   ReferenceFileReceipt,
-  ReferencePartRenderContext,
 } from "./referenceTypes";
 
 /**
@@ -263,7 +263,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               <div className="flex items-center gap-1.5">
                 <span className="inline-block size-1.5 rounded-full bg-status-success shrink-0" />
                 <span className="font-mono text-xs text-chat-foreground-secondary truncate">
-                  Session: {sessionId ? sessionId.slice(0, 8) : "default"}
+                  ferryx remote
                 </span>
               </div>
             )}

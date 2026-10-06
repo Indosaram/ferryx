@@ -2125,7 +2125,7 @@ mod tests {
         // the same screen is the same card
         assert_eq!(read(QUESTION).prompt.id, parsed.prompt.id);
         assert_eq!(
-            plan_claude_answer(&parsed, option(1)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
             vec![ReferenceKeyStep::keys([KEY_DOWN]), enter()]
         );
     }
@@ -2145,7 +2145,7 @@ mod tests {
         assert_eq!(labels(&sets.prompt), vec!["LM-O", "YCB-V", "T-LESS"]);
         // → moves on to the next tab: an enter there would pick its first option
         assert_eq!(
-            plan_claude_answer(&sets, options(vec![0, 2])).expect("a multi-select is answerable"),
+            plan_claude_answer(&sets, &options(vec![0, 2])).expect("a multi-select is answerable"),
             vec![
                 enter(),
                 ReferenceKeyStep::keys([KEY_DOWN]),
@@ -2167,7 +2167,7 @@ mod tests {
              belongs to the lab account and the upstream repository to its owner?"
         );
         assert_eq!(
-            plan_claude_answer(&parsed, option(1)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
             vec![ReferenceKeyStep::keys([KEY_DOWN]), enter()]
         );
     }
@@ -2196,10 +2196,10 @@ mod tests {
         assert_eq!(parsed.prompt.options[0].description, None);
         assert_eq!(parsed.prompt.custom_option_index, None);
         assert_eq!(
-            plan_claude_answer(&parsed, option(1)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
             vec![ReferenceKeyStep::keys([KEY_DOWN]), enter()]
         );
-        assert!(plan_claude_answer(&parsed, custom("x")).is_err());
+        assert!(plan_claude_answer(&parsed, &custom("x")).is_err());
     }
 
     #[test]
@@ -2267,7 +2267,7 @@ mod tests {
             .as_deref()
             .is_some_and(|body| body.contains("Add a heading")));
         assert_eq!(
-            plan_claude_answer(&parsed, custom("Keep the existing introduction"))
+            plan_claude_answer(&parsed, &custom("Keep the existing introduction"))
                 .expect("the plan takes feedback"),
             vec![
                 ReferenceKeyStep::keys([KEY_DOWN]),
@@ -2308,7 +2308,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan_claude_answer(&parsed, option(3)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(3)).expect("a row is an answer"),
             vec![
                 ReferenceKeyStep::keys([KEY_DOWN]),
                 ReferenceKeyStep::keys([KEY_DOWN]),
@@ -2378,14 +2378,14 @@ mod tests {
             .contains("[CC]'ll be able to read, edit, and execute files here.")));
         // answered from the native cursor
         assert_eq!(
-            plan_claude_answer(&parsed, option(1)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
             vec![ReferenceKeyStep::keys([KEY_DOWN]), enter()]
         );
         assert_eq!(
-            plan_claude_answer(&parsed, option(0)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(0)).expect("a row is an answer"),
             vec![enter()]
         );
-        assert!(plan_claude_answer(&parsed, custom("maybe")).is_err());
+        assert!(plan_claude_answer(&parsed, &custom("maybe")).is_err());
     }
 
     #[test]
@@ -2438,12 +2438,12 @@ mod tests {
         );
         // `s`, never Enter: the pick stays in this session
         assert_eq!(
-            plan_claude_answer(&parsed, option(1)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(1)).expect("a row is an answer"),
             vec![ReferenceKeyStep::typed(CLAUDE_MODEL_PICK_KEY)]
         );
         // the list is a window: a row two below the cursor is two moves and the letter
         assert_eq!(
-            plan_claude_answer(&parsed, option(3)).expect("a row is an answer"),
+            plan_claude_answer(&parsed, &option(3)).expect("a row is an answer"),
             vec![
                 ReferenceKeyStep::keys([KEY_DOWN]),
                 ReferenceKeyStep::keys([KEY_DOWN]),
@@ -2624,16 +2624,16 @@ mod tests {
         )
         .is_err());
         // a multi-select answer to a single-choice card
-        assert!(plan_claude_answer(&question, options(vec![0])).is_err());
+        assert!(plan_claude_answer(&question, &options(vec![0])).is_err());
         // an index outside the displayed range, and the typed row itself
-        assert!(plan_claude_answer(&question, option(99)).is_err());
-        assert!(plan_claude_answer(&question, option(3)).is_err());
+        assert!(plan_claude_answer(&question, &option(99)).is_err());
+        assert!(plan_claude_answer(&question, &option(3)).is_err());
         // a typed answer where the menu has no typed row
         let submit = read(SUBMIT);
-        assert!(plan_claude_answer(&submit, custom("yes")).is_err());
+        assert!(plan_claude_answer(&submit, &custom("yes")).is_err());
         // a typed answer on a card whose options are not rows of a menu
         let model = read(MODEL);
-        assert!(plan_claude_answer(&model, custom("Opus 5.5")).is_err());
+        assert!(plan_claude_answer(&model, &custom("Opus 5.5")).is_err());
     }
 
     #[test]

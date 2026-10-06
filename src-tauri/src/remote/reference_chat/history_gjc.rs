@@ -957,7 +957,8 @@ mod tests {
             format!(r#"{{"type":"message","message":{{"role":"toolResult","toolCallId":"c3","content":[{{"type":"text","text":"{at_limit}"}}]}}}}"#),
         ]
         .join("\n");
-        let ReferencePart::Tool { output, output_ref, .. } = tool_part(&parse(&exact)[0], "read") else {
+        let exact_turns = parse(&exact);
+        let ReferencePart::Tool { output, output_ref, .. } = tool_part(&exact_turns[0], "read") else {
             unreachable!("matched above")
         };
         assert_eq!(output.chars().count(), REFERENCE_GJC_TOOL_OUTPUT_CHARS);

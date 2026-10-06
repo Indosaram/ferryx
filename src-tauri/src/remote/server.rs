@@ -4577,7 +4577,7 @@ async fn remote_method_not_allowed() -> Response {
 
 use crate::remote::reference_chat::files as reference_files;
 use crate::remote::reference_chat::history as reference_history;
-use crate::remote::reference_chat::input as reference_input;
+use crate::remote::reference_chat::input::{self as reference_input, ReferenceInputClock};
 use crate::remote::reference_chat::prompts as reference_prompts;
 use crate::remote::reference_chat::screen as reference_screen;
 use crate::remote::reference_chat::types as reference_types;

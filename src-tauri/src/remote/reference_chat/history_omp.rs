@@ -947,7 +947,7 @@ fn legacy_skill_pattern() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::types::{
+    use super::super::types::{
         ReferencePartKind, ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTaskStatus,
         ReferenceTurnRole,
     };

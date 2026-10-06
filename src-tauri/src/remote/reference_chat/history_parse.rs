@@ -1334,6 +1334,7 @@ fn without_memory_citations(text: &str) -> String {
                         marker: end_marker,
                         info: end_info,
                         line: end_line,
+                        ..
                     } = end
                     {
                         let closing = end_line.quote_depth == line.quote_depth
@@ -1782,7 +1783,7 @@ mod tests {
         "\n",
         r#"{"timestamp":"2026-10-06T10:00:06.000Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"<send_user_message_question_reply>[{\"answer\":\"yes\"}]</send_user_message_question_reply>"}}"#,
         "\n",
-        r#"{"timestamp":"2026-10-06T10:00:07.000Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"# AGENTS.md instructions for /Users/dev/project\n<INSTRUCTIONS>\nbe nice\n</INSTRUCTIONS>"}}"#,
+        r##"{"timestamp":"2026-10-06T10:00:07.000Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"# AGENTS.md instructions for /Users/dev/project\n<INSTRUCTIONS>\nbe nice\n</INSTRUCTIONS>"}}"##,
         "\n",
     );
 

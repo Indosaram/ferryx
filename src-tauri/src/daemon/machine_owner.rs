@@ -181,7 +181,6 @@ impl DaemonSessionService {
                     shell: None,
                     provider_claim: None,
                     startup: None,
-                    requested_session_id: Some(session_id.clone()),
                 },
             };
             self.session_metadata.write().insert(session_id, meta);

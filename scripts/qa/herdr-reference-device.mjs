@@ -631,7 +631,7 @@ const READ_STATE_EXPRESSION = `(() => {
   const indexes = lineEls.map((el) => Number(el.getAttribute('data-grid-line'))).filter((n) => Number.isFinite(n));
   const vv = window.visualViewport;
   return {
-    gridText: grid ? lineTexts.join('``n') : null,
+    gridText: grid ? lineTexts.join('\n') : null,
     gridLines: lineTexts.filter((l) => l.length > 0),
     gridLineCount: lineEls.length,
     gridFirstIndex: indexes.length > 0 ? Math.min(...indexes) : null,

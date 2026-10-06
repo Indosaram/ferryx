@@ -2732,21 +2732,15 @@ async function main() {
     }
     writeFileSync(
       evPath("prereq/chrome-launch.txt"),
-      "command: am start -a android.intent.action.VIEW -d '" + ARGS.pageUrl + "'
-" +
-        "exit: " + launch.code + "
---- stdout ---
-" + (launch.stdout ?? "") + "
---- stderr ---
-" + (launch.stderr ?? "") + "
-",
+      "command: am start -a android.intent.action.VIEW -d '" + ARGS.pageUrl + "'\n" +
+        "exit: " + launch.code + "\n--- stdout ---\n" + (launch.stdout ?? "") + "\n--- stderr ---\n" +
+        (launch.stderr ?? "") + "\n",
       "utf8",
     );
     appendLog("chrome launched for " + redactUrl(ARGS.pageUrl));
 
     cdp = await connectCdp({
-      launchOutput: (launch.stdout ?? "") + "
-" + (launch.stderr ?? ""),
+      launchOutput: (launch.stdout ?? "") + "\n" + (launch.stderr ?? ""),
       launchExit: launch.code,
     });
 
@@ -2785,10 +2779,7 @@ async function main() {
       const r = run("/bin/sh", ["-c", ARGS.ptyHook], { timeoutMs: 60000 });
       writeFileSync(
         evPath("pty-hook-output.txt"),
-        "$ " + ARGS.ptyHook + "
---- exit " + r.code + " ---
-" + (r.stdout ?? "") + (r.stderr ?? "") + "
-",
+        "$ " + ARGS.ptyHook + "\n--- exit " + r.code + " ---\n" + (r.stdout ?? "") + (r.stderr ?? "") + "\n",
         "utf8",
       );
       RUN.ptyHook = {

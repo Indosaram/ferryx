@@ -730,7 +730,7 @@ fn key_steps(keys: &[String]) -> Vec<ReferenceKeyStep> {
 
 #[cfg(test)]
 mod tests {
-    use super::types::{
+    use super::super::types::{
         ReferenceKeyStep, ReferencePrompt, ReferencePromptAnswer, ReferencePromptKind,
     };
     use super::*;
