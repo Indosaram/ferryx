@@ -96,6 +96,20 @@ pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf
     }
 }
 
+/// A QA run may pin the shell the product spawns panes with.
+///
+/// The QA harness serves the frontend on the same origin the host user's real app uses, and
+/// WebView2 keeps localStorage in a shared profile an environment variable cannot redirect, so a
+/// host user's stored shell preference reaches this process and can name a shell that is not
+/// installed. Pinning makes a QA run independent of that; a normal launch leaves this unset and
+/// the product default is unchanged.
+fn qa_pinned_shell() -> Option<String> {
+    std::env::var("FERRYX_QA_SHELL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Resolves the cwd a spawn will use. A discarded requested cwd makes the pane spawn in the
 /// worktree root, while a requested cwd that exists but leaves the worktree still fails.
 fn resolve_spawn_cwd(
@@ -4066,7 +4080,8 @@ pub async fn cmd_terminal_spawn_operation(
                     .map_err(IpcError::from)?;
                 let cwd = resolve_spawn_cwd(inherited, root, |path| manager.canonical_allowed_path(path).map_err(IpcError::from))?;
                 Ok((manager.repo_root().to_string_lossy().into_owned(), cwd,
-                    crate::terminal::cached_terminal_preferences().default_shell.clone()))
+                    qa_pinned_shell()
+                        .or_else(|| crate::terminal::cached_terminal_preferences().default_shell.clone())))
             })).await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split preparation timed out"))??;
             tokio::time::timeout_at(deadline, daemon_client.register_workspace(&request.workspace_id, &repo_root))
                 .await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split workspace registration timed out"))??;
@@ -4157,6 +4172,18 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             "FERRYX_QA_SPLIT_CREATE_READY: request_id={} session_id={} daemon_epoch={}",
             prepared.identity.request_id, result.session_id, result.epoch
         );
+        // The freshly created split shell emits its startup VT queries (Windows PowerShell sends a
+        // DSR cursor-position query, `ESC[6n`, before its first prompt) and it BLOCKS until the
+        // terminal answers. The native lane only preserves and answers those queries for a session
+        // it knows is starting up, and the legacy spawn path marks that below; this path returns
+        // before reaching it, so the split's query was discarded and the shell froze with no prompt
+        // and therefore no output at all. Measured: the split session's only published chunk was
+        // the 4-byte `ESC[6n`, while the pane session published its banner and prompt.
+        if let Some(host) =
+            app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+        {
+            host.mark_pending_startup(&result.session_id);
+        }
         return Ok(SpawnTerminalResponse { session_id: result.session_id,
             daemon_epoch: result.epoch.to_string(), session: result.session });
     }
@@ -4823,10 +4850,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let client_request_id = request
             .client_request_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // `qa_pinned_shell` lets a QA run pin the shell; see its doc comment.
         let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {
-            crate::terminal::cached_terminal_preferences()
-                .default_shell
-                .clone()
+            qa_pinned_shell().or_else(|| {
+                crate::terminal::cached_terminal_preferences()
+                    .default_shell
+                    .clone()
+            })
         });
         let spawn_result = match daemon_client
             .spawn_terminal_with_startup(

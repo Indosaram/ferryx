@@ -24,6 +24,26 @@ import {
 
 export const CLASSIFIER_BARRIERS = Object.freeze(['backend-write', 'presentation']);
 
+/**
+ * The shell the QA app must spawn panes with, or null where the platform default is correct.
+ *
+ * Windows needs this pinned. The harness serves the frontend on `http://127.0.0.1:5173`, which is
+ * the SAME origin the host user's real app uses, and WebView2 keeps localStorage in the shared
+ * `%LOCALAPPDATA%\<bundle-id>\EBWebView` profile that an environment variable cannot redirect (it is
+ * resolved through the Windows known-folder API). A host user whose stored
+ * `ferryx.terminal.settings` names a shell therefore pushes that shell into the QA app through
+ * `syncNativeOverrides` -> `cmd_terminal_set_preferences` -> `cached_terminal_preferences()`,
+ * and `src-tauri/src/ipc/terminal.rs:4829` substitutes it for the frontend's null. Measured on
+ * maho-win: the host profile held `{"shell":"wsl"}` while WSL was not installed, so every pane
+ * and split spawned a shell that could never start, produced no PTY output, and the marker step
+ * could not observe its echo (the daemon-side fixture spawn, which does not read frontend
+ * settings, worked).
+ *
+ * Naming the shell here makes a QA run independent of whatever the host user happens to have
+ * stored, without changing the product's own default.
+ */
+export const QA_PINNED_SHELL = process.platform === 'win32' ? 'pwsh' : null;
+
 export function buildIsolatedEnv(context) {
   const dataDir = join(context.isolationRoot, 'data');
   const runtimeDir = join(context.isolationRoot, 'runtime');
@@ -62,6 +82,7 @@ export function buildIsolatedEnv(context) {
     HOME: homeDir,
     APPDATA: appDataDir,
     LOCALAPPDATA: localAppDataDir,
+    ...(QA_PINNED_SHELL ? { FERRYX_QA_SHELL: QA_PINNED_SHELL } : {}),
     FERRYX_DATA_DIR: dataDir,
     FERRYX_RUNTIME_DIR: runtimeDir,
     FERRYX_SESSION_DIR: sessionDir,
@@ -73,7 +94,7 @@ export function buildIsolatedEnv(context) {
     ...context.barrierHub.env(),
   };
   for (const key of Object.keys(env)) {
-    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID', 'FERRYX_QA_FIXTURE_KINDS'].includes(key)) {
+    if (key.startsWith('FERRYX_') && !['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'FERRYX_QA_BARRIER_DIR', 'FERRYX_QA_RUN_ID', 'FERRYX_QA_OPERATION_ID', 'FERRYX_QA_FIXTURE_KINDS', 'FERRYX_QA_SHELL'].includes(key)) {
       throw new HarnessError('ASSERTION_FAILURE', `ambient FERRYX_* variable leaked into isolated env: ${key}`);
     }
   }

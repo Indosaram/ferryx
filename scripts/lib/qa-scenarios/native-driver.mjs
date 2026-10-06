@@ -1627,6 +1627,16 @@ export function selectNativeDriver(ctx) {
 // Runner writes capture-ready.json with exact hash, runId, operationId, and bounds,
 // then awaits independent inspection artifact. Rejects mismatched hash, run, bounds, or text.
 export async function performInspectionHandshake(evidence, barrierHub, nonces, screenshotMetadata, timeoutMs = BUDGETS.stagePresentationMs) {
+  // The independent inspection is performed by a SEPARATE agent that actually looks at the
+  // screenshot, so the wait must be long enough for that agent to fetch the image, view it and
+  // write its artifact. `FERRYX_QA_INSPECTION_MS` raises the window for such a run; unset, the
+  // frozen default applies, so an ordinary run cannot wait longer than before.
+  const inspectionOverride = (() => {
+    const raw = process.env.FERRYX_QA_INSPECTION_MS;
+    const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  })();
+  const effectiveTimeoutMs = inspectionOverride ?? timeoutMs;
   const { runId, operationId } = nonces;
   // 1. Emit capture-ready event and record capture-ready.json
   const captureReadyRecord = barrierHub.recordCaptureReady({
@@ -1643,14 +1653,14 @@ export async function performInspectionHandshake(evidence, barrierHub, nonces, s
   const stopPromise = new Promise(resolve => { stopHandler = resolve; });
   let outcome;
   try {
-    outcome = await withDeadline(waitForFile(recognitionPath, stopPromise), timeoutMs, 'marker-recognition', { onStop: stopHandler });
+    outcome = await withDeadline(waitForFile(recognitionPath, stopPromise), effectiveTimeoutMs, 'marker-recognition', { onStop: stopHandler });
   } catch (err) {
     outcome = { timedOut: false, error: err };
   }
 
   if (outcome.timedOut) {
     throw new HarnessError('MARKER_RECOGNITION_UNVERIFIED',
-      `bounded inspection handshake timed out waiting for independent inspection artifact (${timeoutMs}ms) after capture-ready`);
+      `bounded inspection handshake timed out waiting for independent inspection artifact (${effectiveTimeoutMs}ms) after capture-ready`);
   }
   if (outcome.error) {
     throw outcome.error instanceof HarnessError ? outcome.error : new HarnessError('MARKER_RECOGNITION_UNVERIFIED', `inspection wait failed: ${outcome.error.message}`);
