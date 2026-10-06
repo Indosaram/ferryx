@@ -75,9 +75,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::scoped_contracts::{
-    DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode, ATTACHMENT_MAX_FILE_BYTES,
-};
+use crate::scoped_contracts::{DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode};
 
 use super::types::{
     reference_draft_key, ReferenceStopCapability, ReferenceStopPayload, ReferenceSubmitOrigin,
@@ -103,21 +101,30 @@ pub const REFERENCE_SUBMIT_ENTER: &[u8] = b"\r";
 /// How many bytes one shaped submit may put on the wire.
 ///
 /// The composer cap is [REFERENCE_SUBMIT_MAX_CHARS] CHARACTERS, but the transport carries BYTES,
-/// so a multibyte message can fit the character cap and still be refused by the gateway: the
-/// byte budget is checked BEFORE anything is written, which is the contract's rule and the
-/// reason this check cannot live in the composer alone.
+/// so a multibyte message can fit the character cap and still need a byte budget. The budget is
+/// checked BEFORE anything is written, which is the contract's rule and the reason this check
+/// cannot live in the composer alone.
 ///
-/// The budget is this path's own transport bound, derived from the frozen attachment limit the
-/// way the owning host and the relay derive it for a reference-chat body
-/// (`REFERENCE_CHAT_MUTATION_MAX_BYTES` in `remote/server.rs`, `REFERENCE_CHAT_RELAY_BODY_MAX`
-/// in `remote/relay_server.rs`): `(ATTACHMENT_MAX_FILE_BYTES / 3) * 4 + 64 KiB`. The fixed
-/// 16 KiB this replaces was wrong twice over - that figure is the CONTROL-JSON bound
-/// (`machine_protocol.rs` `CONTROL_JSON_MAX_BYTES`, enforced on `Message::Text` at
-/// `server.rs:2249`), not the bound on a submit, and it sits BELOW the 20,000-character cap,
-/// so a message the composer admits could never be shaped at all
-/// ('shaping_refuses_text_past_the_composer_cap_before_anything_is_written', input.rs:1026).
-pub const REFERENCE_SUBMIT_MAX_BYTES: usize =
-    (ATTACHMENT_MAX_FILE_BYTES as usize / 3) * 4 + 64 * 1024;
+/// TRANSPORT ASSUMPTION CORRECTION. The value this replaces was a fixed 16 KiB, justified as
+/// "the remote gateway refuses a text frame past 16 KiB". That figure is the machine-control
+/// bound, not a submit bound: `server.rs:2249` (`text.len() > 16 * 1024`) guards `Message::Text`
+/// frames parsed as `MachineTerminalControl` (`remote/protocol.rs:7-18` = `Resize | Signal |
+/// Ping`, the `CONTROL_JSON_MAX_BYTES` bound), and no reference-chat mutation travels it. The
+/// independent trace of the real submit path - client POST -> `relay_server.rs:1746` body bound
+/// -> `Message::Binary` chunks of `MAX_MESSAGE_SIZE` -> the raw `session_transport.rs` stream
+/// proxy -> the gateway `to_bytes` bound (`server.rs:5351`) - finds no 16 KiB hop. The old
+/// number was also BELOW the 20,000-character cap, which made every cap-sized message
+/// unshapeable ('shaping_refuses_text_past_the_composer_cap_before_anything_is_written').
+///
+/// The budget is therefore derived from the frozen cap and the bytes this transaction really
+/// puts on the wire: the widest UTF-8 encoding of a cap-sized body
+/// (`REFERENCE_SUBMIT_MAX_CHARS * 4`), the bracketed-paste framing when that mode is on, and the
+/// Enter byte ([REFERENCE_SUBMIT_ENTER]) written separately from the body. This corrects a wrong
+/// assumption; it does not relax a measured limit.
+pub const REFERENCE_SUBMIT_MAX_BYTES: usize = REFERENCE_SUBMIT_MAX_CHARS * 4
+    + REFERENCE_PASTE_START.len()
+    + REFERENCE_PASTE_END.len()
+    + 1; // the separately written Enter byte, [REFERENCE_SUBMIT_ENTER]
 
 /// The gap the pane sees between a submit's text and its Enter (index.ts SUBMIT_DELAY_MS).
 ///
@@ -178,8 +185,9 @@ pub const REFERENCE_CALLER_GONE_MESSAGE: &str =
 ///    [REFERENCE_SUBMIT_ENTER]).
 ///
 /// Refused with [ScopeErrorCode::PayloadTooLarge] when the text is past
-/// [REFERENCE_SUBMIT_MAX_CHARS] characters, or when the shaped payload is past
-/// [REFERENCE_SUBMIT_MAX_BYTES] bytes. Both refusals happen before any byte reaches the pane.
+/// [REFERENCE_SUBMIT_MAX_CHARS] characters, or when the shaped payload PLUS the Enter this
+/// transaction writes separately is past [REFERENCE_SUBMIT_MAX_BYTES] bytes. Both refusals
+/// happen before any byte reaches the pane.
 pub fn shape_reference_submit(text: &str, bracketed_paste: bool) -> Result<String, ScopeErrorCode> {
     if text.chars().count() > REFERENCE_SUBMIT_MAX_CHARS {
         return Err(ScopeErrorCode::PayloadTooLarge);
@@ -190,7 +198,10 @@ pub fn shape_reference_submit(text: &str, bracketed_paste: bool) -> Result<Strin
     } else {
         body
     };
-    if shaped.len() > REFERENCE_SUBMIT_MAX_BYTES {
+    // The Enter is written separately from the body (see [REFERENCE_SUBMIT_ENTER]), so what this
+    // submit puts on the wire is the shaped payload PLUS that Enter. Counting it here is what
+    // makes the budget tight instead of one byte of slack.
+    if shaped.len() + REFERENCE_SUBMIT_ENTER.len() > REFERENCE_SUBMIT_MAX_BYTES {
         return Err(ScopeErrorCode::PayloadTooLarge);
     }
     Ok(shaped)
@@ -1059,17 +1070,41 @@ mod tests {
     }
 
     #[test]
-    fn shaping_refuses_a_multibyte_frame_past_the_transport_byte_budget() {
-        // Hangul is three bytes a character: a message well inside the 20,000-character cap is
-        // still too large for the 16 KiB text frame the gateway carries.
+    fn shaping_admits_the_full_composer_cap_and_counts_the_framing_and_enter() {
+        // This replaces a test that asserted a 30,000-byte Hangul message was refused by a fixed
+        // 16 KiB budget. That budget was the machine-control bound, not this path's (see the
+        // constant's doc), so what is asserted here is what the frozen cap admits and what the
+        // byte budget counts: the body, the paste framing, and the separately written Enter.
+        assert_eq!(
+            REFERENCE_SUBMIT_MAX_BYTES,
+            REFERENCE_SUBMIT_MAX_CHARS * 4
+                + REFERENCE_PASTE_START.len()
+                + REFERENCE_PASTE_END.len()
+                + REFERENCE_SUBMIT_ENTER.len()
+        );
+
+        // 10,000 Hangul characters (30,000 bytes) sit well inside the cap and shape.
         let hangul = "\u{ac00}".repeat(10_000);
         assert!(hangul.chars().count() < REFERENCE_SUBMIT_MAX_CHARS);
-        assert_eq!(shape_reference_submit(&hangul, true), Err(ScopeErrorCode::PayloadTooLarge));
-
-        let fits = "\u{ac00}".repeat(5_000);
-        let shaped = shape_reference_submit(&fits, true).expect("5,000 Hangul characters fit");
-        assert!(shaped.len() <= REFERENCE_SUBMIT_MAX_BYTES);
+        let shaped = shape_reference_submit(&hangul, true).expect("30,000 bytes fit the budget");
         assert!(shaped.starts_with(REFERENCE_PASTE_START));
+        assert_eq!(
+            shaped.len(),
+            REFERENCE_PASTE_START.len() + 30_000 + REFERENCE_PASTE_END.len()
+        );
+        assert!(shaped.len() + REFERENCE_SUBMIT_ENTER.len() <= REFERENCE_SUBMIT_MAX_BYTES);
+
+        // A whole cap of four-byte characters (80,000 bytes) plus its framing and Enter is
+        // exactly the budget: the framing bytes are counted, not left as slack.
+        let four_byte = "\u{10000}".repeat(REFERENCE_SUBMIT_MAX_CHARS);
+        assert_eq!(four_byte.chars().count(), REFERENCE_SUBMIT_MAX_CHARS);
+        let shaped =
+            shape_reference_submit(&four_byte, true).expect("a full cap of 4-byte chars fits");
+        assert_eq!(
+            shaped.len(),
+            REFERENCE_SUBMIT_MAX_CHARS * 4 + REFERENCE_PASTE_START.len() + REFERENCE_PASTE_END.len()
+        );
+        assert_eq!(shaped.len() + REFERENCE_SUBMIT_ENTER.len(), REFERENCE_SUBMIT_MAX_BYTES);
     }
 
     #[tokio::test]

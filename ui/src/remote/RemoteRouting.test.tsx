@@ -24,6 +24,33 @@ const workspace = () => new Response(JSON.stringify({
   projects: [], sessions: [],
 }));
 
+/**
+ * The chat lane's own reads. Chat is the default surface, so these fire on mount in every test in
+ * this file - and they would otherwise be the LAST calls a transport assertion sees. They are
+ * answered by URL here, so the routing assertions keep describing the routing lane alone.
+ */
+function chatLaneFixture(url: string): Response | null {
+  if (url.includes("/api/v1/capabilities")) {
+    return Response.json({ apiVersion: 1, machineId: "mach-1", platform: "linux" });
+  }
+  if (url.includes("/api/v1/sessions")) return Response.json({ sessions: [] });
+  if (url.includes("/reference-chat/") && url.includes("/history")) {
+    return Response.json({
+      source: "claude-transcript",
+      availability: "native",
+      turns: [],
+      cursor: null,
+      hasMore: false,
+      generation: "gen-1",
+      unavailableReason: null,
+    });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/prompt")) {
+    return Response.json({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+  }
+  return null;
+}
+
 function ticketed(inner: (input: any, init?: any) => any): typeof fetch {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
@@ -33,6 +60,8 @@ function ticketed(inner: (input: any, init?: any) => any): typeof fetch {
         headers: { "Content-Type": "application/json" },
       });
     }
+    const lane = chatLaneFixture(url);
+    if (lane !== null) return lane;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }
@@ -57,8 +86,17 @@ it("switches API and event sockets to the selected host without reusing local cr
   const first = EventSocket.instances[0];
   await act(async () => { remoteHostStore.setActiveHost("host-b"); });
   expect(first.close).toHaveBeenCalledOnce();
-  expect(fetcher).toHaveBeenLastCalledWith("http://192.168.1.9:8787/api/v1/workspace/state", { headers: { Authorization: "Bearer host-b-token" } });
+  // Scoped to the workspace endpoint: the switch's own state read is the last such call, whatever
+  // another lane requests, so the ordinal cannot be moved by a request it does not own.
+  const stateCalls = fetcher.mock.calls.filter(([url]) => String(url).includes("/api/v1/workspace/state"));
+  expect(stateCalls.at(-1)).toEqual([
+    "http://192.168.1.9:8787/api/v1/workspace/state",
+    { headers: { Authorization: "Bearer host-b-token" } },
+  ]);
   expect(EventSocket.instances.at(-1)?.url).toBe("ws://192.168.1.9:8787/api/v1/events?ticket=ui-test-ticket");
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+  });
   expect(screen.getByTestId("terminal-transport").textContent).toBe("http://192.168.1.9:8787");
 });
 
@@ -180,6 +218,9 @@ it("parses fragment PIN and hints separately and keeps transport on the relay", 
   // A reachable-but-unverified LAN hint must NOT capture the terminal transport: a
   // health 200 proves reachability only, so the credential-bearing transport stays
   // on the relay origin.
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+  });
   expect(screen.getByTestId("terminal-transport").textContent).toBe(window.location.origin);
 
   // The probe itself must never carry the device credential to an unverified endpoint.

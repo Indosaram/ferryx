@@ -1295,8 +1295,15 @@ mod tests {
             "message": { "role": "user", "content": "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>" }
         });
         assert!(is_claude_context_clear(clear.as_object().unwrap()));
+        // transcript-records.ts:19 - both optional groups are optional, so a bare envelope is
+        // still a whole one: nothing precedes or follows it. The rule separates an envelope
+        // from prose, not a short envelope from a long one.
+        let bare = json!({
+            "type": "user",
+            "message": { "role": "user", "content": "<command-name>/clear</command-name>" }
+        });
+        assert!(is_claude_context_clear(bare.as_object().unwrap()));
         for content in [
-            "<command-name>/clear</command-name>",
             "Quoting /clear is not a reset.",
             "<command-name>/clear</command-name> trailing",
         ] {

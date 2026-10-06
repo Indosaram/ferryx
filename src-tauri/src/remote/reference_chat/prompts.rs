@@ -1457,7 +1457,13 @@ mod tests {
         assert!(!omo_form_is_trusted("claude", Some("idle")));
         assert!(omo_form_is_trusted("claude", Some("blocked")));
         assert!(omo_form_is_trusted("omo", None));
-        assert!(omo_form_is_trusted("", None));
+        // pin parity (prompt.ts:2476): an unnamed pane needs the evidence a claude pane needs,
+        // so the screen's own text never trusts itself
+        assert!(!omo_form_is_trusted("", None));
+        // the route's own entry with the session: the call on screen is the evidence, and an
+        // unnamed pane with no such call yields no card
+        assert!(omo_card("", OMO_FORM, &session(OMO_ASKS_TWO)).is_some());
+        assert!(omo_card("", OMO_FORM, &session("")).is_none());
     }
 
     #[test]

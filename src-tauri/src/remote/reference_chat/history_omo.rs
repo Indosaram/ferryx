@@ -471,7 +471,7 @@ pub fn omo_task_results(entry: &Value, titles: &HashMap<String, String>) -> Opti
                     duration_ms: amount(task.get("duration_ms")).or_else(|| amount(stats.get("runtime_ms"))),
                     turns: amount(stats.get("turns")),
                     tool_calls: amount(stats.get("tool_calls")),
-                    tokens: amount(task.get("total_tokens")).or_else(|| amount(task.get("tokens"))),
+                    tokens: amount(stats.get("total_tokens")).or_else(|| amount(task.get("tokens"))),
                     result,
                     result_cut: if result_cut { Some(true) } else { None },
                 },
@@ -1403,6 +1403,22 @@ mod tests {
         assert_eq!(tasks[0].result.chars().count(), OMO_TASK_RESULT_MAX_CHARS);
         assert_eq!(tasks[0].result_cut, Some(true));
         assert_eq!(tasks[0].title, "t9", "with no name and no agent the id names it");
+    }
+
+    #[test]
+    fn a_tasks_token_count_prefers_the_nested_run_stats_field() {
+        // transcript-records.ts:143 - `amount(stats.total_tokens) ?? amount(task.tokens)`
+        let wake = json!({"type": "custom_message", "customType": "omo-senpi:wake", "display": false, "details": [
+            {"customType": "senpi-task.completion", "details": [
+                {"task_id": "t-nested", "status": "completed", "run_stats": {"total_tokens": 4_200}},
+                {"task_id": "t-flat", "status": "completed", "tokens": 900},
+                {"task_id": "t-none", "status": "completed", "run_stats": {"turns": 2}}
+            ]}
+        ]});
+        let tasks = omo_task_results(&wake, &HashMap::new()).expect("the wake reports its tasks");
+        assert_eq!(tasks[0].tokens, Some(4_200), "the nested run_stats count is the one OmO reports");
+        assert_eq!(tasks[1].tokens, Some(900), "the flat row field is the fallback half of the pin");
+        assert_eq!(tasks[2].tokens, None, "neither field reports no count, never zero");
     }
 
     #[test]

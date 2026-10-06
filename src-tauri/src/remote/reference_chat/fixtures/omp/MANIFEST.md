@@ -36,7 +36,7 @@ exercises it. A variant with no fixture would be an unexplained gap, so there is
 | 26 | A tool result whose content is a plain string | `transcript-records.ts:9-10` | `partial-and-malformed.jsonl` (p4) |
 | 27 | A tool result's `error` flag | `transcript-records.ts:50` | `basic-session.jsonl` (m7) |
 | 28 | A result for a call this page never saw is ignored | `transcript-records.ts:232` | `partial-and-malformed.jsonl` (p5) |
-| 29 | A tool result: `output` / `result` / `callId` spellings | `transcript-records.ts:31` | `basic-session.jsonl` (m7), `record-aliases.jsonl` (r3) |
+| 29 | A tool result: block-level `output` / `result` spellings | `transcript-records.ts:31`, `:33-35` | `basic-session.jsonl` (m7), `record-aliases.jsonl` (r5) |
 | 30 | Output cut at the page limit, with a fetch ref and size | `tool-output.ts:14-20` | `history_omp.rs` test (constructed) |
 | 31 | A goal call's output kept whole up to the longer limit | `tool-output.ts:10-11` | `history_omp.rs` test (constructed) |
 | 32 | `stopReason: "stop"` ends its turn | `transcript-records.ts:182,296` | `settled-turn-boundary.jsonl` (b2) |
@@ -52,6 +52,7 @@ exercises it. A variant with no fixture would be an unexplained gap, so there is
 | 42 | The legacy `<skill name location>` envelope | `skill-activity.ts:60-62` | `skill-invocation.jsonl` (s3) |
 | 43 | Prose that merely mentions the tag is the user's text | `skill-activity.ts:41-63` | `skill-invocation.jsonl` (s4) |
 | 44 | `model_change` / `thinking_level_change` are not turns | `conversation-metadata.ts:64-66` | `basic-session.jsonl` (mc1, tl1) |
+| 45 | A message-level-only `result` is never read; a message-level `callId` still names the call | `transcript-records.ts:27`, `:35` | `record-aliases.jsonl` (r3 -> `""`, r2 -> `callId` mapped) |
 
 ## Deliberate non-port, with its reason
 

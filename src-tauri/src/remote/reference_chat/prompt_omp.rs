@@ -151,10 +151,9 @@ pub struct OmpPromptCard {
     /// The public card. Its `id` is what [`reference_answer_keys`] looks the card up by.
     pub prompt: ReferencePrompt,
     pub responder: OmpPromptResponder,
-    /// Every menu row's label, in order, as the card offers it: a row's `(Recommended)` suffix
-    /// is stripped exactly as the option list strips it, so one row is named alike in both.
-    /// (Divergence: upstream's `menuLabels` (`:282`) keeps the suffix; no pinned matcher
-    /// compares this list against another reader's.)
+    /// Every menu row's label, in order, exactly as `parseBorderMenu` read it off the screen
+    /// (`:282`): the pin keeps a row's `(Recommended)` suffix here even though the option list
+    /// strips it (`:279`), so one and the same row carries two values by the pin's own design.
     pub menu_labels: Vec<String>,
     /// The row the cursor is on (`:277`).
     pub selected_index: usize,
@@ -602,12 +601,9 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
             fallback: None,
         },
         responder: OmpPromptResponder::Question,
-        // a row's label as the card offers it: the pinned `(Recommended)` strip (`:279`) is not
-        // the option list's alone, so `menu_labels` and `options` name the row alike
-        menu_labels: rows
-            .iter()
-            .map(|row| patterns.recommended.replace(&row.label, "").to_string())
-            .collect(),
+        // the row as `parseBorderMenu` read it, suffix and all: the pinned `menuLabels` (`:282`)
+        // is not stripped, so it keeps what the option list (`:279`) takes off the same row
+        menu_labels: rows.iter().map(|row| row.label.clone()).collect(),
         selected_index,
         checked_option_indices: option_rows
             .iter()
@@ -786,19 +782,52 @@ mod tests {
         assert_eq!(prompt.title, "Question");
         assert_eq!(prompt.question, "Which file should I open?");
         assert_eq!(prompt.body, None);
-        // `(Recommended)` is stripped from the label; the custom row is not an option.
+        // The option list strips `(Recommended)` (`:279`); the custom row is not an option.
         assert_eq!(labels(prompt), vec!["src/main.rs", "ui/src/App.tsx", "crates/core/src/lib.rs"]);
         assert!(!prompt.multi_select);
         // The custom row's index is the option count, so it never names a real option.
         assert_eq!(prompt.custom_option_index, Some(3));
         assert_eq!(card.selected_index, 0);
         assert_eq!(card.custom_menu_index, Some(3));
-        assert_eq!(card.menu_labels, vec!["src/main.rs", "ui/src/App.tsx", "crates/core/src/lib.rs", "Other (type your own)"]);
+        // `menuLabels` keeps the row exactly as drawn (`:282`): the row the option list strips
+        // still carries its suffix here. Two values for one row is the pin's own design, not a
+        // contradiction - stripping this list as well is what made it look like one.
+        assert_eq!(
+            card.menu_labels,
+            vec![
+                "src/main.rs",
+                "ui/src/App.tsx",
+                "crates/core/src/lib.rs (Recommended)",
+                "Other (type your own)"
+            ]
+        );
         assert!(card.checked_option_indices.is_empty());
         assert_eq!(prompt.queued, None);
         assert!(prompt.steps.is_empty());
         assert_eq!(prompt.fallback, None);
         assert_eq!(prompt.id.len(), 12, "the pinned id is 12 hex characters");
+    }
+
+    #[test]
+    fn omp_question_strips_a_lowercase_recommended_from_options_but_not_menu_labels() {
+        // The pin's strip is case-insensitive (`/i`, `:279`) and `menuLabels` (`:282`) is not
+        // stripped at all, so one row is offered without its suffix and read with it - here with
+        // the suffix spelled in lowercase, which only the `/i` flag takes off.
+        let screen = QUESTION_SINGLE.replace("(Recommended)", "(recommended)");
+        let card = card(&screen);
+        assert_eq!(
+            labels(&card.prompt),
+            vec!["src/main.rs", "ui/src/App.tsx", "crates/core/src/lib.rs"]
+        );
+        assert_eq!(
+            card.menu_labels,
+            vec![
+                "src/main.rs",
+                "ui/src/App.tsx",
+                "crates/core/src/lib.rs (recommended)",
+                "Other (type your own)"
+            ]
+        );
     }
 
     #[test]

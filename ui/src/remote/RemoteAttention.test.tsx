@@ -7,8 +7,11 @@ import { RemoteApp } from "./RemoteApp";
  * terminal asks for it explicitly through the mode switch the header always offers.
  */
 async function switchToTerminalMode(): Promise<void> {
-  const toggle = screen.queryByTestId("remote-view-mode-terminal");
-  if (!toggle) return;
+  // The mode switch lives in the header's status cluster, which only renders once the paired
+  // host's token is known; a bare render can reach this point before it is on the page. Wait for
+  // it (the suite's own test timeout bounds the wait) instead of silently leaving chat up, which
+  // would make a terminal assertion fail for the wrong reason.
+  const toggle = await screen.findByTestId("remote-view-mode-terminal");
   await act(async () => {
     fireEvent.click(toggle);
   });
@@ -70,12 +73,46 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+/**
+ * The chat lane's own reads. Chat is the default surface, so these fire on mount in every test in
+ * this file - and a mock that answers by CALL ORDER would hand them the workspace states a test
+ * wrote for its own terminal sequence. They are answered by URL instead, so the terminal lane's
+ * request order stays exactly what each test wrote.
+ */
+function chatLaneFixture(url: string): Response | null {
+  if (url.includes("/api/v1/capabilities")) {
+    // A truthful capabilities answer from a gateway that publishes no daemon incarnation, which
+    // leaves the chat lane idle: these tests are about attention and swiping, not chat polling.
+    return jsonResponse({ apiVersion: 1, machineId: "mach-1", platform: "linux" });
+  }
+  if (url.includes("/api/v1/sessions")) {
+    return jsonResponse({ sessions: [] });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/history")) {
+    return jsonResponse({
+      source: "claude-transcript",
+      availability: "native",
+      turns: [],
+      cursor: null,
+      hasMore: false,
+      generation: "gen-1",
+      unavailableReason: null,
+    });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/prompt")) {
+    return jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+  }
+  return null;
+}
+
 function ticketed(inner: typeof fetch): typeof fetch {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes("/api/v1/socket-ticket")) {
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
     }
+    const lane = chatLaneFixture(url);
+    if (lane !== null) return lane;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }

@@ -113,6 +113,10 @@ it("migrates real scoped auth and loads only the selected host's preferences acr
     machineId, relayOrigin: relay, displayName: machineId, deviceToken: `${machineId}-device`, lastSeenAt: 1, directHints: [],
   });
   await act(async () => { render(<RemoteApp />); });
+  // The terminal (and its preferences request) is only mounted once the terminal mode is chosen.
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+  });
   await bounded(local.arrived.promise);
   expect(getRemoteAuthToken()).toBeNull();
   expect(getRemoteAuthToken(`local:${origin}`)).toBe("legacy-device");

@@ -31,11 +31,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +58,173 @@ export const SPAWN_LEDGER_SCHEMA = "ferryx-herdr-reference.spawn-ledger/1";
  * ========================================================================== */
 
 export const REFERENCE_TRANSPORTS = ["local", "ssh", "paired", "account-relay"];
+
+/**
+ * The transports whose original session is reached through the owning host's OWN gateway
+ * over the frozen HTTP routes - never through a direct daemon connection from this machine.
+ *
+ * This is the repository's existing mechanism, not a new one: a non-local host is a
+ * provisioned machine running its own gateway (directly for ssh/paired, through the relay for
+ * account-relay), and every reference-chat route is served by THAT gateway with THAT host's
+ * credential. The runner already drives exactly that (`referenceRequest` -> `host.url` +
+ * `host.credentialFile`), so the harness needs no second transport and must not invent one.
+ *
+ * What it does need is the endpoint and the credential. Those cannot be derived from a
+ * runtime directory on this machine, which is why they are REQUIRED fixture fields and why an
+ * absent one is reported as that exact missing field rather than as a blanket refusal.
+ */
+export const REFERENCE_NONLOCAL_TRANSPORTS = ["ssh", "paired", "account-relay"];
+
+/** How a host's original session is reached, and therefore what the fixture must declare. */
+export const REFERENCE_HOST_ACCESS_KINDS = { localDaemon: "local-daemon", httpGateway: "http-gateway" };
+
+/** The credential tiers a host credential file can carry. */
+export const REFERENCE_CREDENTIAL_TIERS = { machine: "machine", device: "device", unattributed: "unattributed" };
+
+/**
+ * The credential tier a host's credential file carries, and whether it is readable at all.
+ *
+ * The relay admits the machine tier (a machine token authenticates the host's own tunnel); a
+ * gateway route admits a paired device token. Both are read here rather than assumed, and a
+ * file whose tier cannot be shown is reported as `unattributed` instead of being guessed at.
+ */
+export function readHostCredential(host) {
+  if (!isNonEmptyString(host.credentialFile)) {
+    return { ok: false, reason: "host-credential-missing", tier: null, token: null };
+  }
+  if (!existsSync(host.credentialFile)) {
+    return { ok: false, reason: "host-credential-unreadable", tier: null, token: null, path: host.credentialFile };
+  }
+  const raw = readFileSync(host.credentialFile, "utf8").trim();
+  if (raw.length === 0) {
+    return { ok: false, reason: "host-credential-empty", tier: null, token: null, path: host.credentialFile };
+  }
+  if (raw.startsWith("{")) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ok: false, reason: "host-credential-unparseable", tier: null, token: null, path: host.credentialFile };
+    }
+    const machine = isNonEmptyString(parsed.machineToken) ? parsed.machineToken : null;
+    const device = isNonEmptyString(parsed.token)
+      ? parsed.token
+      : isNonEmptyString(parsed.deviceToken)
+        ? parsed.deviceToken
+        : isNonEmptyString(parsed.bearer)
+          ? parsed.bearer
+          : null;
+    if (machine === null && device === null) {
+      return { ok: false, reason: "host-credential-has-no-token", tier: null, token: null, path: host.credentialFile };
+    }
+    return {
+      ok: true,
+      tier: machine !== null ? REFERENCE_CREDENTIAL_TIERS.machine : REFERENCE_CREDENTIAL_TIERS.device,
+      token: machine !== null ? machine : device,
+      path: host.credentialFile,
+    };
+  }
+  return {
+    ok: true,
+    tier: REFERENCE_CREDENTIAL_TIERS.unattributed,
+    token: raw,
+    path: host.credentialFile,
+  };
+}
+
+/**
+ * The access contract of one fixture host: how its original session is reached, and what the
+ * fixture must have declared for that to be possible.
+ *
+ * A LOCAL host is reached through a daemon this machine owns (launched or adopted), so its url
+ * and credential are produced by that launch and are not required up front.
+ *
+ * A NON-LOCAL host is reached over the frozen HTTP routes at its own gateway URL with its own
+ * credential, so both are REQUIRED. The relay transport additionally requires the machine
+ * tier, because a relay tunnel is authenticated by a machine token and a file that cannot be
+ * shown to carry one cannot be shown to reach the relay at all.
+ *
+ * Every failure is an `IsolatedGatewayError` naming the exact missing piece, so a BLOCKED run
+ * says which endpoint or credential to provision instead of refusing the transport wholesale.
+ *
+ * `options.credential` injects an already-resolved credential read, the same way
+ * `daemonControlTransport` takes an injected platform: it lets the contract be exercised
+ * without a host file on disk.
+ */
+export function hostAccessContract(host, options) {
+  const settings = options || {};
+  if (!host || typeof host !== "object" || !isNonEmptyString(host.id)) {
+    throw gatewayBlocked("host-unknown", JSON.stringify(host));
+  }
+  if (!REFERENCE_TRANSPORTS.includes(host.transport)) {
+    throw gatewayBlocked("host-transport-unknown", host.id + " -> " + String(host.transport));
+  }
+  if (host.transport === "local") {
+    return {
+      hostId: host.id,
+      transport: host.transport,
+      kind: REFERENCE_HOST_ACCESS_KINDS.localDaemon,
+      url: isNonEmptyString(host.url) ? host.url : null,
+      credentialFile: isNonEmptyString(host.credentialFile) ? host.credentialFile : null,
+      credentialTier: null,
+      // A local host's url/credential come from the daemon this run launches or adopts.
+      providedBy: "isolated-launch",
+    };
+  }
+  if (!isNonEmptyString(host.url)) {
+    throw gatewayBlocked("host-url-missing", host.id + " (" + host.transport + ")");
+  }
+  if (!/^https?:\/\//.test(host.url.trim())) {
+    throw gatewayBlocked("host-url-not-http", host.id + " -> " + host.url);
+  }
+  const credential = settings.credential || readHostCredential(host);
+  if (!credential.ok) {
+    throw gatewayBlocked(credential.reason, host.id + " -> " + String(credential.path || host.credentialFile || ""));
+  }
+  if (host.transport === "account-relay" && credential.tier === REFERENCE_CREDENTIAL_TIERS.unattributed) {
+    throw gatewayBlocked(
+      "host-machine-credential-required",
+      host.id + " reaches the relay through a machine-authenticated tunnel; its credential file " +
+        "carries an unattributed bare token, so it cannot be shown to be one. Write " +
+        '{"machineToken":"..."} or use a paired gateway URL instead.',
+    );
+  }
+  return {
+    hostId: host.id,
+    transport: host.transport,
+    kind: REFERENCE_HOST_ACCESS_KINDS.httpGateway,
+    url: host.url.trim().replace(/\/+$/, ""),
+    credentialFile: credential.path,
+    credentialTier: credential.tier,
+    // The owning host spawned the original PTY, so its identity arrives as that host's own
+    // spawn receipt rather than from anything this machine can observe.
+    providedBy: "provisioned-host",
+  };
+}
+
+/**
+ * What a non-local session still needs before its original-PTY identity can be asserted: the
+ * OWNING host's own spawn receipt. Returns null when the session already carries one.
+ *
+ * This is the identity half of the non-local contract, and it is deliberately separate from
+ * the endpoint half: an endpoint proves the session is reachable, never that this run created
+ * the process. A pid typed into a config is not ownership proof.
+ */
+export function ownerHostReceiptRequirement(host, session) {
+  if (!host || host.transport === "local") return null;
+  const receiptPath = (session && session.spawnReceiptPath) ||
+    (host && host.spawnReceiptPath) || null;
+  if (isNonEmptyString(receiptPath)) return null;
+  return {
+    kind: "owner-host-spawn-receipt",
+    hostId: host.id,
+    transport: host.transport,
+    backendSessionId: (session && session.backendSessionId) || null,
+    requiredFields: ["sourceKind", "hostId", "transport", "backendSessionId", "epoch", "pid", "executable", "spawnedAt", "candidate"],
+    reason: "no owner-host spawn receipt is configured for this externally spawned session; " +
+      "an opaque pid from the config is not ownership proof",
+  };
+}
 
 /* ==========================================================================
  * Routes (task 13 registered them on the existing gateway; task 14 only consumes them)
@@ -477,27 +646,100 @@ export function captureArtifact(path, label) {
  * ========================================================================== */
 
 /**
- * The identity of a live process: its executable path and command line, read from the OS.
- * This is the identity check the teardown policy allows: a PID is killed only when its
- * live executable still matches the path recorded when it was spawned.
+ * The identity of a live process: its executable PATH and command line, read from the OS.
+ *
+ * The OS is asked for the path, never for a name. A name is not identity: two different
+ * executables can share a basename, so a name match would let an unrelated process - a
+ * recycled PID, or the same build in another directory - be treated as one this harness
+ * started. This is the only identity the teardown policy accepts.
+ *
+ * Per platform: Windows reads `Get-Process ... -ExpandProperty Path`; Linux reads
+ * `/proc/<pid>/exe`, which is the path and not the 15-character `comm` name; Darwin reads
+ * `ps -o comm=`, which reports the executable path there. Where an OS yields only a name,
+ * the probe says so by returning it as-is, and every comparison then fails closed.
  */
 export function probeProcessIdentity(pid) {
   if (process.platform === "win32") {
+    // Existence and path are asked for SEPARATELY: a process that exists but whose path this
+    // account may not read is ALIVE with an unreadable identity, which must report as such
+    // rather than be flattened into "already exited" - the two have different remedies.
     const listing = spawnSync(
       "powershell",
-      ["-NoProfile", "-Command", "(Get-Process -Id " + pid + " -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path)"],
+      [
+        "-NoProfile",
+        "-Command",
+        "$p = Get-Process -Id " + pid + " -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+          "if ($null -eq $p) { '' } else { @{ id = $p.Id; path = $p.Path } | ConvertTo-Json -Compress }",
+      ],
       { encoding: "utf8" },
     );
-    if (listing.status !== 0) return { pid, alive: false, executable: null, commandLine: null };
-    const executable = (listing.stdout || "").trim();
-    if (!executable) return { pid, alive: false, executable: null, commandLine: null };
+    const raw = (listing.stdout || "").trim();
+    if (raw.length === 0) return { pid, alive: false, executable: null, commandLine: null };
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+    const executable =
+      parsed && typeof parsed.path === "string" && parsed.path.trim().length > 0 ? parsed.path.trim() : null;
     return { pid, alive: true, executable, commandLine: executable };
   }
-  const comm = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
   const args = spawnSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8" });
-  const executable = (comm.stdout || "").trim();
   const commandLine = (args.stdout || "").trim();
+  const fromProc = linuxExecutablePath(pid);
+  if (fromProc !== null) return { pid, alive: true, executable: fromProc, commandLine: commandLine || null };
+  const comm = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+  const executable = (comm.stdout || "").trim();
   return { pid, alive: executable.length > 0, executable: executable || null, commandLine: commandLine || null };
+}
+
+/** `/proc/<pid>/exe` on Linux: the executable PATH, or null where it is unavailable. */
+function linuxExecutablePath(pid) {
+  if (process.platform !== "linux") return null;
+  try {
+    return readlinkSync("/proc/" + pid + "/exe").replace(/ \(deleted\)$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A path as identity: absolute, symlink-resolved where the file is reachable, separators
+ * unified, and case-folded ONLY on a case-insensitive filesystem (Windows).
+ *
+ * This is deliberately a PATH comparison and not a name comparison. Two executables in
+ * different directories never compare equal here, however they are spelled.
+ */
+export function normalizeExecutablePath(value, platform) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().replace(/ \(deleted\)$/, "");
+  if (trimmed.length === 0) return null;
+  let resolved = trimmed;
+  try {
+    if (existsSync(trimmed)) resolved = realpathSync.native ? realpathSync.native(trimmed) : realpathSync(trimmed);
+  } catch {
+    /* Unreachable now (a process that has exited): the lexical path is still comparable. */
+  }
+  const isWindows = (platform || process.platform) === "win32";
+  let path = resolved.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  if (path.length > 1) path = path.replace(/\/+$/, "");
+  if (isWindows) {
+    path = path.replace(/^([a-z]):/, (_match, drive) => drive.toUpperCase() + ":");
+    path = path.toLowerCase();
+  }
+  return path.length === 0 ? null : path;
+}
+
+/**
+ * Whether a live process's executable IS the executable recorded at spawn time: full
+ * normalized path equality, both sides known. A null on either side is NOT a match - an
+ * identity that cannot be read is reported, never assumed.
+ */
+export function executablePathMatches(liveExecutable, recordedExecutable, platform) {
+  const live = normalizeExecutablePath(liveExecutable, platform);
+  const recorded = normalizeExecutablePath(recordedExecutable, platform);
+  return live !== null && recorded !== null && live === recorded;
 }
 
 /** The descendants of a PID, from the host process table. Used to find an owned PTY child. */
@@ -556,8 +798,10 @@ function walkDescendants(byParent, rootPid) {
 /**
  * The spawn ledger. Every runtime resource the harness starts is recorded here AT SPAWN
  * TIME with its exact PID and the executable path that was launched; teardown kills only
- * those exact PIDs after re-reading the live executable and confirming it still matches.
- * Anything else that looks related is reported, never killed.
+ * those exact PIDs after re-reading the live executable and confirming it is the SAME FILE,
+ * by full normalized path equality. A basename is never identity proof: another directory's
+ * executable can share the name. Anything else - a mismatch, or an identity that cannot be
+ * read at all - is reported, never killed.
  */
 export class OwnedProcessLedger {
   constructor(role) {
@@ -607,10 +851,7 @@ export class OwnedProcessLedger {
         continue;
       }
       const recorded = entry.executablePath;
-      const matches = Boolean(recorded) && Boolean(live.executable) &&
-        (live.executable === recorded ||
-          live.executable.endsWith("/" + recorded.split("/").pop()) ||
-          live.executable.endsWith("\\" + recorded.split("\\").pop()));
+      const matches = executablePathMatches(live.executable, recorded, process.platform);
       if (!matches) {
         this.receipts.push({
           pid: entry.pid,
@@ -675,12 +916,137 @@ export function setupIsolatedProfile(label) {
   };
 }
 
-/** The daemon socket a profile owns, mirroring src-tauri/src/daemon/server.rs get_runtime_dir. */
+/* ==========================================================================
+ * Daemon control transport (QA only)
+ *
+ * The product publishes a DIFFERENT control endpoint per platform, and this harness must
+ * speak the one the profile it started actually publishes:
+ *
+ *   unix   <runtime>/daemon.sock - a unix socket, and nothing else. The socket's ownership
+ *          and mode ARE the authentication: `get_transport_token_path` does not exist on
+ *          unix at all, and `handle_client` says "Unix inherits the socket's ownership
+ *          boundary and never needs the check".
+ *   win32  <runtime>/daemon.port (the loopback TCP port, as text) plus
+ *          <runtime>/daemon.token (the per-boot bearer). `get_socket_path` returns
+ *          `daemon.port` on non-unix, and the token path states why: "A loopback TCP port
+ *          has no filesystem ownership check, so the published port alone must not be
+ *          enough to drive the daemon." The FIRST frame of every connection must carry
+ *          that token, or the daemon answers TRANSPORT_UNAUTHORIZED and closes.
+ *
+ * Dialling `<runtime>/daemon.sock` on Windows is the defect this section replaces: the
+ * product never creates that file there, so the connect failed with a bare ENOENT that
+ * looked like a daemon which had not started.
+ *
+ * NOTE: `gatewayBlocked` is declared further down this module. Only the CALL is here, and
+ * that binding is initialised long before any caller can reach this section.
+ * ========================================================================== */
+
+/** The transport files a daemon publishes in its runtime directory (daemon/server.rs). */
+export const DAEMON_TRANSPORT_FILES = {
+  unixSocket: "daemon.sock",
+  port: "daemon.port",
+  token: "daemon.token",
+};
+
+/** The address the non-unix listener binds, and the only one this harness will dial. */
+export const DAEMON_LOOPBACK_HOST = "127.0.0.1";
+
+/** The transport kinds this harness speaks. */
+export const DAEMON_TRANSPORT_KINDS = { unixSocket: "unix-socket", loopbackTcp: "loopback-tcp" };
+
+/**
+ * The unix control socket of a profile's daemon, mirroring `get_socket_path` on unix.
+ *
+ * This is the unix transport ONLY. Windows publishes no such file - `get_socket_path`
+ * returns `daemon.port` there - so a Windows caller must go through
+ * [`daemonControlTransport`] instead, which is what the launcher in this module does.
+ */
 export function daemonSocketPath(profile) {
-  if (process.platform === "win32") {
-    return join(profile.paths.runtime, "daemon.sock");
+  return join(profile.paths.runtime, DAEMON_TRANSPORT_FILES.unixSocket);
+}
+
+/**
+ * The control transport a profile's daemon publishes, derived from `profile.paths.runtime`
+ * alone. Nothing here falls back to a production endpoint: a runtime directory outside the
+ * profile root is refused outright, so the harness can only ever drive the daemon it started
+ * itself.
+ *
+ * `options.platform` defaults to `process.platform` and exists so the Windows branch is
+ * exercisable - and regression-covered - from any host.
+ */
+export function daemonControlTransport(profile, options) {
+  const settings = options || {};
+  const platform = settings.platform || process.platform;
+  const runtimeDir = resolve(profile.paths.runtime);
+  const root = profile.root ? resolve(profile.root) : null;
+  if (root && runtimeDir !== root && !runtimeDir.startsWith(root + sep)) {
+    throw gatewayBlocked(
+      "daemon-runtime-not-profile-owned",
+      runtimeDir + " is outside the isolated profile " + root,
+    );
   }
-  return join(profile.paths.runtime, "daemon.sock");
+  if (platform === "win32") {
+    return {
+      kind: DAEMON_TRANSPORT_KINDS.loopbackTcp,
+      platform,
+      runtimeDir,
+      host: DAEMON_LOOPBACK_HOST,
+      portFile: join(runtimeDir, DAEMON_TRANSPORT_FILES.port),
+      tokenFile: join(runtimeDir, DAEMON_TRANSPORT_FILES.token),
+      requiresToken: true,
+    };
+  }
+  return {
+    kind: DAEMON_TRANSPORT_KINDS.unixSocket,
+    platform,
+    runtimeDir,
+    socketPath: join(runtimeDir, DAEMON_TRANSPORT_FILES.unixSocket),
+    tokenFile: null,
+    requiresToken: false,
+  };
+}
+
+/**
+ * A published transport token, or null.
+ *
+ * An absent file, or one holding only whitespace, is NO credential: the product reports it
+ * as absent (`read_transport_token_at`) so a reader treats the pair it is reading as
+ * incomplete rather than presenting an empty token the daemon would reject.
+ */
+export function parseDaemonTransportToken(text) {
+  if (typeof text !== "string") return null;
+  const token = text.trim();
+  return token.length === 0 ? null : token;
+}
+
+/**
+ * The loopback port a `daemon.port` file publishes, or null when the file is not a usable
+ * port. The product writes the port as decimal text and reads it back with `trim().parse()`,
+ * so anything that is not exactly a 1..65535 decimal is refused rather than guessed at.
+ */
+export function parseDaemonPortFile(text) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!/^\d{1,5}$/.test(trimmed)) return null;
+  const port = Number.parseInt(trimmed, 10);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+/**
+ * The first frame of a control connection: one newline-terminated JSON line, carrying
+ * `token` only for a transport that requires it.
+ *
+ * `transport_token_from_line` reads the bearer from exactly that field of the first line, so
+ * a transport that must present one and does not is refused (`TRANSPORT_UNAUTHORIZED`) before
+ * any request is dispatched. A unix socket presents none and is not checked.
+ */
+export function daemonHandshakeFrame(transport, token, version) {
+  const payload = {
+    type: "handshake",
+    version: typeof version === "number" ? version : DAEMON_CONTROL_PROTOCOL_VERSION,
+  };
+  if (transport && transport.requiresToken) payload.token = token;
+  return JSON.stringify(payload) + "\n";
 }
 
 /* ==========================================================================
@@ -705,10 +1071,17 @@ export function daemonSocketPath(profile) {
  *      and again on configure, so a persisted port is
  *      ignored and no per-instance port seam exists
  *                                      remote/state.rs, daemon/server.rs
- *   5. the bound address is read back from the daemon
+ *   5. the control endpoint is the profile's OWN
+ *      transport, never a production one: a unix
+ *      socket where the product publishes one, and on
+ *      Windows the loopback TCP pair
+ *      <runtime>/daemon.port + daemon.token, whose
+ *      token the FIRST frame must carry because a
+ *      port has no ownership check   daemon/server.rs, daemon/client.rs
+ *   6. the bound address is read back from the daemon
  *      (RemoteGetStatus) and is the ONLY authority for
  *      the URL this harness dials                  daemon/protocol.rs
- *   6. the bearer token comes from the real pairing flow over the daemon's own control
+ *   7. the bearer token comes from the real pairing flow over the daemon's own control
  *      socket - RemoteCreatePairingCode (control) -> PIN, then
  *      POST /api/v1/pair/exchange -> device token. The auth store is this profile's;
  *      nothing is hand-written into it and no production credential is read.
@@ -745,6 +1118,12 @@ export const REMOTE_GATEWAY_PORT = 43821;
 
 /** The contract id every isolated-gateway handle reports. */
 export const ISOLATED_GATEWAY_CONTRACT = "ferryx-herdr-reference.isolated-gateway/1";
+
+/**
+ * The contract id of the ownership record a launcher hands to the next process in the same
+ * run chain, so that process can ADOPT the exact daemon instead of launching a second one.
+ */
+export const ISOLATED_GATEWAY_OWNERSHIP_CONTRACT = "ferryx-herdr-reference.isolated-gateway-ownership/1";
 
 /** The file inside the isolated profile that holds the device token this run obtained. */
 export const ISOLATED_CREDENTIAL_FILENAME = "reference-chat-token";
@@ -831,17 +1210,77 @@ export function parseLoopbackBoundAddress(boundAddress) {
 }
 
 /**
- * One connection to a daemon control socket (newline-delimited JSON, protocol v5). On
- * unix the socket's ownership and mode are the authentication, so no token is sent.
- * A socket that closes with requests in flight resolves them as null, which every caller
- * already treats as a protocol failure.
+ * One connection to a daemon's control endpoint (newline-delimited JSON, protocol v5), over
+ * whichever transport the profile publishes.
+ *
+ *   - `unix-socket`: connect the socket and present no token - the ownership boundary
+ *     authenticates, and the product never checks a token there.
+ *   - `loopback-tcp`: read the CREDENTIAL BEFORE THE PORT, exactly as `DaemonClient` does
+ *     ("the credential is read before the port is, so the token presented can never be newer
+ *     than the port it is presented to"), connect `127.0.0.1:<port>`, and put that token on
+ *     the first frame. Without it the daemon answers TRANSPORT_UNAUTHORIZED and closes,
+ *     because a loopback port has no filesystem ownership check.
+ *
+ * A missing or unusable transport file is reported as its own reason, naming the exact path,
+ * rather than surfacing a bare ENOENT from `connect`: on Windows that ENOENT was read as a
+ * daemon that had not started, when the harness was in fact dialling a file the product never
+ * creates.
+ *
+ * Deliberate divergence from the product: `DaemonClient` re-reads a straddled port/token pair
+ * once, because a machine's runtime directory outlives a reboot. This profile is created by
+ * this run, so it cannot hold a predecessor's pair and a rejection here is real - it is
+ * reported, not retried.
+ *
+ * A descriptor from [`daemonControlTransport`] is expected; a bare string is accepted as a
+ * unix socket path so an existing caller keeps working. A socket that closes with requests in
+ * flight resolves them as null, which every caller already treats as a protocol failure.
  */
-export function connectDaemonControl(socketPath, options) {
+export function connectDaemonControl(transport, options) {
   const settings = options || {};
   const timeoutMs = typeof settings.timeoutMs === "number" ? settings.timeoutMs : 30000;
+  const resolved =
+    typeof transport === "string"
+      ? { kind: DAEMON_TRANSPORT_KINDS.unixSocket, socketPath: transport, tokenFile: null, requiresToken: false }
+      : transport;
+  if (!resolved || typeof resolved !== "object") {
+    throw gatewayBlocked("daemon-transport-missing", String(transport));
+  }
+
+  const explicitToken =
+    typeof settings.token === "string" && settings.token.trim().length > 0 ? settings.token.trim() : null;
+  let token = explicitToken;
+  if (resolved.requiresToken && token === null) {
+    if (!resolved.tokenFile || !existsSync(resolved.tokenFile)) {
+      throw gatewayBlocked("daemon-transport-token-missing", String(resolved.tokenFile || ""));
+    }
+    token = parseDaemonTransportToken(readFileSync(resolved.tokenFile, "utf8"));
+    if (token === null) {
+      throw gatewayBlocked("daemon-transport-token-empty", resolved.tokenFile);
+    }
+  }
+
+  let connection = { path: resolved.socketPath };
+  let endpoint = String(resolved.socketPath);
+  if (resolved.kind === DAEMON_TRANSPORT_KINDS.loopbackTcp) {
+    if (!resolved.portFile || !existsSync(resolved.portFile)) {
+      throw gatewayBlocked("daemon-transport-port-missing", String(resolved.portFile || ""));
+    }
+    const portText = readFileSync(resolved.portFile, "utf8");
+    const port = parseDaemonPortFile(portText);
+    if (port === null) {
+      throw gatewayBlocked(
+        "daemon-transport-port-invalid",
+        resolved.portFile + " -> " + JSON.stringify(portText.slice(0, 32)),
+      );
+    }
+    const host = resolved.host || DAEMON_LOOPBACK_HOST;
+    connection = { host, port };
+    endpoint = host + ":" + port;
+  }
+
   return deadline(
     new Promise((resolveConnect, rejectConnect) => {
-      const socket = createConnection({ path: socketPath });
+      const socket = createConnection(connection);
       const lines = createInterface({ input: socket });
       const pending = [];
       lines.on("line", (line) => {
@@ -855,31 +1294,41 @@ export function connectDaemonControl(socketPath, options) {
         if (next) next(message);
       });
       socket.once("error", (error) => {
-        rejectConnect(gatewayBlocked("daemon-socket-error", socketPath + " " + String(error)));
+        rejectConnect(gatewayBlocked("daemon-transport-error", endpoint + " " + String(error)));
       });
       socket.once("close", () => {
         while (pending.length > 0) pending.shift()(null);
       });
-      const call = (payload) =>
+      const send = (line) =>
         new Promise((resolveCall) => {
           pending.push(resolveCall);
-          socket.write(JSON.stringify(payload) + "\n");
+          socket.write(line);
         });
+      const call = (payload) => send(JSON.stringify(payload) + "\n");
       socket.once("connect", async () => {
         try {
-          const handshake = await call({
-            type: "handshake",
-            version: DAEMON_CONTROL_PROTOCOL_VERSION,
-            ...(settings.token ? { token: settings.token } : {}),
-          });
+          const handshake = await send(daemonHandshakeFrame(resolved, token));
           if (!handshake || handshake.type !== "handshakeOk") {
             socket.destroy();
-            rejectConnect(gatewayBlocked("daemon-handshake-refused", socketPath + " " + JSON.stringify(handshake)));
+            const unauthorized = Boolean(handshake) && handshake.code === "TRANSPORT_UNAUTHORIZED";
+            rejectConnect(
+              gatewayBlocked(
+                unauthorized ? "daemon-transport-unauthorized" : "daemon-handshake-refused",
+                endpoint + " " + JSON.stringify(handshake),
+              ),
+            );
             return;
           }
           resolveConnect({
+            transportKind: resolved.kind,
+            endpoint,
             handshake,
             call,
+            // The daemon's own exit closes this socket. A caller that asks the daemon to
+            // shut down awaits that close instead of polling for the process to die.
+            onClose(listener) {
+              socket.once("close", listener);
+            },
             close() {
               lines.close();
               socket.destroy();
@@ -920,7 +1369,10 @@ async function gatewayJson(url, options, timeoutMs) {
 /**
  * Launch one isolated, authenticated gateway on a throwaway profile.
  *
- * options: { binary, label, uiDist, env, cwd, ledger, timeoutMs, extra }. The returned
+ * options: { binary, label, uiDist, env, cwd, ledger, timeoutMs, extra, lease }. `lease`
+ * (`{ ownerPid, createdAt, deadlineAt }`) is copied into the handle's ownership record: it is
+ * what a caller sets when it intends to HAND THE DAEMON OVER to another process instead of
+ * stopping it, and the adopter refuses an expired one. The returned
  * handle's url and token come from the running daemon and its own auth store; stop()
  * shuts that daemon down in band and falls back to the exact PID this run spawned. Every
  * failure is an IsolatedGatewayError for the caller to report as BLOCKED.
@@ -935,7 +1387,7 @@ export async function launchIsolatedGateway(options) {
 
   const profile = setupIsolatedProfile(settings.label || "gateway");
   const configPath = seedIsolatedRemoteConfig(profile);
-  const socketPath = daemonSocketPath(profile);
+  const transport = daemonControlTransport(profile);
   const env = { ...profile.env };
   if (settings.uiDist) env.FERRYX_UI_DIST_DIR = resolve(settings.uiDist);
   for (const [key, value] of Object.entries(settings.env || {})) env[key] = String(value);
@@ -1019,17 +1471,12 @@ export async function launchIsolatedGateway(options) {
         /* The daemon did not stop in band; fall through to the exact-PID fallback. */
       }
     }
-    // The exact PID this run spawned, re-identified before it is signalled: a PID whose
-    // live executable no longer matches the spawn-recorded one is reported, never killed.
+    // The exact PID this run spawned, re-identified before it is signalled: only the SAME
+    // executable file (full normalized path) may be signalled, so a recycled PID or a
+    // same-named binary in another directory is reported instead.
     const live = probeProcessIdentity(child.pid);
     const recorded = entry.executablePath;
-    const recordedName = recorded ? basename(recorded) : null;
-    const identityMatches = Boolean(
-      live.alive && live.executable && recorded &&
-        (live.executable === recorded ||
-          live.executable.endsWith("/" + recordedName) ||
-          live.executable.endsWith("\\" + recordedName)),
-    );
+    const identityMatches = live.alive && executablePathMatches(live.executable, recorded, process.platform);
     if (!identityMatches) {
       return {
         stopped: false,
@@ -1081,7 +1528,7 @@ export async function launchIsolatedGateway(options) {
     // The accept loop starts only after the boot restore of the persisted remote config,
     // so a completed handshake already implies the gateway restore has run; the single
     // status read below is therefore authoritative and needs no polling.
-    control = await connectDaemonControl(socketPath, { timeoutMs });
+    control = await connectDaemonControl(transport, { timeoutMs });
     const statusResponse = await control.call({ type: "remoteGetStatus" });
     if (!statusResponse || statusResponse.type !== "remoteStatusOk") {
       throw gatewayBlocked("gateway-status-unreadable", JSON.stringify(statusResponse));
@@ -1096,7 +1543,7 @@ export async function launchIsolatedGateway(options) {
     }
     const url = "http://" + bound.host + ":" + bound.port;
 
-    // The real pairing flow, over the daemon's own control socket and the gateway's own
+    // The real pairing flow, over the daemon's own control endpoint and the gateway's own
     // exchange route: nothing is hand-written into the auth store.
     const pinResponse = await control.call({ type: "remoteCreatePairingCode", permission: "control" });
     if (!pinResponse || pinResponse.type !== "remotePairingCodeOk" || !/^\d{6}$/.test(String(pinResponse.code || ""))) {
@@ -1144,6 +1591,17 @@ export async function launchIsolatedGateway(options) {
       contract: ISOLATED_GATEWAY_CONTRACT,
       profile,
       entry,
+      // The connectable descriptor for the daemon this run started, so a caller that must
+      // speak to the SAME daemon (the provisioner's PTY spawn) does not have to re-derive
+      // one from a config that may not name this throwaway profile at all. The JSON-safe
+      // summary is `daemonTransport`; this raw form holds local file paths and is never
+      // serialized into a receipt.
+      controlTransport: transport,
+      // Everything the next process in this run chain needs to adopt THIS daemon rather
+      // than launch another. A fresh launch would have a different epoch and none of the
+      // sessions provisioned here, so a recorded originalPTY identity would end up asserted
+      // against a daemon that never spawned it.
+      ownership: ownershipRecord(profile, transport, child, entry, url, credentialFile, control, settings.lease),
       url,
       port: bound.port,
       boundAddress: status.boundAddress,
@@ -1156,7 +1614,17 @@ export async function launchIsolatedGateway(options) {
       },
       token,
       credentialFile,
-      daemonSocketPath: socketPath,
+      // The control endpoint this run actually drove, and the transport it used. The socket
+      // field stays a truthful string-or-null: on Windows the product publishes no socket,
+      // only the loopback port/token pair.
+      daemonTransport: {
+        kind: transport.kind,
+        platform: transport.platform,
+        runtimeDir: transport.runtimeDir,
+        endpoint: control.endpoint,
+        requiresToken: transport.requiresToken,
+      },
+      daemonSocketPath: transport.kind === DAEMON_TRANSPORT_KINDS.unixSocket ? transport.socketPath : null,
       daemonPid: typeof control.handshake.pid === "number" ? control.handshake.pid : null,
       daemonEpoch:
         control.handshake.epoch === undefined || control.handshake.epoch === null
@@ -1191,6 +1659,276 @@ export async function launchIsolatedGateway(options) {
       }
     } else {
       error.detail = (error.detail ? error.detail + " " : "") + "profile-left-behind=" + profile.root + " pid=" + child.pid;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The exact ownership of the daemon a launcher started: what the next process in this run
+ * chain needs in order to ADOPT that daemon instead of launching another one.
+ *
+ * `daemonPid`/`daemonExecutablePath` are the spawn-recorded pair (the identity proof),
+ * `daemonReportedPid` is the daemon's own handshake report for corroboration, and `lease` is
+ * the ADOPTION deadline - how long the handoff stays adoptable. It is not a lifetime and not
+ * a cleanup guarantee, so `reapRequirement` names what the verifier must do instead.
+ */
+function ownershipRecord(profile, transport, child, entry, url, credentialFile, control, lease) {
+  return {
+    contract: ISOLATED_GATEWAY_OWNERSHIP_CONTRACT,
+    profileRoot: profile.root,
+    runtimeDir: profile.paths.runtime,
+    platform: transport.platform,
+    transportKind: transport.kind,
+    daemonPid: child.pid,
+    daemonExecutablePath: entry.executablePath,
+    daemonReportedPid: typeof control.handshake.pid === "number" ? control.handshake.pid : null,
+    daemonEpoch:
+      control.handshake.epoch === undefined || control.handshake.epoch === null
+        ? null
+        : String(control.handshake.epoch),
+    url,
+    credentialFile,
+    lease: lease || null,
+    // There is no reaper service anywhere in this harness, deliberately: a reaper is a
+    // second long-lived process, and an unattended one is worse than the leftover it chases.
+    // So the duty is written down instead - the verifier's own finally reaps this exact PID,
+    // identity-checked against this executable path, and removes the profile root, INCLUDING
+    // the case where provisioning succeeded and the runner then failed to start or adopt.
+    reapRequirement: {
+      by: "exact-pid",
+      pid: child.pid,
+      executablePath: entry.executablePath,
+      profileRoot: profile.root,
+      note: "no reaper service exists: if no runner adopts this daemon, the verifier must stop exactly this PID (identity-checked against this executable path) and remove the profile root",
+    },
+  };
+}
+
+/**
+ * Adopt a daemon that another process in this run chain started, from its ownership record.
+ *
+ * Why adoption rather than a fresh launch: the provisioner spawns the original PTYs in the
+ * daemon it started, so a runner that launched its own daemon would be asserting those
+ * recorded PID/executable identities against a daemon that never spawned them - a different
+ * incarnation with none of the sessions. Adoption keeps ONE daemon and ONE epoch across
+ * provisioning and the scenario run.
+ *
+ * CLEANUP IS NOT BOUNDED BY THIS FILE. The lease is an ADOPTION deadline - how long a handoff
+ * stays adoptable - not a lifetime, and nothing here starts a reaper: a reaper would be a
+ * second service, and an unattended one is worse than the leftover it chases. When a runner
+ * adopts, it reaps in its own cleanup. When nothing adopts, the retained daemon and its
+ * profile stay until the verifier reaps them by the exact PID in the ownership record's
+ * `reapRequirement` (also carried in the provisioning spawn-ledger receipt).
+ *
+ * Every check fails closed: a caller that did not pass `allowHost: true`, a record that is
+ * incomplete, an expired lease, a PID that is no longer that executable, a daemon that is not
+ * running, an epoch or address that drifted from the record, or a credential the adopted
+ * daemon refuses. Ownership is PROVEN before anything is signalled; a failure before that
+ * proof leaves the process alone and names the exact PID, executable and lease deadline in the
+ * error detail so the verifier can reap it.
+ */
+export async function adoptOwnedGateway(ownership, options) {
+  const settings = options || {};
+  const timeoutMs = typeof settings.timeoutMs === "number" ? settings.timeoutMs : 30000;
+  // AUTHORIZATION FIRST, and it is the caller's, not the file's. The ownership record comes
+  // from a fixture manifest, which is DATA: a manifest that names a daemon and a lease is not
+  // permission to drive or kill that daemon. Only an explicit --allow-host true does that,
+  // and it is required here for the same reason it is required to launch one.
+  if (settings.allowHost !== true) {
+    throw gatewayBlocked(
+      "owned-gateway-authorization-required",
+      "adopting a retained gateway requires --allow-host true; a fixture manifest is data, not authorization",
+    );
+  }
+  if (!ownership || typeof ownership !== "object" || ownership.contract !== ISOLATED_GATEWAY_OWNERSHIP_CONTRACT) {
+    throw gatewayBlocked("owned-gateway-record-invalid", JSON.stringify(ownership));
+  }
+  for (const field of ["profileRoot", "runtimeDir", "platform", "daemonPid", "daemonExecutablePath", "url", "credentialFile"]) {
+    if (ownership[field] === undefined || ownership[field] === null || ownership[field] === "") {
+      throw gatewayBlocked("owned-gateway-record-incomplete", field);
+    }
+  }
+  const lease = ownership.lease;
+  if (!lease || typeof lease.deadlineAt !== "number") {
+    throw gatewayBlocked("owned-gateway-lease-missing", "a retained daemon must carry a bounded lease");
+  }
+  if (Date.now() > lease.deadlineAt) {
+    throw gatewayBlocked("owned-gateway-lease-expired", "deadlineAt=" + lease.deadlineAt + " now=" + Date.now());
+  }
+  // Identity first: the recorded PID must still BE the same executable FILE, by full
+  // normalized path. A basename match would accept a different file of the same name.
+  const live = probeProcessIdentity(ownership.daemonPid);
+  if (!live.alive) {
+    throw gatewayBlocked("owned-gateway-not-running", ownership.daemonPid + " " + ownership.daemonExecutablePath);
+  }
+  const identityProven = executablePathMatches(live.executable, ownership.daemonExecutablePath, ownership.platform);
+  if (!identityProven) {
+    throw gatewayBlocked(
+      "owned-gateway-identity-mismatch",
+      "pid " + ownership.daemonPid + " live=" + live.executable + " recorded=" + ownership.daemonExecutablePath,
+    );
+  }
+  if (!existsSync(ownership.credentialFile)) {
+    throw gatewayBlocked("owned-gateway-credential-missing", ownership.credentialFile);
+  }
+
+  const profile = {
+    root: ownership.profileRoot,
+    paths: { runtime: ownership.runtimeDir },
+    cleanup() {
+      rmSync(ownership.profileRoot, { recursive: true, force: true });
+    },
+  };
+  const transport = daemonControlTransport(profile, { platform: ownership.platform });
+  let control = null;
+
+  const stopAdopted = async () => {
+    // In-band first: the daemon persists its remote sessions and exits 0, which closes the
+    // control socket. That close is the receipt - never a poll on the process table.
+    if (control) {
+      control.call({ type: "shutdown" }).catch(() => null);
+      try {
+        await deadline(new Promise((resolve) => control.onClose(resolve)), "adopted gateway shutdown", timeoutMs);
+      } catch {
+        /* The daemon did not stop in band; fall through to the identity-checked kill. */
+      }
+    }
+    const still = probeProcessIdentity(ownership.daemonPid);
+    if (!still.alive) {
+      return { stopped: true, graceful: true, pid: ownership.daemonPid, executablePath: ownership.daemonExecutablePath };
+    }
+    const matches = executablePathMatches(still.executable, ownership.daemonExecutablePath, ownership.platform);
+    if (!matches) {
+      return {
+        stopped: false,
+        graceful: false,
+        killed: false,
+        killSkipped: "live executable does not match the spawn-recorded executable",
+        pid: ownership.daemonPid,
+        executablePath: ownership.daemonExecutablePath,
+        live: still,
+      };
+    }
+    let killed = false;
+    let killError = null;
+    try {
+      killExactPid(ownership.daemonPid);
+      killed = true;
+    } catch (error) {
+      killError = String(error);
+    }
+    return { stopped: killed, graceful: false, killed, killError, pid: ownership.daemonPid, executablePath: ownership.daemonExecutablePath };
+  };
+
+  try {
+    control = await connectDaemonControl(transport, { timeoutMs });
+    const statusResponse = await control.call({ type: "remoteGetStatus" });
+    if (!statusResponse || statusResponse.type !== "remoteStatusOk") {
+      throw gatewayBlocked("owned-gateway-status-unreadable", JSON.stringify(statusResponse));
+    }
+    const status = statusResponse.status || null;
+    if (!status || status.isRunning !== true) {
+      throw gatewayBlocked("owned-gateway-not-running", JSON.stringify(status));
+    }
+    const bound = parseLoopbackBoundAddress(status.boundAddress);
+    if (!bound) {
+      throw gatewayBlocked("owned-gateway-bound-address-not-loopback", String(status.boundAddress));
+    }
+    const url = "http://" + bound.host + ":" + bound.port;
+    const epoch =
+      control.handshake.epoch === undefined || control.handshake.epoch === null
+        ? null
+        : String(control.handshake.epoch);
+    if (ownership.daemonEpoch !== null && ownership.daemonEpoch !== epoch) {
+      throw gatewayBlocked("owned-gateway-epoch-drift", "recorded=" + ownership.daemonEpoch + " live=" + epoch);
+    }
+    if (ownership.url !== url) {
+      throw gatewayBlocked("owned-gateway-address-drift", "recorded=" + ownership.url + " live=" + url);
+    }
+    const token = parseDaemonTransportToken(readFileSync(ownership.credentialFile, "utf8"));
+    if (token === null) {
+      throw gatewayBlocked("owned-gateway-credential-empty", ownership.credentialFile);
+    }
+    // The adopted daemon's own auth store must accept the retained credential, exactly as the
+    // launcher required of the daemon it started.
+    const capabilities = await gatewayJson(
+      url + REFERENCE_CAPABILITIES_PATH,
+      { headers: { accept: "application/json", authorization: "Bearer " + token } },
+      timeoutMs,
+    );
+    if (capabilities.status !== 200) {
+      throw gatewayBlocked(
+        "owned-gateway-token-refused",
+        "GET " + REFERENCE_CAPABILITIES_PATH + " -> " + capabilities.status + " " + String(capabilities.text).slice(0, 500),
+      );
+    }
+
+    return {
+      contract: ISOLATED_GATEWAY_CONTRACT,
+      adopted: true,
+      ownership,
+      profile,
+      entry: {
+        pid: ownership.daemonPid,
+        executablePath: ownership.daemonExecutablePath,
+        argv: [],
+        role: "adopted-isolated-gateway",
+      },
+      controlTransport: transport,
+      url,
+      port: bound.port,
+      boundAddress: status.boundAddress,
+      pinnedPort: REMOTE_GATEWAY_PORT,
+      portRequirement: {
+        fixed: true,
+        port: REMOTE_GATEWAY_PORT,
+        authority: "remote/state.rs REMOTE_GATEWAY_PORT, forced on config load and on configure",
+        urlAuthority: "the daemon's own RemoteGetStatus boundAddress",
+      },
+      token,
+      credentialFile: ownership.credentialFile,
+      daemonTransport: {
+        kind: transport.kind,
+        platform: transport.platform,
+        runtimeDir: transport.runtimeDir,
+        endpoint: control.endpoint,
+        requiresToken: transport.requiresToken,
+      },
+      daemonSocketPath: transport.kind === DAEMON_TRANSPORT_KINDS.unixSocket ? transport.socketPath : null,
+      daemonPid: ownership.daemonPid,
+      daemonEpoch: epoch,
+      deviceId: null,
+      devicePermission: null,
+      machineId: capabilities.json && capabilities.json.machineId ? capabilities.json.machineId : null,
+      referenceHostId:
+        capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
+      remoteStatus: status,
+      stderrTail: () => "",
+      stop: stopAdopted,
+    };
+  } catch (error) {
+    // Ownership was proven before any signal: reap only then, and otherwise leave the
+    // process alone while naming exactly what must be reaped and by when.
+    if (identityProven) {
+      const outcome = await stopAdopted().catch(() => ({ stopped: false }));
+      error.detail =
+        (error.detail ? error.detail + " " : "") +
+        (outcome.stopped
+          ? "the adopted daemon was stopped and its profile removed"
+          : "profile-left-behind=" + ownership.profileRoot + " pid=" + ownership.daemonPid);
+    } else {
+      error.detail =
+        (error.detail ? error.detail + " " : "") +
+        "not-signalled pid=" + ownership.daemonPid + " executable=" + ownership.daemonExecutablePath +
+        " leaseDeadlineAt=" + lease.deadlineAt;
+    }
+    if (control) {
+      try {
+        control.close();
+      } catch {
+        /* The socket dies with the daemon. */
+      }
     }
     throw error;
   }

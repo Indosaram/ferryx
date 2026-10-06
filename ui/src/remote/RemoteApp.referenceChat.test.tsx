@@ -109,8 +109,22 @@ function readableFile(contents: string, name: string, type: string): File {
   return file;
 }
 
+/** One request the app made, as the harness recorded it. */
+interface HarnessCall {
+  url: string;
+  method: string;
+  body: unknown;
+}
+
 interface Harness {
-  readonly calls: { readonly url: string; readonly method: string; readonly body: unknown }[];
+  readonly calls: HarnessCall[];
+  /**
+   * Resolves with the FIRST recorded request whose URL contains `fragment` - immediately when one
+   * already exists, otherwise the moment one is recorded. Rejects after `timeoutMs` carrying every
+   * URL the app actually requested, so a bounded wait that is never satisfied reports what
+   * happened instead of collapsing into "expected undefined to be defined".
+   */
+  readonly whenCalled: (fragment: string, timeoutMs?: number) => Promise<HarnessCall>;
 }
 
 function installFetch(options: {
@@ -125,7 +139,39 @@ function installFetch(options: {
   capabilities?: Record<string, unknown>;
   sessions?: () => unknown[];
 } = {}): Harness {
-  const calls: { url: string; method: string; body: unknown }[] = [];
+  const calls: HarnessCall[] = [];
+  interface Waiter {
+    readonly fragment: string;
+    readonly resolve: (call: HarnessCall) => void;
+    readonly timer: ReturnType<typeof setTimeout>;
+  }
+  const waiters: Waiter[] = [];
+  const record = (call: HarnessCall): void => {
+    calls.push(call);
+    for (let index = waiters.length - 1; index >= 0; index -= 1) {
+      if (!call.url.includes(waiters[index].fragment)) continue;
+      const [waiter] = waiters.splice(index, 1);
+      clearTimeout(waiter.timer);
+      waiter.resolve(call);
+    }
+  };
+  const whenCalled = (fragment: string, timeoutMs = 2000): Promise<HarnessCall> => {
+    const existing = calls.find((call) => call.url.includes(fragment));
+    if (existing) return Promise.resolve(existing);
+    return new Promise<HarnessCall>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const index = waiters.findIndex((waiter) => waiter.timer === timer);
+        if (index >= 0) waiters.splice(index, 1);
+        const seen = calls.map((call) => `${call.method} ${call.url}`).join(" | ");
+        reject(
+          new Error(
+            `No request containing "${fragment}" was recorded within ${timeoutMs}ms. Recorded: ${seen || "(none)"}`,
+          ),
+        );
+      }, timeoutMs);
+      waiters.push({ fragment, resolve, timer });
+    });
+  };
   const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     const method = (init?.method ?? "GET").toUpperCase();
@@ -137,7 +183,7 @@ function installFetch(options: {
         parsed = init.body;
       }
     }
-    calls.push({ url, method, body: parsed });
+    record({ url, method, body: parsed });
     if (url.includes("/api/v1/socket-ticket")) {
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
     }
@@ -185,7 +231,22 @@ function installFetch(options: {
     return jsonResponse({});
   });
   vi.stubGlobal("fetch", impl as unknown as typeof fetch);
-  return { calls };
+  return { calls, whenCalled };
+}
+
+/**
+ * Await one bounded harness signal, attaching the composer's own refusal text if it times out, so a
+ * failed wait reports what the lane did instead of collapsing into "expected undefined to be
+ * defined". Takes the signal (not a fragment) so exactly one bounded wait is ever outstanding: the
+ * caller subscribes, then awaits, then arms the next one.
+ */
+async function settleRequest(signal: Promise<HarnessCall>): Promise<HarnessCall> {
+  try {
+    return await signal;
+  } catch (error) {
+    const refusal = screen.queryByTestId("chat-composer-attach-error")?.textContent ?? "(none)";
+    throw new Error(`${(error as Error).message}\ncomposer refusal: ${refusal}`);
+  }
 }
 
 function setWidth(width: number): void {
@@ -417,17 +478,37 @@ describe("reference chat lane (task 12)", () => {
   it("QA-07: a staged file becomes an editable mention through /files", async () => {
     setWidth(390);
     const harness = installFetch();
+    // Readiness, subscribed BEFORE the render so no request can be missed and awaited BEFORE the
+    // file change so the prerequisite actually holds rather than being raced.
+    //
+    // The lane's newest-page read is the readiness proof, from source: it is gated on
+    // `chatReferenceTarget` being non-null, and the ref is assigned from that same value in the
+    // render body (`chatTargetRef.current = chatReferenceTarget`), which commits before that
+    // read's effect runs - so a recorded /history request means the ref was bound. `attachChatFiles`
+    // returns early, with only a warning, while the ref is null, so triggering the change first can
+    // discard the event outright. Which of the two gates (target binding, or the file read + digest
+    // that follows it) the observed order dependence comes from is a SCHEDULING HYPOTHESIS until the
+    // merged run; this sequence is correct under either.
+    const laneReady = harness.whenCalled("/history");
     render(<RemoteApp />);
     await screen.findByTestId("chat-composer-textarea");
+    await act(async () => {
+      await settleRequest(laneReady);
+    });
+
+    // Armed only once readiness is settled, so one bounded wait is outstanding at a time and a
+    // readiness failure cannot leave a second rejection unhandled.
+    const stagedRequest = harness.whenCalled("/files");
 
     const file = readableFile("abc", "notes.txt", "text/plain");
     await act(async () => {
       fireEvent.change(screen.getByTestId("file-upload-input"), { target: { files: [file] } });
     });
 
-    const staged = harness.calls.find((call) => call.url.includes("/files"));
-    expect(staged).toBeDefined();
-    const body = staged!.body as { params: Record<string, unknown> };
+    const staged = await settleRequest(stagedRequest);
+    expect(staged.url).toContain("/files");
+    expect(staged.method).toBe("POST");
+    const body = staged.body as { params: Record<string, unknown> };
     expect(body.params.name).toBe("notes.txt");
     expect(body.params.mediaType).toBe("text/plain");
     expect(body.params.sizeBytes).toBe(3);

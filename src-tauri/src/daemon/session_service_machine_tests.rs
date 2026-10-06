@@ -527,12 +527,20 @@ async fn machine_session_capacity_limit_is_configurable() {
 // Known gap: the remote/SSH branch of the projector (served from RemoteRuntime::details) is not
 // covered here. TerminalService builds its RemoteRuntime with the real SshConnector and exposes
 // no seam to seed a session entry, so an authentic no-network SSH fixture does not exist under
-// test-only scope; that branch remains source-read only.
+// A bound that expires signals the recorded pid only after its kernel image is proved to be
+// the launched binary, and a drain a descendant keeps open is cut short with the captured
+// stage text preserved; neither outcome is reported as a success it did not observe.
 
 const PROJECTOR_CHILD_ROOT: &str = "FERRYX_PROJECTOR_CHILD_ROOT";
 
-fn projector_child(name: &str, root: &std::path::Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+/// Spawns this test binary again for one scenario. The path is passed in rather than
+/// re-derived, so the path a teardown verifies is provably the one that was launched.
+fn projector_child(
+    name: &str,
+    root: &std::path::Path,
+    launched: &std::path::Path,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(launched);
     command
         .args(["--exact", name, "--nocapture"])
         .env(PROJECTOR_CHILD_ROOT, root)
@@ -546,37 +554,321 @@ fn projector_child(name: &str, root: &std::path::Path) -> tokio::process::Comman
     command
 }
 
+/// Bound for one child scenario. A blocked child must fail this parent naming the stage it
+/// reported, not hang the suite; a bound is a bound, never a sleep or a poll.
+
+const PROJECTOR_CHILD_BOUND: Duration = Duration::from_secs(90);
+
+/// Bounds for the two waits a blocked child forces. Neither may be unbounded, and neither failure
+/// may be reported as a success.
+const PROJECTOR_CLEANUP_BOUND: Duration = Duration::from_secs(10);
+const PROJECTOR_DRAIN_BOUND: Duration = Duration::from_secs(10);
+
+/// Stage markers the child prints and flushes, so a blocked child names the phase it did not
+/// complete instead of leaving the next reader to guess at ConPTY or a lock. The markers are
+/// printed by the shared helpers (fixture, spawn, teardown), so the last one printed is the
+/// phase that did not return: a projection blocked after spawn reports the spawn marker.
+fn projector_child_stage(stage: &str) {
+    use std::io::Write;
+    println!("PROJECTOR-STAGE {stage}");
+    let _ = std::io::stdout().flush();
+}
+
+fn projector_child_last_stage(combined: &str) -> String {
+    combined
+        .lines()
+        .filter_map(|line| {
+            line.split_once("PROJECTOR-STAGE ")
+
+                .map(|(_, stage)| stage.trim().to_owned())
+        })
+        .next_back()
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+/// The kernel's image path for a live pid: the identity a teardown compares before it signals.
+///
+/// Linux reads the `/proc` link the crate already uses for process paths; macOS uses
+/// `proc_pidpath`, the kernel-resolved image `manual_ssh` reads; Windows uses
+/// `QueryFullProcessImageNameW` through the crate's own kernel32 declarations. A target with no
+/// image lookup returns nothing, so its teardown refuses to signal rather than guessing.
+#[cfg(target_os = "linux")]
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    // PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN).
+    let mut buffer = vec![0u8; 4 * 1024];
+    let len = unsafe {
+        libc::proc_pidpath(
+            pid as libc::pid_t,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    if len <= 0 {
+        return None;
+    }
+    buffer.truncate(len as usize);
+    String::from_utf8(buffer).ok().map(PathBuf::from)
+}
+
+/// The same raw kernel32 declarations `ipc::windows_process_cwd` and the PTY suspend path use:
+/// `windows-sys` is pulled with a narrow feature list, so a process API is reached through this
+/// crate's established extern block instead of widening the manifest.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+    fn QueryFullProcessImageNameW(
+        process: *mut std::ffi::c_void,
+        flags: u32,
+        name: *mut u16,
+        size: *mut u32,
+    ) -> i32;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+}
+
+/// Owns the process handle so every early return closes it exactly once.
+#[cfg(windows)]
+struct ProjectorProcessHandle(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for ProjectorProcessHandle {
+    fn drop(&mut self) {
+        // SAFETY: owned non-null handle from OpenProcess; closed exactly once.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// The image path of a live Windows process, as the kernel reports it.
+#[cfg(windows)]
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    // PROCESS_QUERY_LIMITED_INFORMATION is the documented minimum for the image name.
+    // SAFETY: scalar inputs, no borrowed buffers; the returned handle is owned.
+    let raw = unsafe { OpenProcess(0x1000, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    let handle = ProjectorProcessHandle(raw);
+    let mut buffer = vec![0u16; 4 * 1024];
+    let mut size = u32::try_from(buffer.len()).ok()?;
+    // FORMAT_WIN32 (0) yields the drive-letter path `current_exe` also reports, so the two are
+    // comparable without a device-path translation step.
+    // SAFETY: the buffer is initialized and writable and holds exactly `size` WCHARs; the API
+    // updates `size` in place with the number of WCHARs written.
+    let ok = unsafe { QueryFullProcessImageNameW(handle.0, 0, buffer.as_mut_ptr(), &mut size) };
+    if ok == 0 {
+        return None;
+    }
+    buffer.truncate(usize::try_from(size).ok()?);
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
+}
+
+/// Targets with no image lookup here (BSD and others) refuse to signal rather than guess.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn process_image_path(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+fn same_executable(image: &std::path::Path, launched: &std::path::Path) -> bool {
+    let image = std::fs::canonicalize(image).unwrap_or_else(|_| image.to_path_buf());
+    let launched = std::fs::canonicalize(launched).unwrap_or_else(|_| launched.to_path_buf());
+    image == launched
+}
+
+/// Signalled teardown for a child that exceeded its bound, returning a receipt of what it did.
+///
+/// The pid is the one `spawn` returned and the process is still unreaped, so the kernel cannot
+/// have handed it to anyone else; on top of that the pid's kernel image must equal the binary
+/// this parent launched before any signal is sent. Matching a process by name, command line or
+/// any other pattern is not done here, and when the image cannot be read nothing is signalled and
+/// the refusal is reported for a human to resolve.
+fn terminate_projector_child(
+    child: &mut tokio::process::Child,
+    launched: &std::path::Path,
+    pid: Option<u32>,
+) -> String {
+    let Some(pid) = pid else {
+        return "no pid was recorded at spawn: nothing signalled".to_owned();
+    };
+    match process_image_path(pid) {
+        Some(image) if same_executable(&image, launched) => match child.start_kill() {
+            Ok(()) => format!(
+                "signalled pid {pid} after verifying its image {}",
+                image.display()
+            ),
+            Err(error) => format!("signalling the verified pid {pid} failed: {error}"),
+        },
+        Some(image) => format!(
+            "refused to signal pid {pid}: its image {} is not the launched {}",
+            image.display(),
+            launched.display()
+        ),
+        None => format!("refused to signal pid {pid}: its image could not be read"),
+    }
+}
+
+/// Reads a child pipe to EOF into a shared buffer.
+///
+/// The buffer is shared instead of returned, so a parent that stops waiting for the drain still
+/// keeps every byte that arrived - including the stage marker that names a blocked phase.
+fn drain_projector_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if let Ok(mut buffer) = buffer.lock() {
+                        buffer.extend_from_slice(&chunk[..read]);
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Runs one projector case in a private child process and proves the case actually ran.
+///
+/// The child is awaited under a bound while both of its pipes are drained concurrently, so a
+/// child that blocks cannot deadlock against a parent that reads only after exit and cannot hang
+/// the suite. A child that exceeds the bound is signalled only after its pid is proved to be the
+/// binary this parent launched, and no teardown outcome is reported as a success it did not
+/// observe.
 async fn projector_child_case(name: &str) {
+    let launched = std::env::current_exe().unwrap();
     let root = tempfile::tempdir().unwrap();
-    let output = projector_child(name, root.path()).output().await.unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut child = projector_child(name, root.path(), &launched)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    // Drain both pipes into shared buffers while the child runs: a child that fills a pipe buffer
+    // cannot deadlock against a parent that reads only after it exits, and a descendant that
+    // inherited a pipe can leave the drain unfinished without taking the captured text with it.
+    let stdout_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut stdout_task = drain_projector_pipe(stdout, Arc::clone(&stdout_buffer));
+    let mut stderr_task = drain_projector_pipe(stderr, Arc::clone(&stderr_buffer));
+    let waited = tokio::time::timeout(PROJECTOR_CHILD_BOUND, child.wait()).await;
+    let timed_out = waited.is_err();
+    let teardown = if timed_out {
+        terminate_projector_child(&mut child, &launched, pid)
+    } else {
+        "not needed: the child exited inside the bound".to_owned()
+    };
+    // The wait after a signal is bounded too, and a child still unreaped after it is reported as
+    // unreaped rather than reaped: this parent only claims a cleanup it actually observed.
+    let reaped = match waited {
+        Ok(status) => Some(status),
+        Err(_) => tokio::time::timeout(PROJECTOR_CLEANUP_BOUND, child.wait())
+            .await
+            .ok()
+            .and_then(Result::ok),
+    };
+    let drained = tokio::time::timeout(PROJECTOR_DRAIN_BOUND, async {
+        let _ = (&mut stdout_task).await;
+        let _ = (&mut stderr_task).await;
+    })
+    .await
+    .is_ok();
+    if !drained {
+        stdout_task.abort();
+        stderr_task.abort();
+    }
+    // Read after the drain attempt, so a drain cut short still keeps the bytes that arrived.
+    let stdout = String::from_utf8_lossy(&stdout_buffer.lock().unwrap()).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_buffer.lock().unwrap()).into_owned();
+    let combined = format!("{stdout}{stderr}");
+    let stage = projector_child_last_stage(&combined);
     let receipt = root.path().to_owned();
     root.close().unwrap();
+    let cleanup = if reaped.is_none() {
+        "CLEANUP FAILED: still unreaped after the bounded wait"
+    } else if !drained {
+        "drain cut short: a descendant still held the pipes, captured text preserved"
+    } else {
+        "reaped and drained"
+    };
     assert!(
-        output.status.success(),
+        !timed_out,
+        "{name} (pid {pid:?}) exceeded {PROJECTOR_CHILD_BOUND:?}; last stage={stage}; teardown={teardown}; cleanup={cleanup}; stdout={stdout:?} stderr={stderr:?}"
+    );
+    // The exit must be observed, not assumed: a child whose wait failed is a cleanup failure and
+    // is reported as one instead of being read as a pass.
+    let Some(status) = reaped else {
+        panic!("{name}: the child (pid {pid:?}) was not observed to exit inside the bounded wait")
+    };
+    assert!(
+        status.success(),
         "{name} failed: stdout={stdout:?} stderr={stderr:?}"
     );
+
+    // Exact filter, count and status: the name must select exactly this one child and it must
+    // pass, so a mistyped name - which reports "0 passed" and still exits 0 - cannot pass here.
     assert!(
-        stdout.contains("F1-PROJECTOR") || stderr.contains("F1-PROJECTOR"),
+        combined.contains("test result: ok. 1 passed; 0 failed"),
+        "{name} did not run as exactly one passing test: stdout={stdout:?} stderr={stderr:?}"
+    );
+    // The child must have reached its own projector assertion instead of taking the standalone
+    // no-op return, so a body that never ran can never satisfy this parent.
+    assert!(
+        combined.contains("F1-PROJECTOR"),
         "{name} never reached the projector assertion: stdout={stdout:?} stderr={stderr:?}"
     );
+    assert!(
+        !combined.contains("F1-PROJECTOR-SKIPPED"),
+        "{name} skipped its scenario body: stdout={stdout:?} stderr={stderr:?}"
+    );
     eprintln!(
-        "F1-PROJECTOR parent {name}: private root={} removed={}",
+        "F1-PROJECTOR parent {name}: one test passed, last stage={stage}, cleanup={cleanup}, private root={} removed={}",
         receipt.display(),
         !receipt.exists()
     );
 }
 
-fn projector_child_root() -> PathBuf {
-    PathBuf::from(std::env::var_os(PROJECTOR_CHILD_ROOT).expect("child runs with a private root"))
+
+/// Child-mode sentinel: a child body runs only when the parent armed this root, so selecting the
+/// child directly or running the full suite is a no-op instead of a failure - the standalone
+/// handling `provider_resume_child` already uses. An unarmed child never reaches the fixture, so
+/// it never reads or creates the real machine identity.
+fn projector_child_root_if_armed() -> Option<PathBuf> {
+    std::env::var_os(PROJECTOR_CHILD_ROOT).map(PathBuf::from)
+}
+
+fn projector_child_standalone_return() {
+    eprintln!("F1-PROJECTOR-SKIPPED {PROJECTOR_CHILD_ROOT} unset");
 }
 
 /// Private fixture: a registered plain workspace plus a daemon whose durable identity, catalog and
 /// session metadata all live inside the child's own root.
-async fn projector_child_fixture() -> (PathBuf, DaemonServer, Arc<DaemonSessionService>, PathBuf) {
-    let root = projector_child_root();
+async fn projector_child_fixture() -> Option<(PathBuf, DaemonServer, Arc<DaemonSessionService>, PathBuf)> {
+    let root = projector_child_root_if_armed()?;
+    projector_child_stage("fixture");
+    // Armed means the parent aimed the whole identity surface at a private fixture, so refuse a
+    // root that could let the projector read or create the real machine identity.
+    assert!(
+        root.is_absolute(),
+        "projector child root must be absolute: {root:?}"
+    );
+    assert!(
+        std::env::var_os("FERRYX_DATA_DIR")
+            .is_some_and(|data| PathBuf::from(data).starts_with(&root)),
+        "projector child must run with FERRYX_DATA_DIR inside its private root: {root:?}"
+    );
     let project = root.join("project");
     std::fs::create_dir_all(project.join("sub")).unwrap();
     let owner = DaemonServer::new_with_paths(
@@ -588,7 +880,8 @@ async fn projector_child_fixture() -> (PathBuf, DaemonServer, Arc<DaemonSessionS
         .workspace_service
         .register("projector-ws", project.to_str().unwrap())
         .unwrap();
-    (root, owner, service, project)
+
+    Some((root, owner, service, project))
 }
 
 async fn projector_child_spawn(
@@ -598,6 +891,7 @@ async fn projector_child_spawn(
     cols: u16,
     rows: u16,
 ) -> String {
+    projector_child_stage("spawn");
     service
         .handle_spawn(request_id, "projector-ws", None, cwd, cols, rows, None, None, None)
         .await
@@ -605,6 +899,7 @@ async fn projector_child_spawn(
 }
 
 async fn projector_child_cleanup(service: &Arc<DaemonSessionService>) {
+    projector_child_stage("teardown");
     for id in service.terminal_service.list_sessions() {
         service.terminal_service.close_session(&id).await.unwrap();
     }
@@ -612,7 +907,10 @@ async fn projector_child_cleanup(service: &Arc<DaemonSessionService>) {
 
 #[tokio::test]
 async fn projector_desktop_gui_child_canonical_local_target() {
-    let (root, owner, service, project) = projector_child_fixture().await;
+    let Some((root, owner, service, project)) = projector_child_fixture().await else {
+        projector_child_standalone_return();
+        return;
+    };
     let epoch = Epoch(4_242);
     let id = projector_child_spawn(
         &service,
@@ -671,7 +969,10 @@ async fn projector_desktop_gui_child_canonical_local_target() {
 
 #[tokio::test]
 async fn projector_desktop_gui_child_foreign_workspace() {
-    let (_root, owner, service, _project) = projector_child_fixture().await;
+    let Some((_root, owner, service, _project)) = projector_child_fixture().await else {
+        projector_child_standalone_return();
+        return;
+    };
     let epoch = Epoch(4_243);
     let id = projector_child_spawn(&service, "projector-request-owner", None, 80, 24).await;
     let catalog = service.workspace_service.catalog().unwrap();
@@ -712,7 +1013,10 @@ async fn projector_desktop_gui_child_foreign_workspace() {
 
 #[tokio::test]
 async fn projector_desktop_gui_child_root_escape() {
-    let (root, owner, service, project) = projector_child_fixture().await;
+    let Some((root, owner, service, project)) = projector_child_fixture().await else {
+        projector_child_standalone_return();
+        return;
+    };
     let epoch = Epoch(4_244);
     let id = projector_child_spawn(
         &service,
@@ -753,7 +1057,10 @@ async fn projector_desktop_gui_child_root_escape() {
 
 #[tokio::test]
 async fn projector_desktop_gui_child_non_ready_workspace() {
-    let (_root, owner, service, _project) = projector_child_fixture().await;
+    let Some((_root, owner, service, _project)) = projector_child_fixture().await else {
+        projector_child_standalone_return();
+        return;
+    };
     let epoch = Epoch(4_245);
     let id = projector_child_spawn(&service, "projector-request-nonready", None, 80, 24).await;
     let ready = service.workspace_service.catalog().unwrap();

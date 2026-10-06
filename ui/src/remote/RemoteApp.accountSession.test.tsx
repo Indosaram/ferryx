@@ -298,6 +298,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
         path.includes("/api/v1/workspace/select"),
       ),
     ).toBe(false);
+    // The header's status cluster, which owns the mode switch, is only rendered once a worktree
+    // is chosen (account preselection renders the collapsed picker alone), so the terminal is
+    // asked for after the selection, not before it.
+    await switchToTerminalMode();
 
     act(() => {
       fireEvent.click(topContextTrigger);
@@ -508,6 +512,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
 
+    await switchToTerminalMode();
+
     currentHostWorkspace = "wsB";
     currentHostSlug = "feature-b";
     currentHostSessionId = "sess-new-wsB";
@@ -694,6 +700,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     await act(async () => {
       heldStateRead.resolve();
     });
+
+    await switchToTerminalMode();
 
     await waitFor(() => {
       expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();

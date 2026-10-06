@@ -563,13 +563,19 @@ pub fn omo_form_on_screen(screen: &str) -> bool {
 
 /// Is an omo form on this screen the form itself, or a pane herdr names something else?
 ///
-/// A pane herdr names `omo`, `pi` or nothing at all reads an omo form on its own: the form's own
-/// text is the evidence, and `omo_reads_forms` is what keeps every other agent out. A pane it
-/// names `claude` reads one only while herdr reports it waiting on the user, because a claude pane
-/// draws dialogs of its own. Upstream `readKnownPrompt:2476` also gates an unnamed pane on that
-/// status; this lane reads it on the form's own text, which is the reader set the MANIFEST records.
+/// The pin's own rule, kept as it stands (`readKnownPrompt:2476`):
+///
+/// ```text
+/// const omoTrusted = (agent !== "claude" && agent !== "") || pane.agent_status === "blocked";
+/// ```
+///
+/// A pane herdr names `omo` or `pi` reads an omo form on its own. A pane it names `claude`, or
+/// names nothing at all, reads one only on evidence: herdr reports it waiting on the user, or the
+/// pane session's own pending call matches the form on screen - the ask-known arm of the chain.
+/// An unnamed pane is the case where the screen's text is the weakest evidence, because a form
+/// another program printed reads exactly like one the runtime drew.
 pub fn omo_form_is_trusted(agent: &str, agent_status: Option<&str>) -> bool {
-    agent != "claude" || agent_status == Some("blocked")
+    (agent != "claude" && !agent.is_empty()) || agent_status == Some("blocked")
 }
 
 /// Does the reference read an omo form on a pane this agent names?
@@ -1512,9 +1518,10 @@ fn parse_omo_pending(lines: &[String], pending: &[OmoAsk]) -> Option<OmoCard> {
         body: None,
         options,
         multi_select: asked.multi_select,
-        // The widget's own-answer row ("Type your reply") sits one past the options, where the
-        // reference's menu labels put it; the form it opens shows OmO's own row instead.
-        custom_option_index: if asked.multi_select { None } else { Some(option_count as u32 + 1) },
+        // The pin's own value (`prompt.ts:1058`): one past the options, the same number the form
+        // this widget opens reports, so the two cards carry one id. The row past the options is
+        // the widget's own "Type your reply" in the private menu, which the card does not show.
+        custom_option_index: if asked.multi_select { None } else { Some(option_count as u32) },
         steps: omo_steps(&tabs, Some(ask)),
         responder: OmoResponder::Pending,
         call: Some(ask.id.as_str()),
@@ -2190,7 +2197,17 @@ mod tests {
     #[test]
     fn only_the_agents_the_reference_names_read_an_omo_form() {
         assert!(card_for("omo", FORM_TABBED, ASKS_TWO_QUESTIONS).is_some());
-        assert!(card_for("", FORM_TABBED, ASKS_NONE).is_some(), "a pane herdr names no agent is omo's own");
+        // An unnamed pane still reads the form - on the same evidence a claude pane needs
+        // (prompt.ts:2476): the session's own pending call is the form on screen. The screen's
+        // text alone is not enough, which is the case another program's printout fits.
+        assert!(
+            card_for("", FORM_TABBED, ASKS_TWO_QUESTIONS).is_some(),
+            "an unnamed pane's own call names the form it answers"
+        );
+        assert!(
+            card_for("", FORM_TABBED, ASKS_NONE).is_none(),
+            "an unnamed pane with nothing to name the form is not omo's (pin parity, prompt.ts:2476)"
+        );
         assert!(card_for("pi", FORM_TABBED, ASKS_NONE).is_some(), "herdr names an omo pane pi while it waits");
         assert!(
             card_for("claude", FORM_TABBED, ASKS_TWO_QUESTIONS).is_some(),
@@ -2203,7 +2220,9 @@ mod tests {
         assert!(omo_form_is_trusted("claude", Some("blocked")));
         assert!(!omo_form_is_trusted("claude", Some("idle")));
         assert!(omo_form_is_trusted("omo", None));
-        assert!(omo_form_is_trusted("", None));
+        assert!(omo_form_is_trusted("pi", None), "herdr names an omo pane pi while it waits");
+        // pin parity (prompt.ts:2476): `agent !== "claude" && agent !== ""`
+        assert!(!omo_form_is_trusted("", None), "an unnamed pane reads the form only on evidence");
         for agent in ["omp", "codex", "opencode", "grok", "cursor"] {
             assert!(!omo_reads_forms(agent), "{agent} never reaches the omo family");
             assert!(card_for(agent, FORM_TABBED, ASKS_NONE).is_none(), "{agent} is not an omo form's reader");

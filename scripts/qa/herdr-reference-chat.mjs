@@ -35,6 +35,15 @@
  *   BLOCKED when something else holds it, without touching that service. Run the harness
  *   on a dedicated free host; a configured external host still needs no launch at all.
  *
+ *   A fixture produced by the provisioner's retained handoff carries `ownedGateway`: this
+ *   runner ADOPTS that exact daemon - the one the fixture's original PTYs were spawned in -
+ *   instead of launching a second one, so the sessions, the epoch and the recorded identity
+ *   stay the same across the two processes. Adopting requires --allow-host true like any
+ *   other host action: the ownership record in a fixture manifest is DATA, never permission.
+ *   This runner reaps an adopted daemon in its own cleanup, and that cleanup is the only
+ *   thing that does: the record's lease is an adoption deadline, not a lifetime, so if this
+ *   runner never adopts, the verifier reaps the recorded exact PID in its own finally.
+ *
  * EXIT CODES
  *   0  every selected branch passed
  *   2  BLOCKED: a real dependency (host, credential, device, driver, transcript) is missing
@@ -64,6 +73,11 @@ import { randomUUID } from "node:crypto";
 import {
   IsolatedGatewayError,
   OwnedProcessLedger,
+  REFERENCE_CAPABILITIES_PATH,
+  REFERENCE_HOST_ACCESS_KINDS,
+  REFERENCE_NONLOCAL_TRANSPORTS,
+  adoptOwnedGateway,
+  hostAccessContract,
   REFERENCE_HISTORY_DEFAULT_LIMIT,
   REFERENCE_HISTORY_MAX_LIMIT,
   REFERENCE_QA_IDS,
@@ -724,11 +738,121 @@ async function main() {
       throw blocked("candidate-ui-selector-missing", selectors.missing.join(", "));
     }
 
-    // The frozen gateway the scenarios drive. A host that declares startLocal is launched
-    // HERE on a throwaway profile; otherwise the fixture's own URL is used and its
-    // credential file is the only secret this runner reads.
+    // Every configured host's access contract, resolved before any scenario runs. A local
+    // host is reached through a daemon this runner owns; a non-local host (ssh, paired,
+    // account-relay) is reached over the frozen HTTP routes at its own gateway url with its
+    // own credential - the repository's existing mechanism. An incomplete fixture is reported
+    // with the exact missing endpoint or credential, so QA-09's non-local rows are BLOCKED on
+    // a named prerequisite rather than on the transport itself.
+    {
+      const hostAccess = [];
+      const accessBlockers = [];
+      for (const host of fixtureRaw.hosts || []) {
+        try {
+          const access = hostAccessContract(host);
+          hostAccess.push(access);
+          if (access.kind === REFERENCE_HOST_ACCESS_KINDS.httpGateway) {
+            // A non-local host must actually answer before its rows are attempted, and the
+            // answer must be its own: this is the same authenticated capabilities read the
+            // local host goes through, so a wrong URL or a revoked credential is named here
+            // rather than surfacing as an unexplained 401 inside a scenario. A credential that
+            // cannot even be read is the same class of BLOCKED, not a harness interaction
+            // failure, so the reader's own throw is converted here.
+            try {
+              const capabilities = await readGatewayCapabilities(host);
+              access.capabilitiesStatus = capabilities.status;
+              if (capabilities.status !== 200) {
+                accessBlockers.push({
+                  kind: "host-access-unreachable",
+                  hostId: host.id,
+                  transport: host.transport,
+                  reason:
+                    "GET " + REFERENCE_CAPABILITIES_PATH + " -> " + capabilities.status +
+                    " at " + redactUrl(host.url) + " (" + access.credentialTier + " credential)",
+                });
+              }
+            } catch (error) {
+              access.capabilitiesStatus = null;
+              accessBlockers.push({
+                kind: "host-credential-unreadable",
+                hostId: host.id,
+                transport: host.transport,
+                detail: String(access.credentialFile || ""),
+                reason: String(error && error.message ? error.message : error),
+              });
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof IsolatedGatewayError)) throw error;
+          accessBlockers.push({
+            kind: "host-access-contract",
+            hostId: host.id,
+            transport: host.transport,
+            reason: error.reason,
+            detail: error.detail,
+          });
+        }
+      }
+      // Driving a provisioned host is a host action, so it takes the same explicit
+      // authorization as launching one: without it the non-local rows are not attempted and
+      // the missing authorization is named, rather than the transport being called unusable.
+      for (const access of hostAccess) {
+        access.authorized = args.allowHost === true;
+      }
+      result.hostAccess = hostAccess;
+      // Non-local transports the fixture did not configure at all are named as such, so the
+      // QA-09 coverage boundary is visible in the receipt instead of being inferred.
+      const configured = new Set(hostAccess.map((entry) => entry.transport));
+      result.nonLocalTransportsMissing = REFERENCE_NONLOCAL_TRANSPORTS.filter((transport) => !configured.has(transport));
+      if (!args.allowHost && hostAccess.some((entry) => REFERENCE_NONLOCAL_TRANSPORTS.includes(entry.transport))) {
+        accessBlockers.push({
+          kind: "host-access-authorization-required",
+          reason: "driving a provisioned non-local host requires --allow-host true",
+          transports: hostAccess
+            .filter((entry) => REFERENCE_NONLOCAL_TRANSPORTS.includes(entry.transport))
+            .map((entry) => entry.transport),
+        });
+      }
+      for (const entry of accessBlockers) result.blockers.push(entry);
+    }
+
+    // The frozen gateway the scenarios drive, in one of three shapes: ADOPTED from the
+    // provisioning run that spawned this fixture's original PTYs (the same daemon, epoch and
+    // sessions), LAUNCHED here on a throwaway profile, or already running elsewhere and
+    // referenced by url + credential. A launch is never used when a provisioning run handed
+    // one over: a fresh daemon would have a different epoch and none of those sessions, so
+    // the recorded originalPTY identity would be asserted against a daemon that never
+    // spawned it.
     const localHost = (fixtureRaw.hosts || []).find((entry) => entry.transport === "local");
-    if (localHost && localHost.startLocal === true) {
+    if (localHost && localHost.ownedGateway) {
+      // allowHost is passed through, not assumed: adopting a daemon recorded in a fixture
+      // manifest is a host action, and the adopter refuses without it.
+      const gateway = await adoptOwnedGateway(localHost.ownedGateway, {
+        timeoutMs: args.timeoutMs,
+        allowHost: args.allowHost,
+      });
+      ctx.gateways.push(gateway);
+      localHost.url = gateway.url;
+      localHost.gatewayUrl = gateway.url;
+      localHost.credentialFile = gateway.credentialFile;
+      result.localGateway = {
+        contract: gateway.contract,
+        adopted: true,
+        ownership: gateway.ownership,
+        urlRedacted: redactUrl(gateway.url),
+        port: gateway.port,
+        boundAddress: gateway.boundAddress,
+        portRequirement: gateway.portRequirement,
+        pid: gateway.entry.pid,
+        executablePath: gateway.entry.executablePath,
+        daemonTransport: gateway.daemonTransport,
+        daemonSocketPath: gateway.daemonSocketPath,
+        daemonPid: gateway.daemonPid,
+        daemonEpoch: gateway.daemonEpoch,
+        devicePermission: gateway.devicePermission,
+        referenceHostId: gateway.referenceHostId,
+      };
+    } else if (localHost && localHost.startLocal === true) {
       const gateway = await startIsolatedGateway(args, candidateRaw, ledger);
       ctx.gateways.push(gateway);
       localHost.url = gateway.url;
@@ -738,12 +862,17 @@ async function main() {
       localHost.credentialFile = gateway.credentialFile;
       result.localGateway = {
         contract: gateway.contract,
+        adopted: false,
         urlRedacted: redactUrl(gateway.url),
         port: gateway.port,
         boundAddress: gateway.boundAddress,
         portRequirement: gateway.portRequirement,
         pid: gateway.entry.pid,
         executablePath: gateway.entry.executablePath,
+        // The control endpoint the launcher actually drove (a unix socket, or on Windows the
+        // loopback port/token pair), so the receipt names the transport rather than a path
+        // that does not exist on that platform.
+        daemonTransport: gateway.daemonTransport,
         daemonSocketPath: gateway.daemonSocketPath,
         daemonPid: gateway.daemonPid,
         daemonEpoch: gateway.daemonEpoch,

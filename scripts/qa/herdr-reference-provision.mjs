@@ -20,7 +20,12 @@
  *   - It never turns a missing executable, device or driver endpoint into a PASS: those
  *     become blockers and the process exits nonzero.
  *   - It never touches a production profile. Every host it starts runs on a throwaway
- *     isolated profile.
+ *     isolated profile, and a configured host's daemon is reached only through the
+ *     runtimeDir that host declares (see the configured-host contract below). A declared
+ *     production runtime directory is refused without an explicit opt-in.
+ *   - It never assumes a control transport. A host's daemon is dialled over the transport
+ *     the product publishes on that platform - a unix socket, or on Windows the loopback
+ *     daemon.port/daemon.token pair whose token the first frame must carry.
  *   - It never kills a process it did not spawn. Teardown re-reads each recorded PID's live
  *     executable and kills only an exact match; anything else is reported.
  *
@@ -40,8 +45,6 @@
  */
 
 
-import { createConnection } from "node:net";
-import { createInterface } from "node:readline";
 import {
   existsSync,
   mkdirSync,
@@ -62,9 +65,12 @@ import {
   SPAWN_LEDGER_SCHEMA,
   captureArtifact,
   captureSourceProvenance,
-  daemonSocketPath,
+  connectDaemonControl,
+  daemonControlTransport,
+  hostAccessContract,
   killExactPid,
   launchIsolatedGateway,
+  ownerHostReceiptRequirement,
   probeProcessIdentity,
   redactUrl,
   repoRoot,
@@ -86,9 +92,6 @@ import {
 
 const SCRIPT_ID = "herdr-reference-provision.mjs/1.0.0";
 
-/** The daemon protocol version this producer speaks. Mirrors daemon/protocol.rs. */
-const DAEMON_PROTOCOL_VERSION = 5;
-
 /** The sanitizer version recorded beside every sanitized capture. */
 const SANITIZER_VERSION = "herdr-reference-sanitize/1";
 
@@ -108,7 +111,8 @@ const usage = (message) => {
   process.stderr.write(
     "USAGE ERROR: " + message + "\n\n" +
       "  node scripts/qa/herdr-reference-provision.mjs --config <hosts.json> --out <dir>\n" +
-      "      [--capture-native] [--allow-host true] [--timeout-ms <ms>]\n",
+      "      [--capture-native] [--allow-host true] [--timeout-ms <ms>]\n" +
+      "      [--retain-gateway true --retain-deadline-ms <ms>]\n",
   );
   process.exit(EXIT.USAGE);
 };
@@ -118,7 +122,13 @@ const usage = (message) => {
  * ========================================================================== */
 
 function parseArgs(argv) {
-  const args = { captureNative: false, allowHost: false, timeoutMs: 30000 };
+  const args = {
+    captureNative: false,
+    allowHost: false,
+    timeoutMs: 30000,
+    retainGateway: false,
+    retainDeadlineMs: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const next = () => {
@@ -132,6 +142,8 @@ function parseArgs(argv) {
       case "--capture-native": args.captureNative = true; break;
       case "--allow-host": args.allowHost = next() === "true"; break;
       case "--timeout-ms": args.timeoutMs = Number.parseInt(next(), 10); break;
+      case "--retain-gateway": args.retainGateway = next() === "true"; break;
+      case "--retain-deadline-ms": args.retainDeadlineMs = Number.parseInt(next(), 10); break;
       case "-h":
       case "--help":
         process.stdout.write(readFileSync(new URL(import.meta.url), "utf8").split("*/")[0] + "*/\n");
@@ -144,6 +156,11 @@ function parseArgs(argv) {
   if (!args.config) usage("--config is mandatory (authorized isolated host endpoints)");
   if (!args.out) usage("--out is mandatory (where fixtures.json and candidate.json are written)");
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) usage("--timeout-ms must be a positive integer");
+  // Retention is a HANDOFF, never an unbounded leak: a daemon kept for the scenario runner
+  // must carry a deadline, and the runner refuses an expired lease.
+  if (args.retainGateway && (!Number.isFinite(args.retainDeadlineMs) || args.retainDeadlineMs <= 0)) {
+    usage("--retain-gateway requires --retain-deadline-ms (a retained daemon must be bounded)");
+  }
   return args;
 }
 
@@ -151,53 +168,143 @@ function parseArgs(argv) {
  * Daemon UDS client (newline-delimited JSON, protocol v5)
  * ========================================================================== */
 
+/* ==========================================================================
+ * Configured-host daemon transport
+ *
+ * A host declares the daemon it owns; the transport it publishes is the product's own
+ * per-platform pair (see the transport section of herdr-reference-fixtures.mjs): a unix
+ * socket, or on Windows the loopback `daemon.port` plus the per-boot `daemon.token` the
+ * first frame must carry. This producer therefore speaks BOTH through the one shared
+ * client, `connectDaemonControl`, instead of dialling a socket path itself - dialling
+ * `daemon.sock` on Windows is exactly the defect that made every Windows provisioning run
+ * die with a bare ENOENT on a file the product never creates.
+ *
+ * CONFIGURED-HOST CONTRACT (no inferred fallback):
+ *   host.daemon.runtimeDir   REQUIRED. The daemon runtime directory this run owns, on the
+ *                            host the config names. There is no default and no discovery:
+ *                            a host that declares no runtimeDir has no reachable daemon.
+ *   host.daemon.platform     Optional "win32" | "linux" | "darwin". Names the platform
+ *                            the DAEMON runs on, which decides the transport. Omitted, it
+ *                            is taken from host.platform ("windows"/"unix") when that
+ *                            declares one, and otherwise from this process's platform.
+ *   host.daemon.socketPath   Optional unix socket override, honoured ONLY when it resolves
+ *                            inside runtimeDir. It can never point the harness at a daemon
+ *                            outside the profile the config declares.
+ *   host.daemon.token        Optional explicit token. Omitted, it is read from the
+ *                            runtimeDir the config declares, exactly as the product does.
+ *
+ * The platform's own production runtime directory is refused OUTRIGHT - there is no opt-in
+ * field, because driving a production daemon is not authorized and no config may authorize
+ * it. Only a host that declares its own isolated runtimeDir is reachable.
+ *
+ * This resolver is for the LOCAL transport only. A non-local host (ssh, paired, account-relay)
+ * is reached over the frozen HTTP routes at its own gateway with its own credential - the
+ * repository's existing mechanism, validated by `hostAccessContract` and driven by
+ * `referenceRequest` - so it returns no daemon transport here. A non-local host that declares a
+ * daemon runtimeDir is refused (`daemon-transport-local-only`), because a remote host's runtime
+ * directory is not reachable from this process; that is a config error, not a missing
+ * transport.
+ * ========================================================================== */
+
+/** The runtime directory the product uses by default on this platform, without env overrides. */
+function productionRuntimeDir(platform) {
+  if (platform === "win32") {
+    const base = process.env.LOCALAPPDATA || process.env.TEMP || "C:\\ProgramData";
+    return join(base, "Ferryx", "runtime");
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  return uid === null ? null : "/tmp/rorca-" + uid;
+}
+
 /**
- * One connection to a daemon's control socket. Requests are newline-delimited JSON; the
- * response for a request is the next JSON line that is not a stream frame.
+ * The control transport a configured host declares, or null when it declares no daemon.
+ *
+ * Throws an IsolatedGatewayError for a declared daemon this producer refuses to drive (a
+ * missing runtimeDir, a socket override outside it, or the platform's production runtime
+ * directory without an explicit opt-in).
  */
-function connectDaemon(socketPath, token) {
-  return new Promise((resolveConnect, rejectConnect) => {
-    const socket = createConnection({ path: socketPath });
-    const lines = createInterface({ input: socket });
-    const pending = [];
-    const streams = [];
-    lines.on("line", (line) => {
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        return;
-      }
-      if (message.type === "stream" || message.type === "output" || message.type === "terminalOutput") {
-        for (const listener of streams) listener(message);
-        return;
-      }
-      const next = pending.shift();
-      if (next) next(message);
-    });
-    socket.on("error", rejectConnect);
-    const call = (payload) =>
-      new Promise((resolveCall) => {
-        pending.push(resolveCall);
-        socket.write(JSON.stringify(payload) + "\n");
-      });
-    socket.on("connect", async () => {
-      const handshake = await call({ type: "handshake", version: DAEMON_PROTOCOL_VERSION, ...(token ? { token } : {}) });
-      if (!handshake || handshake.type !== "handshakeOk") {
-        socket.destroy();
-        rejectConnect(new Error("daemon handshake refused: " + JSON.stringify(handshake)));
-        return;
-      }
-      resolveConnect({
-        handshake,
-        call,
-        onStream(listener) { streams.push(listener); },
-        close() {
-          lines.close();
-          socket.destroy();
-        },
-      });
-    });
+function daemonTransportForHost(host) {
+  const daemon = host.daemon || null;
+  if (!daemon || (!daemon.runtimeDir && !daemon.socketPath)) return null;
+  // A non-local host is reached over the frozen HTTP routes at its OWN gateway (see
+  // hostAccessContract in herdr-reference-fixtures.mjs), never through this machine's
+  // loopback - so it has no daemon transport HERE, and that is not a refusal of the
+  // transport. Declaring a daemon for one IS a config error worth naming, because a remote
+  // host's own runtime directory is not reachable from this process.
+  if (host.transport && host.transport !== "local") {
+    if (daemon) {
+      throw blocked(
+        "daemon-transport-local-only",
+        host.id + " is a " + host.transport + " host and declares a daemon runtimeDir/socketPath; " +
+          "a remote daemon is not reachable from this machine. Reach this host through its " +
+          "gateway url + credentialFile instead (hostAccessContract).",
+      );
+    }
+    return null;
+  }
+  if (!daemon.runtimeDir) {
+    throw blocked(
+      "daemon-runtime-undeclared",
+      host.id + " declares a daemon socketPath but no runtimeDir; this producer never infers one",
+    );
+  }
+  const platform =
+    daemon.platform ||
+    (host.platform === "windows" ? "win32" : host.platform === "unix" ? "linux" : process.platform);
+  const runtimeDir = resolve(daemon.runtimeDir);
+  // No opt-in: driving a production daemon is not authorized, so the production runtime
+  // directory is refused whenever the config names it, and no config field can lift that.
+  const production = productionRuntimeDir(platform);
+  if (production && resolve(production) === runtimeDir) {
+    throw blocked(
+      "daemon-runtime-is-production",
+      host.id + " points at the platform production runtime directory " + runtimeDir +
+        "; driving a production daemon is not authorized and no config field can enable it",
+    );
+  }
+  // The shared descriptor derives every path from the runtimeDir, and refuses a runtimeDir
+  // outside the profile root it is given - so the declared directory IS the ownership
+  // boundary here.
+  const transport = daemonControlTransport(
+    { root: runtimeDir, paths: { runtime: runtimeDir } },
+    { platform },
+  );
+  if (daemon.socketPath) {
+    if (transport.kind !== "unix-socket") {
+      throw blocked(
+        "daemon-socket-override-not-unix",
+        host.id + " declares a unix socketPath for a " + transport.kind + " transport",
+      );
+    }
+    const declared = resolve(daemon.socketPath);
+    if (declared !== resolve(transport.socketPath)) {
+      throw blocked(
+        "daemon-socket-outside-runtime",
+        host.id + " socketPath " + declared + " is not the socket of " + runtimeDir,
+      );
+    }
+  }
+  return daemon.token ? { ...transport, explicitToken: String(daemon.token) } : transport;
+}
+
+/** The JSON-safe identity of a transport, for the receipts. */
+function describeDaemonTransport(transport, endpoint) {
+  if (!transport) return null;
+  return {
+    kind: transport.kind,
+    platform: transport.platform,
+    runtimeDir: transport.runtimeDir,
+    endpoint: endpoint || null,
+    requiresToken: transport.requiresToken,
+    tokenSource: transport.explicitToken ? "config" : transport.requiresToken ? "runtime-file" : "socket-ownership",
+  };
+}
+
+/** One control connection over a configured host's declared transport. */
+function connectHostDaemon(transport, timeoutMs) {
+  return connectDaemonControl(transport, {
+    timeoutMs,
+    ...(transport.explicitToken ? { token: transport.explicitToken } : {}),
   });
 }
 
@@ -448,7 +555,7 @@ function readTranscriptVersion(config, session) {
  * production data directory, and nothing waits for a JSON ready line the binary never
  * writes.
  */
-async function startIsolatedGateway(config, host, ledger, args) {
+async function startIsolatedGateway(config, host, ledger, args, lease) {
   try {
     return await launchIsolatedGateway({
       binary: config.candidate && config.candidate.binary,
@@ -458,6 +565,7 @@ async function startIsolatedGateway(config, host, ledger, args) {
       cwd: config.source && config.source.root ? config.source.root : repoRoot,
       ledger,
       timeoutMs: args.timeoutMs,
+      lease,
       extra: { hostId: host.id, transport: host.transport, launchedBy: "herdr-reference-provision.mjs" },
     });
   } catch (error) {
@@ -476,16 +584,8 @@ async function startIsolatedGateway(config, host, ledger, args) {
  * deliberately NO process-table or descendant scan anywhere on this path: a scan is not
  * ownership proof and cannot distinguish a recycled PID from the original session.
  */
-async function spawnOriginalPty(host, session, ledger, args) {
-  const socketPath = host.daemon && host.daemon.socketPath
-    ? host.daemon.socketPath
-    : (host.daemon && host.daemon.runtimeDir
-      ? daemonSocketPath({ paths: { runtime: host.daemon.runtimeDir } })
-      : null);
-  if (!socketPath) throw blocked("daemon-socket-unknown", host.id);
-  if (!existsSync(socketPath)) {
-    throw blocked("daemon-socket-missing", host.id + " -> " + socketPath);
-  }
+async function spawnOriginalPty(host, session, ledger, args, transport) {
+  if (!transport) throw blocked("daemon-runtime-undeclared", host.id);
   const realShell = session.realShell || host.realShell || null;
   if (!realShell) {
     throw blocked(
@@ -498,9 +598,10 @@ async function spawnOriginalPty(host, session, ledger, args) {
   // this run's.
   //
   // NOTE ON A KNOWN HAZARD: a client-side cached default_shell can fill a spawn IPC and
-  // override a pane's requested shell. This producer talks to the daemon UDS directly and
-  // sets \`shell\` on the request itself, with no WebView in the path, so no cached default can
-  // intervene here. A host that drives the UI instead must verify the shell it got back.
+  // override a pane's requested shell. This producer talks to the daemon's own control
+  // endpoint directly and sets \`shell\` on the request itself, with no WebView in the path,
+  // so no cached default can intervene here. A host that drives the UI instead must verify
+  // the shell it got back.
   const wrapperDir = join(resolve(args.out), "pty-identity", String(session.backendSessionId || session.clientRequestId || "session"));
   const identityPath = join(wrapperDir, "identity.json");
   clearPtyIdentity(identityPath);
@@ -512,8 +613,10 @@ async function spawnOriginalPty(host, session, ledger, args) {
     loginArgs: session.loginArgs,
     providerCommand: session.providerCommand || null,
   });
-  const token = host.daemon && host.daemon.token ? host.daemon.token : undefined;
-  const client = await connectDaemon(socketPath, token);
+  // The shared client speaks whichever transport this host declares and reports its own
+  // named reason when the endpoint is absent - no bare ENOENT, and no socket path this
+  // producer guessed. The spawn request and the `spawnOk` response shape are unchanged.
+  const client = await connectHostDaemon(transport, args.timeoutMs);
   try {
     const requestId = session.clientRequestId || ("herdr-ref-" + session.backendSessionId);
     const response = await client.call({
@@ -564,6 +667,7 @@ async function spawnOriginalPty(host, session, ledger, args) {
       cols: details.cols,
       rows: details.rows,
       running: details.running,
+      daemonTransport: describeDaemonTransport(transport, client.endpoint),
     };
   } finally {
     client.close();
@@ -660,7 +764,14 @@ async function main() {
   const sessionRecords = [];
   const captureRecords = [];
   const startedGateways = [];
+  // Gateways handed to the scenario runner instead of being stopped here. They are NOT
+  // owned by this process any more, so they are excluded from the ledger teardown and named
+  // in its receipts by exact PID and lease.
+  const retainedGateways = new Set();
   let interrupted = false;
+  // Whether this run reached its success path, so the retained-daemon announcement is made
+  // ONCE: on stdout as part of the receipt, or on stderr when the run failed after retention.
+  let completedSuccessfully = false;
 
   const onSignal = () => {
     interrupted = true;
@@ -670,6 +781,9 @@ async function main() {
 
   try {
     const configuredHosts = Array.isArray(config.hosts) ? config.hosts : [];
+    // One transport resolution per host, reused by every later step: resolving twice would
+    // also report the same refusal twice.
+    const hostTransports = new Map();
     for (const host of configuredHosts) {
       const record = {
         id: host.id,
@@ -680,7 +794,45 @@ async function main() {
         daemonEpoch: null,
         daemonPid: null,
         started: false,
+        // How this host's original session is reached: a daemon this machine owns (local), or
+        // the host's own gateway over the frozen HTTP routes (ssh/paired/account-relay).
+        access: null,
+        // The transport this host declares, resolved once here so every later step (and the
+        // receipt) speaks about the same endpoint. A declared daemon this producer refuses to
+        // drive is reported as a blocker rather than silently skipped.
+        daemonTransport: null,
       };
+      // The ACCESS contract first: it is what decides how this host's original session is
+      // reached, and it is where an incomplete fixture is named precisely (which endpoint or
+      // credential is missing) instead of the transport being refused wholesale.
+      try {
+        record.access = hostAccessContract(host);
+      } catch (error) {
+        if (!(error instanceof IsolatedGatewayError)) throw error;
+        record.access = null;
+        blockers.push({
+          kind: "host-access-contract",
+          hostId: host.id,
+          transport: host.transport,
+          reason: error.reason,
+          detail: error.detail,
+        });
+      }
+      try {
+        const transport = daemonTransportForHost(host);
+        hostTransports.set(host.id, { transport });
+        record.daemonTransport = describeDaemonTransport(transport, null);
+      } catch (error) {
+        if (!(error instanceof ProvisionError)) throw error;
+        hostTransports.set(host.id, { error });
+        blockers.push({
+          kind: "host-daemon-transport",
+          hostId: host.id,
+          transport: host.transport,
+          reason: error.reason,
+          detail: error.detail,
+        });
+      }
       // Only a local host is started here. ssh/paired/account-relay hosts are already
       // running elsewhere and are referenced by URL + credential; starting a second copy
       // would be a different machine's gateway, not the one the evidence must bind.
@@ -695,13 +847,29 @@ async function main() {
         // A launch that cannot honour the contract is a blocker with the launcher's own
         // reason, never a silently unstarted host.
         try {
-          const gateway = await startIsolatedGateway(config, host, ledger, args);
-          startedGateways.push(gateway);
+          // A handoff must be bounded, so a retained gateway always carries a deadline the
+          // runner checks before it adopts.
+          const lease = args.retainGateway
+            ? {
+                ownerPid: process.pid,
+                createdAt: Date.now(),
+                deadlineAt: Date.now() + args.retainDeadlineMs,
+                scope: "adoption-only",
+              }
+            : null;
+          const gateway = await startIsolatedGateway(config, host, ledger, args, lease);
           record.started = true;
-          // Recorded as EVIDENCE of this launch, not as the fixture's host url: this
-          // gateway lives only for the provisioning run and is stopped when the run
-          // ends, so a fixture pointing at it would hand the runner a dead URL. The
-          // runner launches its own (host.startLocal) or is given an external host.
+          // The endpoint this run actually drove for this host, from the launcher's own
+          // handle - a configured host.daemon and a launched gateway are the same field.
+          record.daemonTransport = gateway.daemonTransport;
+          // This run's own daemon replaces whatever the config declared for this host: the
+          // PTY spawn below must go to the daemon this run started, whose profile is the one
+          // the launcher just created.
+          hostTransports.set(host.id, { transport: gateway.controlTransport });
+          // Recorded as EVIDENCE of this launch. Whether it also becomes the fixture's host
+          // url depends on the handoff: a gateway this run stops at exit would be a dead URL
+          // for the runner, so only a RETAINED one is published with its real url and
+          // credential (see below).
           record.gateway = {
             contract: gateway.contract,
             urlRedacted: redactUrl(gateway.url),
@@ -710,12 +878,31 @@ async function main() {
             portRequirement: gateway.portRequirement,
             pid: gateway.entry.pid,
             executablePath: gateway.entry.executablePath,
+            daemonTransport: gateway.daemonTransport,
             daemonSocketPath: gateway.daemonSocketPath,
             daemonPid: gateway.daemonPid,
             daemonEpoch: gateway.daemonEpoch,
             devicePermission: gateway.devicePermission,
             referenceHostId: gateway.referenceHostId,
           };
+          if (args.retainGateway) {
+            // Handed off, not stopped: the scenario runner drives THIS daemon, so the
+            // sessions the PTYs were spawned in, their epoch and their recorded identity all
+            // stay valid.
+            //
+            // The lease is an ADOPTION deadline only - how long the handoff stays adoptable.
+            // It is not a lifetime and it does not clean anything up: nothing in this harness
+            // reaps a retained daemon that no runner adopts, because a reaper would be a
+            // second service. The verifier reaps it, by the exact PID below, in its own
+            // finally - including when provisioning succeeded and the runner never started.
+            retainedGateways.add(gateway);
+            record.ownedGateway = gateway.ownership;
+            record.url = gateway.url;
+            record.urlRedacted = redactUrl(gateway.url);
+            record.credentialFile = gateway.credentialFile;
+          } else {
+            startedGateways.push(gateway);
+          }
         } catch (error) {
           if (!(error instanceof ProvisionError)) throw error;
           blockers.push({
@@ -733,14 +920,31 @@ async function main() {
     // The daemon epoch and identity of every host are read from that host's own daemon.
     for (const host of configuredHosts) {
       const record = hosts.find((entry) => entry.id === host.id);
-      const socketPath = host.daemon && host.daemon.socketPath ? host.daemon.socketPath : null;
-      if (!socketPath || !existsSync(socketPath)) continue;
-      const client = await connectDaemon(socketPath, host.daemon.token);
+      // A host that declares no daemon is simply not a daemon-bearing host; one whose declared
+      // daemon was refused above is already reported. A host that declares a daemon which
+      // cannot be reached is reported here, never skipped: the epoch and PID that follow are
+      // the daemon's own report and cannot be inferred.
+      const resolved = hostTransports.get(host.id);
+      if (!resolved || resolved.error || !resolved.transport) continue;
+      const transport = resolved.transport;
       try {
-        record.daemonEpoch = String(client.handshake.epoch);
-        record.daemonPid = client.handshake.pid;
-      } finally {
-        client.close();
+        const client = await connectHostDaemon(transport, args.timeoutMs);
+        try {
+          record.daemonEpoch = String(client.handshake.epoch);
+          record.daemonPid = client.handshake.pid;
+          record.daemonTransport = describeDaemonTransport(transport, client.endpoint);
+        } finally {
+          client.close();
+        }
+      } catch (error) {
+        if (!(error instanceof ProvisionError)) throw error;
+        blockers.push({
+          kind: "host-daemon-unreachable",
+          hostId: host.id,
+          transport: host.transport,
+          reason: error.reason,
+          detail: error.detail,
+        });
       }
     }
 
@@ -780,11 +984,14 @@ async function main() {
         // and can prove ownership of. A host that already runs its own session supplies the
         // PID instead, and this producer never invents one.
         if (host.spawnSessions === true && row.pid === null) {
+          // The daemon this spawn goes to: the one this run launched for the host when it did,
+          // otherwise the transport the config declares for it. Never a guess.
+          const hostTransport = hostTransports.get(host.id);
           const spawned = await spawnOriginalPty(host, {
             ...session,
             cols: session.cols,
             rows: session.rows,
-          }, ledger, args);
+          }, ledger, args, hostTransport && !hostTransport.error ? hostTransport.transport : null);
           row.backendSessionId = spawned.backendSessionId;
           row.epoch = spawned.epoch;
           row.pid = spawned.pid;
@@ -792,6 +999,7 @@ async function main() {
           row.cols = spawned.cols;
           row.rows = spawned.rows;
           row.daemonPid = spawned.daemonPid;
+          row.daemonTransport = spawned.daemonTransport;
           row.spawnedByThisRun = true;
           row.ptyIdentity = spawned.ptyIdentity;
           row.ptyIdentityPath = spawned.ptyIdentityPath;
@@ -807,16 +1015,11 @@ async function main() {
         // a BLOCKER rather than a stamped identity.
         if (!row.ptyIdentity) {
           const receiptPath = session.spawnReceiptPath || host.spawnReceiptPath || null;
-          if (!receiptPath) {
-            blockers.push({
-              kind: "owner-host-spawn-receipt",
-              hostId: host.id,
-              transport: host.transport,
-              backendSessionId: row.backendSessionId,
-              reason:
-                "no owner-host spawn receipt is configured for this externally spawned session; " +
-                "an opaque pid from the config is not ownership proof",
-            });
+          const requirement = receiptPath ? null : ownerHostReceiptRequirement(host, row);
+          if (requirement) {
+            // One contract, shared with the runner: the missing prerequisite is named field by
+            // field rather than reported as a blanket non-local refusal.
+            blockers.push(requirement);
           } else if (!existsSync(receiptPath)) {
             blockers.push({
               kind: "owner-host-spawn-receipt",
@@ -925,11 +1128,52 @@ async function main() {
       "PROVISIONED " + sessionRecords.length + " session(s) across " + hosts.length + " host(s); " +
         "wrote fixtures.json, candidate.json, spawn-ledger.json\n",
     );
+    if (retainedGateways.size > 0) {
+      for (const gateway of retainedGateways) {
+        process.stdout.write(
+          "RETAINED gateway pid=" + gateway.ownership.daemonPid +
+            " executable=" + gateway.ownership.daemonExecutablePath +
+            " url=" + redactUrl(gateway.url) +
+            " leaseDeadlineAt=" + gateway.ownership.lease.deadlineAt +
+            " - NOT stopped here. A runner that adopts it reaps it; otherwise the verifier must" +
+            " stop exactly this PID and remove profileRoot=" + gateway.ownership.profileRoot + "\n",
+        );
+      }
+    }
+    completedSuccessfully = true;
     return EXIT.OK;
   } finally {
-    // Teardown is paired and recorded: every gateway this run started is stopped, and the
-    // ledger kills only PIDs whose live executable still matches the spawn-recorded one.
+    // Teardown is paired and recorded: every gateway this run started AND still owns is
+    // stopped, and the ledger kills only PIDs whose live executable still matches the
+    // spawn-recorded one. A gateway handed to the runner is no longer owned here: it is
+    // removed from the ledger so this teardown cannot kill the daemon the runner will adopt,
+    // and it is named in the receipt by exact PID, executable and lease instead.
+    for (const gateway of retainedGateways) {
+      const retainedPid = gateway.ownership.daemonPid;
+      ledger.entries = ledger.entries.filter((entry) => entry.pid !== retainedPid);
+      ledger.receipts.push({
+        pid: retainedPid,
+        action: "retained-for-runner",
+        executablePath: gateway.ownership.daemonExecutablePath,
+        lease: gateway.ownership.lease,
+        profileRoot: gateway.ownership.profileRoot,
+        reapRequirement: gateway.ownership.reapRequirement,
+      });
+      // Announced here only when the run did NOT reach its success path - a failure after
+      // retention, before fixtures.json exists, is exactly the case where nothing else names
+      // this PID. On success the stdout receipt below is the single announcement.
+      if (!completedSuccessfully) {
+        process.stderr.write(
+          "RETAINED (not stopped, no reaper service): pid=" + retainedPid +
+            " executable=" + gateway.ownership.daemonExecutablePath +
+            " profileRoot=" + gateway.ownership.profileRoot +
+            " adoptionDeadlineAt=" + gateway.ownership.lease.deadlineAt +
+            " - reap this exact PID in your finally if no runner adopts it\n",
+        );
+      }
+    }
     for (const gateway of startedGateways) {
+      if (retainedGateways.has(gateway)) continue;
       try {
         await gateway.stop();
       } catch {

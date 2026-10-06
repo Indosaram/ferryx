@@ -189,11 +189,27 @@ impl ReferenceRouteFixture {
         host: &str,
         extras: &[(&str, String)],
     ) -> String {
+        self.read_query_for(&self.session_id, registry_id, epoch, host, extras)
+    }
+
+    /// The same query, naming the session the caller claims it is reading.
+    ///
+    /// The route's own id and the query's backendSessionId are two separate claims about one
+    /// read, and the gateway fences them separately: a query naming another session is refused
+    /// before the target is looked up, which the ownership fence cannot stand in for.
+    fn read_query_for(
+        &self,
+        backend_session_id: &str,
+        registry_id: &str,
+        epoch: &str,
+        host: &str,
+        extras: &[(&str, String)],
+    ) -> String {
         let mut params = vec![
             ("hostId".to_string(), host.to_string()),
             ("ownerId".to_string(), ROUTE_TEST_OWNER.to_string()),
             ("epoch".to_string(), epoch.to_string()),
-            ("backendSessionId".to_string(), self.session_id.clone()),
+            ("backendSessionId".to_string(), backend_session_id.to_string()),
             ("registryId".to_string(), registry_id.to_string()),
         ];
         for (key, value) in extras {
@@ -232,12 +248,34 @@ impl ReferenceRouteFixture {
         (details.cols, details.rows)
     }
 
-    /// Type one line through the reference submit route and wait for the pane to echo a marker.
+    /// Type one line through the reference submit route and wait for the pane to run it.
     ///
     /// The subscription is taken BEFORE the trigger, and the wait is bounded by an event, never by
     /// a fixed sleep.
+    ///
+    /// Two properties of the real pane shape the command. First, the session was created with
+    /// `startup.kind = "shell"`, and this host's shell resolver starts `pwsh` on Windows, not a
+    /// POSIX shell: a `printf` there is not a command the pane runs, and its echoed input alone
+    /// would satisfy an assertion that never proved execution. The command is therefore written in
+    /// the shell the resolver picks, with the marker split across that shell's own literals so the
+    /// contiguous string exists only in the output (the convention `terminal/pty.rs` records:
+    /// "write a command whose OUTPUT marker is split so the echoed input never contains it").
+    /// Second, this harness is the pane's terminal client: on Windows ConPTY asks it for the cursor
+    /// position and does not start the shell until it answers (see `remote/relay_server.rs` and the
+    /// ssh helper fixtures). Unattended, that query leaves the pane silent forever, which is
+    /// indistinguishable from a serving bug. Unix shells never ask, and the command below is
+    /// unchanged in meaning there.
     async fn submit_and_await_marker(&self, marker: &str) {
-        let marker_bytes: &[u8] = marker.as_bytes();
+        const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+        const CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+        let (prefix, suffix) = marker
+            .split_once('_')
+            .expect("the marker names a prefix and a suffix the shell joins");
+        let command = if cfg!(windows) {
+            format!("Write-Output ('{prefix}_' + '{suffix}')")
+        } else {
+            format!("printf '{prefix}_%s\\n' '{suffix}'\n")
+        };
         let mut watch = self
             .state
             .session_backend
@@ -254,24 +292,41 @@ impl ReferenceRouteFixture {
                 Some(&self.control),
                 Some(&self.mutation(
                     &request_id,
-                    serde_json::json!({
-                        "text": format!("printf '{marker}\\n'\n"),
-                        "origin": "chat",
-                    }),
+                    serde_json::json!({ "text": command, "origin": "chat" }),
                 )),
             )
             .await;
         assert_eq!(status, 200, "submit: {body}");
         let observed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut seen: Vec<u8> = Vec::new();
+            let mut answered = 0usize;
             loop {
                 match watch.recv().await {
                     Ok(chunk) => {
-                        if chunk
-                            .bytes
-                            .windows(marker_bytes.len())
-                            .any(|window| window == marker_bytes)
+                        seen.extend_from_slice(&chunk.bytes);
+                        if seen
+                            .windows(marker.len())
+                            .any(|window| window == marker.as_bytes())
                         {
                             return true;
+                        }
+                        // The pane is waiting for its terminal to report the cursor; without the
+                        // report its shell never starts and no output can arrive.
+                        let queries = seen
+                            .windows(CURSOR_QUERY.len())
+                            .filter(|window| *window == CURSOR_QUERY)
+                            .count();
+                        while answered < queries {
+                            let reported = self
+                                .state
+                                .session_backend
+                                .write_input(&self.session_id, CURSOR_REPORT)
+                                .await
+                                .is_ok();
+                            answered += 1;
+                            if !reported {
+                                return false;
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -283,7 +338,7 @@ impl ReferenceRouteFixture {
         assert_eq!(
             observed.ok(),
             Some(true),
-            "the pane's own output must carry {marker} within the deadline"
+            "the pane must run {marker} and print it within the deadline"
         );
     }
 }
@@ -344,8 +399,29 @@ async fn a_reference_chat_read_refuses_a_foreign_target() {
     assert_eq!(status, 400, "a history read names its reader: {body}");
     assert!(body.contains("INVALID_REQUEST"), "{body}");
 
+    // The query's own claim is fenced on its own: this read is addressed to this host's own live
+    // session with this host's own incarnation, and names a session that is not the route's. The
+    // mismatch is the only thing wrong with it, so a missing fence shows up here as a 200 rather
+    // than as a refusal some other fence happened to produce.
+    let mismatched = fixture.read_query_for(
+        &uuid::Uuid::new_v4().to_string(),
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request("GET", &format!("{path}?{mismatched}"), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 403, "a query naming another session: {body}");
+    assert!(body.contains("FORBIDDEN"), "{body}");
+
+    // A session this host does not own: the query names the route's own id, so the mismatch fence
+    // above has nothing to refuse and the ownership fence is what answers.
     let unknown = uuid::Uuid::new_v4().to_string();
-    let unknown_query = fixture.read_query(
+    let unknown_query = fixture.read_query_for(
+        &unknown,
         "codex",
         &fixture.daemon_epoch,
         &reference_files::reference_host_id(),

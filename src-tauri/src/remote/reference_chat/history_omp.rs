@@ -1017,12 +1017,15 @@ mod tests {
         assert_eq!(assistant.started_at.as_deref(), Some("2026-10-06T01:00:02.000Z"));
         // the last recorded assistant activity, not the next user's timestamp
         assert_eq!(assistant.ended_at.as_deref(), Some("2026-10-06T01:00:04.000Z"));
+        // transcript-records.ts:184-190, :296 - m4 stopped for good yet still closes this turn,
+        // so its text is the fourth part; only m6 opens the next turn.
         assert_eq!(
             kinds(assistant),
             vec![
                 ReferencePartKind::Thinking,
                 ReferencePartKind::Text,
-                ReferencePartKind::Tool
+                ReferencePartKind::Tool,
+                ReferencePartKind::Text
             ]
         );
         match &assistant.parts[0] {
@@ -1037,6 +1040,11 @@ mod tests {
         assert!(input.contains("\"command\": \"ls -la\""), "input was {input}");
         assert_eq!(output, "total 8\nfile-a.txt");
         assert!(!error);
+        assert_eq!(
+            text_of(&assistant.parts[3]),
+            "One file: file-a.txt",
+            "the settled answer belongs to the turn it closes"
+        );
 
         assert_eq!(turns[2].role, ReferenceTurnRole::User);
         assert_eq!(text_of(&turns[2].parts[0]), "now show its contents");
@@ -1162,11 +1170,19 @@ mod tests {
         assert_eq!(turns.len(), 2);
         // a prompt recorded as a plain string is still the user's text
         assert_eq!(text_of(&turns[0].parts[0]), "plain string prompt");
-        // toolName / toolInput / callId / result are the pi-family spellings
+        // toolName / toolInput / toolCallId are the pi-family spellings (transcript-records.ts:30)
         let (name, summary, input, output, error) = tool_of(&turns[1].parts[0]);
         assert_eq!(name, "bash");
         assert_eq!(summary, "pwd");
         assert!(input.contains("pwd"), "input was {input}");
+        // transcript-records.ts:27 - `result` is read from a block inside `content`, never from
+        // the message itself, so a message-level-only result answers the call with the empty string
+        assert_eq!(output, "");
+        assert!(!error);
+        // transcript-records.ts:33-35 - the block-level spelling the pin does read
+        let (name, summary, _, output, error) = tool_of(&turns[1].parts[1]);
+        assert_eq!(name, "bash");
+        assert_eq!(summary, "pwd");
         assert_eq!(output, "/tmp");
         assert!(!error);
     }
@@ -1280,10 +1296,28 @@ mod tests {
 
     #[test]
     fn omp_limited_parse_keeps_the_newest_turns() {
+        // transcript-records.ts:300 - `slice(-maxTurns)` keeps the LAST turn, which in this
+        // fixture is the assistant turn answering "now show its contents", not that prompt.
         let turns = parse_omp_transcript_limited(OMP_HISTORY_KIND, BASIC_SESSION, Some(1))
             .expect("the omp family parses");
         assert_eq!(turns.len(), 1);
-        assert_eq!(text_of(&turns[0].parts[0]), "now show its contents");
+        assert_eq!(turns[0].role, ReferenceTurnRole::Assistant);
+        assert_eq!(
+            kinds(&turns[0]),
+            vec![ReferencePartKind::Tool, ReferencePartKind::Text]
+        );
+        let (name, summary, _, output, error) = tool_of(&turns[0].parts[0]);
+        assert_eq!(name, "read");
+        assert_eq!(summary, "file-a.txt");
+        assert_eq!(output, "permission denied");
+        assert!(error, "the kept turn is the failed read and its answer");
+        assert_eq!(text_of(&turns[0].parts[1]), "Cannot read it.");
+
+        // the bound keeps the newest turns in both directions
+        let two = parse_omp_transcript_limited(OMP_HISTORY_KIND, BASIC_SESSION, Some(2))
+            .expect("the omp family parses");
+        assert_eq!(two.len(), 2);
+        assert_eq!(text_of(&two[0].parts[0]), "now show its contents");
 
         // upstream's `slice(-0)` is `slice(0)`: a zero bound keeps everything
         let turns = parse_omp_transcript_limited(OMP_HISTORY_KIND, BASIC_SESSION, Some(0))

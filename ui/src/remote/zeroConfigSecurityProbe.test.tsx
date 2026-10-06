@@ -1,5 +1,5 @@
 // Permanent security regressions derived from the 2026-09-10 final audit probes.
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { remoteHostStore, remoteHostKey } from "../state/remoteHostStore";
 import { RemoteApp } from "./RemoteApp";
@@ -107,6 +107,10 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
   paired();
   const fetch = fetcher();
   await mount(fetch);
+  // Chat is the default surface: the real terminal socket is only opened in terminal mode.
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+  });
   const socket = Socket.instances.find(({ url }) => url.includes("/terminal/"));
   expect(socket).toBeDefined();
   const url = new URL(socket!.url);

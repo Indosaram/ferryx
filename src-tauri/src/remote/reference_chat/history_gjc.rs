@@ -1016,7 +1016,15 @@ mod tests {
             turns.iter().map(|turn| turn.role).collect::<Vec<_>>(),
             vec![ReferenceTurnRole::User, ReferenceTurnRole::Assistant, ReferenceTurnRole::Assistant]
         );
-        assert_eq!(turns[1].parts.len(), 2);
+        // transcript-records.ts:184-190, :296 - a turn closes only after a stop message, so the
+        // content of that stop message still belongs to the turn it closes: [Tool, Thinking, Text].
+        assert_eq!(turns[1].parts.len(), 3);
+        assert!(matches!(&turns[1].parts[0], ReferencePart::Tool { name, .. } if name.as_str() == "read"));
+        assert_eq!(turns[1].parts[1], ReferencePart::Thinking { text: "done".into() });
+        assert_eq!(
+            turns[1].parts[2],
+            ReferencePart::Text { text: "The full review.".into(), phase: None }
+        );
         assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "Nothing new to do.".into(), phase: None }]);
     }
 
