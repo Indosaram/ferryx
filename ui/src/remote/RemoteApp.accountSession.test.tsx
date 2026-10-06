@@ -6,6 +6,19 @@ import * as attachTunnelModule from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
 import { remoteHostStore } from "../state/remoteHostStore";
 
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  const toggle = screen.queryByTestId("remote-view-mode-terminal");
+  if (!toggle) return;
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+}
+
+
 class MockTestWebSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -267,6 +280,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -470,6 +484,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -652,6 +667,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
     act(() => {
@@ -831,6 +847,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -1003,6 +1020,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })

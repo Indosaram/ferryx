@@ -10,6 +10,19 @@ import { remoteHostStore } from "../state/remoteHostStore";
 import { clearRemoteAuthToken, setRemoteAuthToken } from "../lib/remoteClient";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  const toggle = screen.queryByTestId("remote-view-mode-terminal");
+  if (!toggle) return;
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+}
+
+
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
     sessionId,
@@ -422,6 +435,7 @@ describe("Remote UI Components", () => {
     });
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); });
@@ -447,6 +461,7 @@ describe("Remote UI Components", () => {
     const request = vi.fn<typeof fetch>(async (_input, init) => init?.method === "POST" ? response.promise : jsonResponse(focusedState));
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); fireEvent.click(button); });
@@ -495,6 +510,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
     // Disconnect drops the session token, so the same mount renders the login
     // screen; a hook declared below that early return changes the hook count.
@@ -523,6 +539,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
@@ -541,6 +558,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
@@ -569,6 +587,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
@@ -644,6 +663,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     expect(eventSocket().url).toMatch(/\/api\/v1\/events\?ticket=ui-test-ticket$/);
@@ -744,6 +764,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
@@ -788,6 +809,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     act(() => {
@@ -832,6 +854,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     act(() => {
@@ -862,6 +885,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByText("No focused terminal")).toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
@@ -1082,6 +1106,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-tab-1");
@@ -1248,6 +1273,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1329,6 +1355,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
@@ -1520,6 +1547,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1550,6 +1578,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const tablist = await openWorktreeSheet();
     // One entry is enough to render the list, and no mirrored terminal is required to browse it.
@@ -1620,6 +1649,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1667,6 +1697,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1725,6 +1756,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
@@ -1808,6 +1840,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -1863,6 +1896,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -1918,6 +1952,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -1979,6 +2014,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
     const firstInstanceId = screen.getByTestId("remote-terminal").getAttribute("data-instance-id");
@@ -2039,6 +2075,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -2117,6 +2154,7 @@ describe("Remote UI Components", () => {
       vi.stubGlobal("WebSocket", EventWebSocket);
 
       render(<RemoteApp />);
+    await switchToTerminalMode();
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -2167,6 +2205,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
@@ -2211,6 +2250,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2242,6 +2282,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2270,6 +2311,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2325,6 +2367,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2425,6 +2468,7 @@ describe("Remote UI Components", () => {
 
     try {
       render(<RemoteApp />);
+    await switchToTerminalMode();
 
       // RemoteApp must prioritize /login?code=... at page origin and mount AccountLoginPage
       // while consume promise is pending:

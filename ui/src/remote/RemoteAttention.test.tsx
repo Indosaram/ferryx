@@ -2,6 +2,19 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  const toggle = screen.queryByTestId("remote-view-mode-terminal");
+  if (!toggle) return;
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+}
+
+
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
     sessionId,
@@ -227,6 +240,7 @@ describe("RemoteAttention Affordance", () => {
 
     try {
       render(<RemoteApp />);
+    await switchToTerminalMode();
       await act(async () => {
         await signal(Promise.all([initialRead.promise, socketReady.promise]));
       });
@@ -286,6 +300,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     await openWorktreeSheet();
 
@@ -331,6 +346,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -385,6 +401,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -452,6 +469,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -476,6 +494,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -508,6 +527,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -569,6 +589,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -618,6 +639,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
 
@@ -665,6 +687,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
 
@@ -708,6 +731,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     const { unmount } = render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminalFirst = await screen.findByTestId("remote-terminal");
 

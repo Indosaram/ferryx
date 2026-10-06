@@ -1,30 +1,38 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ArrowDown,
-  ChevronLeft,
-  Maximize2,
-  Minimize2,
-  Terminal as TerminalIcon,
-  X,
-} from "lucide-react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowDown, ChevronLeft, Terminal as TerminalIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
   ActivityIndicator,
   ActivityState,
+  ReferenceAbandonedBranchDisclosure,
+  ReferenceDisclosureBanner,
+  ReferenceOlderPageControl,
+  ReferenceOlderState,
 } from "./MobileChatComponents";
-import {
-  MobileChatMessage,
-  MobileChatMessageProps,
-} from "./MobileChatMessage";
-import {
-  MobileChatComposer,
-  ChatAttachment,
-} from "./MobileChatComposer";
-import { RemoteTerminal } from "../RemoteTerminal";
+import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
+import { MobileChatComposer } from "./MobileChatComposer";
+import type { HeldMessage } from "./referenceQueue";
+import type {
+  ReferenceAbandonedBranch,
+  ReferenceFileReceipt,
+  ReferencePartRenderContext,
+} from "./referenceTypes";
 
+/**
+ * The chat lens over the original pane (plan task 12).
+ *
+ * One thing is deliberately absent: this component never mounts a terminal. The chat is the
+ * default at every width and the terminal is an explicit mode the owner switches to, so a
+ * nested drawer here would be a second owner of the same session and a second place for the
+ * geometry to be decided. `onOpenTerminal` asks the owner to switch modes instead.
+ *
+ * Abandoned branches arrive on individual turns in the frozen DTO, but the reference discloses
+ * them once for the page: they are composed here and never forwarded to a turn.
+ */
 export interface MobileChatWorkspaceProps {
   readonly messages: readonly MobileChatMessageProps[];
-  readonly onSendMessage: (text: string, attachments: readonly ChatAttachment[]) => void;
+  /** `false` means the owner kept the draft (held, refused); the box must not clear it. */
+  readonly onSendMessage: (text: string) => boolean | void;
   readonly onStopExecution?: () => void;
   readonly isRunning?: boolean;
   readonly activityState?: ActivityState;
@@ -32,12 +40,42 @@ export interface MobileChatWorkspaceProps {
   readonly workspaceLabel?: string;
   readonly worktreeLabel?: string;
 
-  readonly sessionId?: string;
-  readonly token?: string;
-  readonly transportUrl?: string;
-  readonly terminalTitle?: string;
-  readonly isAccountSession?: boolean;
-  readonly createWebSocket?: (pathAndQuery: string) => any;
+  /** Switch to the explicit terminal for this same session; never a replacement conversation. */
+  readonly onOpenTerminal?: () => void;
+
+  /** The disclosure for this page source; null when the page is native. */
+  readonly pageDisclosure?: string | null;
+  /** Abandoned branches for the page: composed once here, never per turn. */
+  readonly pageAbandoned?: ReferenceAbandonedBranch | null;
+  readonly hasOlderPage?: boolean;
+  readonly loadedOlder?: boolean;
+  readonly olderState?: ReferenceOlderState;
+  readonly onLoadOlder?: () => void;
+
+  /** The owner-scoped draft, and the files the owner already staged for this target. */
+  readonly draft?: string;
+  readonly onDraftChange?: (text: string) => void;
+  readonly draftUnsaved?: boolean;
+  readonly stagedFiles?: readonly ReferenceFileReceipt[];
+  readonly onAttachFiles?: (files: readonly File[], caret: number) => void;
+  readonly onRemoveStagedFile?: (attachmentId: string) => void;
+  readonly attaching?: boolean;
+  readonly attachError?: string | null;
+
+  /** Held messages for this target; only an explicit press sends one. */
+  readonly heldMessages?: readonly HeldMessage[];
+  readonly heldSendingId?: string | null;
+  readonly heldUnsaved?: boolean;
+  readonly onEditHeld?: (id: string, text: string) => void;
+  readonly onSendHeld?: (id: string) => void;
+  readonly onRemoveHeld?: (id: string) => void;
+
+  /** A prompt waiting on the original pane, drawn above the message box. */
+  readonly promptCard?: React.ReactNode;
+  /** Something the user must know about this lane. */
+  readonly composerWarning?: string | null;
+  /** Where a part bytes live when the page does not carry them. */
+  readonly referenceContext?: ReferencePartRenderContext;
 
   readonly className?: string;
   readonly warnings?: readonly string[];
@@ -50,6 +88,27 @@ export interface MobileChatWorkspaceProps {
   readonly headerActions?: React.ReactNode;
 }
 
+/**
+ * Turns a `/tree` walked away from, composed for the page: the reference renders this once at
+ * the top of the transcript, not on every turn that carries one.
+ */
+function aggregateReferenceAbandoned(
+  messages: readonly MobileChatMessageProps[],
+): ReferenceAbandonedBranch | null {
+  let count = 0;
+  let branches = 0;
+  let summary: string | null = null;
+  for (const message of messages) {
+    const branch = message.referenceAbandoned;
+    if (!branch) continue;
+    count += branch.count;
+    branches += branch.branches;
+    if (summary === null && branch.summary) summary = branch.summary;
+  }
+  if (count === 0 && branches === 0) return null;
+  return summary === null ? { count, branches } : { count, branches, summary };
+}
+
 export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   messages,
   onSendMessage,
@@ -59,12 +118,30 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   activityLabel,
   workspaceLabel,
   worktreeLabel,
-  sessionId,
-  token,
-  transportUrl,
-  terminalTitle = "Raw PTY Terminal",
-  isAccountSession,
-  createWebSocket,
+  onOpenTerminal,
+  pageDisclosure = null,
+  pageAbandoned = null,
+  hasOlderPage = false,
+  loadedOlder = false,
+  olderState = "idle",
+  onLoadOlder,
+  draft,
+  onDraftChange,
+  draftUnsaved = false,
+  stagedFiles,
+  onAttachFiles,
+  onRemoveStagedFile,
+  attaching = false,
+  attachError = null,
+  heldMessages,
+  heldSendingId = null,
+  heldUnsaved = false,
+  onEditHeld,
+  onSendHeld,
+  onRemoveHeld,
+  promptCard,
+  composerWarning = null,
+  referenceContext,
   className,
   warnings,
   composerPlaceholder,
@@ -79,9 +156,8 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [showScrollPill, setShowScrollPill] = useState(false);
-
-  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
-  const [isTerminalExpanded, setIsTerminalExpanded] = useState(false);
+  // the viewport as it was before this commit, so an older page can be anchored
+  const viewportRef = useRef({ top: 0, height: 0, count: 0, atBottom: true });
 
   const scrollToBottom = useCallback((smooth = true) => {
     if (messagesEndRef.current) {
@@ -98,10 +174,37 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = distanceFromBottom < 48;
-
+    viewportRef.current = {
+      top: el.scrollTop,
+      height: el.scrollHeight,
+      count: messages.length,
+      atBottom,
+    };
     setIsAtBottom(atBottom);
     setShowScrollPill(distanceFromBottom > 100);
-  }, []);
+  }, [messages.length]);
+
+  // An older page lands ABOVE what the reader is looking at: keep their place instead of
+  // jumping. A page that lands below keeps the bottom-follow rule.
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const previous = viewportRef.current;
+    if (
+      messages.length > previous.count &&
+      !previous.atBottom &&
+      previous.top > 0 &&
+      el.scrollHeight > previous.height
+    ) {
+      el.scrollTop = previous.top + (el.scrollHeight - previous.height);
+    }
+    viewportRef.current = {
+      top: el.scrollTop,
+      height: el.scrollHeight,
+      count: messages.length,
+      atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 48,
+    };
+  }, [messages]);
 
   useEffect(() => {
     if (isAtBottom) {
@@ -110,7 +213,8 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   }, [messages, isRunning, activityState, isAtBottom, scrollToBottom]);
 
   const hasMessages = messages.length > 0;
-  const canShowTerminal = Boolean(sessionId && token);
+  // The page discloses abandoned branches once; a turn never repeats them.
+  const abandoned = pageAbandoned ?? aggregateReferenceAbandoned(messages);
 
   return (
     <div
@@ -175,19 +279,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             />
           )}
 
-          {canShowTerminal && (
+          {onOpenTerminal && (
             <button
               type="button"
-              data-testid="terminal-toggle-button"
-              aria-label={isTerminalOpen ? "Hide terminal" : "Show terminal"}
-              aria-pressed={isTerminalOpen}
-              onClick={() => setIsTerminalOpen((prev) => !prev)}
-              className={cn(
-                "flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                isTerminalOpen
-                  ? "bg-chat-surface-raised text-chat-foreground border-chat-border shadow-xs"
-                  : "bg-chat-surface/90 text-chat-foreground-secondary border-chat-border hover:bg-chat-surface-hover hover:text-chat-foreground"
-              )}
+              data-testid="open-terminal-button"
+              aria-label="Open the terminal for this session"
+              title="Open the terminal for this session"
+              onClick={onOpenTerminal}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md border border-chat-border bg-chat-surface/90 text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <TerminalIcon className="size-3.5" aria-hidden="true" />
             </button>
@@ -212,6 +311,12 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           >
             {warnings.join(" ")}
           </div>
+        ) : null}
+        {pageDisclosure !== null ? (
+          <ReferenceDisclosureBanner disclosure={pageDisclosure} />
+        ) : null}
+        {abandoned !== null ? (
+          <ReferenceAbandonedBranchDisclosure abandoned={abandoned} />
         ) : null}
         {!hasMessages ? (
           <div
@@ -248,81 +353,28 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 approvalAction={msg.approvalAction}
                 activityState={msg.activityState}
                 durationLabel={msg.durationLabel}
+                referenceParts={msg.referenceParts}
+                referenceSource={msg.referenceSource}
+                referenceContext={referenceContext}
               />
             ))}
           </>
         )}
+        {hasOlderPage || loadedOlder ? (
+          <ReferenceOlderPageControl
+            hasOlder={hasOlderPage}
+            loadedOlder={loadedOlder}
+            state={olderState}
+            onLoadOlder={onLoadOlder}
+          />
+        ) : null}
 
         <div ref={messagesEndRef} className="h-2 w-full" />
       </div>
 
       <footer className="relative z-20 shrink-0">
-        {canShowTerminal && (
-          <div
-            data-testid="terminal-drawer"
-            aria-hidden={!isTerminalOpen}
-            {...(!isTerminalOpen ? { inert: "" } : {})}
-            className={cn(
-              "absolute inset-x-0 bottom-full flex flex-col w-full bg-chat-screen/95 border-t border-chat-border backdrop-blur-xl shadow-2xl transition-[opacity,transform] duration-300 ease-out",
-              isTerminalOpen
-                ? "opacity-100 translate-y-0 pointer-events-auto"
-                : "opacity-0 translate-y-3 pointer-events-none",
-              isTerminalExpanded ? "h-[85vh]" : "h-[45vh]"
-            )}
-          >
-            <div className="flex items-center justify-between px-3 py-2 bg-chat-surface/90 border-b border-chat-border select-none">
-              <div className="flex items-center gap-2">
-                <TerminalIcon className="size-3.5 text-status-success" />
-                <span className="text-xs font-mono font-semibold text-chat-foreground">
-                  {terminalTitle}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  data-testid="terminal-expand-button"
-                  aria-label={isTerminalExpanded ? "Collapse terminal" : "Expand terminal"}
-                  onClick={() => setIsTerminalExpanded((prev) => !prev)}
-                  className="p-1.5 rounded-md text-chat-foreground-secondary hover:text-chat-foreground hover:bg-chat-surface-raised/80 active:scale-95 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  title={isTerminalExpanded ? "Collapse" : "Expand"}
-                >
-                  {isTerminalExpanded ? (
-                    <Minimize2 className="size-3.5" />
-                  ) : (
-                    <Maximize2 className="size-3.5" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  data-testid="terminal-close-button"
-                  aria-label="Close terminal"
-                  onClick={() => setIsTerminalOpen(false)}
-                  className="p-1.5 rounded-md text-chat-foreground-secondary hover:text-chat-foreground hover:bg-chat-surface-raised/80 active:scale-95 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  title="Close terminal"
-                >
-                  <X className="size-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-0 w-full relative overflow-hidden bg-terminal">
-              {isTerminalOpen && sessionId && token && (
-                <RemoteTerminal
-                  sessionId={sessionId}
-                  token={token}
-                  transportUrl={transportUrl}
-                  embedded={true}
-                  isAccountSession={isAccountSession}
-                  createWebSocket={createWebSocket}
-                />
-              )}
-            </div>
-          </div>
-        )}
-
         <div className="relative">
-          {showScrollPill && !isTerminalOpen && (
+          {showScrollPill && (
             <div className="absolute -top-12 right-4 z-20">
               <button
                 type="button"
@@ -339,6 +391,22 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             </div>
           )}
           <MobileChatComposer
+            value={draft}
+            onValueChange={onDraftChange}
+            draftUnsaved={draftUnsaved}
+            attachments={stagedFiles}
+            onAttachFiles={onAttachFiles}
+            onRemoveAttachment={onRemoveStagedFile}
+            attaching={attaching}
+            attachError={attachError}
+            heldMessages={heldMessages}
+            heldSendingId={heldSendingId}
+            heldUnsaved={heldUnsaved}
+            onEditHeld={onEditHeld}
+            onSendHeld={onSendHeld}
+            onRemoveHeld={onRemoveHeld}
+            promptCard={promptCard}
+            warning={composerWarning}
             onSend={onSendMessage}
             onStop={onStopExecution}
             isRunning={isRunning}

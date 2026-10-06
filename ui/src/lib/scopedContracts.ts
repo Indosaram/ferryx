@@ -53,7 +53,9 @@ export interface MutationEnvelope<P> {
 }
 export type ScopeErrorCode = "INVALID_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND"
   | "TARGET_EXPIRED" | "CONTROL_CONFLICT" | "REQUEST_CONFLICT" | "PROVIDER_OWNED"
-  | "UNSUPPORTED" | "TIMEOUT" | "INVENTORY_INCOMPLETE" | "PAYLOAD_TOO_LARGE" | "CAPTURE_UNSUPPORTED";
+  | "UNSUPPORTED" | "TIMEOUT" | "INVENTORY_INCOMPLETE" | "PAYLOAD_TOO_LARGE" | "CAPTURE_UNSUPPORTED"
+  /** The mutation may have happened and its outcome cannot be determined. */
+  | "OPERATION_OUTCOME_UNKNOWN";
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 export interface ScopeError<D = JsonValue> {
   readonly code: ScopeErrorCode;

@@ -1740,7 +1740,15 @@ async fn host_http_handler(
         None => uri_path.to_owned(),
     };
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, 64 * 1024)
+    // The generic forwarded-body bound is 64 KiB. The reference-chat file lane carries a
+    // base64 image, so its paths get the bound derived from the frozen attachment limit —
+    // and only those paths, which allowed_http_route has already admitted above.
+    let body_limit = if reference_chat_http_path(&path) {
+        REFERENCE_CHAT_RELAY_BODY_MAX
+    } else {
+        64 * 1024
+    };
+    let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     proxy_http(
@@ -1807,7 +1815,7 @@ async fn browser_identify_http_handler(
     .await
 }
 
-fn allowed_http_route(method: &Method, path: &str) -> bool {
+pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     if parts.iter().any(|part| {
         part.is_empty()
@@ -1838,8 +1846,28 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
+            // Reference chat (plan task 13). The relay only admits the frozen route table;
+            // the machine's own gateway authenticates, fences the target and enforces the
+            // read-only policy, exactly as it does for a direct caller.
+            | ("GET", ["reference-chat", _, "history" | "screen" | "prompt"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
+            | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             | ("GET", ["attach"])
     )
+}
+
+/// How large a forwarded body one reference-chat route may carry.
+///
+/// The file lane's stage payload is base64 over the frozen ATTACHMENT_MAX_FILE_BYTES, which the
+/// generic 64 KiB forwarded-body bound would refuse before the machine ever saw it. The bound is
+/// derived from that frozen limit and applies only to the reference-chat paths the allowlist
+/// above already admits.
+const REFERENCE_CHAT_RELAY_BODY_MAX: usize =
+    (crate::scoped_contracts::ATTACHMENT_MAX_FILE_BYTES as usize / 3) * 4 + 64 * 1024;
+
+/// Is this forwarded path one of the reference-chat routes?
+fn reference_chat_http_path(path: &str) -> bool {
+    path.starts_with("reference-chat/")
 }
 
 fn decode_http_query_component(value: &str) -> Result<String, StatusCode> {
@@ -1865,7 +1893,7 @@ fn decode_http_query_component(value: &str) -> Result<String, StatusCode> {
     String::from_utf8(decoded).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
-fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode> {
+pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode> {
     let Some(query) = query else {
         return Ok(());
     };
@@ -1895,6 +1923,35 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
         // Chat history pages by limit/cursor. Without this the relay answers 400 and the
         // remote chat view stays empty even though the machine serves the route.
         ["agent-history", _] => &["limit", "cursor"],
+        // Reference chat. A read names its whole target in the query; the file routes carry
+        // the same target, and a mutation's target travels in its own envelope body.
+        ["reference-chat", _, "history"] => &[
+            "hostId",
+            "ownerId",
+            "epoch",
+            "backendSessionId",
+            "providerSessionId",
+            "registryId",
+            "limit",
+            "cursor",
+            "cursorStream",
+        ],
+        ["reference-chat", _, "screen" | "prompt"] => &[
+            "hostId",
+            "ownerId",
+            "epoch",
+            "backendSessionId",
+            "providerSessionId",
+            "registryId",
+        ],
+        ["reference-chat", _, "files", _] => &[
+            "hostId",
+            "ownerId",
+            "epoch",
+            "backendSessionId",
+            "providerSessionId",
+            "registryId",
+        ],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
