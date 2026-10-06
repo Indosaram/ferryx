@@ -923,15 +923,6 @@ async function main() {
   return exitCode;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error) => {
-    const code = error instanceof RunnerError ? error.code : EXIT.INTERACTION;
-    process.stderr.write((error.reason || "runner-failed") + ": " + (error.detail || error.message) + "\n");
-    process.exit(code);
-  });
-
-
 const SCRIPT_ID = "herdr-reference-chat.mjs/1.0.0";
 
 const EXIT = { OK: 0, BLOCKED: 2, INTERACTION: 3, FAILED: 4, USAGE: 5, INTERRUPT: 130 };
@@ -1681,4 +1672,12 @@ scenario("QA-05", {
     return { status: "pass", observed: report };
   },
 });
+
+main()
+  .then((code) => process.exit(code))
+  .catch((error) => {
+    const code = error instanceof RunnerError ? error.code : EXIT.INTERACTION;
+    process.stderr.write((error.reason || "runner-failed") + ": " + (error.detail || error.message) + "\n");
+    process.exit(code);
+  });
 

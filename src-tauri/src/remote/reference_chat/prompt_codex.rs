@@ -1379,9 +1379,11 @@ fn codex_model_header(
     {
         return None;
     }
+    let model =
+        matched.and_then(|captures| captures.get(1).map(|value| value.as_str().to_string()));
     Some(CodexModelHeader {
         title: whole,
-        model: matched.and_then(|captures| captures.get(1).map(|value| value.as_str().to_string())),
+        model,
         notes,
     })
 }
