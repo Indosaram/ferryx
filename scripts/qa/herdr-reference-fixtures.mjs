@@ -1147,16 +1147,31 @@ export function workspaceRegistrationFor(host, session) {
  * registered against the same root is accepted by the daemon, so re-running is safe.
  */
 export async function registerWorkspaceOnDaemon(client, registration, meta) {
-  const response = await client.call(registration.request, {
+  // This call knows exactly what it asked for, so it hands that identity to the failure reader:
+  // a daemon refusal names its own message, and the request kind comes from here rather than
+  // being read out of a reply that does not carry one.
+  const requested = {
     requestKind: "registerWorkspace",
     requestId: (meta && meta.requestId) || registration.workspaceId,
-  });
-  const failure = daemonRequestFailure(response);
+  };
+  const response = await client.call(registration.request, requested);
+  const failure = daemonRequestFailure(response, requested);
   if (failure) {
     return { ok: false, reason: failure.code, detail: describeDaemonRequestFailure(failure) };
   }
   if (!response || response.type !== "registerWorkspaceOk") {
-    return { ok: false, reason: "workspace-registration-refused", detail: JSON.stringify(response) };
+    // An unexpected reply is still a refusal of THIS request: the same description keeps the
+    // request identity and carries the reply verbatim instead of dropping either.
+    return {
+      ok: false,
+      reason: "workspace-registration-refused",
+      detail: describeDaemonRequestFailure({
+        code: "workspace-registration-refused",
+        requestKind: requested.requestKind,
+        requestId: requested.requestId,
+        message: JSON.stringify(response),
+      }),
+    };
   }
   return { ok: true, workspaceId: registration.workspaceId, repoRoot: registration.repoRoot };
 }
@@ -1563,14 +1578,27 @@ export function connectDaemonControl(transport, options) {
  * A transport that ends mid-request settles every in-flight request with this shape, so a
  * caller reads a code and the request it belonged to instead of an opaque null. The message
  * carries no secret: the transport token never travels in a response or a diagnostic.
+ *
+ * A reply the DAEMON itself sent carries only what the daemon chose to send - typically a code
+ * and a message, and no request identity. The caller, however, always knows which request it
+ * issued, so `fallback` supplies that identity and is used ONLY where the reply is silent. Both
+ * facts therefore survive: the daemon's own message is never replaced by the caller's, and the
+ * request that provoked it is never lost.
  */
-export function daemonRequestFailure(response) {
+export function daemonRequestFailure(response, fallback) {
   if (!response || typeof response !== "object" || response.type !== "error") return null;
+  const known = fallback || {};
   return {
     code: typeof response.code === "string" && response.code.length > 0 ? response.code : "daemon-transport-error",
     message: typeof response.message === "string" ? response.message : "",
-    requestKind: typeof response.requestKind === "string" ? response.requestKind : "unknown",
-    requestId: response.requestId === undefined ? null : response.requestId,
+    requestKind:
+      typeof response.requestKind === "string" && response.requestKind.length > 0
+        ? response.requestKind
+        : isNonEmptyString(known.requestKind) ? known.requestKind : "unknown",
+    requestId:
+      response.requestId !== undefined && response.requestId !== null
+        ? response.requestId
+        : known.requestId === undefined ? null : known.requestId,
   };
 }
 
