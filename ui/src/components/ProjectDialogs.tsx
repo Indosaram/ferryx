@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { copyTextToClipboard } from "../lib/clipboard";
 import { createPairedWorktreeActions, pairedActionMessage } from "../lib/pairedWorktreeActions";
 import { createRemoteWorktree, registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
 import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
@@ -19,7 +20,9 @@ import {
   createWorktree,
   isTauriRuntime,
   listProjectBranches,
+  previewGitHubIssue,
   registerProject,
+  type GitHubIssuePreview,
   type LocalBranch,
   type RegisteredProject,
 } from "../lib/tauri";
@@ -48,6 +51,15 @@ function extractErrorMessage(cause: unknown, fallback: string): string {
     if (typeof message === "string" && message) return message;
   }
   return fallback;
+}
+
+/// The text a user copies out of an issue preview and pastes into the new pane
+/// themselves. Ferryx never sends it anywhere on its own.
+function issueContextText(issue: GitHubIssuePreview): string {
+  const lines = [`Issue #${issue.number}: ${issue.title}`, issue.url];
+  const body = issue.body.trim();
+  if (body) lines.push("", body);
+  return `${lines.join("\n")}\n`;
 }
 
 export function deriveWorkspaceId(folderPath: string, existingProjects: RegisteredProject[] = []): string {
@@ -766,6 +778,14 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
   const [loadingBranches, setLoadingBranches] = useState(!isRemote && isGitBacked);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [issueRef, setIssueRef] = useState("");
+  const [issue, setIssue] = useState<GitHubIssuePreview | null>(null);
+  const [loadingIssue, setLoadingIssue] = useState(false);
+  const [issueError, setIssueError] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const submitInFlight = useRef(false);
+  const issueRequestId = useRef(0);
+  const supportsIssueIntake = isGitBacked && !isRemote;
 
   const remoteHostId = remoteTarget?.hostId ?? null;
   const hostLabel = remoteHostId
@@ -804,11 +824,44 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     };
   }, [project.workspaceId, isGitBacked, isRemote]);
 
+  const loadIssue = async () => {
+    const trimmed = issueRef.trim();
+    if (!trimmed || loadingIssue) return;
+    // Only the newest request may publish: an earlier one resolving late would
+    // otherwise preview - and pre-fill the slug from - a different issue than
+    // the reference now in the field.
+    const requestId = issueRequestId.current + 1;
+    issueRequestId.current = requestId;
+    setLoadingIssue(true);
+    setIssueError(null);
+    setCopyState("idle");
+    try {
+      const preview = await previewGitHubIssue({ workspaceId: project.workspaceId, issueRef: trimmed });
+      if (issueRequestId.current !== requestId) return;
+      setIssue(preview);
+      setSlug(preview.suggestedSlug);
+    } catch (cause) {
+      if (issueRequestId.current !== requestId) return;
+      setIssue(null);
+      setIssueError(extractErrorMessage(cause, "Could not read that GitHub issue."));
+    } finally {
+      if (issueRequestId.current === requestId) setLoadingIssue(false);
+    }
+  };
+
+  const copyIssueContext = async () => {
+    if (!issue) return;
+    setCopyState((await copyTextToClipboard(issueContextText(issue))) ? "copied" : "failed");
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmedSlug = slug.trim();
-    if (!trimmedSlug || submitting) return;
+    // A ref guards the double click that lands before React re-renders; the
+    // `submitting` state alone cannot, since both clicks see the same render.
+    if (!trimmedSlug || submitting || submitInFlight.current) return;
     if (!isRemote && !baseRef) return;
+    submitInFlight.current = true;
     setSubmitting(true);
     setError(null);
     try {
@@ -842,6 +895,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     } catch (cause) {
       setError(isPaired ? pairedActionMessage(cause) : extractErrorMessage(cause, "Could not create the worktree."));
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   };
@@ -897,6 +951,76 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
                   </select>
                 </label>
               ) : null}
+              {supportsIssueIntake ? (
+                <div className="space-y-2 rounded-md border border-border/60 p-2" aria-label="GitHub issue intake">
+                  <label className="block space-y-1 text-[11px] text-muted-foreground">
+                    <span>GitHub issue (optional)</span>
+                    <input
+                      aria-label="GitHub issue"
+                      className={fieldClass}
+                      value={issueRef}
+                      disabled={loadingIssue || submitting}
+                      placeholder="12 or https://github.com/owner/repo/issues/12"
+                      onChange={(event) => {
+                        setIssueRef(event.target.value);
+                        // Editing the reference retires any preview still in flight.
+                        issueRequestId.current += 1;
+                        setLoadingIssue(false);
+                        setIssue(null);
+                        setIssueError(null);
+                        setCopyState("idle");
+                      }}
+                    />
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground hover:bg-accent disabled:opacity-45"
+                      disabled={loadingIssue || !issueRef.trim()}
+                      onClick={() => void loadIssue()}
+                    >
+                      {loadingIssue ? "Reading issue..." : "Load issue"}
+                    </button>
+                    {issue ? (
+                      <button
+                        type="button"
+                        aria-label="Copy issue context"
+                        className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground hover:bg-accent"
+                        onClick={() => void copyIssueContext()}
+                      >
+                        Copy issue context
+                      </button>
+                    ) : null}
+                  </div>
+                  {issueError ? (
+                    <p role="alert" className="text-[11px] text-destructive">
+                      {issueError}
+                    </p>
+                  ) : null}
+                  {copyState === "copied" ? (
+                    <p className="text-[10px] text-muted-foreground">
+                      Copied. Paste it into the new pane when you are ready.
+                    </p>
+                  ) : null}
+                  {copyState === "failed" ? (
+                    <p role="alert" className="text-[11px] text-destructive">
+                      Could not copy the issue context. Select the preview text and copy it manually.
+                    </p>
+                  ) : null}
+                  {issue ? (
+                    <div className="space-y-1" aria-label="Issue preview">
+                      <p className="selectable text-[11px] font-medium text-foreground">{issue.title}</p>
+                      <p className="selectable break-all font-mono text-[10px] text-muted-foreground">{issue.url}</p>
+                      <pre className="selectable max-h-24 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-1.5 font-mono text-[10px] text-muted-foreground">
+                        {issue.body || "No description."}
+                      </pre>
+                      {issue.bodyTruncated ? (
+                        <p className="text-[10px] text-muted-foreground/70">Description truncated for this preview.</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : (
             <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -917,7 +1041,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
               disabled={submitting || (!isRemote && (loadingBranches || !baseRef)) || !slug.trim()}
               className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
             >
-              Create Worktree
+              Create Worktree{issue ? ` from Issue #${issue.number}` : ""}
             </button>
           ) : null}
         </div>

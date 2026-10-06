@@ -1,0 +1,39 @@
+Neutralize the two pre-existing compile errors on this tree, so the backend
+fixtures for the GitHub issue intake can be executed.
+
+Both references were introduced by a15fdcf9 ("fix(remote): describe every live
+session and publish desktop focus") and are missing from every branch of this
+repository: `DaemonSessionService::project_desktop_gui_session` is defined
+nowhere, and `SpawnRequestFingerprint` has no `requested_session_id` field.
+Nothing in the issue-intake slice touches `daemon/`, so the module under test is
+byte-identical to the committed one once this patch is applied.
+
+Apply from the repository root:
+
+    git apply docs/evidence/github-issue-intake-20261006/preexisting-daemon-breakage.patch
+
+--- a/src-tauri/src/daemon/machine_owner.rs
++++ b/src-tauri/src/daemon/machine_owner.rs
+@@ -181,7 +181,6 @@
+                     shell: None,
+                     provider_claim: None,
+                     startup: None,
+-                    requested_session_id: Some(session_id.clone()),
+                 },
+             };
+             self.session_metadata.write().insert(session_id, meta);
+@@ -239,13 +238,7 @@
+                             if sessions.iter().any(|s| s.target.session_id == session_id) {
+                                 continue;
+                             }
+-                            match service.project_desktop_gui_session(&session_id, epoch, &catalog) {
+-                                Ok(desktop_session) => sessions.push(desktop_session),
+-                                Err(err) if err == "MACHINE_SERVICE_UNAVAILABLE" => {
+-                                    completeness = Completeness::Partial;
+-                                }
+-                                Err(_) => {}
+-                            }
++                            let _ = (&session_id, &epoch, &catalog);
+                         }
+                     }
+                     Err(_) => {

@@ -1574,6 +1574,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_delete_destructive,
         cmd_worktree_delete_preview,
         cmd_worktree_status,
+        ipc::github_issue::cmd_github_issue_preview,
         cmd_worktree_disk_scan_start,
         cmd_worktree_disk_scan_cancel,
         cmd_worktree_disk_scan_result,
