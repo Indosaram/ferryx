@@ -1,0 +1,12 @@
+
+Would you like to run the following command?
+
+$ rm -rf junk
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)
+
+Press enter to confirm or esc to cancel
+
+• Command completed successfully.
+› Ask Codex to do something

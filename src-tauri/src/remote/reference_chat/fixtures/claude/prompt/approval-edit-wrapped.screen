@@ -1,0 +1,17 @@
+
+● Write(notes.md)
+────────────────────────────────────────
+ Create file
+ notes.md
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1 # Notes
+  2 ────────────────────────────────────────
+  3 Results below the rule
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to create notes.md?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits
+   (auto-approve file edits and common
+   file commands) for this session
+   3. No
+ Esc to cancel · Tab to amend

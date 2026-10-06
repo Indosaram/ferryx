@@ -1,0 +1,7 @@
+Allow tool: Bash
+
+Command: git push --force origin main
+
+❯ Approve
+  Deny
+  esc to cancel

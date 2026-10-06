@@ -1,0 +1,14 @@
+────────────────────────────────────────
+
+ select -> Always allow
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+
+ thinking
+ more of the answer
+ and yet more
+
+>
+────────────────────────────────────────
+────────────────────────────────────────
+/tmp/app
+0.0%/215k (auto)                                        some-model • medium

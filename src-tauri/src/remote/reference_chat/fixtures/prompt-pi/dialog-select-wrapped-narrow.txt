@@ -1,0 +1,16 @@
+────────────────────────────────────────
+
+ Where should this change go next?
+
+ → Keep it on the staging environment for now
+ and wait for review
+   Deploy to production
+   Cancel
+
+ ↑↓ navigate  enter select  escape/ctrl+c
+ cancel
+
+────────────────────────────────────────
+────────────────────────────────────────
+/tmp/app
+0.0%/215k (auto)                                        some-model • medium

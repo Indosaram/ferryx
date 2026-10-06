@@ -1,0 +1,18 @@
+
+────────────────────────────
+←  ☒ Route  ☐ Author  ✔ Su
+Who should author the
+commits that go into the
+pull request, given that
+the fork belongs to the
+lab account and the
+upstream repository to
+its owner?
+❯ 1. Keep local
+     The local git identity.
+  2. Repo owner
+     The repository owner.
+  3. Type something.
+────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

@@ -1,0 +1,9 @@
+
+• WAITING
+• Queued follow-up inputs
+  ? 2 questions · 8s
+    alt+↑ to answer
+• Messages to be submitted after next tool call
+  ↳ stop, don't touch prod
+› Ask Codex to do anything
+  GPT-6-Sol xhigh · ~/lab · Context 97% left · weekly 56% left

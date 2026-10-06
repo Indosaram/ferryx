@@ -1,0 +1,19 @@
+──────────────────────────────
+
+Only showing models from configured providers.
+Use /login to add providers.
+>
+
+→ ✓ vllm-flash/Qwen3.8-Flash-Next
+[lwsa-platform] · default
+    vllm/Qwen/Qwen3.8-27B [lwsa-platform]
+
+  Model Name: qwen-3-8-flash
+
+  Refreshing model catalogs…
+
+  Enter to select · Ctrl+S to set as default ·
+Escape/Ctrl+C to cancel
+──────────────────────────────
+/tmp/pn
+0.0%/215k (auto)  vllm-flash/Qwen3.8-Flash-Nex

@@ -1,0 +1,11 @@
+
+✨ Update available! 0.146.0 -> 0.146.1
+
+› 1. Update now
+  2. Skip
+  3. Skip until next version
+
+Press enter to continue
+
+• Command completed successfully.
+› Ask Codex to do anything

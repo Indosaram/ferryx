@@ -1,0 +1,9 @@
+Allow tool: Bash
+
+❯ Approve
+  Deny
+  esc to cancel
+
+✓ Bash approved
+$ npm test
+$ npm run build

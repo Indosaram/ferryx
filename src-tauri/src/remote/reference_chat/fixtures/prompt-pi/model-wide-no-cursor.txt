@@ -1,0 +1,13 @@
+────────────────────────────────────────
+
+Only showing models from configured providers. Use /login to add providers.
+>
+
+  ✓ vllm/Qwen/Qwen3.8-27B [lwsa-platform] · default
+    vllm-flash/Qwen3.8-Flash-Next [lwsa-platform]
+Could not refresh llama.cpp; showing cached models.
+ Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
+────────────────────────────────────────
+────────────────────────────────────────
+/tmp/app
+0.0%/215k (auto)                                        some-model • medium

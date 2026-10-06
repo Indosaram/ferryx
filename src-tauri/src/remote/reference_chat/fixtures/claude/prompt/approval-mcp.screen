@@ -1,0 +1,10 @@
+
+● github - create_issue (MCP)(title: "Flaky test")
+────────────────────────────────────────
+ Tool use
+   github - create_issue(title: "Flaky test")
+────────────────────────────────────────
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+ Esc to cancel · Tab to amend
