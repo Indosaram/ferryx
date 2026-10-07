@@ -15,7 +15,7 @@ import test, { after } from 'node:test';
 import { createServer } from 'node:net';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import {
   DAEMON_CONTROL_PROTOCOL_VERSION,
   DAEMON_LOOPBACK_HOST,
@@ -1399,7 +1399,12 @@ test('the ssh inventory path is a FILE, and the project store is its sibling', (
   // daemon_ssh_store_path() returns FERRYX_DATA_DIR/ssh_hosts.json - a file - and the daemon
   // compares that value for exact equality with its own ssh_store_path.
   assert.equal(SSH_HOST_STORE_FILENAME, 'ssh_hosts.json');
-  const inventory = '/tmp/herdr-ssh-qa/' + SSH_HOST_STORE_FILENAME;
+  // Built from native pieces, because every derived value is: `join` and `dirname` are
+  // platform-native, so a POSIX-spelled input would make `dirname` yield POSIX separators while
+  // `sshProjectsStorePath` (which calls `join`) yields native ones - the two then differ on
+  // Windows without anything being wrong with the code under test.
+  const inventoryDir = join(tmpdir(), 'herdr-ssh-qa');
+  const inventory = join(inventoryDir, SSH_HOST_STORE_FILENAME);
   assert.equal(
     remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', inventory).startup.remoteSsh.hostStorePath,
     inventory,
@@ -1423,7 +1428,8 @@ test('the ssh inventory path is a FILE, and the project store is its sibling', (
 
   // A directory is not this value, and neither is any other filename: the daemon's own path always
   // ends in ssh_hosts.json, so anything else would be refused as an inventory mismatch.
-  for (const wrong of ['/tmp/herdr-ssh-qa', '/tmp/herdr-ssh-qa/', '/tmp/herdr-ssh-qa/hosts.json']) {
+  // The directory, the same directory with a trailing separator, and a differently-named file.
+  for (const wrong of [inventoryDir, inventoryDir + sep, join(inventoryDir, 'hosts.json')]) {
     assert.throws(
       () => remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', wrong),
       (error) => error instanceof ProvisionError && error.reason === 'ssh-host-store-not-inventory-file',
