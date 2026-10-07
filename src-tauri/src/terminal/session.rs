@@ -362,6 +362,54 @@ pub(crate) struct PtySessionConfig {
     pub worktree_path: Option<PathBuf>,
 }
 
+/// Where a PTY reader thread currently is. Diagnostic only: written by the reader loop and read
+/// by tests and failure messages; it changes no behavior. A parked thread reports the phase it was
+/// entering when it stopped, which is what locates a stall the boolean `reader_finished` cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtyReaderPhase {
+    Starting,
+    BeforeRead,
+    AfterRead,
+    BeforeSend,
+    AfterSend,
+    Finished,
+}
+
+impl PtyReaderPhase {
+    pub(crate) fn as_raw(self) -> u64 {
+        match self {
+            PtyReaderPhase::Starting => 0,
+            PtyReaderPhase::BeforeRead => 1,
+            PtyReaderPhase::AfterRead => 2,
+            PtyReaderPhase::BeforeSend => 3,
+            PtyReaderPhase::AfterSend => 4,
+            PtyReaderPhase::Finished => 5,
+        }
+    }
+
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        match raw {
+            1 => PtyReaderPhase::BeforeRead,
+            2 => PtyReaderPhase::AfterRead,
+            3 => PtyReaderPhase::BeforeSend,
+            4 => PtyReaderPhase::AfterSend,
+            5 => PtyReaderPhase::Finished,
+            _ => PtyReaderPhase::Starting,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            PtyReaderPhase::Starting => "starting",
+            PtyReaderPhase::BeforeRead => "before-read",
+            PtyReaderPhase::AfterRead => "after-read",
+            PtyReaderPhase::BeforeSend => "before-send",
+            PtyReaderPhase::AfterSend => "after-send",
+            PtyReaderPhase::Finished => "finished",
+        }
+    }
+}
+
 pub struct PtySession {
     #[cfg(windows)]
     input: windows_input::WindowsInput,
@@ -376,6 +424,8 @@ pub struct PtySession {
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
+    /// The reader's own phase, diagnostics only (see `PtyReaderPhase`).
+    reader_phase: Arc<AtomicU64>,
     reaped: Arc<AtomicBool>,
     /// Epoch millis of the last PTY output chunk read from the child (0 = none).
     last_output_at: Arc<AtomicU64>,
@@ -435,6 +485,8 @@ impl PtySession {
         let reader_paused = Arc::new(AtomicBool::new(false));
         let pause_requested_task = Arc::clone(&pause_requested);
         let reader_paused_task = Arc::clone(&reader_paused);
+        let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
+        let reader_phase_task = Arc::clone(&reader_phase);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
@@ -454,14 +506,18 @@ impl PtySession {
                     }
                 }
 
+                reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
+                        reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     #[cfg(unix)]
@@ -483,6 +539,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
         Self {
@@ -496,6 +553,7 @@ impl PtySession {
             output_tx,
             worktree_path: config.worktree_path,
             reader_finished,
+            reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
@@ -1072,6 +1130,11 @@ impl PtySession {
         self.output_tx.lock().take();
     }
 
+    /// The reader's current phase, for diagnostics only.
+    pub(crate) fn reader_phase(&self) -> &'static str {
+        PtyReaderPhase::from_raw(self.reader_phase.load(Ordering::Acquire)).as_str()
+    }
+
     pub(crate) fn close_io(&self) {
         self.writer.lock().take();
         self.master.lock().take();
@@ -1224,6 +1287,8 @@ impl PtySession {
         let reader_paused = Arc::new(AtomicBool::new(false));
         let pause_requested_task = Arc::clone(&pause_requested);
         let reader_paused_task = Arc::clone(&reader_paused);
+        let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
+        let reader_phase_task = Arc::clone(&reader_phase);
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
@@ -1244,14 +1309,18 @@ impl PtySession {
                     }
                 }
 
+                reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
+                        reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1271,6 +1340,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
         let child_handle = snapshot.pid.map(|pid| {
@@ -1291,6 +1361,7 @@ impl PtySession {
             output_tx,
             worktree_path: snapshot.worktree_path,
             reader_finished,
+            reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(snapshot.state)),

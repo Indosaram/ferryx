@@ -6,8 +6,9 @@ use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscripti
 #[cfg(test)]
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
-    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
-    DaemonStreamMessage, HistorySegmentWire, TerminalStartup, DAEMON_PROTOCOL_VERSION,
+    AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
+    DaemonResponse, DaemonStreamMessage, HistorySegmentWire, TerminalStartup,
+    DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -955,6 +956,76 @@ pub fn get_agent_state_socket_path() -> PathBuf {
 
 pub fn agent_state_socket_path() -> String {
     get_agent_state_socket_path().to_string_lossy().into_owned()
+}
+
+/// One parsed agent-state ingress report: session id, state, agent, provider session, detail.
+type AgentStateIngressReport = (
+    String,
+    String,
+    Option<String>,
+    Option<AgentProviderSession>,
+    Option<String>,
+);
+
+/// How the ingress must present one report's provider identity to admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngressAdmissionIdentity {
+    /// Admit the claim exactly as the report carried it.
+    AsReported,
+    /// Admit the claim without its pinned path: this family resolves its store from the id alone.
+    WithoutPath,
+    /// Admit no identity for this report.
+    Refused,
+}
+
+/// What the ingress did with one report, which decides what the hub may publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngressOutcome {
+    /// The session is not machine-owned, so the local consumer owns its metadata.
+    Local,
+    /// Admission accepted the identity.
+    Admitted,
+    /// Admission refused it.
+    Refused,
+}
+
+/// The admission decision for one report's provider claim.
+///
+/// Only an OMO claim can lose its pinned path, and only when the id is the one discovery read from
+/// the pane's own process AND the claimed path is the store that id resolves to on this host. OMO is
+/// the family the daemon resolves from an id alone; every other family keeps its claim exactly as it
+/// arrived, so the existing pinned-path rule still decides it.
+fn ingress_admission_identity(
+    agent: &str,
+    id: &str,
+    has_path: bool,
+    discovered: Option<&str>,
+    path_is_own_store: bool,
+) -> IngressAdmissionIdentity {
+    if !has_path || !agent.eq_ignore_ascii_case("omo") {
+        return IngressAdmissionIdentity::AsReported;
+    }
+    if discovered.is_some_and(|found| found == id.trim()) && path_is_own_store {
+        return IngressAdmissionIdentity::WithoutPath;
+    }
+    // The claim names a path this session cannot prove is its own store: admit no identity rather
+    // than a path nothing verified.
+    IngressAdmissionIdentity::Refused
+}
+
+/// The identity the hub may publish for one report.
+fn ingress_publish_identity(
+    outcome: IngressOutcome,
+    reported: Option<AgentProviderSession>,
+    admitted: Option<AgentProviderSession>,
+) -> Option<AgentProviderSession> {
+    match outcome {
+        // A local pane keeps the report as reported: its consumer resolves the transcript from it.
+        IngressOutcome::Local => reported,
+        IngressOutcome::Admitted => admitted,
+        // A refused identity is never published, so a stale or foreign claim cannot linger.
+        IngressOutcome::Refused => None,
+    }
 }
 
 /// Name of the rendezvous record the non-unix ingress publishes beside its socket: the loopback
@@ -2041,13 +2112,7 @@ impl DaemonServer {
     /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
     fn parse_agent_state_report(
         line: &str,
-    ) -> Option<(
-        String,
-        String,
-        Option<String>,
-        Option<crate::daemon::protocol::AgentProviderSession>,
-        Option<String>,
-    )> {
+    ) -> Option<AgentStateIngressReport> {
         let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
             return None;
@@ -2066,6 +2131,139 @@ impl DaemonServer {
         ))
     }
 
+    /// The pid of a pane's own PTY, when it has a live one.
+    fn ingress_pty_pid(&self, session_id: &str) -> Option<u32> {
+        self.session_service
+            .machine_pty(session_id)
+            .and_then(|pty| pty.pid())
+    }
+
+    /// Is `claimed` the store `provider_id` resolves to under this host's HOME?
+    ///
+    /// Both sides are canonicalized and the claim must be a regular file, so a symlink or a
+    /// directory cannot pass by spelling alone.
+    fn ingress_path_is_own_store(provider_id: &str, claimed: &str) -> bool {
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+            return false;
+        };
+        let Some(expected) =
+            crate::agent_transcript::transcript_path_for_session(Path::new(&home), provider_id)
+        else {
+            return false;
+        };
+        let (Ok(claimed_path), Ok(expected_path)) = (
+            std::fs::canonicalize(Path::new(claimed)),
+            std::fs::canonicalize(&expected),
+        ) else {
+            return false;
+        };
+        claimed_path.is_file() && claimed_path == expected_path
+    }
+
+    /// The identity admission must see for one report, or `None` when none may be admitted.
+    ///
+    /// Every process-table and filesystem read happens inside `run_blocking`: discovery walks the
+    /// process table and reads a process environment, and the path check touches the filesystem, so
+    /// neither may run on the reactor.
+    async fn ingress_identity_for_admission(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent: Option<&str>,
+        reported: Option<&AgentProviderSession>,
+    ) -> Option<AgentProviderSession> {
+        let Some(provider) = reported else {
+            return None;
+        };
+        let Some(agent) = agent else {
+            return Some(provider.clone());
+        };
+        if provider.transcript_path.is_none() || !agent.eq_ignore_ascii_case("omo") {
+            return Some(provider.clone());
+        }
+        let server = Arc::clone(self);
+        let session_id = session_id.to_string();
+        let agent = agent.to_string();
+        let id = provider.id.clone();
+        let claimed = provider.transcript_path.clone().unwrap_or_default();
+        let decision = crate::ipc::run_blocking(move || {
+            let discovered = server
+                .ingress_pty_pid(&session_id)
+                .and_then(|pid| crate::ipc::agents::discover_agent_session_id(pid, &agent));
+            let path_is_own_store = discovered
+                .as_deref()
+                .is_some_and(|found| Self::ingress_path_is_own_store(found, &claimed));
+            Ok(ingress_admission_identity(
+                &agent,
+                &id,
+                true,
+                discovered.as_deref(),
+                path_is_own_store,
+            ))
+        })
+        .await;
+        match decision {
+            Ok(IngressAdmissionIdentity::WithoutPath) => Some(AgentProviderSession {
+                key: provider.key,
+                id: provider.id.clone(),
+                transcript_path: None,
+            }),
+            Ok(IngressAdmissionIdentity::AsReported) => Some(provider.clone()),
+            Ok(IngressAdmissionIdentity::Refused) | Err(_) => None,
+        }
+    }
+
+    /// Fold one parsed ingress report into the hub.
+    ///
+    /// A report is admitted as a machine session only when this daemon owns the session. A local
+    /// pane keeps the metadata it reported, and a refused identity never replaces a published one.
+    async fn ingest_agent_state_report(
+        self: &Arc<Self>,
+        states: &Arc<AgentStateHub>,
+        sessions: &Arc<DaemonSessionService>,
+        epoch: crate::scoped_contracts::Epoch,
+        report: AgentStateIngressReport,
+    ) {
+        let (session_id, state, agent, reported, detail) = report;
+        let admitted = self
+            .ingress_identity_for_admission(&session_id, agent.as_deref(), reported.as_ref())
+            .await;
+        let outcome = match sessions.machine_detail_routed(&session_id, epoch).await {
+            Ok(crate::remote::machine_protocol::SessionDetail::Running { session }) => {
+                let hint = AgentStateReport {
+                    session_id: session_id.clone(),
+                    state: state.clone(),
+                    agent: agent.clone(),
+                    provider_session: admitted.clone(),
+                    detail: detail.clone(),
+                };
+                match sessions.validate_machine_agent_report(session.target, hint).await {
+                    Ok(_) => IngressOutcome::Admitted,
+                    // Not machine-owned: this pane's local consumer owns its metadata.
+                    Err(error) if error == "SESSION_NOT_FOUND" => IngressOutcome::Local,
+                    Err(error) => {
+                        tracing::debug!(%error, "Machine agent metadata rejected");
+                        IngressOutcome::Refused
+                    }
+                }
+            }
+            // An exited or expired session, or an unreachable owner, publishes nothing.
+            Ok(_) => return,
+            Err(error) if error == "SESSION_NOT_FOUND" => IngressOutcome::Local,
+            Err(error) => {
+                tracing::debug!(%error, "Machine agent owner unavailable");
+                return;
+            }
+        };
+        states.publish_canonical(AgentState {
+            session_id,
+            state,
+            agent,
+            provider_session: ingress_publish_identity(outcome, reported, admitted),
+            detail,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        });
+    }
+
     #[cfg(unix)]
     pub fn spawn_agent_state_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
         let path = get_agent_state_socket_path();
@@ -2081,6 +2279,7 @@ impl DaemonServer {
             tracing::warn!(%error, "Failed to secure agent state socket");
         }
 
+        let server = Arc::clone(self);
         let states = Arc::clone(&self.agent_states);
         let sessions = self.session_service.clone();
         let epoch = crate::scoped_contracts::Epoch(self.epoch);
@@ -2098,45 +2297,9 @@ impl DaemonServer {
                     let mut line = String::new();
                     while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                         if let Some(report) = Self::parse_agent_state_report(&line) {
-                            match sessions.machine_detail_routed(&report.0, epoch).await {
-                                Ok(crate::remote::machine_protocol::SessionDetail::Running {
-                                    session,
-                                }) => {
-                                    let hint = AgentStateReport {
-                                        session_id: report.0.clone(),
-                                        state: report.1.clone(),
-                                        agent: report.2.clone(),
-                                        provider_session: report.3.clone(),
-                                        detail: report.4.clone(),
-                                    };
-                                    if let Err(error) = sessions
-                                        .validate_machine_agent_report(session.target, hint)
-                                        .await
-                                    {
-                                        tracing::debug!(%error, "Machine agent metadata rejected");
-                                        line.clear();
-                                        continue;
-                                    }
-                                }
-                                Ok(_) => {
-                                    line.clear();
-                                    continue;
-                                }
-                                Err(error) if error == "SESSION_NOT_FOUND" => {}
-                                Err(error) => {
-                                    tracing::debug!(%error, "Machine agent owner unavailable");
-                                    line.clear();
-                                    continue;
-                                }
-                            }
-                            states.publish_canonical(AgentState {
-                                session_id: report.0,
-                                state: report.1,
-                                agent: report.2,
-                                provider_session: report.3,
-                                detail: report.4,
-                                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
-                            });
+                            server
+                                .ingest_agent_state_report(&states, &sessions, epoch, report)
+                                .await;
                         }
                         line.clear();
                     }
@@ -2198,6 +2361,7 @@ impl DaemonServer {
         }
         tracing::info!(port, "Agent state ingress listening on loopback");
 
+        let server = Arc::clone(self);
         let states = Arc::clone(&self.agent_states);
         let sessions = self.session_service.clone();
         let epoch = crate::scoped_contracts::Epoch(self.epoch);
@@ -2224,45 +2388,9 @@ impl DaemonServer {
                             continue;
                         }
                         if let Some(report) = Self::parse_agent_state_report(&line) {
-                            match sessions.machine_detail_routed(&report.0, epoch).await {
-                                Ok(crate::remote::machine_protocol::SessionDetail::Running {
-                                    session,
-                                }) => {
-                                    let hint = AgentStateReport {
-                                        session_id: report.0.clone(),
-                                        state: report.1.clone(),
-                                        agent: report.2.clone(),
-                                        provider_session: report.3.clone(),
-                                        detail: report.4.clone(),
-                                    };
-                                    if let Err(error) = sessions
-                                        .validate_machine_agent_report(session.target, hint)
-                                        .await
-                                    {
-                                        tracing::debug!(%error, "Machine agent metadata rejected");
-                                        line.clear();
-                                        continue;
-                                    }
-                                }
-                                Ok(_) => {
-                                    line.clear();
-                                    continue;
-                                }
-                                Err(error) if error == "SESSION_NOT_FOUND" => {}
-                                Err(error) => {
-                                    tracing::debug!(%error, "Machine agent owner unavailable");
-                                    line.clear();
-                                    continue;
-                                }
-                            }
-                            states.publish_canonical(AgentState {
-                                session_id: report.0,
-                                state: report.1,
-                                agent: report.2,
-                                provider_session: report.3,
-                                detail: report.4,
-                                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
-                            });
+                            server
+                                .ingest_agent_state_report(&states, &sessions, epoch, report)
+                                .await;
                         }
                         line.clear();
                     }
@@ -7043,6 +7171,82 @@ mod tests {
             )),
             PathBuf::from(r"\\?\Volume{b75e2c83-0000-0000-0000-602200000000}\")
         );
+    }
+
+    /// A provider claim shaped the way the extension reports it.
+    fn reported_claim(id: &str, path: Option<&str>) -> AgentProviderSession {
+        AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn ingress_drops_a_path_only_for_a_verified_omo_claim() {
+        let id = "01a112e9-02b1-7857-b11d-967060362583";
+        // The canonical machine OMO report: the id is the one discovery read from the pane's own
+        // process, and the path is the store that id resolves to on this host.
+        assert_eq!(
+            ingress_admission_identity("omo", id, true, Some(id), true),
+            IngressAdmissionIdentity::WithoutPath
+        );
+        // A path that is not this session's own store is refused, never admitted.
+        assert_eq!(
+            ingress_admission_identity("omo", id, true, Some(id), false),
+            IngressAdmissionIdentity::Refused
+        );
+        // An id the live process does not report is refused.
+        assert_eq!(
+            ingress_admission_identity(
+                "omo",
+                id,
+                true,
+                Some("01a00000-0000-0000-0000-000000000000"),
+                true
+            ),
+            IngressAdmissionIdentity::Refused
+        );
+        // Nothing discovered means nothing verified.
+        assert_eq!(
+            ingress_admission_identity("omo", id, true, None, true),
+            IngressAdmissionIdentity::Refused
+        );
+        // Only OMO may lose its path: another family's claim keeps it exactly as reported, so the
+        // daemon's existing pinned-path rule still decides it.
+        for agent in ["pi", "omp", "claude", "codex"] {
+            assert_eq!(
+                ingress_admission_identity(agent, id, true, Some(id), true),
+                IngressAdmissionIdentity::AsReported,
+                "{agent} must keep its pinned path"
+            );
+        }
+        // A claim with no path is admitted exactly as reported, whatever the agent.
+        assert_eq!(
+            ingress_admission_identity("omo", id, false, Some(id), false),
+            IngressAdmissionIdentity::AsReported
+        );
+    }
+
+    #[test]
+    fn ingress_publishes_local_metadata_and_withholds_refused_identities() {
+        let reported = Some(reported_claim("reported-id", Some("/home/qa/.pi/store.jsonl")));
+        let admitted = Some(reported_claim("admitted-id", None));
+        // A local pane keeps the metadata it reported, path included: its consumer resolves the
+        // transcript from that path.
+        assert_eq!(
+            ingress_publish_identity(IngressOutcome::Local, reported.clone(), admitted.clone()),
+            reported
+        );
+        // An admitted machine session publishes the admitted identity.
+        assert_eq!(
+            ingress_publish_identity(IngressOutcome::Admitted, reported.clone(), admitted.clone()),
+            admitted
+        );
+        // A refusal publishes NO identity, so a stale or foreign claim is never published.
+        assert_eq!(ingress_publish_identity(IngressOutcome::Refused, reported, admitted), None);
+        assert_eq!(ingress_publish_identity(IngressOutcome::Refused, None, None), None);
+        assert_eq!(ingress_publish_identity(IngressOutcome::Local, None, None), None);
     }
 
     #[test]

@@ -10,9 +10,16 @@ fn served_session_cwd_falls_back_when_the_stored_value_is_probe_output() {
         Some("/repo".to_string())
     );
     assert_eq!(serveable_local_cwd(&poisoned, None), None);
+    // A plausible absolute cwd is served verbatim rather than replaced by the worktree path. The
+    // path is built from the running platform's own root, because `Path::is_absolute` on Windows
+    // requires a prefix: a POSIX-shaped `/repo/sub` is rooted but NOT absolute there, so falling
+    // back to the worktree path is correct behavior this assertion would otherwise misread as a
+    // defect in `serveable_local_cwd`.
+    let worktree = if cfg!(windows) { r"C:\repo" } else { "/repo" };
+    let nested = std::path::Path::new(worktree).join("sub");
     assert_eq!(
-        serveable_local_cwd(std::path::Path::new("/repo/sub"), Some("/repo".to_string())),
-        Some("/repo/sub".to_string())
+        serveable_local_cwd(&nested, Some(worktree.to_string())),
+        Some(nested.to_string_lossy().into_owned())
     );
 }
 
@@ -317,8 +324,14 @@ async fn dropped_http_reply_replays_original_process_and_controller_fences_close
                 .as_ref()
                 .is_some_and(|session| session.is_reader_finished());
             let hub_holds_session = service.terminal_service.output_hub().has_session(&id);
+            // The reader's own phase is the locator the boolean cannot be: a parked thread reports
+            // the phase it was entering when it stopped (before-read / before-send), which names the
+            // blocking call instead of only proving the thread had not finished.
+            let reader_phase = pty
+                .as_ref()
+                .map_or("no-session", |session| session.reader_phase());
             panic!(
-                "wait_machine_lifecycle failed for {id}: {error}; pty_reaped={reaped}; exit_recorded={exit_recorded}; reader_finished={reader_finished}; hub_holds_session={hub_holds_session}"
+                "wait_machine_lifecycle failed for {id}: {error}; pty_reaped={reaped}; exit_recorded={exit_recorded}; reader_finished={reader_finished}; reader_phase={reader_phase}; hub_holds_session={hub_holds_session}"
             );
         }
     }
@@ -516,6 +529,72 @@ async fn sixty_four_live_machine_sessions_are_the_admission_limit() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// Closing a session must end its reader thread, and the reader's own phase must reach `finished`.
+///
+/// This is the close-completion regression for the Windows stall: the wait is the existing
+/// `wait_machine_lifecycle` bound (an event, never a sleep) and the failure message carries the
+/// reader's phase, so a reader that parks names the blocking call instead of only timing out.
+/// It is expected to fail on a host whose reader cannot be stopped - that failure is the evidence,
+/// not a reason to omit the coverage.
+#[tokio::test]
+async fn closing_a_machine_session_ends_its_reader() {
+    let (root, owner, template) = fixture().await;
+    let service = owner.session_service.clone();
+    let mut request = template.clone();
+    request.request_id = uuid::Uuid::new_v4().to_string();
+    let machine_target = target();
+    let session_id = machine_target.session_id.clone();
+    let spawned = service
+        .spawn_machine(
+            request,
+            "device".into(),
+            "digest".into(),
+            machine_target,
+            Instant::now() + Duration::from_secs(30),
+            Arc::new(|| Ok(())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawned, session_id);
+    let pty = service
+        .terminal_service
+        .get_session(&session_id)
+        .expect("the session this test spawned is live");
+
+    service
+        .terminal_service
+        .close_session(&session_id)
+        .await
+        .unwrap();
+    let lifecycle = service.wait_machine_lifecycle(&session_id).await;
+
+    assert!(
+        lifecycle.is_ok(),
+        "closing {session_id} never completed its lifecycle; the reader is in phase {} and \
+         pty_reaped={} - a parked reader holds the output sender, so the pump keeps the lifecycle \
+         sender and the exit record is never written",
+        pty.reader_phase(),
+        pty.is_reaped()
+    );
+    assert_eq!(
+        pty.reader_phase(),
+        "finished",
+        "the reader must have finished once the session was closed"
+    );
+    eprintln!(
+        "A09 close completion: session={session_id} reader_phase={} reaped={}",
+        pty.reader_phase(),
+        pty.is_reaped()
+    );
+    drop(pty);
+    drop(service);
+    drop(owner);
+    // The temp root is removed off the runtime, as every other fixture teardown in this file does.
+    tokio::task::spawn_blocking(move || root.close().unwrap())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -941,6 +1020,17 @@ async fn projector_child_spawn(
         .unwrap()
 }
 
+/// The reader phase of a child's session at the moment the body finished, for the sentinel.
+///
+/// Diagnostic only: a body that returns while its reader is still in `before-read` names the
+/// blocking call the process is stuck on, instead of only proving the thread had not finished.
+fn projector_child_reader_phase(service: &Arc<DaemonSessionService>, id: &str) -> &'static str {
+    service
+        .terminal_service
+        .get_session(id)
+        .map_or("no-session", |session| session.reader_phase())
+}
+
 async fn projector_child_cleanup(service: &Arc<DaemonSessionService>) {
     projector_child_stage("teardown");
     // Hold each session so its reader state can still be read once the close removes it.
@@ -1030,10 +1120,11 @@ async fn projector_desktop_gui_child_canonical_local_target() {
     // process failed to exit after it - a shutdown stall, not a scenario stall.
     projector_child_stage("body-complete");
     eprintln!(
-        "F1-PROJECTOR canonical: session={id} machine_id={} cwd=sub root_cwd={} fixture_root={}",
+        "F1-PROJECTOR canonical: session={id} machine_id={} cwd=sub root_cwd={} fixture_root={} reader_phase={}",
         projected.target.machine_id,
         projected_root.cwd,
-        root.display()
+        root.display(),
+        projector_child_reader_phase(&service, &id)
     );
 }
 
@@ -1080,7 +1171,8 @@ async fn projector_desktop_gui_child_foreign_workspace() {
     // process failed to exit after it - a shutdown stall, not a scenario stall.
     projector_child_stage("body-complete");
     eprintln!(
-        "F1-PROJECTOR foreign workspace: session={id} worktree-mismatch=refused unregistered=refused"
+        "F1-PROJECTOR foreign workspace: session={id} worktree-mismatch=refused unregistered=refused reader_phase={}",
+        projector_child_reader_phase(&service, &id)
     );
 }
 
@@ -1127,7 +1219,8 @@ async fn projector_desktop_gui_child_root_escape() {
     // process failed to exit after it - a shutdown stall, not a scenario stall.
     projector_child_stage("body-complete");
     eprintln!(
-        "F1-PROJECTOR root escape: session={id} outside-root=refused missing-cwd=refused"
+        "F1-PROJECTOR root escape: session={id} outside-root=refused missing-cwd=refused reader_phase={}",
+        projector_child_reader_phase(&service, &id)
     );
 }
 
@@ -1175,7 +1268,8 @@ async fn projector_desktop_gui_child_non_ready_workspace() {
     // process failed to exit after it - a shutdown stall, not a scenario stall.
     projector_child_stage("body-complete");
     eprintln!(
-        "F1-PROJECTOR non-ready: session={id} availability=missing-refused ready-projectable"
+        "F1-PROJECTOR non-ready: session={id} availability=missing-refused ready-projectable reader_phase={}",
+        projector_child_reader_phase(&service, &id)
     );
 }
 

@@ -625,6 +625,12 @@ describe("reference chat lane (task 12)", () => {
         const url = String(input instanceof Request ? input.url : input);
         calls.push(url);
         if (url.includes("/api/v1/socket-ticket")) return jsonResponse({ ticket: "t", expiresAt: 9999999999 });
+        // The lane binds a target to the identity the gateway publishes: the epoch it compares
+        // against AND the owner authority. Without this document there is no target, and the
+        // refusal this test asserts would never be reached.
+        if (url.includes("/api/v1/capabilities")) {
+          return jsonResponse({ apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID });
+        }
         if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true }] });
         if (url.includes("/api/v1/workspace/state")) return jsonResponse(state);
         if (url.includes("/history")) return jsonResponse(nativePage());

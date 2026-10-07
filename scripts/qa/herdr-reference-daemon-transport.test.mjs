@@ -15,7 +15,7 @@ import test, { after } from 'node:test';
 import { createServer } from 'node:net';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   DAEMON_CONTROL_PROTOCOL_VERSION,
   DAEMON_LOOPBACK_HOST,
@@ -57,6 +57,21 @@ import {
   workspaceIdRefusal,
   workspaceRegistrationFor,
 } from './herdr-reference-fixtures.mjs';
+import {
+  HOST_SUPPLIED_SOURCE_KIND,
+  validateOwnerHostSpawnReceipt,
+} from './herdr-reference-pty-identity.mjs';
+import {
+  ProvisionError,
+  SSH_RECEIPT_PROBE_PLATFORM,
+  SSH_HOST_STORE_FILENAME,
+  remoteSpawnRequest,
+  remoteExecutableProbeCommand,
+  remoteOwnerHostReceipt,
+  remoteReceiptCorrelation,
+  sshProjectsStorePath,
+  sshConnectionArgs,
+} from './herdr-reference-provision.mjs';
 
 const root = resolve('herdr-transport-fixture');
 const runtime = join(root, 'runtime');
@@ -1117,5 +1132,289 @@ test('a record that publishes a host id without its owner is refused', () => {
   const named = incomplete.errors.filter((message) => /without referenceOwnerId/.test(message));
   assert.equal(named.length, 2, 'host and session are each named: ' + incomplete.errors.join('; '));
   assert.equal(incomplete.ok, false);
+});
+
+/* ==========================================================================
+ * The ssh owner-host receipt, correlated by the owning daemon's own reply
+ * ==========================================================================
+ *
+ * Source-only assertions over the pure path: a `remoteSessionDetails` reply and the declared
+ * create record go in, a correlated receipt comes out, and the SHARED validator then accepts it.
+ * No transport, no host and no bridge is involved here.
+ */
+
+const daemonSessionId = 'daemon-session-1';
+const helperSessionId = 'helper-session-1';
+const helperTarget = {
+  hostId: 'host-1',
+  ownerId: 'owner-1',
+  epoch: 41,
+  backendSessionId: helperSessionId,
+};
+const createRecord = { sessionId: daemonSessionId, clientRequestId: 'req-1' };
+const candidateProvenance = {
+  candidateId: 'cand-1',
+  sourceManifestSha256: 'a'.repeat(64),
+  binarySha256: 'b'.repeat(64),
+};
+
+/** The daemon's own reply, as RemoteSessionDetails serializes it. */
+function remoteDetails(overrides) {
+  return {
+    descriptor: {
+      backendSessionId: daemonSessionId,
+      target: { ...helperTarget },
+      clientRequestId: 'req-1',
+      cols: 80,
+      rows: 24,
+    },
+    state: 'connected',
+    generation: 1,
+    attempts: 0,
+    failure: null,
+    replayGap: null,
+    pid: 4242,
+    ...(overrides || {}),
+  };
+}
+
+function correlatedReceipt(overrides) {
+  const correlation = remoteReceiptCorrelation(remoteDetails((overrides || {}).details), createRecord);
+  assert.equal(correlation.ok, true, 'the fixture must correlate: ' + JSON.stringify(correlation));
+  return remoteOwnerHostReceipt({
+    correlation,
+    hostId: 'host-1',
+    epoch: 41,
+    remotePlatform: 'linux',
+    executable: '/usr/bin/bash',
+    observedAt: '2026-10-07T00:00:06.000Z',
+    candidate: candidateProvenance,
+  });
+}
+
+test('the daemon reply correlates its session id with the helper target', () => {
+  const correlation = remoteReceiptCorrelation(remoteDetails(), createRecord);
+  assert.equal(correlation.ok, true);
+  // The two identities stay separate values; neither is relabelled as the other.
+  assert.equal(correlation.daemonSessionId, daemonSessionId);
+  assert.equal(correlation.helperSessionId, helperSessionId);
+  assert.notEqual(correlation.daemonSessionId, correlation.helperSessionId);
+  assert.deepEqual(correlation.helperTarget, helperTarget);
+  assert.equal(correlation.clientRequestId, 'req-1');
+  assert.equal(correlation.pid, 4242);
+});
+
+test('a session id or request id the daemon does not confirm is refused', () => {
+  const wrongSession = remoteReceiptCorrelation(
+    remoteDetails({ descriptor: { ...remoteDetails().descriptor, backendSessionId: 'some-other-session' } }),
+    createRecord,
+  );
+  assert.equal(wrongSession.ok, false);
+  assert.equal(wrongSession.reason, 'ssh-correlation-session-mismatch');
+
+  const wrongRequest = remoteReceiptCorrelation(
+    remoteDetails({ descriptor: { ...remoteDetails().descriptor, clientRequestId: 'some-other-request' } }),
+    createRecord,
+  );
+  assert.equal(wrongRequest.ok, false);
+  assert.equal(wrongRequest.reason, 'ssh-correlation-request-mismatch');
+});
+
+test('an absent pid, helper target or reply is refused rather than defaulted', () => {
+  const cases = [
+    [remoteDetails({ pid: null }), 'ssh-connected-pid-absent'],
+    [remoteDetails({ pid: 0 }), 'ssh-connected-pid-absent'],
+    [remoteDetails({ pid: '4242' }), 'ssh-connected-pid-absent'],
+    [remoteDetails({ descriptor: { ...remoteDetails().descriptor, target: null } }), 'ssh-helper-target-absent'],
+    [remoteDetails({ descriptor: null }), 'ssh-remote-descriptor-absent'],
+    [null, 'ssh-remote-session-unknown'],
+  ];
+  for (const [details, reason] of cases) {
+    const correlation = remoteReceiptCorrelation(details, createRecord);
+    assert.equal(correlation.ok, false, JSON.stringify(details));
+    assert.equal(correlation.reason, reason, JSON.stringify(details));
+  }
+});
+
+test('a correlated receipt is accepted by the shared validator', () => {
+  const receipt = correlatedReceipt();
+  assert.equal(receipt.sourceKind, HOST_SUPPLIED_SOURCE_KIND);
+  assert.equal(receipt.backendSessionId, daemonSessionId);
+  assert.equal(receipt.correlation.helperSessionId, helperSessionId);
+  assert.notEqual(receipt.backendSessionId, receipt.correlation.helperSessionId);
+  assert.equal(receipt.pid, 4242);
+  assert.equal(receipt.executable, '/usr/bin/bash');
+  assert.equal(receipt.correlation.source, 'daemon-remote-session-details');
+
+  const checked = validateOwnerHostSpawnReceipt(receipt, {
+    hostId: 'host-1',
+    transport: 'ssh',
+    backendSessionId: daemonSessionId,
+    epoch: '41',
+    candidateId: candidateProvenance.candidateId,
+    sourceManifestSha256: candidateProvenance.sourceManifestSha256,
+  });
+  assert.equal(checked.ok, true, checked.errors.join('; '));
+
+  // No spawn-time record is claimed, and the pid authorizes nothing.
+  assert.equal(receipt.acquisition.spawnedAtProvenance, 'acquisition-observed');
+  assert.equal(receipt.acquisition.executableProvenance, 'host-observed-proc-exe');
+  assert.match(receipt.acquisition.cleanupAuthority, /^none/);
+});
+
+test('a receipt is never built without a confirmed correlation or off Linux', () => {
+  const correlation = remoteReceiptCorrelation(remoteDetails(), createRecord);
+  const base = {
+    correlation,
+    hostId: 'host-1',
+    epoch: 41,
+    remotePlatform: 'linux',
+    executable: '/usr/bin/bash',
+    candidate: candidateProvenance,
+  };
+  assert.throws(
+    () => remoteOwnerHostReceipt({ ...base, correlation: { ok: false } }),
+    (error) => error instanceof ProvisionError && error.reason === 'ssh-receipt-without-correlation',
+  );
+  // The process identity comes from /proc, so any other platform is refused, not probed.
+  for (const platform of ['darwin', 'windows', undefined]) {
+    assert.throws(
+      () => remoteOwnerHostReceipt({ ...base, remotePlatform: platform }),
+      (error) => error.reason === 'ssh-probe-platform-unsupported',
+      'platform ' + String(platform) + ' must be refused',
+    );
+  }
+  assert.throws(
+    () => remoteOwnerHostReceipt({ ...base, executable: null }),
+    (error) => error.reason === 'ssh-executable-unknown',
+  );
+  assert.equal(SSH_RECEIPT_PROBE_PLATFORM, 'linux');
+});
+
+test('the executable probe reads only the exe, and ssh is non-interactive', () => {
+  const command = remoteExecutableProbeCommand(4242);
+  assert.ok(command.includes('/proc/4242/exe'), command);
+  // No start time is read: there is nothing to compare one against, and a start time observed
+  // now is not a spawn record.
+  assert.ok(!command.includes('stat'), command);
+  assert.ok(!command.includes('uptime'), command);
+
+  const args = sshConnectionArgs({ hostname: '127.0.0.1', username: 'qa', port: 44841, identityFile: '/keys/id' });
+  assert.ok(args.includes('-T'));
+  assert.ok(args.includes('BatchMode=yes'));
+  assert.ok(args.includes('StrictHostKeyChecking=yes'));
+  assert.ok(args.includes('44841'));
+  assert.ok(args.includes('qa@127.0.0.1'));
+  assert.ok(args.includes('/keys/id'));
+  assert.ok(!args.some((value) => /password/i.test(value)), 'no password path may be offered');
+});
+
+/* --------------------------------------------------------------------------
+ * The remote spawn the ssh branch sends
+ * ------------------------------------------------------------------------ */
+
+const sshWorkspaceId = 'ssh:' + 'c'.repeat(64);
+const sshStorePath = '/tmp/herdr-ssh-qa/ssh_hosts.json';
+const sshSpawnSession = {
+  workspaceId: sshWorkspaceId,
+  clientRequestId: 'req-ssh-1',
+  remoteCwd: '/home/qa/ulw/stage/repo',
+  worktree: null,
+  cols: 80,
+  rows: 24,
+};
+
+test('the remote spawn is the product startup, with no local shell or wrapper', () => {
+  const request = remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'req-ssh-1', sshStorePath);
+  assert.equal(request.type, 'spawn');
+  assert.equal(request.workspaceId, sshWorkspaceId);
+  assert.equal(request.clientRequestId, 'req-ssh-1');
+  // The product's own remote startup, naming the store the daemon is configured with.
+  assert.deepEqual(request.startup, { remoteSsh: { hostStorePath: sshStorePath } });
+  // A local shell override is refused for an ssh session, and the recording wrapper is a LOCAL
+  // artifact the remote host never sees.
+  assert.equal(request.shell, null);
+  assert.equal(request.worktree, null);
+  assert.equal(request.cwd, '/home/qa/ulw/stage/repo');
+  assert.equal(request.cols, 80);
+  assert.equal(request.rows, 24);
+  assert.ok(!('wrapperPath' in request), 'the remote request carries no wrapper');
+});
+
+test('a remote spawn requires the derived ssh id and a declared store', () => {
+  // The local registry refuses an id containing ':', so a remote spawn must name the ssh id.
+  for (const workspaceId of ['plain-workspace', null, 'ssh', 'daemon:1']) {
+    assert.throws(
+      () => remoteSpawnRequest({ ...sshSpawnSession, workspaceId }, { id: 'host-ssh' }, 'r', sshStorePath),
+      (error) => error instanceof ProvisionError && error.reason === 'ssh-workspace-id-required',
+      'workspaceId ' + String(workspaceId) + ' must be refused',
+    );
+  }
+  assert.throws(
+    () => remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', null),
+    (error) => error.reason === 'ssh-host-store-undeclared',
+  );
+  assert.throws(
+    () => remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', '   '),
+    (error) => error.reason === 'ssh-host-store-undeclared',
+  );
+  // A leading-space id is trimmed rather than sent as a different workspace than the daemon has.
+  assert.equal(
+    remoteSpawnRequest({ ...sshSpawnSession, workspaceId: '  ' + sshWorkspaceId }, { id: 'h' }, 'r', sshStorePath).workspaceId,
+    sshWorkspaceId,
+  );
+});
+
+test('the correlation is verified against the real spawn response, not a declaration', () => {
+  // What spawnRemotePty records from the daemon's own spawnOk, with no config value involved.
+  const fromSpawn = { sessionId: daemonSessionId, clientRequestId: 'req-ssh-1' };
+  const correlated = remoteReceiptCorrelation(remoteDetails(), fromSpawn);
+  assert.equal(correlated.ok, true, JSON.stringify(correlated));
+  assert.equal(correlated.daemonSessionId, daemonSessionId);
+
+  // A declaration the daemon does not confirm is refused exactly like any other mismatch: a
+  // fabricated success is not reachable through this path.
+  const fabricated = remoteReceiptCorrelation(remoteDetails(), {
+    sessionId: daemonSessionId,
+    clientRequestId: 'a-request-the-daemon-never-saw',
+  });
+  assert.equal(fabricated.ok, false);
+  assert.equal(fabricated.reason, 'ssh-correlation-request-mismatch');
+  const fabricatedSession = remoteReceiptCorrelation(remoteDetails(), {
+    sessionId: 'a-session-the-daemon-never-created',
+    clientRequestId: 'req-1',
+  });
+  assert.equal(fabricatedSession.ok, false);
+  assert.equal(fabricatedSession.reason, 'ssh-correlation-session-mismatch');
+});
+
+test('the ssh inventory path is a FILE, and the project store is its sibling', () => {
+  // daemon_ssh_store_path() returns FERRYX_DATA_DIR/ssh_hosts.json - a file - and the daemon
+  // compares that value for exact equality with its own ssh_store_path.
+  assert.equal(SSH_HOST_STORE_FILENAME, 'ssh_hosts.json');
+  const inventory = '/tmp/herdr-ssh-qa/' + SSH_HOST_STORE_FILENAME;
+  assert.equal(
+    remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', inventory).startup.remoteSsh.hostStorePath,
+    inventory,
+  );
+
+  // The project store is derived the way the product derives it - `with_file_name` - so it is the
+  // inventory file's SIBLING. The child reading would be a path the daemon never looks at.
+  assert.equal(sshProjectsStorePath(inventory), '/tmp/herdr-ssh-qa/remote_projects.json');
+  assert.notEqual(
+    sshProjectsStorePath(inventory),
+    join(dirname(inventory), SSH_HOST_STORE_FILENAME, SSH_PROJECTS_STORE_FILENAME),
+    'the project store is never a child of the inventory file',
+  );
+
+  // A directory is not this value, and neither is any other filename: the daemon's own path always
+  // ends in ssh_hosts.json, so anything else would be refused as an inventory mismatch.
+  for (const wrong of ['/tmp/herdr-ssh-qa', '/tmp/herdr-ssh-qa/', '/tmp/herdr-ssh-qa/hosts.json']) {
+    assert.throws(
+      () => remoteSpawnRequest(sshSpawnSession, { id: 'host-ssh' }, 'r', wrong),
+      (error) => error instanceof ProvisionError && error.reason === 'ssh-host-store-not-inventory-file',
+      String(wrong) + ' must be refused as a directory rather than an inventory file',
+    );
+  }
 });
 

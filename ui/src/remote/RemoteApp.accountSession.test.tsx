@@ -347,7 +347,6 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
-    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -355,6 +354,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(topContextTrigger).toBeDefined();
     expect(topContextTrigger.getAttribute("aria-expanded")).toBe("false");
 
+    // The body is the preselection placeholder here, and the header's status cluster - which owns
+    // the mode switch - is not rendered yet, so no terminal can be mounted whichever mode the app
+    // will end up in.
     expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
     expect(screen.queryByTestId("remote-terminal")).toBeNull();
     expect(screen.queryByTestId("account-worktrees-container")).toBeNull();
@@ -366,10 +368,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       ),
     ).toBe(false);
     // The header's status cluster, which owns the mode switch, is only rendered once a worktree
-    // is chosen (account preselection renders the collapsed picker alone), so the terminal is
-    // asked for after the selection, not before it.
-    await switchToTerminalMode();
-
+    // is chosen (account preselection renders the collapsed picker alone). Asking for the
+    // terminal before that is a silent no-op - the switch does not exist yet - so the request is
+    // made below, after the selection has landed.
     act(() => {
       fireEvent.click(topContextTrigger);
     });
@@ -392,6 +393,14 @@ describe("RemoteApp - Account Session Phone Flow", () => {
         }),
       );
     });
+
+    // The selection has landed, so the switch exists now: wait for it rather than assume it, then
+    // ask for the terminal. A switch that never appears fails here instead of silently leaving the
+    // chat surface up and reporting only a missing grid.
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-view-mode-terminal")).toBeDefined();
+    });
+    await switchToTerminalMode();
 
     try {
       await waitFor(() => {

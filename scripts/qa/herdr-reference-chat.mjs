@@ -2017,9 +2017,7 @@ scenario("QA-04", {
     // an earlier fence (a missing owner id, an unreadable envelope) satisfies the probes below and
     // the branch passes while neither guard was reached - which is exactly what run 2 did.
     const multiline = await http.mutate(session, "submit", randomUUID(), {
-      text: "line-one
-line-two
-line-three",
+      text: "line-one\nline-two\nline-three",
       attachmentIds: [],
       origin: "chat",
     });

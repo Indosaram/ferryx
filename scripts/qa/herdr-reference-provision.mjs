@@ -60,7 +60,8 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CANDIDATE_SCHEMA,
@@ -95,6 +96,7 @@ import {
 } from "./herdr-reference-fixtures.mjs";
 import {
   PTY_IDENTITY_SCHEMA,
+  HOST_SUPPLIED_SOURCE_KIND,
   bindHostSuppliedIdentity,
   clearPtyIdentity,
   readPtyIdentity,
@@ -111,7 +113,7 @@ const SANITIZER_VERSION = "herdr-reference-sanitize/1";
 
 const EXIT = { OK: 0, BLOCKED: 2, INTERACTION: 3, ASSERTION: 4, USAGE: 5, INTERRUPT: 130 };
 
-class ProvisionError extends Error {
+export class ProvisionError extends Error {
   constructor(code, reason, detail) {
     super(reason + (detail ? ": " + detail : ""));
     this.code = code;
@@ -848,6 +850,423 @@ function listUiFiles(root) {
 /* ==========================================================================
  * Main
  * ========================================================================== */
+/* ==========================================================================
+ * SSH owner-host receipt (QA only)
+ * ==========================================================================
+ *
+ * A remote ssh session this run did not create is bound to the OWNING daemon's own report of it.
+ * The daemon is the one party holding BOTH identities - its own session id and the helper's
+ * target - because it created that helper session, so its reply IS the correlation, rather than a
+ * cwd comparison dressed up as one.
+ *
+ * That reply already exists: `DaemonRequest::RemoteSessionDetails { sessionId }` answers with
+ * `RemoteSessionDetails`, whose `descriptor` carries `backendSessionId`, the helper `target` and
+ * the `clientRequestId` the helper was spawned with, plus the connected `pid`. This producer adds
+ * no product surface and no new transport: it reads that reply through the same control client it
+ * already uses for every other daemon question.
+ *
+ * This run CANNOT create a remote session - the local registry refuses an `ssh:` workspace id
+ * (see workspaceIdRefusal) - so the create side is DECLARED by the config and the daemon's reply
+ * is what verifies it. A declared value the daemon does not confirm is a typed refusal.
+ */
+
+/** The only platform this producer can read a process identity from: the probe reads /proc. */
+export const SSH_RECEIPT_PROBE_PLATFORM = "linux";
+
+/*
+ * The ssh inventory path is a FILE, not a directory.
+ *
+ * `daemon_ssh_store_path()` returns `FERRYX_DATA_DIR/ssh_hosts.json` - a file - and with
+ * FERRYX_DATA_DIR set that early return makes the dev variant unreachable. The daemon compares the
+ * value it is handed for EXACT equality with its own:
+ *
+ *     if host_store_path != &self.ssh_store_path { "SSH inventory path is not daemon-configured" }
+ *
+ * and it derives the project store as that FILE's SIBLING (`projects::store_path` =
+ * `host_store.with_file_name("remote_projects.json")`). So the declared value is the file
+ * `<FERRYX_DATA_DIR>/ssh_hosts.json`, and the projects file sits beside it - never inside it.
+ */
+export const SSH_HOST_STORE_FILENAME = "ssh_hosts.json";
+export const SSH_PROJECTS_STORE_FILENAME = "remote_projects.json";
+
+/**
+ * The project store the product derives from the inventory FILE, by the same rule it uses:
+ * `host_store.with_file_name("remote_projects.json")` is the file's SIBLING, not a child of it.
+ */
+export function sshProjectsStorePath(hostStorePath) {
+  return join(dirname(hostStorePath), SSH_PROJECTS_STORE_FILENAME);
+}
+
+function isNonEmptyText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function quotePosix(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * The correlation, or a typed refusal naming exactly which agreement failed.
+ *
+ * Every check refuses rather than defaulting: an absent reply, a session id or request id the
+ * daemon does not confirm, a missing helper target, and an absent pid each stop the receipt. The
+ * daemon's session id and the helper's are returned SEPARATELY and never relabelled as one another.
+ */
+export function remoteReceiptCorrelation(details, create) {
+  if (!details || typeof details !== "object") {
+    return {
+      ok: false,
+      reason: "ssh-remote-session-unknown",
+      detail: "the daemon reports no remote session details for this session id",
+    };
+  }
+  const descriptor = details.descriptor;
+  if (!descriptor || typeof descriptor !== "object") {
+    return { ok: false, reason: "ssh-remote-descriptor-absent", detail: "the reply carries no descriptor" };
+  }
+  if (!isNonEmptyText(descriptor.backendSessionId)) {
+    return { ok: false, reason: "ssh-daemon-session-id-absent", detail: "the descriptor names no backendSessionId" };
+  }
+  if (descriptor.backendSessionId !== create.sessionId) {
+    return {
+      ok: false,
+      reason: "ssh-correlation-session-mismatch",
+      detail: "the daemon reports session " + descriptor.backendSessionId +
+        ", the create record names " + create.sessionId,
+    };
+  }
+  if (descriptor.clientRequestId !== create.clientRequestId) {
+    return {
+      ok: false,
+      reason: "ssh-correlation-request-mismatch",
+      detail: "the daemon reports request " + String(descriptor.clientRequestId) +
+        ", the create record names " + create.clientRequestId,
+    };
+  }
+  const target = descriptor.target;
+  if (!target || !isNonEmptyText(target.backendSessionId)) {
+    return { ok: false, reason: "ssh-helper-target-absent", detail: "the descriptor carries no helper target" };
+  }
+  if (!Number.isInteger(details.pid) || details.pid <= 0) {
+    return {
+      ok: false,
+      reason: "ssh-connected-pid-absent",
+      detail: "the daemon reports pid " + String(details.pid) +
+        "; a session that has not connected has no helper pid to bind",
+    };
+  }
+  return {
+    ok: true,
+    daemonSessionId: descriptor.backendSessionId,
+    helperTarget: target,
+    helperSessionId: target.backendSessionId,
+    clientRequestId: descriptor.clientRequestId,
+    pid: details.pid,
+  };
+}
+
+/**
+ * The owner-host receipt, assembled from a correlation the daemon confirmed and host observations.
+ *
+ * `backendSessionId` is the DAEMON's session and `helperSessionId` is the helper's: two different
+ * values, both kept. `executable` is the only value not from the daemon's reply, because the reply
+ * does not carry one - it is read from the host, which is why the host must be Linux.
+ *
+ * Nothing here is a spawn-time record. `spawnedAt` is the moment this run observed the session and
+ * says so, and the receipt states that it authorizes no cleanup: a discovered pid is evidence, not
+ * a process this run owns.
+ */
+export function remoteOwnerHostReceipt(input) {
+  const options = input || {};
+  const correlation = options.correlation || {};
+  if (!correlation.ok || !isNonEmptyText(correlation.daemonSessionId)) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-receipt-without-correlation",
+      "a receipt is only built from a correlation the daemon confirmed",
+    );
+  }
+  if (options.remotePlatform !== SSH_RECEIPT_PROBE_PLATFORM) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-probe-platform-unsupported",
+      "the host platform is " + String(options.remotePlatform) +
+        "; the process identity probe reads /proc and is Linux-only, so no receipt is produced",
+    );
+  }
+  if (!isNonEmptyText(options.executable)) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-executable-unknown",
+      "the host reported no executable for pid " + String(correlation.pid),
+    );
+  }
+  const observedAt = isNonEmptyText(options.observedAt) ? options.observedAt : new Date().toISOString();
+  const candidate = options.candidate || {};
+  return {
+    schema: "ferryx-herdr-reference.ssh-owner-host-receipt/1",
+    // The fields the shared validator requires, each from an observed source.
+    sourceKind: HOST_SUPPLIED_SOURCE_KIND,
+    hostId: options.hostId,
+    transport: "ssh",
+    backendSessionId: correlation.daemonSessionId,
+    epoch: String(options.epoch),
+    pid: correlation.pid,
+    executable: options.executable,
+    spawnedAt: observedAt,
+    candidate: {
+      candidateId: candidate.candidateId || null,
+      sourceManifestSha256: candidate.sourceManifestSha256 || null,
+      binarySha256: candidate.binarySha256 || null,
+    },
+    // Provenance. Additive: the shared validator reads the block above and ignores what it does
+    // not know, so nothing here can weaken the contract it enforces.
+    correlation: {
+      source: "daemon-remote-session-details",
+      daemonSessionId: correlation.daemonSessionId,
+      helperSessionId: correlation.helperSessionId,
+      helperTarget: correlation.helperTarget,
+      clientRequestId: correlation.clientRequestId,
+    },
+    acquisition: {
+      method: "daemon-remote-session-details",
+      observedAt,
+      // Stated, because the two are easy to conflate: this is when the session was OBSERVED, not
+      // when it was spawned, and no spawn-time pid record exists anywhere for this session.
+      spawnedAtProvenance: "acquisition-observed",
+      executableProvenance: "host-observed-proc-exe",
+      platform: options.remotePlatform,
+      cleanupAuthority: "none: a discovered pid is evidence, never an owned process",
+    },
+  };
+}
+
+/** The ssh argument vector for one host, from the config's own declared connection facts. */
+export function sshConnectionArgs(host) {
+  const args = [
+    "-T",
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", "UpdateHostKeys=no",
+    "-o", "ConnectTimeout=" + Math.max(1, Math.ceil((host.connectTimeoutMs || 5000) / 1000)),
+  ];
+  if (isNonEmptyText(host.identityFile)) args.push("-i", host.identityFile);
+  if (Number.isInteger(host.port) && host.port > 0) args.push("-p", String(host.port));
+  args.push(isNonEmptyText(host.username) ? host.username + "@" + host.hostname : String(host.hostname));
+  return args;
+}
+
+/**
+ * The command that reads a remote process's executable from the host itself.
+ *
+ * Only the executable: `/proc/<pid>/exe` is what the daemon's reply does not carry. No start time
+ * is read, because there is nothing here to compare one against - a start time observed now is not
+ * a spawn record, and a value with no meaning is worse than an absent one.
+ */
+export function remoteExecutableProbeCommand(pid) {
+  return "readlink /proc/" + String(pid) + "/exe 2>/dev/null || true";
+}
+
+/** Run one command on the host over ssh, bounded. The child is recorded by exact pid. */
+function sshExec(host, remoteCommand, timeoutMs, ledger) {
+  return new Promise((resolveExec, rejectExec) => {
+    const child = spawn("ssh", [...sshConnectionArgs(host), remoteCommand], { stdio: ["ignore", "pipe", "pipe"] });
+    if (ledger) ledger.record(child, { role: "ssh-exec", command: remoteCommand });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectExec(blocked("ssh-exec-timeout", remoteCommand + ": no exit within " + timeoutMs + "ms"));
+    }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(timer); rejectExec(error); });
+    child.once("exit", (code) => { clearTimeout(timer); resolveExec({ code, stdout, stderr }); });
+  });
+}
+
+/**
+ * The product's own remote spawn request for one ssh session.
+ *
+ * This is the request the product sends, not an approximation of it: the workspace id is the
+ * DERIVED `ssh:` id (`ssh::identity(host_id, repo_root)`), the startup is `remoteSsh` with the
+ * inventory FILE the daemon is configured with, and `shell` is null because a local shell override is
+ * refused for an ssh session and the recording wrapper is a LOCAL artifact that does not exist on
+ * the remote host. Ownership for a remote session therefore comes from the daemon's own report of
+ * it, never from a wrapper this run installs.
+ */
+export function remoteSpawnRequest(session, host, requestId, storePath) {
+  const workspaceId = isNonEmptyText(session.workspaceId) ? session.workspaceId.trim() : null;
+  if (!workspaceId || !workspaceId.startsWith("ssh:")) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-workspace-id-required",
+      "a remote spawn names the derived \"ssh:\" workspace id; the session declares " +
+        String(session.workspaceId),
+    );
+  }
+  if (!isNonEmptyText(storePath)) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-host-store-undeclared",
+      host.id + ": declare sshHostStorePath as the FILE <FERRYX_DATA_DIR>/" + SSH_HOST_STORE_FILENAME,
+    );
+  }
+  // The daemon's own path always ends in this filename, so a directory (or any other name) is not
+  // the value it compares against. Refused here, before the spawn, rather than left for the daemon
+  // to refuse as an inventory mismatch.
+  if (basename(storePath) !== SSH_HOST_STORE_FILENAME) {
+    throw new ProvisionError(
+      EXIT.ASSERTION,
+      "ssh-host-store-not-inventory-file",
+      String(storePath) + ": the value is the FILE ending in " + SSH_HOST_STORE_FILENAME +
+        "; a directory is not this value",
+    );
+  }
+  return {
+    type: "spawn",
+    clientRequestId: requestId,
+    workspaceId,
+    worktree: session.worktree || null,
+    cwd: session.remoteCwd || null,
+    cols: session.cols,
+    rows: session.rows,
+    shell: null,
+    startup: { remoteSsh: { hostStorePath: storePath } },
+  };
+}
+
+/**
+ * Spawn the original PTY for a REMOTE ssh session through the product's own remote startup, and
+ * return the daemon's REAL response as the create record the correlation is then verified against.
+ *
+ * Two differences from the local path, both because the session is remote:
+ *
+ *   - NO local workspace registration. The id is an `ssh:` remote namespace that the local
+ *     registry refuses by rule (`workspaceIdRefusal`), and the product resolves it from the remote
+ *     project store instead. Registering would be a refusal, not a preparation.
+ *   - NO recording wrapper. The wrapper is a local file this run would install on the daemon's own
+ *     host; the remote host never sees it, and the daemon's `remoteSessionDetails` reply is what
+ *     binds the session to the helper's PTY instead.
+ */
+async function spawnRemotePty(host, session, args, transport) {
+  if (!transport) throw blocked("daemon-runtime-undeclared", host.id);
+  const storePath = host.sshHostStorePath || null;
+  if (!isNonEmptyText(storePath)) {
+    throw blocked(
+      "ssh-host-store-undeclared",
+      host.id + ": declare sshHostStorePath as the FILE <FERRYX_DATA_DIR>/" + SSH_HOST_STORE_FILENAME,
+    );
+  }
+  // The inventory FILE and the project store beside it are both TASK-OWNED and must already exist:
+  // this producer resolves nothing on the remote host and fabricates no project. A store the
+  // fixture did not place is reported, not created.
+  if (!existsSync(storePath)) throw blocked("ssh-host-store-missing", storePath);
+  if (!statSync(storePath).isFile()) throw blocked("ssh-host-store-not-a-file", storePath);
+  const projectsPath = sshProjectsStorePath(storePath);
+  if (!existsSync(projectsPath)) throw blocked("ssh-projects-store-missing", projectsPath);
+  const requestId = session.clientRequestId || ("herdr-ref-" + String(session.workspaceId));
+  const request = remoteSpawnRequest(session, host, requestId, storePath);
+  const client = await connectHostDaemon(transport, args.timeoutMs);
+  try {
+    const response = await client.call(request, { requestKind: "spawn", requestId });
+    if (!response || response.type !== "spawnOk") {
+      const failure = daemonRequestFailure(response, { requestKind: "spawn", requestId });
+      if (failure) throw blocked(failure.code, describeDaemonRequestFailure(failure));
+      throw new ProvisionError(EXIT.INTERACTION, "remote-spawn-refused", JSON.stringify(response));
+    }
+    const details = response.session || {};
+    if (details.cols !== session.cols || details.rows !== session.rows) {
+      throw new ProvisionError(
+        EXIT.ASSERTION,
+        "spawn-geometry-mismatch",
+        "requested " + session.cols + "x" + session.rows + ", daemon reports " + details.cols + "x" + details.rows,
+      );
+    }
+    return {
+      backendSessionId: response.sessionId,
+      epoch: String(response.epoch),
+      clientRequestId: requestId,
+      daemonPid: client.handshake.pid,
+      cols: details.cols,
+      rows: details.rows,
+      running: details.running,
+      daemonTransport: describeDaemonTransport(transport, client.endpoint),
+      // The daemon's OWN response, recorded as the create record. The correlation is verified
+      // against this, never against a value the config asserted.
+      createResponse: {
+        sessionId: response.sessionId,
+        clientRequestId: requestId,
+        spawnedAt: new Date().toISOString(),
+      },
+    };
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Acquire the owner-host receipt for one ssh session from the daemon that owns it.
+ *
+ * The daemon's reply is read through the SAME control client this producer already uses, and the
+ * create record is verified against it. That record is the daemon's own spawn response when this
+ * run created the session, and the config's declaration only when the session already existed.
+ * Nothing acquired here enters the owned-process ledger: the ledger kills only pids this run
+ * recorded at spawn time.
+ */
+async function acquireSshOwnerHostReceipt({ host, create, args, ledger, candidate, transport }) {
+  if (!create || !isNonEmptyText(create.sessionId) || !isNonEmptyText(create.clientRequestId)) {
+    throw blocked(
+      "ssh-create-record-missing",
+      host.id + ": no create record for this session - spawn it here, or declare createResponse",
+    );
+  }
+  if (host.platform !== SSH_RECEIPT_PROBE_PLATFORM) {
+    throw blocked(
+      "ssh-probe-platform-unsupported",
+      host.id + ": platform " + String(host.platform) + "; the process identity probe is Linux-only",
+    );
+  }
+  if (!transport) throw blocked("daemon-runtime-undeclared", host.id);
+  const client = await connectHostDaemon(transport, args.timeoutMs);
+  let details = null;
+  try {
+    const reply = await client.call(
+      { type: "remoteSessionDetails", sessionId: create.sessionId },
+      { requestKind: "remoteSessionDetails", requestId: create.sessionId },
+    );
+    const failure = daemonRequestFailure(reply, { requestKind: "remoteSessionDetails", requestId: create.sessionId });
+    if (failure) throw blocked(failure.code, describeDaemonRequestFailure(failure));
+    if (!reply || reply.type !== "remoteSessionDetailsOk") {
+      throw blocked("ssh-remote-session-details-refused", JSON.stringify(reply));
+    }
+    details = reply.details || null;
+  } finally {
+    client.close();
+  }
+  const correlation = remoteReceiptCorrelation(details, create);
+  if (!correlation.ok) throw blocked(correlation.reason, correlation.detail);
+  // The one value the daemon's reply does not carry, read from the host it names.
+  const probe = await sshExec(host, remoteExecutableProbeCommand(correlation.pid), args.timeoutMs, ledger);
+  if (probe.code !== 0) {
+    throw blocked("ssh-executable-probe-failed", "pid " + correlation.pid + ": exit " + probe.code + ": " + probe.stderr.slice(-500));
+  }
+  const receipt = remoteOwnerHostReceipt({
+    correlation,
+    hostId: host.id,
+    epoch: client.handshake.epoch,
+    remotePlatform: host.platform,
+    executable: probe.stdout.trim(),
+    observedAt: new Date().toISOString(),
+    candidate,
+  });
+  const dir = join(resolve(args.out), "ssh-owner-host-receipts");
+  mkdirSync(dir, { recursive: true });
+  const receiptPath = join(dir, create.sessionId + ".json");
+  writeJson(receiptPath, receipt);
+  return { receipt, receiptPath };
+}
+
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -1130,15 +1549,18 @@ async function main() {
           // The daemon this spawn goes to: the one this run launched for the host when it did,
           // otherwise the transport the config declares for it. Never a guess.
           const hostTransport = hostTransports.get(host.id);
-          const spawned = await spawnOriginalPty(host, {
-            ...session,
-            cols: session.cols,
-            rows: session.rows,
-          }, ledger, args, hostTransport && !hostTransport.error ? hostTransport.transport : null);
+          const transport = hostTransport && !hostTransport.error ? hostTransport.transport : null;
+          // An ssh session goes through the product's own REMOTE startup: a different request,
+          // no local registration and no local wrapper. The local path below is unchanged.
+          const spawned = host.transport === "ssh"
+            ? await spawnRemotePty(host, session, args, transport)
+            : await spawnOriginalPty(host, {
+                ...session,
+                cols: session.cols,
+                rows: session.rows,
+              }, ledger, args, transport);
           row.backendSessionId = spawned.backendSessionId;
           row.epoch = spawned.epoch;
-          row.pid = spawned.pid;
-          row.executablePath = spawned.executablePath;
           row.cols = spawned.cols;
           row.rows = spawned.rows;
           row.daemonPid = spawned.daemonPid;
@@ -1147,10 +1569,63 @@ async function main() {
           row.spawnedByThisRun = true;
           row.ptyIdentity = spawned.ptyIdentity;
           row.ptyIdentityPath = spawned.ptyIdentityPath;
-          row.missingIdentity = row.missingIdentity.filter((field) =>
-            !["backendSessionId", "epoch", "pid", "executablePath", "cols", "rows"].includes(field));
+          // The REAL create record, from the daemon's own spawn response. The correlation is
+          // verified against this rather than against anything the config asserted.
+          if (spawned.createResponse) row.createResponse = spawned.createResponse;
+          if (spawned.pid) {
+            row.pid = spawned.pid;
+            row.executablePath = spawned.executablePath;
+            row.missingIdentity = row.missingIdentity.filter((field) =>
+              !["backendSessionId", "epoch", "pid", "executablePath", "cols", "rows"].includes(field));
+          } else {
+            row.missingIdentity = row.missingIdentity.filter((field) =>
+              !["backendSessionId", "epoch", "cols", "rows"].includes(field));
+          }
         }
 
+        // A remote ssh session this run did not create is bound to the owning daemon's own report
+        // of it. That reply is the correlation - the daemon holds both its own session id and the
+        // helper's target - and the create record is verified against it: the daemon's own spawn
+        // response when this run created the session, the config's declaration only when the
+        // session already existed. A discovered pid carries NO cleanup authority: it is evidence,
+        // not an owned process, so
+        // nothing here reaches the owned-process ledger.
+        if (!row.ptyIdentity && host.transport === "ssh" && host.acquireSshReceipt === true && !row.spawnReceiptPath) {
+          try {
+            const resolved = hostTransports.get(host.id);
+            const acquired = await acquireSshOwnerHostReceipt({
+              host,
+              // The daemon's own spawn response when this run created the session; the config's
+              // declaration only when the session already existed.
+              create: row.createResponse || session.createResponse || null,
+              args,
+              ledger,
+              transport: resolved && !resolved.error ? resolved.transport : null,
+              candidate: {
+                candidateId: candidateManifest.candidateId,
+                sourceManifestSha256: candidateManifestSha256,
+                binarySha256: candidateManifest.binary ? candidateManifest.binary.sha256 : null,
+              },
+            });
+            row.acquiredSshReceiptPath = acquired.receiptPath;
+            // The helper's own id, kept BESIDE the daemon's rather than relabelled as it.
+            row.sshHelperSessionId = acquired.receipt.correlation.helperSessionId;
+            row.pid = acquired.receipt.pid;
+            row.pidSource = "owner-host-spawn-receipt";
+            row.executablePath = acquired.receipt.executable;
+            row.missingIdentity = row.missingIdentity.filter((field) => !["pid", "executablePath"].includes(field));
+          } catch (error) {
+            if (!(error instanceof ProvisionError)) throw error;
+            blockers.push({
+              kind: "owner-host-spawn-receipt",
+              hostId: host.id,
+              transport: host.transport,
+              backendSessionId: session.backendSessionId || null,
+              reason: error.reason,
+              detail: error.detail,
+            });
+          }
+        }
         // A session this run did not spawn (ssh, paired, account-relay) must be bound to the
         // OWNING HOST's own spawn receipt. A pid that merely appears in the config is not
         // ownership proof: it could be stale, belong to another session, or have been typed by
@@ -1158,7 +1633,8 @@ async function main() {
         // session, incarnation and candidate provenance, and an absent or mismatched receipt is
         // a BLOCKER rather than a stamped identity.
         if (!row.ptyIdentity) {
-          const receiptPath = session.spawnReceiptPath || host.spawnReceiptPath || null;
+          const receiptPath =
+            session.spawnReceiptPath || host.spawnReceiptPath || row.acquiredSshReceiptPath || null;
           const requirement = receiptPath ? null : ownerHostReceiptRequirement(host, row);
           if (requirement) {
             // One contract, shared with the runner: the missing prerequisite is named field by
@@ -1355,11 +1831,18 @@ async function main() {
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error) => {
-    const code = error instanceof ProvisionError ? error.code : EXIT.INTERACTION;
-    process.stderr.write((error.reason || "provision-failed") + ": " + (error.detail || error.message) + "\n");
-    process.exit(code);
-  });
+// Importing this module for its pure helpers must not run a provisioning pass, so the CLI
+// entry point runs only when this file itself was invoked.
+const invokedAsScript = process.argv[1]
+  ? resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+if (invokedAsScript) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      const code = error instanceof ProvisionError ? error.code : EXIT.INTERACTION;
+      process.stderr.write((error.reason || "provision-failed") + ": " + (error.detail || error.message) + "\n");
+      process.exit(code);
+    });
+}
 
