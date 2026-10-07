@@ -191,6 +191,28 @@ export async function runHeadlessDiagnosticClassifier(ctx) {
 export async function runNativeDiagnosticClassifier(ctx, plan, budget = new MonotonicBudget()) {
   const { evidence, barrierHub, pid } = ctx;
 
+  // The write stage is addressed by the session the runner BOUND, never by the
+  // operation nonce. A real keystroke's request id is minted by the frontend
+  // input queue (`req-<queueRunId>-<sessionId>-<itemId>`,
+  // `ui/src/lib/nativeTerminalInputQueue.ts`), while the runner's nonce travels
+  // only in the product's inherited env and in the arm file, so the two can
+  // never be equal on the GUI lane. Measured on maho-win against the app's own
+  // `ferryx-switch-debug.jsonl`: every
+  // `terminal.surface.input.stage.backend_write` line carried
+  // `operationId: "req-f3c8e184-…-5"` while the arm held
+  // `qa-op-96831e1e-…` - which is why `awaitHeld('backend-write')` timed out on
+  // every run of the campaign.
+  const paneTarget = ctx.paneBinding?.backendSessionId;
+  if (typeof paneTarget !== 'string' || paneTarget.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', 'diagnostic-classifier: the pane step settled no bound session, so the barrier stages have no target');
+  }
+  // BOTH armed barriers are addressed the same way. The render coordinator
+  // adopts `<name>.bind.json` before it will hold, so an unbound `presentation`
+  // barrier reports `presentation_binding_failed` and never holds either.
+  barrierHub.bindBackendSession('backend-write', paneTarget);
+  barrierHub.bindBackendSession('presentation', paneTarget);
+  evidence.action({ action: 'classifier-barriers-bound', backendSessionId: paneTarget });
+
   // 1. Initial typing into owned pane
   if (ctx.platformPreflight === 'win32') {
     await focusWindowWindows(evidence, pid);
@@ -208,16 +230,51 @@ export async function runNativeDiagnosticClassifier(ctx, plan, budget = new Mono
   }
   barrierHub.release('backend-write');
   const writeRecovered = await barrierHub.awaitReceipt('backend-write', 1, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'backend-write released receipt'));
-  assertPositiveRecovery(writeRecovered, 'classifier after write release');
+  // `presentation` is deliberately ARMED for this scenario, so the render
+  // coordinator is holding the pane's frame from boot on. The classifier is
+  // therefore right to report `BlockedInPresentation` immediately after the write
+  // release - and `assertPositiveRecovery` would read that correct verdict as an
+  // unproven recovery. What this assertion is about is the WRITE stage's own
+  // progress, so it is judged on that stage's progress evidence, exactly as the
+  // headless lane's `assertClassifierReceipt(recovered)` path does.
+  const writeProgress = writeRecovered?.stageProgress;
+  if (writeProgress?.releaseOutcome !== 'released' || writeProgress.backendWriteCompleted !== true || writeProgress.success !== true) {
+    throw new HarnessError('RECOVERY_UNPROVEN', `classifier after write release: the write stage did not report completed progress: ${JSON.stringify(writeProgress)}`);
+  }
+  if (writeRecovered.classifierVerdict === 'BlockedInIpcWrite') {
+    throw new HarnessError('RECOVERY_UNPROVEN', `classifier after write release still reports BlockedInIpcWrite: ${JSON.stringify(writeRecovered)}`);
+  }
 
   // 3. Presentation stage hold & recovery assertion
-  await barrierHub.awaitHeld('presentation', budget.consume(BUDGETS.stagePresentationMs, 'presentation hold'));
-  const presentationHeld = await barrierHub.awaitReceipt('presentation', 0, budget.consume(BUDGETS.stagePresentationMs, 'presentation held receipt'));
-  if (presentationHeld.classifierVerdict !== 'BlockedInPresentation') {
-    throw new HarnessError('ASSERTION_FAILURE', `classifier must report BlockedInPresentation while presentation is held, got ${JSON.stringify(presentationHeld.classifierVerdict)}`);
+  //
+  // The hold appears when a frame is DISPATCHED through the armed path AFTER the pane
+  // step has bound the session. The pane's own first dispatch is too early - the runner
+  // can only write `presentation.bind.json` once the pane exists - and the armed path
+  // reports that as a `presentation_binding_failed` record and then dispatches the frame
+  // normally instead of dropping it. So this step types into the pane again, which is
+  // the dispatch that adopts the bind and holds.
+  //
+  // The receipts are therefore matched BY VERDICT, not by index: index 0 of the
+  // `presentation` stream is that early binding-failure record on every run, and an
+  // index-based read would assert `BlockedInPresentation` against a failure record.
+  if (ctx.platformPreflight === 'win32') {
+    await focusWindowWindows(evidence, pid);
+    await typeMarkerWindows(evidence, pid);
+  } else {
+    await typeMarkerDarwin(evidence, pid);
   }
+  await barrierHub.awaitHeld('presentation', budget.consume(BUDGETS.stagePresentationMs, 'presentation hold'));
+  const presentationHeld = await barrierHub.awaitReceiptMatching('presentation', {
+    match: receipt => receipt?.classifierVerdict === 'BlockedInPresentation',
+    timeoutMs: budget.consume(BUDGETS.stagePresentationMs, 'presentation held receipt'),
+    label: 'presentation held',
+  });
   barrierHub.release('presentation');
-  const presentationRecovered = await barrierHub.awaitReceipt('presentation', 1, budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'presentation released receipt'));
+  const presentationRecovered = await barrierHub.awaitReceiptMatching('presentation', {
+    match: receipt => receipt?.classifierVerdict === 'Idle' || receipt?.classifierVerdict === 'Healthy',
+    timeoutMs: budget.consume(BUDGETS.stagePrepareCreateStatusMs, 'presentation released receipt'),
+    label: 'presentation released',
+  });
   assertPositiveRecovery(presentationRecovered, 'classifier after presentation release');
 
   // 4. End one owned output stream to exercise existing EOF event

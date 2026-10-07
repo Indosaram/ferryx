@@ -1,3 +1,14 @@
+// The QA barrier's hold/settle stages carry futures that hold Tauri's managed
+// `NativeTerminalSurfaceHostState` across an `await`, so the compiler must prove
+// that managed state `Sync` through the whole WGPU object graph
+// (`NumericDimension` -> `InterfaceVar` -> ... -> `ResourceState`). That
+// derivation is deep enough to overflow the default limit of 128 and fail
+// `cargo build --features local-split-qa` with
+// `E0275: overflow evaluating the requirement validation::NumericDimension: Sync`
+// while `cargo check` passes. The bound is a compile-time resolution depth, not
+// runtime behaviour, and a normal build reaches none of this code.
+#![recursion_limit = "512"]
+
 pub mod account;
 pub mod agent_detect;
 pub mod agent_transcript;

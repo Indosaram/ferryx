@@ -108,6 +108,10 @@ pub(super) struct SpawnRequestFingerprint {
     pub(super) shell: Option<String>,
     pub(super) provider_claim: Option<ProviderSessionClaimKey>,
     pub(super) startup: Option<TerminalStartup>,
+    /// The session id the client asked for, when the spawn carried one. It belongs in the
+    /// fingerprint because two spawns differing only here are DIFFERENT requests: the id is what
+    /// makes a replayed spawn idempotent instead of a second session.
+    pub(super) requested_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -789,6 +793,169 @@ impl DaemonSessionService {
             generation,
             cancelled: receiver,
             disconnected,
+        })
+    }
+
+    pub(crate) fn project_desktop_gui_session(
+        &self,
+        session_id: &str,
+        epoch: crate::scoped_contracts::Epoch,
+        catalog: &crate::remote::workspace_catalog::Catalog,
+    ) -> Result<crate::remote::machine_protocol::Session, String> {
+        // Metadata publication is not loss of authority. The lock is only TRIED, never waited
+        // on: this runs on the daemon's own runtime, and a contended read reports the typed
+        // MACHINE_SERVICE_UNAVAILABLE the caller already treats as a partial inventory.
+        let metadata = self
+            .session_metadata
+            .try_read()
+            .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
+        let meta = metadata.get(session_id).ok_or("SESSION_NOT_FOUND")?.clone();
+        drop(metadata);
+
+        // This daemon's own durable identity, read the way the IPC and gateway paths read
+        // it. A session id or an arbitrary journal record is not an identity: a machine
+        // answer has to name the machine that serves it.
+        let machine_id = crate::remote::auth::canonical_identity_dir()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
+            .map(|identity| identity.machine_id)
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+        let target = crate::remote::machine_protocol::RemoteTerminalTarget {
+            machine_id,
+            daemon_epoch: epoch,
+            session_id: session_id.to_owned(),
+        };
+        let worktree =
+            meta.worktree
+                .as_ref()
+                .map(|identity| crate::remote::machine_protocol::WorktreeIdentity {
+                    ws_id: identity.ws_id.clone(),
+                    slug: identity.slug.clone(),
+                });
+        // The provider an agent reported for this PTY, when one did: the same retained state
+        // session details and the inbox read.
+        let (agent_type, provider_session) = match self.agent_states.current(session_id) {
+            Some(state) => (state.agent.clone(), state.provider_session.clone()),
+            None => (None, None),
+        };
+        let (start, end) = self
+            .terminal_service
+            .output_hub()
+            .session_sequence_range(session_id)
+            .unwrap_or_default();
+        let start_sequence = crate::scoped_contracts::Epoch(start.unwrap_or(0));
+        let end_sequence = crate::scoped_contracts::Epoch(end.unwrap_or(0));
+
+        if crate::ssh::projects::is_remote(&meta.workspace_id)
+            || meta.workspace_id.starts_with("ssh:")
+            || meta.workspace_id.contains("::")
+        {
+            // A remote/ssh session's cwd lives on the remote host, so the local root jail
+            // cannot apply. Serve it from the remote runtime instead of refusing it: the
+            // desktop shows these sessions, so the inventory has to describe them.
+            let details = self
+                .terminal_service
+                .remote()
+                .details(session_id)
+                .ok_or("SESSION_NOT_FOUND")?;
+            return Ok(crate::remote::machine_protocol::Session {
+                title: None,
+                agent_type,
+                target,
+                workspace_id: meta.workspace_id.clone(),
+                worktree,
+                cwd: details.descriptor.config.project_path.clone(),
+                cols: details.descriptor.cols,
+                rows: details.descriptor.rows,
+                running: details.state
+                    == crate::terminal::remote::RemoteConnectionState::Connected,
+                provider_session,
+                start_sequence,
+                end_sequence,
+            });
+        }
+
+        let catalog_row = catalog
+            .workspaces
+            .get(&meta.workspace_id)
+            .ok_or("SESSION_NOT_FOUND")?;
+        if !matches!(
+            catalog_row.availability,
+            crate::remote::machine_protocol::Availability::Ready
+        ) {
+            return Err("SESSION_NOT_FOUND".into());
+        }
+        let root_dir = if let Some(identity) = meta.worktree.as_ref() {
+            if identity.ws_id != meta.workspace_id {
+                return Err("SESSION_OWNERSHIP_CHANGED".into());
+            }
+            match self
+                .workspace_service
+                .registry
+                .resolve_terminal_target(&meta.workspace_id, Some(identity))
+            {
+                Ok((_manager, path)) => path,
+                Err(_) => {
+                    // The registry only holds workspaces this process registered; fall back to
+                    // the same jail checks the worktree manager applies on its own.
+                    let manager = self
+                        .workspace_service
+                        .worktree_manager(&meta.workspace_id, false)?;
+                    let resolved = manager
+                        .find_worktree_by_slug(&identity.ws_id, &identity.slug)
+                        .map_err(|_| "WORKTREE_NOT_FOUND")?
+                        .ok_or("WORKTREE_NOT_FOUND")?;
+                    manager
+                        .canonical_allowed_path(&resolved.path)
+                        .map_err(|_| "INVALID_PATH")?
+                }
+            }
+        } else if let Ok((_manager, path)) = self
+            .workspace_service
+            .registry
+            .resolve_terminal_target(&meta.workspace_id, None)
+        {
+            path
+        } else {
+            catalog_row.repo_root.clone()
+        };
+
+        let canonical_cwd = std::fs::canonicalize(&meta.cwd).map_err(|_| "INVALID_PATH")?;
+        let canonical_root = std::fs::canonicalize(&root_dir).map_err(|_| "INVALID_PATH")?;
+        if !canonical_cwd.starts_with(&canonical_root) {
+            return Err("SESSION_OWNERSHIP_CHANGED".into());
+        }
+        let relative_cwd = canonical_cwd
+            .strip_prefix(&canonical_root)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .map_err(|_| "INVALID_PATH")?;
+        let cwd = if relative_cwd.is_empty() {
+            ".".to_string()
+        } else {
+            relative_cwd
+        };
+
+        let pty = self
+            .terminal_service
+            .get_session(session_id)
+            .ok_or("SESSION_EXPIRED")?;
+        let (cols, rows) = pty.get_size();
+        let running = matches!(
+            pty.state(),
+            PtySessionState::Starting | PtySessionState::Running
+        );
+        Ok(crate::remote::machine_protocol::Session {
+            title: None,
+            agent_type,
+            target,
+            workspace_id: meta.workspace_id.clone(),
+            worktree,
+            cwd,
+            cols,
+            rows,
+            running,
+            provider_session,
+            start_sequence,
+            end_sequence,
         })
     }
 
@@ -1837,6 +2004,9 @@ impl DaemonSessionService {
             shell: shell.clone(),
             provider_claim: provider_claim.clone(),
             startup: startup.clone(),
+            // This path has no client-requested session id: the daemon mints the id. Only the
+            // machine/adopted path carries one (machine_owner.rs).
+            requested_session_id: None,
         };
         self.prune_dead_spawn_ownership(now);
         {
@@ -2588,6 +2758,7 @@ impl DaemonSessionService {
                     shell: None,
                     provider_claim: ProviderSessionClaimKey::from_startup(Some(startup)),
                     startup: Some(startup.clone()),
+                    requested_session_id: None,
                 },
             },
         );

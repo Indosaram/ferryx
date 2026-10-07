@@ -1275,6 +1275,27 @@ async fn dispatch_armed_presentation_barrier<R: Runtime>(
                         "producerComponent": "surface-host-render-coordinator",
                     }),
                 );
+                // An armed-but-unbound barrier must not EAT the frame. The pane's
+                // very first dispatch always takes this path - the runner can only
+                // write `presentation.bind.json` after the pane step has settled the
+                // session - and dropping that frame left `frame-submitted.jsonl`
+                // ABSENT and the pane with no later dispatch to present or hold, so
+                // the run died at `PANE_BINDING_UNBOUND` before the write stage was
+                // ever reached. Widening the stage budget to 30 s changed nothing,
+                // which is what proves the drop (not a timing) was the cause.
+                // Falling through keeps the barrier's meaning - nothing is held until
+                // it is bound - while never losing a frame the product would have
+                // drawn. Once the pane step binds, the next dispatch adopts the bind
+                // and holds for real.
+                dispatch_owned_render_inner(
+                    window,
+                    hosts,
+                    slot,
+                    session_id,
+                    coordinator,
+                    gpu_worker,
+                    dispatch_owner,
+                );
                 return;
             }
         }
@@ -1301,7 +1322,17 @@ async fn dispatch_armed_presentation_barrier<R: Runtime>(
         }
     };
     if target != session_id {
-        // Explicit target does not match this session; bypass without claiming.
+        // An explicit target that does not match this session is not this
+        // barrier's frame: dispatch it normally instead of dropping it.
+        dispatch_owned_render_inner(
+            window,
+            hosts,
+            slot,
+            session_id,
+            coordinator,
+            gpu_worker,
+            dispatch_owner,
+        );
         return;
     }
 

@@ -1228,6 +1228,11 @@ test('suspension-ownership and stale-binding adapters verify process actuation a
     evidenceRunDir: root,
     runId: 'run-so',
     operationId: 'op-so',
+    // The stale-binding adapter offers its stale attempt against the LIVE binding
+    // of the pane the runner created, so the settled pane session is part of the
+    // context it needs. Without one there is nothing for the registration fence to
+    // reject - the defect the adapter now refuses to paper over.
+    paneBinding: { backendSessionId: 'b-pane-so' },
   };
 
   const soRes = await runSuspensionOwnershipScenario(fakeCtx, {}, new MonotonicBudget());
@@ -2721,7 +2726,17 @@ test('split scenarios declare the pre-trigger pane step; scenarios that never sp
     // declare and validate their own fixture kinds.
     expect(SCENARIO_FIXTURE_REQUIREMENTS[scenario]).toEqual(['source']);
   }
-  for (const scenario of ['diagnostic-classifier', 'retained-handover', 'handover-abort', 'suspension-ownership', 'stale-binding']) {
+  // A scenario that must HOLD a real stage needs a real pane to drive it. Both
+  // barriers are addressed by the session the runner bound, and without the pane
+  // step no session is bound - measured, not assumed: `stale-binding` ran with
+  // `fixtureKindsRequested: ["source"]`, no pane at all, and the product reported
+  // `FERRYX_QA_STALE_BINDING_UNSERVICED`. Their fixture contracts stay their own
+  // (`diagnostic-classifier` still needs created+idle, `stale-binding` source) and
+  // are asserted by the fixture-kind tests, not here.
+  for (const scenario of ['diagnostic-classifier', 'stale-binding']) {
+    expect([scenario, SCENARIO_PLANS[scenario].pane]).toEqual([scenario, true]);
+  }
+  for (const scenario of ['retained-handover', 'handover-abort', 'suspension-ownership']) {
     expect([scenario, Boolean(SCENARIO_PLANS[scenario].pane)]).toEqual([scenario, false]);
   }
 });

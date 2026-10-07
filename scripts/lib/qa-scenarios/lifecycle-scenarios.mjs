@@ -227,9 +227,36 @@ export async function runStaleBindingScenario(ctx, plan, budget = new MonotonicB
   const { evidence, barrierHub, pid } = ctx;
   const driver = selectNativeDriver(ctx);
 
-  // Trigger stale attach where delayed receipt changes identity fields
-  barrierHub.command('trigger-stale-binding', { mutateField: 'attemptGeneration' });
-  evidence.action({ action: 'trigger-stale-binding', mutateField: 'attemptGeneration' });
+  // A stale attempt has to be offered against a LIVE seven-field binding, and the
+  // only session that has one is the pane this runner created and bound. Measured
+  // with the pane step absent: the product reported
+  // `FERRYX_QA_STALE_BINDING_UNSERVICED: no daemon session with a live
+  // seven-field binding yet; the command stays pending` and the
+  // `stale-receipt-rejected` receipt could never settle, because the registration
+  // fence that writes it had nothing to reject. The binding itself comes from the
+  // pane's own attach tuple, so no bind file is written here - this only refuses to
+  // proceed without one.
+  const paneTarget = ctx.paneBinding?.backendSessionId;
+  if (typeof paneTarget !== 'string' || paneTarget.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', 'stale-binding: the pane step settled no bound session, so there is no live binding to offer a stale attempt against');
+  }
+  evidence.action({ action: 'stale-binding-live-binding', backendSessionId: paneTarget });
+
+  // Trigger stale attach where delayed receipt changes identity fields.
+  //
+  // `attemptGeneration` cannot be used here: a pane's FIRST binding legitimately
+  // has generation 0, and the product's own mutation is
+  // `active.attempt_generation.checked_sub(1)?`
+  // (`native_terminal/surface_host.rs::mutate_attach_tuple_field`), which cannot go
+  // below zero. Measured: `FERRYX_QA_STALE_BINDING_UNSATISFIABLE: the live binding
+  // has attemptGeneration 0 and cannot be made strictly older`. `paneIdentity` is
+  // the same class of field - the product lists it in
+  // `STALE_BINDING_MUTABLE_FIELDS` as one the registration fence really compares -
+  // and it is always satisfiable, so the stale attempt is offered and the fence's
+  // own rejection is what settles the receipt.
+  const mutateField = 'paneIdentity';
+  barrierHub.command('trigger-stale-binding', { mutateField });
+  evidence.action({ action: 'trigger-stale-binding', mutateField });
 
   // Await stale receipt rejected
   const rejectedReceipt = await barrierHub.awaitReceipt('stale-receipt-rejected', 0, budget.consume(BUDGETS.attemptCeilingMs, 'stale-receipt-rejected'));

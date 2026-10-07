@@ -121,7 +121,19 @@ export const PANE_PRESENTATION_RECEIPT = 'presentation';
 // The session a receipt is about: the presentation receipt carries the product's
 // own `attachTuple.backendSessionId`; the marker receipt carries `sessionId`
 // (`marker_output_payload` in `src-tauri/src/terminal/qa_liveness.rs`).
+//
+// A receipt that reports a FAILED binding is not a presentation, and must not be
+// read as one. When a scenario arms the `presentation` barrier before launch, the
+// render coordinator refuses to dispatch any frame until the runner binds a
+// target session (`bindBackendSession`) and writes
+// `stage: "presentation_binding_failed"` with `status: "failed"` in the meantime.
+// That record carries `sessionId`, so reading it as the pane's presentation made
+// the pane step assert a seven-field attach tuple on a failure record - measured:
+// `pane binding: presentation receipt missing 7-tuple field 'incarnation'`.
+// Skipping it lets the pane step keep waiting and fall back to its measured
+// daemon-inventory source, which is exactly what an armed barrier requires.
 export function paneReceiptSessionId(receipt) {
+  if (receipt?.status === 'failed') return null;
   const id = receipt?.attachTuple?.backendSessionId ?? receipt?.sessionId;
   return typeof id === 'string' && id.length > 0 ? id : null;
 }

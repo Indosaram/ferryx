@@ -198,6 +198,7 @@ mod pane_liveness_adopted_ownership_tests {
                 shell: None,
                 provider_claim: None,
                 startup: None,
+                requested_session_id: None,
             },
         }
     }

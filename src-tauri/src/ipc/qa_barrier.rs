@@ -1911,6 +1911,37 @@ pub(crate) async fn scan_and_ack_arms_off_runtime(
     }
 }
 
+/// The operation identity this write belongs to, or `None` when the barrier does
+/// not own it.
+///
+/// Two identities are honoured, and which one applies is the runner's choice:
+///
+/// * a barrier the runner BOUND to a concrete session (`bindBackendSession` ->
+///   `<name>.bind.json`) owns that session's write. This is the only identity a
+///   real keystroke can satisfy: the operation nonce lives in the product's
+///   inherited env and in the arm file, while a keystroke's request id is minted
+///   by the frontend input queue (`req-<queueRunId>-<sessionId>-<itemId>`,
+///   `ui/src/lib/nativeTerminalInputQueue.ts`), so the two can never be equal on
+///   the GUI lane. The `presentation` barrier has always been addressed by the
+///   session the runner bound; the write stage now is too.
+/// * an UNBOUND barrier keeps the operation-nonce path unchanged, which is how
+///   the headless lane drives this stage.
+fn write_barrier_operation<'a>(
+    spec: &'a ArmSpec,
+    session_id: &str,
+    operation_id: Option<&'a str>,
+) -> Option<&'a str> {
+    match spec.target_backend_session_id.as_deref() {
+        Some(target) if !target.is_empty() => {
+            (target == session_id).then_some(spec.operation_id.as_str())
+        }
+        _ => match operation_id {
+            Some(id) if id == spec.operation_id => Some(id),
+            _ => None,
+        },
+    }
+}
+
 /// Hold the REAL backend-write stage: called from
 /// `send_native_terminal_input_with_stage_logging` after the
 /// `backend_write_start` stage event and before the write future is awaited.
@@ -1921,13 +1952,21 @@ pub(crate) async fn hold_backend_write_barrier(
     session_id: &str,
     operation_id: Option<&str>,
 ) -> Option<ReleaseOutcome> {
-    let spec = channel.spec(WRITE_BARRIER)?;
-    // Never fabricate an operation identity: only the runner's operation nonce
-    // (carried by the arm and echoed by the request id) can hold the barrier.
-    let operation_id = operation_id?;
-    if operation_id != spec.operation_id {
-        return None;
+    let mut spec = channel.spec(WRITE_BARRIER)?;
+    // The runner addresses a barrier by binding it to the session it created
+    // (`bindBackendSession` -> `<name>.bind.json`). The presentation stage adopts
+    // that bind on its render path; this stage has no render path of its own, so
+    // the bind is adopted here, once, the first time a write reaches an
+    // armed-but-unbound barrier. An adoption that cannot be correlated reports
+    // itself and leaves the barrier on its operation-nonce path unchanged.
+    if spec.target_backend_session_id.as_deref().map_or(true, str::is_empty) {
+        if adopt_runner_bind_off_runtime(channel, WRITE_BARRIER).await.is_ok() {
+            if let Some(adopted) = channel.spec(WRITE_BARRIER) {
+                spec = adopted;
+            }
+        }
     }
+    let operation_id = write_barrier_operation(&spec, session_id, operation_id)?;
     let start = tokio::time::Instant::now();
     // The real pending age must pass the classifier's slow-execution threshold
     // so the held verdict is measured evidence of a genuinely parked write.
@@ -1996,12 +2035,9 @@ pub(crate) async fn settle_backend_write_barrier(
     let Some(spec) = channel.spec(WRITE_BARRIER) else {
         return;
     };
-    let Some(operation_id) = operation_id else {
+    let Some(operation_id) = write_barrier_operation(&spec, session_id, operation_id) else {
         return;
     };
-    if operation_id != spec.operation_id {
-        return;
-    }
     let mut fresh_snapshot =
         write_stage_snapshot(state, session_id, operation_id, None, None, Some(success));
     if let Some(client) = qa_daemon_client() {

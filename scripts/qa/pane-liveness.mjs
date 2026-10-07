@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   BUDGETS, EXIT, HarnessError, parseInvocation, preflight,
@@ -75,7 +75,21 @@ const runnerRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 // scenario without launching a product.
 export const SCENARIO_PLANS = {
   'diagnostic-classifier': {
+    // `presentation` is armed at BOOT, like every other barrier, and the armed
+    // render path no longer DROPS a frame it cannot bind yet: the pane's first
+    // dispatch falls through to a normal dispatch, the pane step settles and binds
+    // the session, and the next dispatch adopts that bind and holds for real. Two
+    // earlier shapes were measured and rejected: arming at boot while the path
+    // still dropped the frame (no `frame-submitted.jsonl` at all, run died at
+    // `PANE_BINDING_UNBOUND`), and deferring the arm to after the pane step (the
+    // product scans arms once at channel install, so the later arm was never
+    // acked and the hold could never appear).
     barriers: ['backend-write', 'presentation'], marker: true, splitMenu: false,
+    // The barrier is addressed by the session the runner BOUND
+    // (`bindBackendSession`), so this scenario needs a real pane to bind to. It
+    // is not a split scenario: `splitMenu: false` and the pane step below only
+    // creates and binds the pane the classifier's own write stage runs on.
+    pane: true,
     // Receipt names are the product's real barrier settlements: the classifier
     // stages settle on the backend-write/presentation barriers themselves.
     receipts: ['fixture-setup', 'backend-write', 'presentation', 'marker-output'],
@@ -120,6 +134,12 @@ export const SCENARIO_PLANS = {
   },
   'stale-binding': {
     barriers: [], marker: true, splitMenu: false,
+    // A stale attempt must be offered against a LIVE binding, and the only
+    // session with one is the pane the runner created and bound. Measured with
+    // the pane step absent: the product reported
+    // `FERRYX_QA_STALE_BINDING_UNSERVICED: no daemon session with a live
+    // seven-field binding yet` and no receipt could ever settle.
+    pane: true,
     receipts: ['fixture-setup', 'stale-receipt-rejected', 'reattach-marker', 'marker-output'],
     invariants: ['staleReceiptRejected', 'reattachSameBackend'],
   },
@@ -433,6 +453,54 @@ async function runNativeScenario(ctx) {
 //   * it NEVER throws. It runs in a `finally`, where a throw would escape
 //     `main()` and destroy the run's own result.json - a diagnostic that cannot
 //     be taken must be reported, never fatal.
+// Preserve the daemon's OWN durable log before the isolation root is removed.
+//
+// The daemon writes it to `<FERRYX_DATA_DIR>/logs/daemon.log`
+// (`daemon/logging.rs::open_log`), and the runner points `FERRYX_DATA_DIR` INTO the isolation
+// root this pass unlinks - so the daemon's record was discarded with the root. That matters
+// because the daemon's stderr is not durable anywhere: `daemon/logging.rs` documents that the
+// desktop spawns it with a pipe it never drains, and only the app process's own stdio reaches
+// `app.stderr.log`. Producers that run in the daemon (`terminal/qa_liveness.rs` - the
+// `eof-handled` settlement, the suspension check) therefore had NO observable surface at all.
+//
+// Bounded and never fatal, exactly like `archiveRunBarrierHub`: a diagnostic that cannot be
+// taken is reported in the receipt, never thrown from a `finally`.
+export function archiveDaemonLog({ isolationRoot, evidence } = {}) {
+  const receipt = { sourcePath: null, path: null, ok: false, reason: null, bytes: 0 };
+  try {
+    if (typeof isolationRoot !== 'string' || isolationRoot.length === 0) {
+      receipt.reason = 'ISOLATION_ROOT_UNSET';
+      return receipt;
+    }
+    if (typeof evidence?.runDir !== 'string' || evidence.runDir.length === 0) {
+      receipt.reason = 'EVIDENCE_DIR_UNSET';
+      return receipt;
+    }
+    // The data dir is a direct child of the isolation root, so only the root and its own
+    // immediate children are inspected - no unbounded walk.
+    const candidates = [isolationRoot];
+    for (const entry of readdirSync(isolationRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) candidates.push(join(isolationRoot, entry.name));
+    }
+    for (const base of candidates) {
+      const source = join(base, 'logs', 'daemon.log');
+      if (!existsSync(source)) continue;
+      const destination = join(evidence.runDir, 'daemon.log');
+      copyFileSync(source, destination);
+      receipt.sourcePath = source;
+      receipt.path = destination;
+      receipt.bytes = statSync(source).size;
+      receipt.ok = true;
+      return receipt;
+    }
+    receipt.reason = 'DAEMON_LOG_NOT_FOUND';
+    return receipt;
+  } catch (error) {
+    receipt.reason = `DAEMON_LOG_ARCHIVE_FAILED: ${error?.message ?? error}`;
+    return receipt;
+  }
+}
+
 export function archiveRunBarrierHub({ barrierHub, evidence, registry = null } = {}) {
   try {
     return archiveBarrierHub(barrierHub?.dir ?? null, evidence?.runDir ?? null, {
@@ -533,7 +601,9 @@ export async function main(argv) {
   };
 
   const plan = SCENARIO_PLANS[context.scenario];
-  // Pre-arm BEFORE launch (plan: controls arm before trigger).
+  // Pre-arm BEFORE launch (plan: controls arm before trigger). The product scans and
+  // acks arms once, at channel install, so every barrier has to be on disk before the
+  // app boots - a barrier armed later is never seen at all.
   for (const barrier of plan.barriers) {
     const targetRole = plan.barrierRoles?.[barrier] ?? BARRIER_ROLES[barrier];
     barrierHub.prearm(barrier, {
@@ -609,6 +679,7 @@ export async function main(argv) {
     // archived into this run's own evidence dir HERE, before the roots go:
     // bounded, skip-on-failure, and never fatal to the run.
     const barrierArchive = archiveRunBarrierHub({ barrierHub, evidence, registry });
+    const daemonLog = archiveDaemonLog({ isolationRoot: context.isolationRoot, evidence });
     const receipts = await registry.cleanup();
     const gate = computeCleanupGate(registry, receipts);
     // Pass-6: when an isolation root is still held after the forced reap of this
@@ -637,6 +708,7 @@ export async function main(argv) {
     // Where the barrier hub's own files were preserved (task-9 pass-22): the
     // receipt says what was copied, what the byte cap left behind, and why.
     result.barrierArchive = barrierArchive;
+    result.daemonLog = daemonLog;
     evidence.write('cleanup.json', {
       registered: {
         processes: registry.processes.map(p => ({ pid: p.pid, label: p.label, executable: p.executable ?? null })),
