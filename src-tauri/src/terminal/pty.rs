@@ -485,10 +485,10 @@ impl PtyManager {
                     Ok(None) => {}
                     Err(error) => {
                         session.mark_failed(error.to_string());
-                        // The session is being torn down, so its reader must stop; the retained
-                        // handle reaches it here, before the master is given up just below.
-                        session.request_reader_stop();
+                        // Tearing the session down: give the master up so the console host can
+                        // flush, then end the reader with the cancellation as the bounded fallback.
                         session.close_io();
+                        let _ = Self::end_reader_after_close(&session).await;
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -517,12 +517,12 @@ impl PtyManager {
             return;
         }
 
-        // The child has already exited, so everything it produced is either read or sitting in the
-        // pipe. Requesting the stop only now is what preserves the output-before-exit contract: the
-        // reader is told to stop after the process that produced the output is gone, never before.
-        session.request_reader_stop();
+        // The child has exited, so its stream is settling. Giving up the master lets the console
+        // host flush whatever it still holds and exit, and the reader delivers that tail and ends on
+        // the stream; the cancellation inside is the bounded fallback for a host that never exits,
+        // never the first move.
         session.close_io();
-        let _ = Self::join_reader_bounded(&session).await;
+        let _ = Self::end_reader_after_close(&session).await;
         session.mark_exited(Some(code));
         session.close_output();
         self.remove_from_registry(session_id);
@@ -543,6 +543,44 @@ impl PtyManager {
                 ))
             }
         }
+    }
+
+    /// End the reader of a session whose I/O has already been closed, keeping the output the console
+    /// host may still be holding.
+    ///
+    /// The order is the contract. `close_io` gives up the master first, and dropping the master is
+    /// what runs `ClosePseudoConsole` - the operation that lets the host flush its tail and exit. The
+    /// reader stays armed through that, delivers the tail, and ends on the stream, all within the
+    /// bound below. The cancellation is only the fallback for the case this seam exists for, a host
+    /// that never exits and a read the kernel owns forever; applying it first would disarm the reader
+    /// before the one operation that can still produce output, which is how a tail gets truncated.
+    async fn end_reader_after_close(session: &Arc<PtySession>) -> Result<(), PtyError> {
+        match Self::join_reader_bounded(session).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                session.request_reader_stop();
+                // The join above consumed the handle, so this observes the reader's own flag - its
+                // last act before returning - instead of joining it a second time.
+                if Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    /// Observe the reader's finished flag, bounded. The reader sets it as its last act, so this
+    /// reports the same event `join_reader_bounded` waits for, without needing the handle.
+    async fn await_reader_finished(session: &Arc<PtySession>, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !session.is_reader_finished() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(Duration::from_millis(20))).await;
+        }
+        true
     }
 
     async fn poll_reap_bounded(
@@ -666,13 +704,14 @@ impl PtyManager {
             }
         }
 
-        // The child has been reaped above (or was already gone), so its output is settled and the
-        // reader can be told to stop and deliver the tail before it ends. This ordering is the
-        // contract: the stop is requested only after the process that produced the output is dead.
-        session.request_reader_stop();
+        // The child has been reaped above (or was already gone). Giving up the master now lets the
+        // console host flush what it still holds, and the reader delivers that tail and ends on the
+        // stream; the cancellation inside is the bounded fallback, not the first move. Requesting it
+        // here instead would disarm the reader before the only operation that can produce more
+        // output.
         session.close_io();
 
-        if let Err(reader_error) = Self::join_reader_bounded(&session).await {
+        if let Err(reader_error) = Self::end_reader_after_close(&session).await {
             if first_error.is_none() {
                 first_error = Some(reader_error);
             }

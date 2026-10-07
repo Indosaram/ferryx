@@ -507,13 +507,13 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
-                // A requested stop ends the loop here, once the read that was in flight has
-                // returned. On Windows the cancellation event is what made that read return; this
-                // flag is what stops the loop from issuing another one.
-                if reader_stop_requested_task.load(Ordering::Acquire) {
-                    break;
-                }
-                if pause_requested_task.load(Ordering::Acquire) {
+                // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
+                // variable rather than an immediate `break` because one read carries at most one
+                // buffer: the read below keeps draining while bytes remain, and the loop ends on the
+                // read that reports the cancellation with nothing buffered. Breaking here instead
+                // would drop a tail larger than one buffer that the pipe is still holding.
+                let stopping = reader_stop_requested_task.load(Ordering::Acquire);
+                if !stopping && pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
                         && !reader_finished_task.load(Ordering::Acquire)
@@ -541,7 +541,14 @@ impl PtySession {
                         }
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        // Once a stop was requested this is the cancellation, not a retryable
+                        // signal: the cancel event is sticky, so retrying here would spin.
+                        if stopping {
+                            break;
+                        }
+                        continue;
+                    }
                     #[cfg(unix)]
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         use std::os::fd::AsRawFd;
@@ -1169,17 +1176,18 @@ impl PtySession {
         }
     }
 
-    /// How many reads the kernel has reported pending on this session's master.
+    /// How many reads are outstanding on this session's master right now.
     ///
-    /// Test-only, and Windows-only because that is the platform whose reader can be parked by a
-    /// read the kernel owns: it is the exact signal a regression waits on to know such a read is in
-    /// flight, rather than inferring one from elapsed time.
+    /// Test-only, and Windows-only because that is the platform whose reader can be parked by a read
+    /// the kernel owns. It is a gauge, so a non-zero value means a read is in flight at the moment of
+    /// the read - not that one was in flight at some earlier point - which is what makes a wait on it
+    /// a subscription to the current state rather than to history.
     #[cfg(all(test, windows))]
-    pub(crate) fn pending_reader_reads_for_test(&self) -> u64 {
+    pub(crate) fn outstanding_reader_reads_for_test(&self) -> u64 {
         self.reader_interrupt
             .lock()
             .as_ref()
-            .map(|interrupt| interrupt.pending_read_count())
+            .map(|interrupt| interrupt.outstanding_read_count())
             .unwrap_or(0)
     }
 
@@ -1194,8 +1202,28 @@ impl PtySession {
 
     pub(crate) fn close_io(&self) {
         self.writer.lock().take();
-        self.master.lock().take();
+        self.release_master();
         self.release_paused_reader();
+    }
+
+    /// Give up the master, dropping it on a thread of its own.
+    ///
+    /// Dropping the master runs `ClosePseudoConsole`, which waits for the console host to exit and
+    /// flushes the output the host still holds - the operation that can still produce the last bytes
+    /// of a pane. It can also wait on a client that has stopped reading, so the thread that drops it
+    /// must be one nothing else depends on: the close path has to stay free to apply the bounded
+    /// cancellation, and the reader is the thread that lets the host finish. The slot is emptied
+    /// synchronously, so a caller that checks for a live master (export, resize) sees it gone at
+    /// once - only the drop itself is off-thread.
+    fn release_master(&self) {
+        let master = self.master.lock().take();
+        if let Some(master) = master {
+            // If the thread cannot be created the closure is dropped here, which is the previous
+            // behavior: the thread exists only to keep a blocking ClosePseudoConsole off this one.
+            let _ = std::thread::Builder::new()
+                .name("pty-master-release".to_string())
+                .spawn(move || drop(master));
+        }
     }
 
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
@@ -1356,13 +1384,13 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
-                // A requested stop ends the loop here, once the read that was in flight has
-                // returned. On Windows the cancellation event is what made that read return; this
-                // flag is what stops the loop from issuing another one.
-                if reader_stop_requested_task.load(Ordering::Acquire) {
-                    break;
-                }
-                if pause_requested_task.load(Ordering::Acquire) {
+                // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
+                // variable rather than an immediate `break` because one read carries at most one
+                // buffer: the read below keeps draining while bytes remain, and the loop ends on the
+                // read that reports the cancellation with nothing buffered. Breaking here instead
+                // would drop a tail larger than one buffer that the pipe is still holding.
+                let stopping = reader_stop_requested_task.load(Ordering::Acquire);
+                if !stopping && pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
                         && !reader_finished_task.load(Ordering::Acquire)
@@ -1390,7 +1418,12 @@ impl PtySession {
                         }
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        if stopping {
+                            break;
+                        }
+                        continue;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         let mut poll = libc::pollfd {
                             fd: reader_poll.as_raw_fd(),
@@ -1450,10 +1483,12 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         self.writer.lock().take();
         // A session dropped without an explicit close must still not leave its reader parked on the
-        // pipe: the blocking thread would outlive the session and hold runtime shutdown open. The
-        // retained handle is what reaches it here, since the master may already be gone.
+        // pipe: the blocking thread would outlive the session and hold runtime shutdown open. Drop
+        // cannot wait for a tail and it closes the output channel a few lines below, so there is no
+        // consumer left for one: the cancellation is the only thing that can end the read here, and
+        // it is applied directly instead of after a drain.
         self.request_reader_stop();
-        self.master.lock().take();
+        self.release_master();
         self.release_paused_reader();
         self.output_tx.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
@@ -1717,7 +1752,13 @@ mod windows_reader_tests {
 
     /// The hole this seam exists for: a session that has already given its master up - exactly what
     /// a failed handover export leaves behind - must still be able to end its reader when it closes.
-    /// The master is gone, so only the retained handle can reach that reader.
+    /// The master is gone, so only the retained handle can reach that reader, and here the stream is
+    /// never going to end on its own, so the cancellation is what returns the parked read.
+    ///
+    /// The "closing must not stop the reader" half of the contract is asserted on unix, where it is
+    /// deterministic (`a_failed_export_leaves_the_session_readable_by_the_predecessor`). Asserting it
+    /// here would race the console host exiting and closing the pipe by itself, which is a correct
+    /// way for this reader to end - a legitimate EOF, not a failure of the seam.
     #[tokio::test]
     async fn a_session_whose_master_is_gone_can_still_end_its_reader() {
         let manager = crate::terminal::PtyManager::new();
@@ -1726,19 +1767,17 @@ mod windows_reader_tests {
             .expect("spawn a ConPTY session");
         let session = manager.get_session(&session_id).expect("session registered");
 
-        // Subscribe to the kernel's own report that a read is in flight, rather than assuming one.
+        // Subscribe to the reader's outstanding-read gauge, which reports a read in flight RIGHT
+        // NOW, rather than to a running total that an earlier completed read would also satisfy.
         wait_until(
-            || session.pending_reader_reads_for_test() > 0,
-            "the reader to park in a pending read",
+            || session.outstanding_reader_reads_for_test() >= 1,
+            "the reader to park in a read the kernel owns",
         );
 
         // The master goes away the way a failed export takes it, leaving the reader parked on a
-        // pipe whose write end the console host still holds.
+        // pipe whose write end the console host still holds. Whether the host then exits by itself
+        // or never does, this close must end the reader, and the assertions below are what prove it.
         session.close_io();
-        assert!(
-            !session.is_reader_finished(),
-            "giving up the master must not stop the reader on its own"
-        );
 
         session.request_reader_stop();
 
@@ -1768,8 +1807,8 @@ mod windows_reader_tests {
             .expect("spawn a ConPTY session");
         let session = manager.get_session(&session_id).expect("session registered");
         wait_until(
-            || session.pending_reader_reads_for_test() > 0,
-            "the reader to park in a pending read",
+            || session.outstanding_reader_reads_for_test() >= 1,
+            "the reader to park in a read the kernel owns",
         );
 
         tokio::time::timeout(Duration::from_secs(20), manager.close_session(&session_id))

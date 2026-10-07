@@ -31,21 +31,12 @@ resolver = "2"
 name = "portable_pty"
 path = "src/lib.rs"
 
-[[example]]
-name = "bash"
-path = "examples/bash.rs"
-
-[[example]]
-name = "narrow"
-path = "examples/narrow.rs"
-
-[[example]]
-name = "whoami"
-path = "examples/whoami.rs"
-
-[[example]]
-name = "whoami_async"
-path = "examples/whoami_async.rs"
+# The four `[[example]]` targets this manifest used to declare (bash, narrow, whoami, whoami_async)
+# are gone: the vendored copy carries no `examples/` directory, and `autoexamples = false` above means
+# nothing is discovered either. Declaring targets whose files are absent makes every cargo invocation
+# against this manifest fail at target resolution, so the standalone crate test run was impossible.
+# They are removed rather than recreated: this crate is consumed as a path dependency, so the examples
+# are not part of what is built, and inventing replacements would be fabricating targets.
 
 [dependencies.anyhow]
 version = "1.0"

@@ -98,14 +98,23 @@ impl Default for PtySize {
 ///   master's read.
 pub trait ReaderInterrupt: Send + Sync {
     /// Ask this master's readers to stop waiting. Safe to call from any thread.
+    ///
+    /// Caller contract, which the interruption cannot enforce on its own: once this returns, a read
+    /// on a reader cloned from this master reports [std::io::ErrorKind::Interrupted] instead of
+    /// blocking, and it keeps doing so for the life of that reader, because the request is sticky.
+    /// A caller must therefore treat that error as terminal for that reader rather than as a
+    /// retryable `EINTR`: a loop that retries on `Interrupted` without also stopping will spin at
+    /// full speed. (The session's reader loop checks its own stop flag before retrying, so it
+    /// terminates; this note exists so no other caller has to rediscover that.)
     fn request(&self);
 
-    /// How many reads of this master the kernel has reported pending so far.
+    /// How many reads of this master are outstanding right now: issued and not yet reaped.
     ///
-    /// A test seam: the exact signal a regression subscribes to in order to know a read is
-    /// genuinely in flight, instead of inferring one from elapsed time. Implementations without a
-    /// cancellable reader report 0.
-    fn pending_read_count(&self) -> u64 {
+    /// A gauge, not a running total - it falls again when the operation is reaped, so a caller can
+    /// distinguish "a read is in flight at this moment" from "a read was in flight at some earlier
+    /// point". It exists as a test seam for exactly that subscription, in place of inferring a
+    /// read from elapsed time. Implementations without a cancellable reader report 0.
+    fn outstanding_read_count(&self) -> u64 {
         0
     }
 }

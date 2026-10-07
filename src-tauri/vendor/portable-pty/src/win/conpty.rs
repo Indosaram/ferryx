@@ -4,7 +4,7 @@ use crate::{Child, MasterPty, PtyPair, PtySize, PtySystem, ReaderInterrupt, Slav
 use anyhow::Error;
 use filedescriptor::{FileDescriptor, Pipe};
 use std::io::Read;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
@@ -14,6 +14,7 @@ use winapi::um::minwinbase::OVERLAPPED;
 use winapi::um::synchapi::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
 use winapi::um::winbase::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0};
 use winapi::um::wincon::COORD;
+use winapi::um::winnt::HANDLE;
 
 #[derive(Default)]
 pub struct ConPtySystem {}
@@ -154,10 +155,11 @@ struct BlockingInput(FileDescriptor);
 /// cloned from that same master.
 struct ReaderCancel {
     event: FileDescriptor,
-    // Reads of this master that the kernel reported as pending, counted at the moment the kernel
-    // said so. This is how a test waits for a read that is genuinely in flight instead of inferring
-    // one from a delay; production never reads it.
-    pending_reads: AtomicU64,
+    // Reads of this master that are outstanding RIGHT NOW: issued and not yet reaped. A gauge, not
+    // a running total - it falls again when the operation is reaped, so a test can tell "a read is
+    // in flight at this moment" from "a read was in flight at some earlier point", which a
+    // monotonic counter cannot. Production never reads it.
+    outstanding_reads: AtomicU64,
 }
 
 impl ReaderCancel {
@@ -169,7 +171,7 @@ impl ReaderCancel {
         }
         Ok(Arc::new(Self {
             event: unsafe { FileDescriptor::from_raw_handle(handle.cast()) },
-            pending_reads: AtomicU64::new(0),
+            outstanding_reads: AtomicU64::new(0),
         }))
     }
 
@@ -181,12 +183,16 @@ impl ReaderCancel {
         unsafe { WaitForSingleObject(self.event.as_raw_handle() as _, 0) == WAIT_OBJECT_0 }
     }
 
-    fn note_pending_read(&self) {
-        self.pending_reads.fetch_add(1, Ordering::Release);
+    fn note_outstanding_read(&self) {
+        self.outstanding_reads.fetch_add(1, Ordering::Release);
     }
 
-    fn pending_read_count(&self) -> u64 {
-        self.pending_reads.load(Ordering::Acquire)
+    fn note_read_reaped(&self) {
+        self.outstanding_reads.fetch_sub(1, Ordering::Release);
+    }
+
+    fn outstanding_read_count(&self) -> u64 {
+        self.outstanding_reads.load(Ordering::Acquire)
     }
 }
 
@@ -198,8 +204,8 @@ impl ReaderInterrupt for MasterInterrupt {
         self.0.request();
     }
 
-    fn pending_read_count(&self) -> u64 {
-        self.0.pending_read_count()
+    fn outstanding_read_count(&self) -> u64 {
+        self.0.outstanding_read_count()
     }
 }
 
@@ -253,6 +259,22 @@ impl OverlappedOutputReader {
         })
     }
 
+    /// Record that an operation is outstanding: the kernel owns the OVERLAPPED and the caller's
+    /// buffer until it is reaped, and this is the gauge a test subscribes to for that.
+    fn begin_pending(&mut self) {
+        self.pending = true;
+        self.cancel.note_outstanding_read();
+    }
+
+    /// Record that the outstanding operation has been reaped, which is the only point at which the
+    /// OVERLAPPED and the caller's buffer become ours again.
+    fn finish_pending(&mut self) {
+        if self.pending {
+            self.pending = false;
+            self.cancel.note_read_reaped();
+        }
+    }
+
     /// Deliver bytes the pipe is already holding, without waiting for more.
     ///
     /// `PeekNamedPipe` answers what is buffered right now, so this never waits and never
@@ -281,7 +303,7 @@ impl OverlappedOutputReader {
         let want = (available as usize).min(buf.len()) as DWORD;
         self.overlapped.hEvent = self.completion.as_raw_handle() as _;
         let mut transferred: DWORD = 0;
-        self.pending = true;
+        self.begin_pending();
         let issued = unsafe {
             winapi::um::fileapi::ReadFile(
                 self.handle.as_raw_handle() as _,
@@ -292,7 +314,7 @@ impl OverlappedOutputReader {
             )
         };
         if issued != 0 {
-            self.pending = false;
+            self.finish_pending();
             return Some(transferred as usize);
         }
         // The bytes were there, so the completion is already on its way: reap it as usual.
@@ -318,7 +340,7 @@ impl OverlappedOutputReader {
                 TRUE,
             )
         };
-        self.pending = false;
+        self.finish_pending();
         if collected != 0 {
             Some(transferred as usize)
         } else {
@@ -348,7 +370,7 @@ impl Read for OverlappedOutputReader {
         }
         self.overlapped.hEvent = self.completion.as_raw_handle() as _;
         let mut transferred: DWORD = 0;
-        self.pending = true;
+        self.begin_pending();
         let issued = unsafe {
             winapi::um::fileapi::ReadFile(
                 self.handle.as_raw_handle() as _,
@@ -360,20 +382,24 @@ impl Read for OverlappedOutputReader {
         };
         if issued != 0 {
             // Completed inline: nothing is pending and the bytes belong to the caller.
-            self.pending = false;
+            self.finish_pending();
             return Ok(transferred as usize);
         }
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-            self.pending = false;
+            self.finish_pending();
             return Err(error);
         }
         // The wait carries the cancellation event, so a request that arrived before or during this
-        // operation is observed here rather than missed.
-        self.cancel.note_pending_read();
-        let handles: [RawHandle; 2] = [
-            self.completion.as_raw_handle(),
-            self.cancel.event.as_raw_handle(),
+        // operation is observed here rather than missed. The operation stays counted as outstanding
+        // until one of the reap paths below clears it.
+        // The wait's signature is `lpHandles: *const HANDLE`, and winapi's HANDLE points at
+        // `winapi::ctypes::c_void` - a nominally distinct type from the `std::ffi::c_void` that
+        // `std::os::windows::io::RawHandle` points at. The array is typed as the FFI's own handle so
+        // the pointer handed over is exactly the one the signature declares.
+        let handles: [HANDLE; 2] = [
+            self.completion.as_raw_handle().cast(),
+            self.cancel.event.as_raw_handle().cast(),
         ];
         let waited = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, INFINITE) };
         if waited == WAIT_FAILED {
@@ -402,7 +428,7 @@ impl Read for OverlappedOutputReader {
                 TRUE,
             )
         };
-        self.pending = false;
+        self.finish_pending();
         if collected != 0 {
             return Ok(transferred as usize);
         }
@@ -546,10 +572,12 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     }
 
-    /// The subscription a regression uses in place of a delay: the count rises at the moment the
-    /// kernel reports the read pending, and only a cancellation ends that read.
+    /// The outstanding-read signal is a GAUGE, not a running total: it rises while a read is in
+    /// flight and falls again when that read is reaped, so a regression can subscribe to the state
+    /// that exists at the moment of the action. A monotonic counter would satisfy the wait below
+    /// but fail the two equality assertions.
     #[test]
-    fn a_pending_read_is_counted_when_the_kernel_reports_it() {
+    fn an_outstanding_read_is_a_gauge_that_falls_when_it_is_reaped() {
         let pipe = overlapped_output_pipe().expect("an overlapped output pipe");
         let cancel = ReaderCancel::new().expect("a cancellation event");
         let mut reader = OverlappedOutputReader::new(
@@ -557,7 +585,7 @@ mod tests {
             Arc::clone(&cancel),
         )
         .expect("a reader");
-        assert_eq!(cancel.pending_read_count(), 0, "nothing was issued yet");
+        assert_eq!(cancel.outstanding_read_count(), 0, "nothing was issued yet");
 
         let (issued_tx, issued_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -568,15 +596,21 @@ mod tests {
         });
         issued_rx.recv().expect("the worker reports before it reads");
 
-        // Wait for the kernel's own report that the read is in flight; fail rather than hang.
+        // Wait for the reader to have an operation in flight; fail rather than hang.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while cancel.pending_read_count() == 0 {
+        while cancel.outstanding_read_count() == 0 {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the kernel never reported the read as pending"
+                "the reader never had a read in flight"
             );
             std::thread::yield_now();
         }
+        // Nothing was written and nothing was cancelled, so that read is still outstanding.
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            1,
+            "the read in flight must be counted exactly once"
+        );
 
         cancel.request();
         let outcome = done_rx
@@ -585,6 +619,56 @@ mod tests {
         let error = outcome.expect_err("the read was cancelled, not completed");
         assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
         worker.join().expect("the reader thread ends");
+
+        // The read was reaped, so the gauge is back to zero. This is the assertion a running total
+        // cannot satisfy, and it is what makes the session-level wait meaningful.
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            0,
+            "a reaped read must leave the outstanding count"
+        );
+    }
+
+    /// A tail larger than one read buffer must be delivered in full. A single `read` returns at most
+    /// one buffer, so this drives the same drain-until-empty loop the session's reader loop runs and
+    /// asserts every byte arrives, in order, before the cancellation is reported.
+    #[test]
+    fn repeated_reads_drain_a_tail_larger_than_one_buffer() {
+        const CHUNK: usize = 4096;
+        let mut pipe = overlapped_output_pipe().expect("an overlapped output pipe");
+        let cancel = ReaderCancel::new().expect("a cancellation event");
+        let mut reader = OverlappedOutputReader::new(
+            pipe.read.try_clone().expect("a duplicate read end"),
+            Arc::clone(&cancel),
+        )
+        .expect("a reader");
+
+        // Three buffers' worth, written while nobody is reading, so the pipe holds all of it. The
+        // first byte of each block identifies it, so a dropped or reordered block is visible.
+        let mut written = Vec::new();
+        for round in 0..3u8 {
+            let mut block = vec![b'a' + round; CHUNK];
+            block[0] = b'A' + round;
+            written.extend_from_slice(&block);
+        }
+        pipe.write_all(&written).expect("write the tail into the pipe");
+
+        cancel.request();
+
+        let mut drained = Vec::new();
+        loop {
+            let mut buf = [0u8; CHUNK];
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => drained.extend_from_slice(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
+                Err(error) => panic!("unexpected read error while draining the tail: {error}"),
+            }
+        }
+        assert_eq!(
+            drained, written,
+            "the drain must deliver the whole tail in order, not one buffer of it"
+        );
     }
 
     /// Cancellation is scoped to one pipe: ending one reader must leave another reader waiting for
@@ -619,7 +703,7 @@ mod tests {
             let _ = done_tx.send(second_reader.read(&mut buf));
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while second_cancel.pending_read_count() == 0 {
+        while second_cancel.outstanding_read_count() == 0 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the untouched reader never issued its read"
