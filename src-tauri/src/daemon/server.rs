@@ -2704,6 +2704,22 @@ impl DaemonServer {
         });
     }
 
+    /// Records why this daemon is going away, then flushes the state that outlives it.
+    ///
+    /// Local PTYs die with the process, so the only durable state worth writing is the remote
+    /// session table: it is what lets a successor re-attach those sessions to the same ids. The
+    /// reason is written first because a daemon death with no record at all is the state the
+    /// 2026-10-07 incident had to be reconstructed from, and it could not be.
+    pub async fn shutdown_gracefully(&self, reason: &str) {
+        tracing::warn!(reason, "Daemon shutting down");
+        if let Err(message) = self
+            .persist_remote_sessions_at(self.remote_sessions_path.clone())
+            .await
+        {
+            tracing::error!(%message, "Failed to persist remote sessions while shutting down");
+        }
+    }
+
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
         self.run_server_with_handover_and_readiness(None, None)
             .await
@@ -4457,6 +4473,7 @@ impl DaemonServer {
                     DaemonResponse::UnsubscribeDagOk
                 }
                 Ok(DaemonRequest::Shutdown) => {
+                    tracing::info!("Daemon shutdown requested over the control socket");
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
                         Err(message) => daemon_error(message),
@@ -4728,6 +4745,10 @@ impl DaemonServer {
                 crate::ipc::qa_barrier::active_channel().as_deref(),
                 &mut cmd,
             );
+            // The successor must outlive this predecessor, which retires as soon as the transfer
+            // commits; a successor left inside the predecessor's process group would be killed by
+            // whatever teardown reaches that group.
+            crate::util::detach_launched_child(&mut cmd);
             match successor_stdout {
                 Some(target) => {
                     cmd.stdout(target);
@@ -4855,13 +4876,15 @@ impl DaemonServer {
                 };
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
-                let spawned = std::process::Command::new(&exe)
+                let mut successor = std::process::Command::new(&exe);
+                successor
                     .arg("--daemon")
                     .env("FERRYX_DAEMON_SUCCESSOR", "1")
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
+                    .stderr(std::process::Stdio::null());
+                crate::util::detach_launched_child(&mut successor);
+                let spawned = successor.spawn();
                 match spawned {
                     Ok(child) => {
                         tracing::warn!(
