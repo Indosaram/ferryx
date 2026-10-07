@@ -90,7 +90,7 @@ async fn capability_fixture() -> (tempfile::TempDir, CapabilityServer, String) {
 /// Each id lands in its own field: the reference host id is not derived from the machine id.
 #[test]
 fn the_capability_identity_publishes_each_id_in_its_own_field() {
-    let fields = reference_chat_capability_identity("machine-abc", "renamed-host");
+    let fields = reference_chat_capability_identity("machine-abc", "renamed-host", "owner-1");
     assert_eq!(
         fields.get("machineId").and_then(|value| value.as_str()),
         Some("machine-abc")
@@ -99,15 +99,19 @@ fn the_capability_identity_publishes_each_id_in_its_own_field() {
         fields.get("referenceHostId").and_then(|value| value.as_str()),
         Some("renamed-host")
     );
-    // Exactly the two fields: no third alias a client could read a host id out of.
+    assert_eq!(
+        fields.get("referenceOwnerId").and_then(|value| value.as_str()),
+        Some("owner-1")
+    );
+    // Exactly the three fields: no alias a client could read one identity out of.
     let names: Vec<&str> = fields.keys().map(String::as_str).collect();
-    assert_eq!(names, vec!["machineId", "referenceHostId"]);
+    assert_eq!(names, vec!["machineId", "referenceHostId", "referenceOwnerId"]);
 }
 
 /// The two ids are independent inputs, not one value published twice.
 #[test]
 fn the_capability_identity_never_derives_one_id_from_the_other() {
-    let distinct = reference_chat_capability_identity("machine-abc", "renamed-host");
+    let distinct = reference_chat_capability_identity("machine-abc", "renamed-host", "owner-1");
     assert_ne!(
         distinct.get("machineId").and_then(|value| value.as_str()),
         distinct.get("referenceHostId").and_then(|value| value.as_str()),
@@ -115,7 +119,7 @@ fn the_capability_identity_never_derives_one_id_from_the_other() {
     );
 
     // The same input for both is copied into both: the function invents neither.
-    let identical = reference_chat_capability_identity("same-value", "same-value");
+    let identical = reference_chat_capability_identity("same-value", "same-value", "same-value");
     assert_eq!(
         identical.get("machineId").and_then(|value| value.as_str()),
         Some("same-value")

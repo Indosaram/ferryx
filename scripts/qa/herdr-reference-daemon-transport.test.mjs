@@ -25,9 +25,11 @@ import {
   DAEMON_TRANSPORT_KINDS,
   ISOLATED_GATEWAY_OWNERSHIP_CONTRACT,
   IsolatedGatewayError,
+  ReferenceAuthorityError,
   REFERENCE_CREDENTIAL_TIERS,
   REFERENCE_HOST_ACCESS_KINDS,
   REFERENCE_NONLOCAL_TRANSPORTS,
+  FIXTURE_SCHEMA,
   adoptOwnedGateway,
   boundedBytesReport,
   captureSessionDiagnostics,
@@ -44,9 +46,14 @@ import {
   ownerHostReceiptRequirement,
   parseDaemonPortFile,
   parseDaemonTransportToken,
+  referenceReadQuery,
   registerWorkspaceOnDaemon,
+  resolveReferenceAuthority,
+  targetFor,
+  targetForRead,
   transportErrorCode,
   validateFixtureManifest,
+  validateReferenceCapabilities,
   workspaceIdRefusal,
   workspaceRegistrationFor,
 } from './herdr-reference-fixtures.mjs';
@@ -964,5 +971,151 @@ test('closing the owned connection settles the reads it cancelled', async () => 
   assert.ok(report.sessionFailure, 'unreadable details are reported, not raised');
   assert.ok(report.replayFailure);
   await daemon.close();
+});
+
+/* ==========================================================================
+ * The reference-chat authority the gateway publishes (referenceOwnerId)
+ * ==========================================================================
+ *
+ * The owner a reference read or mutation carries is the one the OWNING gateway published in
+ * `/api/v1/capabilities`, beside `referenceHostId` and for the same incarnation as `daemonEpoch`.
+ * These are source-only assertions: they bind the published value, and the typed refusal that
+ * stands in place of a configured owner, without a gateway and without a runtime.
+ */
+
+const publishedCapabilities = {
+  daemonEpoch: '41',
+  referenceHostId: 'host-published',
+  referenceOwnerId: 'owner-published',
+  machineId: 'machine-not-a-host-id',
+};
+
+function authoritativeSession(overrides) {
+  return {
+    hostId: 'host-1',
+    referenceHostId: 'host-published',
+    referenceOwnerId: 'owner-published',
+    ownerId: 'owner-published',
+    epoch: '41',
+    backendSessionId: 'sess-1',
+    providerSessionId: 'provider-1',
+    registryId: 'codex-cli',
+    ...(overrides || {}),
+  };
+}
+
+test('a read carries the published owner, and omits the host id', () => {
+  const params = new URLSearchParams(referenceReadQuery(authoritativeSession(), {}, 'screen'));
+  assert.equal(params.get('ownerId'), 'owner-published');
+  // A read omits hostId entirely: the gateway resolves its own reference host id.
+  assert.equal(params.get('hostId'), null);
+});
+
+test('a configured owner that is not the published one is refused, not sent', () => {
+  assert.throws(
+    () => referenceReadQuery(authoritativeSession({ ownerId: 'owner-from-config' }), {}, 'screen'),
+    (error) => error instanceof ReferenceAuthorityError && error.code === 'reference-owner-not-authoritative',
+  );
+});
+
+test('a row with no published owner never falls back to the configured one', () => {
+  assert.throws(
+    () => referenceReadQuery(authoritativeSession({ referenceOwnerId: null }), {}, 'screen'),
+    (error) => error instanceof ReferenceAuthorityError && error.code === 'reference-owner-absent',
+  );
+  assert.throws(
+    () => targetFor(authoritativeSession({ referenceOwnerId: undefined })),
+    (error) => error instanceof ReferenceAuthorityError && error.code === 'reference-owner-absent',
+  );
+});
+
+test('a mutation target echoes the published owner and the published host id', () => {
+  const target = targetFor(authoritativeSession());
+  assert.equal(target.hostId, 'host-published');
+  assert.equal(target.ownerId, 'owner-published');
+  assert.equal(target.epoch, '41');
+  assert.equal(target.backendSessionId, 'sess-1');
+  // machineId is a different value and is never substituted for the host id.
+  assert.notEqual(target.hostId, 'machine-not-a-host-id');
+});
+
+test('a read target is the owner and the incarnation, with no host id', () => {
+  const target = targetForRead(authoritativeSession());
+  assert.deepEqual(Object.keys(target).sort(), ['backendSessionId', 'epoch', 'ownerId']);
+  assert.equal(target.ownerId, 'owner-published');
+  assert.equal(target.epoch, '41');
+});
+
+test('the capability validator requires the owner published beside the host id', () => {
+  const ok = validateReferenceCapabilities(publishedCapabilities);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.referenceHostId, 'host-published');
+  assert.equal(ok.referenceOwnerId, 'owner-published');
+
+  const absent = validateReferenceCapabilities({ daemonEpoch: '41', referenceHostId: 'host-published' });
+  assert.equal(absent.ok, false);
+  assert.deepEqual(absent.missing, ['referenceOwnerId']);
+  assert.equal(absent.referenceOwnerId, null);
+});
+
+test('authority resolves from the gateway, and a changed owner is an invalidation', () => {
+  assert.deepEqual(
+    resolveReferenceAuthority(publishedCapabilities, authoritativeSession()),
+    { hostId: 'host-published', ownerId: 'owner-published' },
+  );
+  assert.throws(
+    () => resolveReferenceAuthority(publishedCapabilities, authoritativeSession({ ownerId: 'owner-from-config' })),
+    (error) => error instanceof ReferenceAuthorityError && error.code === 'reference-owner-changed',
+  );
+  assert.throws(
+    () =>
+      resolveReferenceAuthority(
+        { daemonEpoch: '41', referenceHostId: 'host-published' },
+        authoritativeSession(),
+      ),
+    (error) => error instanceof ReferenceAuthorityError && error.code === 'reference-authority-absent',
+  );
+});
+
+test('a record that publishes a host id without its owner is refused', () => {
+  const withOwner = {
+    schema: FIXTURE_SCHEMA,
+    hosts: [
+      {
+        id: 'host-1',
+        transport: 'local',
+        url: 'http://127.0.0.1:1',
+        credentialFile: '/nonexistent-credential',
+        referenceHostId: 'host-published',
+        referenceOwnerId: 'owner-published',
+      },
+    ],
+    sessions: [
+      {
+        hostId: 'host-1',
+        backendSessionId: 'sess-1',
+        executablePath: '/bin/sh',
+        pid: 1,
+        provider: 'codex-cli',
+        referenceHostId: 'host-published',
+        referenceOwnerId: 'owner-published',
+      },
+    ],
+  };
+  const complete = validateFixtureManifest(withOwner);
+  assert.equal(
+    complete.errors.filter((message) => /without referenceOwnerId/.test(message)).length,
+    0,
+    'a complete published pair must not be reported as incomplete: ' + complete.errors.join('; '),
+  );
+
+  const incomplete = validateFixtureManifest({
+    ...withOwner,
+    hosts: [{ ...withOwner.hosts[0], referenceOwnerId: undefined }],
+    sessions: [{ ...withOwner.sessions[0], referenceOwnerId: undefined }],
+  });
+  const named = incomplete.errors.filter((message) => /without referenceOwnerId/.test(message));
+  assert.equal(named.length, 2, 'host and session are each named: ' + incomplete.errors.join('; '));
+  assert.equal(incomplete.ok, false);
 });
 

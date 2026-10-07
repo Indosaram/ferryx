@@ -1277,6 +1277,24 @@ export class IsolatedGatewayError extends Error {
 const gatewayBlocked = (reason, detail) => new IsolatedGatewayError(reason, detail);
 
 /**
+ * A reference-chat authority failure.
+ *
+ * `referenceHostId` and `referenceOwnerId` are published by the OWNING gateway in
+ * `/api/v1/capabilities` and are authoritative for the same incarnation as `daemonEpoch`. A
+ * value that is absent, or that a caller substituted from config, is reported through this type
+ * so no caller can turn it into a pass: the harness refuses rather than sending a target or a
+ * read the gateway would answer TARGET_EXPIRED.
+ */
+export class ReferenceAuthorityError extends Error {
+  constructor(code, detail) {
+    super(code + (detail ? ": " + detail : ""));
+    this.name = "ReferenceAuthorityError";
+    this.code = code;
+    this.detail = detail || "";
+  }
+}
+
+/**
  * Seed the persisted remote gateway config the daemon restores at boot.
  *
  * Shape is PersistedRemoteGatewayConfig (remote/state.rs, camelCase). mode must be
@@ -2127,6 +2145,10 @@ export async function launchIsolatedGateway(options) {
       machineId: exchanged.json.machineId || null,
       referenceHostId:
         capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
+      // Published beside the host id and owned by the same incarnation. Recorded, never derived:
+      // a configured owner is not this gateway's owner.
+      referenceOwnerId:
+        capabilities.json && capabilities.json.referenceOwnerId ? capabilities.json.referenceOwnerId : null,
       remoteStatus: status,
       stderrTail: () => stderr,
       // Everything needed to attribute a later transport failure: what the daemon wrote, how
@@ -2518,6 +2540,8 @@ export async function adoptOwnedGateway(ownership, options) {
       machineId: capabilities.json && capabilities.json.machineId ? capabilities.json.machineId : null,
       referenceHostId:
         capabilities.json && capabilities.json.referenceHostId ? capabilities.json.referenceHostId : null,
+      referenceOwnerId:
+        capabilities.json && capabilities.json.referenceOwnerId ? capabilities.json.referenceOwnerId : null,
       remoteStatus: status,
       stderrTail: () => "",
       // The adopted daemon's own output is not this process's pipe, but its log file is
@@ -2654,6 +2678,12 @@ export function validateFixtureManifest(value) {
     // here would hand the runner a host with no endpoint, which is the state this check exists to
     // refuse.
     requireFields(errors, "host", host, ["id", "transport", "url", "credentialFile"]);
+    // The published pair travels together or not at all: a record that claims a reference host id
+    // without the owner it was published beside cannot bind a read or a mutation, so the claim is
+    // reported as an incomplete authority rather than accepted and resolved later.
+    if (isNonEmptyString(host.referenceHostId) && !isNonEmptyString(host.referenceOwnerId)) {
+      errors.push("host " + host.id + " publishes referenceHostId without referenceOwnerId");
+    }
     if (!REFERENCE_TRANSPORTS.includes(host.transport)) {
       errors.push("host " + host.id + " has an unknown transport: " + String(host.transport));
     }
@@ -2693,6 +2723,11 @@ export function validateFixtureManifest(value) {
     }
     if (!hostIds.has(session.hostId)) {
       errors.push("session " + session.backendSessionId + " names an unknown host " + session.hostId);
+    }
+    if (isNonEmptyString(session.referenceHostId) && !isNonEmptyString(session.referenceOwnerId)) {
+      errors.push(
+        "session " + session.backendSessionId + " publishes referenceHostId without referenceOwnerId",
+      );
     }
     if (isNonEmptyString(session.transcriptPath) && !existsSync(session.transcriptPath)) {
       errors.push("session " + session.backendSessionId + " transcript path does not exist");
@@ -2865,25 +2900,66 @@ export async function readGatewayCapabilities(host) {
 /**
  * Validate the capabilities the reference-chat contract depends on.
  *
- * \`referenceHostId\` is an authoring prerequisite owned by the backend task; until it ships,
- * every mutation is BLOCKED here rather than being sent with a machineId that the gateway
- * would refuse.
+ * The gateway publishes `referenceHostId` and `referenceOwnerId` beside each other, and both are
+ * authoritative for the same incarnation as `daemonEpoch`. Until a value ships, every read and
+ * mutation is BLOCKED here rather than being sent with a machineId or a configured owner that the
+ * gateway would refuse.
  */
 export function validateReferenceCapabilities(capabilities) {
   const errors = [];
   const missing = [];
   if (!capabilities || typeof capabilities !== "object") {
-    return { ok: false, errors: ["capabilities are not an object"], missing: ["daemonEpoch", "referenceHostId"] };
+    return {
+      ok: false,
+      errors: ["capabilities are not an object"],
+      missing: ["daemonEpoch", "referenceHostId", "referenceOwnerId"],
+      machineId: null,
+      referenceHostId: null,
+      referenceOwnerId: null,
+    };
   }
   if (!isNonEmptyString(capabilities.daemonEpoch)) missing.push("daemonEpoch");
   if (!isNonEmptyString(capabilities.referenceHostId)) missing.push("referenceHostId");
+  if (!isNonEmptyString(capabilities.referenceOwnerId)) missing.push("referenceOwnerId");
   if (missing.length > 0) {
     errors.push(
       "the gateway does not publish: " + missing.join(", ") +
-        " (referenceHostId is the backend authoring prerequisite for mutations)",
+        " (referenceHostId and referenceOwnerId are the gateway's own authority for reads and " +
+        "mutations)",
     );
   }
-  return { ok: errors.length === 0, errors, missing, machineId: capabilities.machineId || null };
+  return {
+    ok: errors.length === 0,
+    errors,
+    missing,
+    machineId: capabilities.machineId || null,
+    referenceHostId: capabilities.referenceHostId || null,
+    referenceOwnerId: capabilities.referenceOwnerId || null,
+  };
+}
+
+/**
+ * Resolve the authority a run must bind, from the gateway's own capability document.
+ *
+ * The single reader for the published pair: a caller holding the capabilities and a session row
+ * gets either the authoritative (hostId, ownerId) or a typed refusal. A CHANGED value is an
+ * invalidation, not drift to tolerate — the gateway publishes both per incarnation, so an owner
+ * that disagrees with the row means the row is stale and the run must not proceed with it.
+ */
+export function resolveReferenceAuthority(capabilities, session) {
+  const validated = validateReferenceCapabilities(capabilities);
+  if (!validated.ok) {
+    throw new ReferenceAuthorityError("reference-authority-absent", validated.errors.join("; "));
+  }
+  const configured = session && session.ownerId;
+  if (isNonEmptyString(configured) && String(configured) !== String(validated.referenceOwnerId)) {
+    throw new ReferenceAuthorityError(
+      "reference-owner-changed",
+      "the session names owner " + String(configured) +
+        " but the gateway now publishes " + String(validated.referenceOwnerId),
+    );
+  }
+  return { hostId: validated.referenceHostId, ownerId: validated.referenceOwnerId };
 }
 
 /**
@@ -2916,22 +2992,70 @@ export function sessionsForHost(manifest, hostId) {
  * The corrected identity contract: the host id a mutation carries is the gateway's OWN
  * `referenceHostId`, published in `/api/v1/capabilities` — NOT the `machineId`. The two are
  * different values and the gateway refuses a foreign one with 403, so a machineId here would
- * produce a permanent, confusing refusal rather than a pass.
+ * produce a permanent, confusing refusal rather than a pass. The owner is published beside it and
+ * is echoed here rather than taken from the fixture config.
  *
- * This fails closed: a session with no resolved referenceHostId cannot build a target at all,
- * which is the correct outcome when the gateway does not publish it yet.
+ * This fails closed: a session with no resolved referenceHostId or referenceOwnerId cannot build
+ * a target at all, which is the correct outcome when the gateway does not publish them yet.
  */
 export function targetFor(session) {
   const hostId = session.referenceHostId;
   if (!isNonEmptyString(hostId)) {
-    throw new Error(
+    throw new ReferenceAuthorityError(
+      "reference-host-absent",
       "a mutation target needs the gateway's own referenceHostId from /api/v1/capabilities; " +
         "the machineId is NOT a substitute and none may be invented",
     );
   }
   return {
     hostId,
-    ownerId: session.ownerId,
+    ownerId: referenceAuthorityOwner(session),
+    epoch: session.epoch,
+    backendSessionId: session.backendSessionId,
+  };
+}
+
+/**
+ * The owner a read or a mutation must carry: the one the OWNING gateway published.
+ *
+ * `referenceOwnerId` is published beside `referenceHostId` in `/api/v1/capabilities` and is
+ * authoritative for the same incarnation as `daemonEpoch`. This fails closed twice over: a row
+ * that carries no published owner builds no target at all, and a row whose owner disagrees with
+ * the published one is refused here rather than sent — the gateway answers TARGET_EXPIRED for a
+ * foreign owner exactly as it does for a foreign epoch, so a mismatch that reached the wire would
+ * be indistinguishable from an invalidation.
+ *
+ * There is deliberately NO configured-owner fallback: `ownerId` in the fixture config is an INPUT
+ * to provisioning, never an authority, so it can never stand in for the published value.
+ */
+export function referenceAuthorityOwner(session) {
+  const ownerId = session.referenceOwnerId;
+  if (!isNonEmptyString(ownerId)) {
+    throw new ReferenceAuthorityError(
+      "reference-owner-absent",
+      "the session carries no referenceOwnerId; the gateway's own /api/v1/capabilities owner is " +
+        "the only authority, and a configured ownerId is NOT a substitute",
+    );
+  }
+  const configured = session.ownerId;
+  if (isNonEmptyString(configured) && String(configured) !== String(ownerId)) {
+    throw new ReferenceAuthorityError(
+      "reference-owner-not-authoritative",
+      "the session names owner " + String(configured) + " but the gateway publishes " + String(ownerId),
+    );
+  }
+  return ownerId;
+}
+
+/**
+ * The read tuple: the published owner, the published incarnation, and the session.
+ *
+ * A read omits hostId — the gateway resolves its own — so the identity it does carry is the
+ * owner and the epoch, both of which the gateway published for this incarnation.
+ */
+export function targetForRead(session) {
+  return {
+    ownerId: referenceAuthorityOwner(session),
     epoch: session.epoch,
     backendSessionId: session.backendSessionId,
   };
@@ -2971,7 +3095,11 @@ export function referenceReadQuery(session, extra, route) {
   const allowed = REFERENCE_READ_QUERY_FIELDS[route || "history"];
   const params = new URLSearchParams();
   const source = {
-    ownerId: session.ownerId,
+    // The owner a read carries is the gateway's own published one. A caller can still override it
+    // through `extra` — that is how the negative branch forges a foreign owner — but the default is
+    // never the configured ownerId, and an absent published owner is a typed refusal rather than an
+    // omitted query field the gateway would answer TARGET_EXPIRED for.
+    ownerId: referenceAuthorityOwner(session),
     epoch: session.epoch,
     backendSessionId: session.backendSessionId,
     providerSessionId: session.providerSessionId,

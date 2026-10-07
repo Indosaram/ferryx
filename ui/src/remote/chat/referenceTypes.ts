@@ -286,7 +286,13 @@ export interface ReferenceFileReceipt {
   readonly mentionText: string;
 }
 
-/** The stable identity of a target, for draft keys and request fencing. */
+/**
+ * The stable identity of a target, for draft keys and request fencing.
+ *
+ * The owner is part of that identity, and it is the authority the gateway PUBLISHED, not a value
+ * this client asserts: a target whose owner changes is a different key, so the lane resets and any
+ * request still in flight for the old authority is fenced out - the same treatment the epoch gets.
+ */
 export function referenceTargetKey(target: ReferenceTargetRef): string {
   const { hostId, ownerId, epoch, backendSessionId } = target.target;
   return `${hostId}|${ownerId}|${epoch}|${backendSessionId}`;

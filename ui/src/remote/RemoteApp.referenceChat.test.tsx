@@ -61,6 +61,10 @@ class StubWebSocket {
 
 const SESSION_ID = "sess-main";
 const DAEMON_EPOCH = "18446744073709551615";
+// The owner authority the gateway publishes for this incarnation. Deliberately NOT the workspace
+// id the state below carries ("ferryx"): if the client ever fell back to the workspace again, an
+// assertion naming this value would fail instead of passing by coincidence.
+const REFERENCE_OWNER_ID = "owner-pub-1";
 
 const remoteState = {
   activeContext: {
@@ -192,6 +196,9 @@ function installFetch(options: {
         apiVersion: 1,
         machineId: "mach-1",
         daemonEpoch: DAEMON_EPOCH,
+        // The owner authority the route compares a target against, published beside the host id
+        // on the same instance lifetime as the epoch. A gateway that omits it has no target.
+        referenceOwnerId: REFERENCE_OWNER_ID,
         platform: "linux",
       });
     }
@@ -317,7 +324,7 @@ describe("reference chat lane (task 12)", () => {
     expect(history!.url).toContain(`/api/v1/reference-chat/${SESSION_ID}/history`);
     expect(history!.url).toContain(`epoch=${DAEMON_EPOCH}`);
     expect(history!.url).toContain("registryId=claude");
-    expect(history!.url).toContain("ownerId=ferryx");
+    expect(history!.url).toContain(`ownerId=${REFERENCE_OWNER_ID}`);
     // the legacy agent-history path is not used by the chat any more
     expect(harness.calls.some((call) => call.url.includes("/api/v1/agent-history/"))).toBe(false);
   });
@@ -715,7 +722,7 @@ describe("reference chat lane (task 12)", () => {
     // A gateway that renamed itself publishes that name. A read must still carry no host id: the
     // route falls back to the host's OWN reference_host_id(), which is what keeps it correct.
     const harness = installFetch({
-      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceHostId: "renamed-host" },
+      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceHostId: "renamed-host", referenceOwnerId: REFERENCE_OWNER_ID },
     });
     render(<RemoteApp />);
     await screen.findByTestId("chat-composer-textarea");
@@ -726,14 +733,14 @@ describe("reference chat lane (task 12)", () => {
     const history = harness.calls.find((call) => call.url.includes("/history"));
     expect(history!.url).not.toContain("hostId=");
     expect(history!.url).toContain(`epoch=${DAEMON_EPOCH}`);
-    expect(history!.url).toContain("ownerId=ferryx");
+    expect(history!.url).toContain(`ownerId=${REFERENCE_OWNER_ID}`);
     expect(history!.url).toContain(`backendSessionId=${SESSION_ID}`);
   });
 
   it("QA-09: a mutation names the host the gateway published, never the machine id", async () => {
     setWidth(390);
     const harness = installFetch({
-      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceHostId: "renamed-host" },
+      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceHostId: "renamed-host", referenceOwnerId: REFERENCE_OWNER_ID },
     });
     render(<RemoteApp />);
     await screen.findByTestId("chat-composer-textarea");
@@ -755,7 +762,7 @@ describe("reference chat lane (task 12)", () => {
   it("QA-09: the gateway's own epoch wins over the session row", async () => {
     setWidth(390);
     const harness = installFetch({
-      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: "77" },
+      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: "77", referenceOwnerId: REFERENCE_OWNER_ID },
       sessions: () => [{ sessionId: SESSION_ID, daemonEpoch: DAEMON_EPOCH, running: true }],
     });
     render(<RemoteApp />);
@@ -773,7 +780,7 @@ describe("reference chat lane (task 12)", () => {
   it("QA-09: without a published host id the documented default is used", async () => {
     setWidth(390);
     const harness = installFetch({
-      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH },
+      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH, referenceOwnerId: REFERENCE_OWNER_ID },
     });
     render(<RemoteApp />);
     await screen.findByTestId("chat-composer-textarea");
@@ -786,6 +793,8 @@ describe("reference chat lane (task 12)", () => {
     const submit = harness.calls.find((call) => call.url.includes("/submit"));
     const body = submit!.body as { target: Record<string, unknown> };
     expect(body.target.hostId).toBe("local");
+    // the same envelope echoes the published owner, so the route can compare it
+    expect(body.target.ownerId).toBe(REFERENCE_OWNER_ID);
   });
 
   it("QA-09: the provider session the host published for THIS pane travels with the read", async () => {
@@ -861,6 +870,7 @@ describe("reference chat lane (task 12)", () => {
             apiVersion: 1,
             machineId: "mach-1",
             daemonEpoch: capabilitiesReads === 1 ? DAEMON_EPOCH : "88",
+            referenceOwnerId: REFERENCE_OWNER_ID,
           });
         }
         if (url.includes("/api/v1/sessions")) {
@@ -897,6 +907,7 @@ describe("reference chat lane (task 12)", () => {
     expect(parseChatGatewayIdentity({ daemonEpoch: "0" })).toEqual({
       daemonEpoch: "0",
       referenceHostId: null,
+      referenceOwnerId: null,
       machineId: null,
     });
     // a non-canonical or non-string epoch is not an incarnation this route could compare
@@ -908,10 +919,38 @@ describe("reference chat lane (task 12)", () => {
     expect(parseChatGatewayIdentity({ daemonEpoch: "5", hostId: "named-host", machineId: "mach-1" })).toEqual({
       daemonEpoch: "5",
       referenceHostId: "named-host",
+      referenceOwnerId: null,
       machineId: "mach-1",
     });
     // the machine identity is never promoted to the host id
     expect(parseChatGatewayIdentity({ daemonEpoch: "5", machineId: "mach-1" })!.referenceHostId).toBeNull();
+    // the owner authority is read from its own published field, never from the host id
+    expect(
+      parseChatGatewayIdentity({ daemonEpoch: "5", referenceHostId: "h", referenceOwnerId: "own-1" })!
+        .referenceOwnerId,
+    ).toBe("own-1");
+  });
+
+  it("repair15: a gateway that publishes no owner authority has no target at all", async () => {
+    setWidth(390);
+    // The workspace the UI is showing is not an owner authority. With `referenceOwnerId` absent
+    // there is no target: neither a read nor a mutation may go out under an owner this client
+    // invented, which is what the removed workspace fallback used to do.
+    const harness = installFetch({
+      capabilities: { apiVersion: 1, machineId: "mach-1", daemonEpoch: DAEMON_EPOCH },
+    });
+    render(<RemoteApp />);
+    await screen.findByTestId("chat-composer-textarea");
+    // the identity answer landed, so the absence below is a property of the payload, not a race
+    await harness.whenCalled("/api/v1/capabilities");
+
+    expect(harness.calls.some((call) => call.url.includes("/history"))).toBe(false);
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "hi" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect(harness.calls.some((call) => call.url.includes("/submit"))).toBe(false);
   });
 
   it("QA-09: the provider session is read only from rows naming this session, and never guessed", () => {

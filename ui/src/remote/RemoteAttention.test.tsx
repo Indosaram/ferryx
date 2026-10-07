@@ -881,6 +881,9 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("fetch", ticketed(fetchMockLast));
 
     render(<RemoteApp />);
+    // The second half is a fresh mount, and chat is the default at every width, so the terminal
+    // must be asked for again before it can be swiped.
+    await switchToTerminalMode();
 
     const terminalLast = await screen.findByTestId("remote-terminal");
 

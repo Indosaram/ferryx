@@ -405,17 +405,33 @@ const REFERENCE_CHAT_DEFAULT_HOST_ID = "local";
  * `daemonEpoch` is the value the reference-chat route compares a target against, so it is the
  * authoritative incarnation on EVERY transport (relay, direct and the account tunnel alike).
  * `referenceHostId` is the gateway's own `reference_host_id()` where it publishes one.
+ * `referenceOwnerId` is the OWNER authority for reference-chat targets, published beside the host
+ * id by the same gateway and on the same instance/incarnation lifetime as `daemonEpoch`. It is
+ * never asserted by this client, never taken from the environment and never derived from the
+ * request: a target that does not echo it is refused TARGET_EXPIRED exactly like a stale epoch,
+ * and a gateway that publishes none leaves the lane with no target at all rather than an owner
+ * this client invented.
  * `machineId` is the host's machine identity: recorded for diagnostics, NEVER substituted for
  * the host id, because the two are different values.
  */
 export interface ChatGatewayIdentity {
   readonly daemonEpoch: string;
   readonly referenceHostId: string | null;
+  readonly referenceOwnerId: string | null;
   readonly machineId: string | null;
 }
 
 /** Field names a gateway may publish its reference host id under. */
 const CHAT_HOST_ID_FIELDS: readonly string[] = ["referenceHostId", "hostId"];
+
+/**
+ * The one field a gateway publishes its reference OWNER authority under.
+ *
+ * Deliberately not an alias list, unlike the host id: the route compares a target's owner against
+ * this value, so accepting a second spelling would be this client choosing which field is
+ * authoritative. Absence is absence - it never falls back to a configured or local owner.
+ */
+const CHAT_OWNER_ID_FIELD = "referenceOwnerId";
 
 function chatText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -442,7 +458,12 @@ export function parseChatGatewayIdentity(raw: unknown): ChatGatewayIdentity | nu
       break;
     }
   }
-  return { daemonEpoch, referenceHostId, machineId: chatText(body.machineId) };
+  return {
+    daemonEpoch,
+    referenceHostId,
+    referenceOwnerId: chatText(body[CHAT_OWNER_ID_FIELD]),
+    machineId: chatText(body.machineId),
+  };
 }
 
 /** The gateway's own identity, from the one authenticated route that publishes it. */
@@ -812,6 +833,8 @@ function referenceChatReadQuery(
   // A READ names no host: the route falls back to the gateway's own `reference_host_id()`, so a
   // renamed host answers from its own identity instead of a client-side guess. A mutation still
   // carries a host id, because the frozen envelope requires one.
+  // The owner is queried so the route can compare it: it is the gateway's published authority,
+  // and a read that names an owner the live incarnation did not publish is refused, not served.
   params.set("ownerId", ownerId);
   params.set("epoch", epoch);
   params.set("backendSessionId", backendSessionId);
@@ -895,6 +918,12 @@ export const RemoteApp: React.FC = () => {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const [pairingHash, setPairingHash] = useState(window.location.hash);
   const [magicLinkOverridden, setMagicLinkOverridden] = useState(() => hasMagicLinkCode());
+  // The mode the user asked for lives here, ABOVE the keyed connection below: the key is the
+  // host identity, so a pairing adoption or a host switch remounts that subtree. Chat stays the
+  // default because this state is born chat; an explicit terminal choice now survives the
+  // remount instead of being discarded with the component that held it. Nothing is persisted and
+  // no store is involved - the owner is simply the first component that does not remount.
+  const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
   useEffect(() => {
     const onHashChange = () => setPairingHash(window.location.hash);
     window.addEventListener("hashchange", onHashChange);
@@ -912,6 +941,8 @@ export const RemoteApp: React.FC = () => {
       hostId={hostId}
       relayUrl={relayUrl}
       readUrlHints={pairingRequested || state.activeHostId === null || magicLinkOverridden}
+      viewMode={viewMode}
+      onViewModeChange={setViewMode}
       initialMagicLinkRequested={magicLinkOverridden}
       onMagicLinkConsumed={() => {
         remoteHostStore.setActiveHost(null);
@@ -925,9 +956,15 @@ export const RemoteHostConnection: React.FC<{
   hostId: string;
   relayUrl: string;
   readUrlHints: boolean;
+  // The mode owner is above this component when a caller supplies it: this subtree is keyed by
+  // the host identity, so anything it owns alone is lost on a host switch. Callers that keep no
+  // mode state (the desktop shell, the selection-lifetime harness) leave these out and get the
+  // same chat default from the local fallback.
+  viewMode?: "chat" | "terminal" | "browser";
+  onViewModeChange?: (mode: "chat" | "terminal" | "browser") => void;
   initialMagicLinkRequested?: boolean;
   onMagicLinkConsumed?: () => void;
-}> = ({ hostId, relayUrl, readUrlHints, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
+}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
     if (initialMagicLinkRequested) return null;
@@ -964,8 +1001,11 @@ export const RemoteHostConnection: React.FC<{
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   // Chat is the default at EVERY width: the terminal is a mode the user asks for, never the
   // landing surface of a phone or a desktop. One owner decides the mode, so no nested drawer
-  // can mount the same session twice.
-  const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
+  // can mount the same session twice. When the caller owns that mode, the choice outlives this
+  // keyed subtree; the local fallback keeps the same default for callers that do not.
+  const [localViewMode, setLocalViewMode] = useState<"chat" | "terminal" | "browser">("chat");
+  const viewMode = controlledViewMode ?? localViewMode;
+  const setViewMode = onViewModeChange ?? setLocalViewMode;
   const [chatMessages, setChatMessages] = useState<MobileChatMessageProps[]>([]);
   const [chatWarnings, setChatWarnings] = useState<readonly string[]>([]);
   // The lane the chat speaks to: the owning target of the session in focus.
@@ -1783,7 +1823,6 @@ export const RemoteHostConnection: React.FC<{
     model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.agentType ?? null;
   const chatActivity =
     model.context.terminalTabs?.find((tab) => tab.id === model.context.activeTabId)?.activityState ?? null;
-  const chatWorkspaceId = model.context.workspaceId ?? null;
   // The gateway's own capabilities answer is the exact value the route compares a target
   // against, so it wins; the session row is the fallback for a host that publishes it there.
   const chatDaemonEpoch =
@@ -1799,13 +1838,19 @@ export const RemoteHostConnection: React.FC<{
   const chatIsRunning = chatActivity === "working" || chatPrompt !== null;
 
   const chatReferenceTarget = useMemo<ReferenceTargetRef | null>(() => {
-    if (!effectiveSessionId || !chatWorkspaceId || !chatDaemonEpoch) return null;
+    // The owner is the authority the gateway PUBLISHED, on the same instance lifetime as the
+    // epoch. The workspace this UI happens to be showing is not a substitute: with no published
+    // owner there is no target, and the lane reports unavailable instead of asserting one this
+    // client invented. A changed owner is a different target key, so the lane resets and a
+    // target that outlived its authority earns the same TARGET_EXPIRED a stale epoch earns.
+    const referenceOwnerId = chatGateway?.referenceOwnerId ?? null;
+    if (!effectiveSessionId || !referenceOwnerId || !chatDaemonEpoch) return null;
     return {
       target: {
         // The id the host publishes for itself, else its documented default. Never the machine
         // identity, which is a different value, and never another host's name.
         hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
-        ownerId: chatWorkspaceId,
+        ownerId: referenceOwnerId,
         epoch: chatDaemonEpoch,
         backendSessionId: effectiveSessionId,
       },
@@ -1813,7 +1858,7 @@ export const RemoteHostConnection: React.FC<{
       // and the reader then binds the conversation by the host's own owner/source rules.
       ...(chatProviderSession !== null ? { providerSessionId: chatProviderSession } : {}),
     };
-  }, [chatDaemonEpoch, chatGateway, chatProviderSession, chatWorkspaceId, effectiveSessionId]);
+  }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
@@ -2001,9 +2046,10 @@ export const RemoteHostConnection: React.FC<{
       } catch (error) {
         if (cancelled) return;
         if (error instanceof ReferenceHistoryFetchError && referenceHistoryErrorIsIdentity(error.code)) {
-          // A refusal is an answer, not permission to look somewhere else. A stale incarnation is
-          // the one refusal that can be repaired: re-read the host's identity and let the next
-          // poll speak to the incarnation that is live now. Everything else clears the lane.
+          // A refusal is an answer, not permission to look somewhere else. A stale incarnation or
+          // a superseded owner authority is the one refusal that can be repaired: re-read the
+          // host's identity and let the next poll speak to the incarnation that is live now.
+          // Everything else clears the lane.
           if (error.code === "TARGET_EXPIRED" || error.code === "FORBIDDEN") {
             await refreshChatIdentity();
           }
@@ -2130,7 +2176,13 @@ export const RemoteHostConnection: React.FC<{
     }
   }, [chatOlderCursor]);
 
-  /** One mutation, as the frozen envelope carries it: target, request id, payload. */
+  /**
+   * One mutation, as the frozen envelope carries it: target, request id, payload.
+   *
+   * The target echoes the gateway's published owner and epoch rather than anything this client
+   * decided, so a mutation whose authority moved is refused TARGET_EXPIRED on the same path an
+   * epoch change is - never re-attributed to another owner.
+   */
   const chatMutationBody = useCallback(
     (target: ReferenceTargetRef, params: unknown) => ({
       requestId: newChatRequestId(),

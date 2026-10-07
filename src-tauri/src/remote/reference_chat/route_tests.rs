@@ -34,9 +34,16 @@ const REFERENCE_CHAT_ROUTES: [(&str, &str); 9] = [
     ("DELETE", "files/00000000-0000-0000-0000-000000000000"),
 ];
 
-/// The owner id these tests fence their targets with. It travels as part of the identity tuple;
-/// the gateway does not invent a second owner concept it cannot verify.
-const ROUTE_TEST_OWNER: &str = "owner-reference-route";
+/// An owner id that is NOT this gateway's own. The gateway mints its owner identity itself
+/// (\`RemoteGatewayState::reference_owner_id\`) and publishes it beside the host id, so a caller
+/// cannot choose one; this value is what a caller choosing for itself would send, and the fence
+/// must refuse it.
+const ROUTE_TEST_FOREIGN_OWNER: &str = "owner-reference-route";
+
+/// The cursor-position query a pane's terminal may ask before it starts, and the report that
+/// answers it. Windows ConPTY asks; the answer is what lets the shell start at all.
+const ROUTE_CURSOR_QUERY: &[u8] = b"\x1b[6n";
+const ROUTE_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
 
 /// How many create-path phases one fixture's hook retains. Bounded on purpose: the log is a
 /// diagnostic, and the create path emits a fixed, small set of phases.
@@ -374,9 +381,29 @@ impl ReferenceRouteFixture {
         host: &str,
         extras: &[(&str, String)],
     ) -> String {
+        self.read_query_naming_owner(
+            backend_session_id,
+            registry_id,
+            epoch,
+            host,
+            &self.state.reference_owner_id,
+            extras,
+        )
+    }
+
+    /// The same query with the owner named by the caller, so a foreign owner can be sent.
+    fn read_query_naming_owner(
+        &self,
+        backend_session_id: &str,
+        registry_id: &str,
+        epoch: &str,
+        host: &str,
+        owner: &str,
+        extras: &[(&str, String)],
+    ) -> String {
         let mut params = vec![
             ("hostId".to_string(), host.to_string()),
-            ("ownerId".to_string(), ROUTE_TEST_OWNER.to_string()),
+            ("ownerId".to_string(), owner.to_string()),
             ("epoch".to_string(), epoch.to_string()),
             ("backendSessionId".to_string(), backend_session_id.to_string()),
             ("registryId".to_string(), registry_id.to_string()),
@@ -393,17 +420,66 @@ impl ReferenceRouteFixture {
 
     /// The frozen mutation envelope: the target travels with the request id.
     fn mutation(&self, request_id: &str, params: serde_json::Value) -> String {
+        self.mutation_naming_owner(request_id, &self.state.reference_owner_id, params)
+    }
+
+    /// The same envelope with the owner named by the caller, so a foreign owner can be sent.
+    fn mutation_naming_owner(
+        &self,
+        request_id: &str,
+        owner: &str,
+        params: serde_json::Value,
+    ) -> String {
         serde_json::json!({
             "requestId": request_id,
             "target": {
                 "hostId": reference_files::reference_host_id(),
-                "ownerId": ROUTE_TEST_OWNER,
+                "ownerId": owner,
                 "epoch": self.daemon_epoch.as_str(),
                 "backendSessionId": self.session_id.as_str(),
             },
             "params": params,
         })
         .to_string()
+    }
+
+    /// Answer every cursor query the bytes seen so far contain, reporting the counts by reference.
+    ///
+    /// Returns the write error when dispatching a report failed. The pass is byte-driven and
+    /// platform-neutral: a host whose pane never asks simply leaves the counts at zero.
+    async fn answer_cursor_queries(
+        &self,
+        seen: &[u8],
+        queries: &mut usize,
+        answered: &mut usize,
+    ) -> Option<String> {
+        let detected = seen
+            .windows(ROUTE_CURSOR_QUERY.len())
+            .filter(|window| *window == ROUTE_CURSOR_QUERY)
+            .count();
+        if detected > *queries {
+            *queries = detected;
+        }
+        while *answered < *queries {
+            if let Err(error) = self
+                .state
+                .session_backend
+                .write_input(&self.session_id, ROUTE_CURSOR_REPORT)
+                .await
+            {
+                return Some(error);
+            }
+            *answered += 1;
+        }
+        None
+    }
+
+    /// The pane's retained output sequence range: a write to the pane advances it.
+    fn sequence_range(&self) -> Option<(Option<u64>, Option<u64>)> {
+        self.state
+            .terminal_service
+            .output_hub()
+            .session_sequence_range(&self.session_id)
     }
 
     /// The pane's geometry, as the owning daemon reports it.
@@ -462,8 +538,6 @@ impl ReferenceRouteFixture {
     /// detected and answered, whether a write failed, and what the host says about the pane - and
     /// none of them is asserted to be the cause.
     async fn submit_and_await_marker(&self, marker: &str) {
-        const CURSOR_QUERY: &[u8] = b"\x1b[6n";
-        const CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
         let (prefix, suffix) = marker
             .split_once('_')
             .expect("the marker names a prefix and a suffix the shell joins");
@@ -492,6 +566,16 @@ impl ReferenceRouteFixture {
         let seeded = seen.len();
         let gap = attachment.snapshot.gap.is_some();
         let mut watch = attachment.receiver;
+        let mut queries = 0usize;
+        let mut answered = 0usize;
+        let mut last_write_error: Option<String> = None;
+        // The replay is scanned BEFORE the wait for live output. On Windows the pane's cursor
+        // query arrives in this replay and the shell does not start until it is answered, so a
+        // detector that watched only live chunks would wait on a pane that is waiting on the
+        // answer. The live loop below repeats the same pass for anything that arrives later.
+        if let Some(error) = self.answer_cursor_queries(&seen, &mut queries, &mut answered).await {
+            last_write_error = Some(error);
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let (status, body) = self
             .server
@@ -506,9 +590,6 @@ impl ReferenceRouteFixture {
             )
             .await;
         assert_eq!(status, 200, "submit: {body}");
-        let mut queries = 0usize;
-        let mut answered = 0usize;
-        let mut last_write_error: Option<String> = None;
         let observed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 match watch.recv().await {
@@ -521,26 +602,14 @@ impl ReferenceRouteFixture {
                             return true;
                         }
                         // A shell that asks its terminal for the cursor before it starts is
-                        // answered here. Whether this host's pane asks is not assumed: the count
-                        // and the dispatch are reported in the failure below.
-                        let detected = seen
-                            .windows(CURSOR_QUERY.len())
-                            .filter(|window| *window == CURSOR_QUERY)
-                            .count();
-                        if detected > queries {
-                            queries = detected;
-                        }
-                        while answered < queries {
-                            if let Err(error) = self
-                                .state
-                                .session_backend
-                                .write_input(&self.session_id, CURSOR_REPORT)
-                                .await
-                            {
-                                last_write_error = Some(error);
-                                return false;
-                            }
-                            answered += 1;
+                        // answered here, and the same pass already ran over the replay. Whether
+                        // this host's pane asks is not assumed: the count and the dispatch are
+                        // reported in the failure below.
+                        if let Some(error) =
+                            self.answer_cursor_queries(&seen, &mut queries, &mut answered).await
+                        {
+                            last_write_error = Some(error);
+                            return false;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -660,6 +729,99 @@ async fn a_reference_chat_read_refuses_a_foreign_target() {
         .await;
     assert_eq!(status, 404, "a session this host does not own: {body}");
     assert!(body.contains("NOT_FOUND"), "{body}");
+
+    fixture.server.stop().await;
+}
+
+/// A target naming another owner is refused on every original-pane route - reads and mutations
+/// alike - and the refusals write nothing and resize nothing.
+///
+/// This is the plan's screen negative (task 6: "segmented VT versus replay gap/wrong owner and
+/// recorded zero writes/resizes"), and the fence that answers it is the shared target binding
+/// rather than the screen reader: \`reference_chat::screen\` performs no authorization by design.
+/// A valid control runs first, so a refusal produced by an unrelated guard cannot stand in.
+#[tokio::test]
+async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() {
+    let fixture = fixture().await;
+    assert!(
+        !fixture.state.reference_owner_id.is_empty()
+            && fixture.state.reference_owner_id != ROUTE_TEST_FOREIGN_OWNER,
+        "the gateway's owner identity is its own value, never the caller's"
+    );
+
+    // Valid control: this gateway's own owner is served, so the refusals below are the fence's.
+    let control = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{control}", fixture.route("screen")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "the gateway's own owner must still be served: {body}");
+    let geometry_before = fixture.geometry().await;
+    let sequences_before = fixture.sequence_range();
+
+    // Every read, with a foreign owner and nothing else changed.
+    for suffix in ["screen", "history", "prompt"] {
+        let foreign = fixture.read_query_naming_owner(
+            &fixture.session_id,
+            "codex",
+            &fixture.daemon_epoch,
+            &reference_files::reference_host_id(),
+            ROUTE_TEST_FOREIGN_OWNER,
+            &[],
+        );
+        let (status, body) = fixture
+            .server
+            .request(
+                "GET",
+                &format!("{}?{foreign}", fixture.route(suffix)),
+                Some(&fixture.control),
+                None,
+            )
+            .await;
+        assert_eq!(status, 410, "a foreign owner on {suffix} must be refused: {body}");
+        assert!(body.contains("TARGET_EXPIRED"), "typed refusal on {suffix}: {body}");
+    }
+
+    // The mutation envelope carries the owner inside its target, and is fenced the same way.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("submit"),
+            Some(&fixture.control),
+            Some(&fixture.mutation_naming_owner(
+                &request_id,
+                ROUTE_TEST_FOREIGN_OWNER,
+                serde_json::json!({ "text": "never typed\n", "origin": "chat" }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 410, "a foreign owner must not reach a mutation: {body}");
+    assert!(body.contains("TARGET_EXPIRED"), "typed refusal on submit: {body}");
+
+    // Zero writes and zero resizes: nothing was submitted in this test, so the idle pane emits
+    // nothing, and a refused target must leave both observables exactly as the control left them.
+    assert_eq!(
+        fixture.geometry().await,
+        geometry_before,
+        "a refused target resized the pane"
+    );
+    assert_eq!(
+        fixture.sequence_range(),
+        sequences_before,
+        "a refused target wrote to the pane"
+    );
 
     fixture.server.stop().await;
 }

@@ -752,6 +752,13 @@ pub struct RemoteGatewayState {
     pub terminal_service: Arc<TerminalService>,
     /// Session-owning daemon epoch, supplied by the daemon at construction.
     pub daemon_epoch: AtomicU64,
+    /// This gateway incarnation's reference-chat owner identity.
+    ///
+    /// Minted here, once per incarnation, and published beside `referenceHostId` on the
+    /// capability document. It is deliberately NOT an environment value and NOT read from the
+    /// request: a caller cannot choose it, which is what makes a target naming a different owner
+    /// a real refusal instead of an echo of the caller's own string.
+    pub reference_owner_id: String,
     /// Explicit stores keep identity alongside auth, including private fixtures.
     pub(crate) identity_dir: Option<PathBuf>,
     #[cfg(test)]
@@ -957,6 +964,7 @@ impl RemoteGatewayState {
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
+            reference_owner_id: uuid::Uuid::new_v4().to_string(),
             session_backend,
             workspace_registry,
             machine_services: None,

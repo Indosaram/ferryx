@@ -994,6 +994,9 @@ async function main() {
             daemonEpoch: gateway.daemonEpoch,
             devicePermission: gateway.devicePermission,
             referenceHostId: gateway.referenceHostId,
+            // Published beside the host id by the same incarnation, so a later read or mutation
+            // can echo the OWNING gateway's owner instead of a value the config declared.
+            referenceOwnerId: gateway.referenceOwnerId,
           };
           if (args.retainGateway) {
             // Handed off, not stopped: the scenario runner drives THIS daemon, so the
@@ -1060,12 +1063,42 @@ async function main() {
 
     // Sessions: the authoritative target tuple is assembled from the host plus the daemon's
     // own report. A field the harness cannot obtain is recorded as missing.
+    //
+    // The owner every row carries is the LOCAL gateway's published one, not the session host's:
+    // the runner binds every reference read and mutation through the local host's url, so the
+    // authority that will answer TARGET_EXPIRED for a foreign owner is the local gateway. A run
+    // whose gateway published no owner cannot produce a usable target, so that is recorded as a
+    // BLOCKER here - never as a row with no owner, which would read as a pass with nothing bound.
+    const localHostRecord = hosts.find((entry) => entry.transport === "local") || null;
+    const publishedOwnerId =
+      localHostRecord &&
+      typeof localHostRecord.referenceOwnerId === "string" &&
+      localHostRecord.referenceOwnerId.trim().length > 0
+        ? localHostRecord.referenceOwnerId
+        : null;
+    if (publishedOwnerId === null) {
+      blockers.push({
+        kind: "reference-owner-unavailable",
+        hostId: localHostRecord ? localHostRecord.id : null,
+        reason:
+          "the gateway published no referenceOwnerId in /api/v1/capabilities; a configured " +
+          "ownerId is not an authority and none may be substituted for it",
+      });
+    }
     for (const host of configuredHosts) {
       const hostRecord = hosts.find((entry) => entry.id === host.id);
       for (const session of host.sessions || []) {
         const row = {
           hostId: host.id,
-          ownerId: session.ownerId || null,
+          // The owner a read or a mutation must carry is the one the OWNING gateway published
+          // beside its reference host id. The config's ownerId is an INPUT, never an authority:
+          // it is recorded for audit and is never what a target is built from.
+          ownerId: publishedOwnerId,
+          configuredOwnerId:
+            typeof session.ownerId === "string" && session.ownerId.trim().length > 0
+              ? session.ownerId
+              : null,
+          referenceOwnerId: publishedOwnerId,
           epoch: hostRecord.daemonEpoch || session.epoch || null,
           backendSessionId: session.backendSessionId || null,
           provider: session.provider || null,

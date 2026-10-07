@@ -3309,11 +3309,17 @@ pub(super) fn authenticate_machine_request(
 /// purpose: `machineId` is the host's pairing identity, a different value, and a client that
 /// substituted one for the other would name a host this gateway refuses.
 ///
-/// Pure and explicit: the caller supplies both ids, so the field names and the separation
+/// `referenceOwnerId` is the gateway incarnation's OWN reference-chat owner identity, minted at
+/// construction and stable for that incarnation. It is published for the same reason the host id
+/// is: a target must name the owner this gateway will compare against, and the value must not be
+/// inferable from the caller's own request.
+///
+/// Pure and explicit: the caller supplies all three ids, so the field names and the separation
 /// between them are testable without touching the process environment.
 fn reference_chat_capability_identity(
     machine_id: &str,
     reference_host_id: &str,
+    reference_owner_id: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert(
@@ -3323,6 +3329,10 @@ fn reference_chat_capability_identity(
     fields.insert(
         "referenceHostId".to_string(),
         serde_json::Value::String(reference_host_id.to_string()),
+    );
+    fields.insert(
+        "referenceOwnerId".to_string(),
+        serde_json::Value::String(reference_owner_id.to_string()),
     );
     fields
 }
@@ -3372,6 +3382,7 @@ async fn get_capabilities(
         fields.extend(reference_chat_capability_identity(
             &identity.machine_id,
             &reference_host_id,
+            &state.reference_owner_id,
         ));
     }
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(document)).into_response())
@@ -4853,6 +4864,7 @@ fn reference_chat_target(
     owner_id: Option<&str>,
     epoch: Option<&str>,
     provider_session_id: Option<&str>,
+    daemon_owner: &str,
     daemon_epoch: u64,
 ) -> Result<reference_types::ReferenceTargetRef, ScopeError> {
     if session_id.trim().is_empty() {
@@ -4883,6 +4895,17 @@ fn reference_chat_target(
             ))
         }
     };
+    // The owner is this gateway incarnation's own identity, not a label the caller supplies: a
+    // target naming any other value is refused exactly as a foreign incarnation is, so no route
+    // can be served for an owner the gateway did not publish.
+    if owner != daemon_owner {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::TargetExpired,
+            format!(
+                "the request names owner {owner}; this gateway serves owner {daemon_owner}"
+            ),
+        ));
+    }
     let epoch_value = match epoch.map(str::trim).filter(|value| !value.is_empty()) {
         Some(text) => match text.parse::<u64>() {
             Ok(value) if value.to_string() == text => value,
@@ -5008,6 +5031,7 @@ async fn reference_chat_read_context(
         query.owner_id.as_deref(),
         query.epoch.as_deref(),
         query.provider_session_id.as_deref(),
+        state.reference_owner_id.as_str(),
         state
             .daemon_epoch
             .load(std::sync::atomic::Ordering::Acquire),
@@ -5061,6 +5085,7 @@ async fn reference_chat_mutation_context<P>(
         Some(named.owner_id.as_str()),
         Some(named_epoch.as_str()),
         body.provider_session_id.as_deref(),
+        state.reference_owner_id.as_str(),
         state
             .daemon_epoch
             .load(std::sync::atomic::Ordering::Acquire),

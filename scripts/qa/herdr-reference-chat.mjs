@@ -164,20 +164,35 @@ scenario("QA-06", {
   async failure(ctx) {
     const { host, session } = localContext(ctx);
     const http = httpHelpers(ctx, host);
+    // "refused" and "shellSignal" are VALID enum values, so they reach capability validation;
+    // "ctrl-c" is not a variant at all, so the envelope is refused before any capability is read.
+    // Those two are different guards and are asserted separately below.
     const refused = await http.mutate(session, "stop", randomUUID(), { capability: "refused" });
     const shellSignal = await http.mutate(session, "stop", randomUUID(), { capability: "shellSignal" });
     const badCapability = await http.mutate(session, "stop", randomUUID(), { capability: "ctrl-c" });
     const report = {
-      refused: { status: refused.status, body: refused.json },
-      shellSignal: { status: shellSignal.status, body: shellSignal.json },
-      unknownCapability: { status: badCapability.status, body: badCapability.json },
+      refused: { status: refused.status, body: redactForEvidence(refused.json) },
+      shellSignal: { status: shellSignal.status, body: redactForEvidence(shellSignal.json) },
+      unknownCapability: { status: badCapability.status, body: redactForEvidence(badCapability.json) },
     };
     ctx.record("qa-06-failure.json", report);
-    // An unknown capability is a typed refusal, never a substituted killing signal.
-    assert(refused.status !== 200 || (refused.json && refused.json.ok === false),
-      "a refused capability was answered as a successful stop");
-    assert(badCapability.status === 400 || badCapability.status === 422,
-      "an unknown stop capability was not refused: " + badCapability.status);
+    // The capability guard itself: a valid capability the target cannot honour is a typed
+    // ScopeResult refusal, never a substituted killing signal. "shellSignal" is recorded above and
+    // deliberately NOT asserted - its semantics are unchanged pending the contract adjudication.
+    assertTypedRefusal(refused, {
+      label: "QA-06 refused capability",
+      status: "UNSUPPORTED",
+      code: "UNSUPPORTED",
+      envelope: "scope",
+    });
+    // A schema-invalid capability is a malformed REQUEST, not a capability refusal: INVALID_REQUEST
+    // on the machine envelope, from the extractor, is the correct and only expected outcome here.
+    assertTypedRefusal(badCapability, {
+      label: "QA-06 unknown capability (schema-invalid)",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
     return { status: "pass", observed: report };
   },
 });
@@ -195,6 +210,15 @@ scenario("QA-07", {
       sizeBytes: imageBytes.length,
       contentBase64: imageBytes.toString("base64"),
     });
+    // Record what the route ACTUALLY answered before asserting on it, so a shape mismatch is
+    // diagnosable from the receipt instead of only from the assertion message (the previous run
+    // failed at the assertion and left no receipt behind). Credential-shaped keys and encoded
+    // payloads are redacted; the fixture owns the bytes and can re-derive them.
+    ctx.record("qa-07-stage-response.json", {
+      status: staged.status,
+      envelope: referenceEnvelopeOf(staged.json),
+      body: redactForEvidence(staged.json),
+    });
     const data = assertScopeResult(staged.json, imageRequestId, "QA-07 stage");
     const receipt = assertFileReceipt(data, "QA-07 stage");
     const preview = await http.previewFile(session, receipt.attachmentId);
@@ -207,7 +231,7 @@ scenario("QA-07", {
       staged: { status: staged.status, receipt, mentionText: data.mentionText },
       preview: { status: preview.status, displayName: previewData.displayName, sizeBytes: previewData.sizeBytes },
       delete: { status: removed.status },
-      previewAfterDelete: { status: afterDelete.status, body: afterDelete.json },
+      previewAfterDelete: { status: afterDelete.status, body: redactForEvidence(afterDelete.json) },
     };
     ctx.record("qa-07-happy.json", report);
     assert(receipt.hostId === session.hostId, "the staged file was receipted on a different host");
@@ -223,6 +247,16 @@ scenario("QA-07", {
   async failure(ctx) {
     const { host, session } = localContext(ctx);
     const http = httpHelpers(ctx, host);
+    // The control: the SAME route on the SAME target must ACCEPT a well-formed stage under every
+    // bound. Without it a refusal from an earlier fence (an unreadable envelope, a missing owner id,
+    // a dead session) satisfies the probes below and the branch passes while no file guard ran.
+    const controlRequestId = randomUUID();
+    const control = await http.mutate(session, "files", controlRequestId, {
+      name: "qa07-control.txt",
+      mediaType: "file",
+      sizeBytes: 4,
+      contentBase64: Buffer.from("okay").toString("base64"),
+    });
     const traversal = await http.mutate(session, "files", randomUUID(), {
       name: "../../escape.txt",
       mediaType: "file",
@@ -242,16 +276,56 @@ scenario("QA-07", {
       contentBase64: Buffer.from("short").toString("base64"),
     });
     const missingPreview = await http.previewFile(session, "00000000-0000-0000-0000-000000000000");
+    // Every response is recorded before anything is asserted, so a shape mismatch is diagnosable
+    // from the receipt and not only from an assertion message.
     const report = {
-      traversal: { status: traversal.status, body: traversal.json },
-      oversize: { status: oversize.status, body: oversize.json },
-      declaredSizeMismatch: { status: mismatch.status, body: mismatch.json },
-      unknownFilePreview: { status: missingPreview.status, body: missingPreview.json },
+      control: { status: control.status, envelope: referenceEnvelopeOf(control.json), body: redactForEvidence(control.json) },
+      traversal: { status: traversal.status, envelope: referenceEnvelopeOf(traversal.json), body: redactForEvidence(traversal.json) },
+      oversize: { status: oversize.status, envelope: referenceEnvelopeOf(oversize.json), body: redactForEvidence(oversize.json) },
+      declaredSizeMismatch: { status: mismatch.status, envelope: referenceEnvelopeOf(mismatch.json), body: redactForEvidence(mismatch.json) },
+      unknownFilePreview: { status: missingPreview.status, envelope: referenceEnvelopeOf(missingPreview.json), body: redactForEvidence(missingPreview.json) },
     };
     ctx.record("qa-07-failure.json", report);
-    assert(traversal.status !== 200 || (traversal.json && traversal.json.ok === false),
-      "a traversal-shaped name was staged");
-    assert(missingPreview.status === 404, "an unknown file id was not refused with 404");
+    assert(control.status === 200 && control.json && control.json.ok === true,
+      "the control stage was not accepted: " + describeResponse(control));
+    const controlData = assertScopeResult(control.json, controlRequestId, "QA-07 control stage");
+    const controlReceipt = assertFileReceipt(controlData, "QA-07 control stage");
+    // A name is a NAME: a separator is refused by validate_reference_file_name (files.rs) before any
+    // bytes are decoded. This route's staging refusals are the MACHINE envelope, never a ScopeResult.
+    assertTypedRefusal(traversal, {
+      label: "QA-07 traversal-shaped name",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
+    // Over ATTACHMENT_MAX_FILE_BYTES (10 MiB) the bounds check refuses before anything is staged.
+    assertTypedRefusal(oversize, {
+      label: "QA-07 oversized file",
+      status: "PAYLOAD_TOO_LARGE",
+      code: "PAYLOAD_TOO_LARGE",
+      envelope: "machine",
+    });
+    // A declared size that disagrees with the bytes carried is a malformed request, not a size refusal.
+    assertTypedRefusal(mismatch, {
+      label: "QA-07 declared-size mismatch",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
+    // A file id this target never staged resolves to nothing: the same NOT_FOUND the route answers
+    // when the staged file is gone.
+    assertTypedRefusal(missingPreview, {
+      label: "QA-07 unknown file preview",
+      status: "NOT_FOUND",
+      code: "NOT_FOUND",
+      envelope: "machine",
+    });
+    // Return the target's staged set to its prior state: the control is this branch's own artefact,
+    // and a staged file left behind would count against the per-turn file bound on a re-run.
+    const cleaned = await http.deleteFile(session, controlReceipt.attachmentId);
+    report.controlCleanup = { status: cleaned.status };
+    assert(cleaned.status === 204, "the control file was not deleted: " + describeResponse(cleaned));
+    ctx.record("qa-07-failure.json", report);
     return { status: "pass", observed: report };
   },
 });
@@ -419,28 +493,46 @@ scenario("QA-10", {
   },
   async failure(ctx) {
     const { host, session } = localContext(ctx);
-    // The unknown-session probe still names the REAL incarnation and owner, so the only thing
-    // wrong with it is the session id. That keeps the refusal attributable to the session
-    // rather than to an expired epoch or a missing owner.
+    // The control is a SCREEN read, not a history read: the screen route resolves no transcript, so
+    // a 404 there is unambiguously the live-session fence - whereas a history read 404s for a
+    // missing transcript too, with the SAME status and code, and the two cannot be told apart.
+    const control = await referenceRequest(host, {
+      method: "GET",
+      sessionId: session.backendSessionId,
+      suffix: "screen",
+      query: referenceReadQuery(session, {}, "screen"),
+    });
+    // The unknown-session probe still names the REAL incarnation and owner, so the only thing wrong
+    // with it is the session id. That keeps the refusal attributable to the session rather than to
+    // an expired epoch or a missing owner.
     const unknownSession = { ...session, backendSessionId: "no-such-session" };
     const unknown = await referenceRequest(host, {
       method: "GET",
       sessionId: "no-such-session",
-      suffix: "history",
-      query: referenceReadQuery(unknownSession, { limit: 10 }, "history"),
+      suffix: "screen",
+      query: referenceReadQuery(unknownSession, {}, "screen"),
     });
     const codexAlias = nativeKindOf("codex-cli");
     const gjcDetector = REFERENCE_REGISTRY_ROWS.find((row) => row.id === "gjc").detector;
     const report = {
-      unknownSession: { status: unknown.status, body: unknown.json },
+      control: { status: control.status, envelope: referenceEnvelopeOf(control.json) },
+      unknownSession: { status: unknown.status, envelope: referenceEnvelopeOf(unknown.json), body: redactForEvidence(unknown.json) },
       unknownSessionEpoch: unknownSession.epoch,
       unknownAliasNativeKind: codexAlias,
       gjcDetector,
       knownRows: REFERENCE_REGISTRY_ROWS.map((row) => row.id),
     };
     ctx.record("qa-10-failure.json", report);
-    assert(unknown.status === 404 || unknown.status === 400 || unknown.status === 422,
-      "an unknown session was not refused: " + unknown.status);
+    assertReadControl(control, "QA-10 live-session control");
+    // reference_chat_ensure_live: the id names no live session on this host.
+    assertTypedRefusal(unknown, {
+      label: "QA-10 unknown session",
+      status: "NOT_FOUND",
+      code: "NOT_FOUND",
+      envelope: "machine",
+    });
+    // Matrix checks, not route evidence: they exercise the fixture's own registry functions and
+    // pass regardless of what the gateway answered above.
     assert(codexAlias === "unavailable", "an unknown alias claimed a native reader");
     assert(gjcDetector === "none", "gjc was given a detector the reference does not have");
     return { status: "pass", observed: report };
@@ -1419,6 +1511,148 @@ function assertSameTarget(echoed, session, label) {
   assert(echoed.backendSessionId === session.backendSessionId, label + ": response backendSessionId differs");
 }
 
+/* ==========================================================================
+ * Typed refusals, controls, and evidence redaction
+ *
+ * The frozen mapping is `reference_chat_status` / `reference_chat_wire_code` in
+ * `src-tauri/src/remote/server.rs`. The wire strings are UPPERCASE; the Rust enum variants are
+ * CamelCase, and every check below quotes the WIRE form, never the variant name.
+ *
+ * Two envelopes answer on these routes, told apart by where `requestId` sits:
+ *   machine  { error: { code, message, retryable, requestId, details } }   (machine_error_with_details)
+ *   scope    { ok: false, error: { code, message, retryable, details }, requestId }  (reference_chat_result_failure)
+ * A mutation whose ENVELOPE the JSON extractor could not read answers the machine shape, because
+ * it never reached the route that builds a ScopeResult. A status alone is therefore not evidence:
+ * an unrelated earlier fence (a missing owner id, an unreadable envelope) answers 400/404 too.
+ * ========================================================================== */
+
+/** The HTTP status each frozen wire code maps to (server.rs `reference_chat_status`). */
+export const REFERENCE_WIRE_STATUS = Object.freeze({
+  INVALID_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  REQUEST_CONFLICT: 409,
+  CONTROL_CONFLICT: 409,
+  OPERATION_OUTCOME_UNKNOWN: 409,
+  TARGET_EXPIRED: 410,
+  PAYLOAD_TOO_LARGE: 413,
+  UNSUPPORTED: 422,
+  CAPTURE_UNSUPPORTED: 422,
+  INVENTORY_INCOMPLETE: 503,
+  TIMEOUT: 504,
+});
+
+/** Which envelope a parsed body is, or that it carries none at all. */
+export function referenceEnvelopeOf(body) {
+  if (body === null || body === undefined || typeof body !== "object") return "none";
+  if (typeof body.ok === "boolean") return "scope";
+  if (body.error && typeof body.error === "object" && typeof body.error.code === "string") return "machine";
+  return "other";
+}
+
+const EVIDENCE_REDACT_KEY = /token|secret|authorization|credential|password|base64|bearer/i;
+
+/**
+ * A bounded, secret-free copy of a body for evidence. Any key that names a credential, a token or
+ * an encoded payload is replaced wholesale; long strings are truncated.
+ */
+export function redactForEvidence(value, depth = 0) {
+  if (depth > 6) return "[depth-limit]";
+  if (typeof value === "string") {
+    return value.length > 200 ? value.slice(0, 200) + "…(" + value.length + " chars)" : value;
+  }
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => redactForEvidence(entry, depth + 1));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] = EVIDENCE_REDACT_KEY.test(key) ? "[redacted]" : redactForEvidence(entry, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** A short, redacted description of a response, for an assertion message. */
+export function describeResponse(result) {
+  if (!result || typeof result !== "object") return "(no response)";
+  if (result.json !== null && result.json !== undefined) return JSON.stringify(redactForEvidence(result.json));
+  const text = typeof result.text === "string" ? result.text.trim() : "";
+  if (text.length === 0) return "(empty body)";
+  return "(unparsed body) " + (text.length > 160 ? text.slice(0, 160) + "…" : text);
+}
+
+/**
+ * One refusal, fully attributed: the status, the envelope kind, and the frozen wire code.
+ *
+ * Every argument is required, so a caller cannot accidentally fall back to "some non-200".
+ * `status` may be the number or a wire code from REFERENCE_WIRE_STATUS.
+ */
+export function assertTypedRefusal(result, expectation) {
+  const label = expectation.label;
+  const expectedStatus = typeof expectation.status === "number"
+    ? expectation.status
+    : REFERENCE_WIRE_STATUS[expectation.status];
+  const code = expectation.code;
+  assert(typeof expectedStatus === "number", label + ": expectation names no known status for " + code);
+  assert(result && typeof result.status === "number", label + ": no response to judge");
+  assert(result.status === expectedStatus,
+    label + ": expected HTTP " + expectedStatus + " " + code + ", got " + result.status + " " + describeResponse(result));
+  const envelope = referenceEnvelopeOf(result.json);
+  assert(envelope === expectation.envelope,
+    label + ": expected the " + expectation.envelope + " envelope, got " + envelope + " " + describeResponse(result));
+  const error = result.json.error;
+  assert(error && typeof error.code === "string",
+    label + ": the refusal carries no error code " + describeResponse(result));
+  assert(error.code === code,
+    label + ": expected wire code " + code + ", got " + error.code + " " + describeResponse(result));
+  if (expectation.requestId !== undefined) {
+    // The caller's id must be the one the refusal is about. A scope refusal echoes it; the machine
+    // envelope mints its OWN request id (server.rs machine_error_with_details), so there only its
+    // presence is assertable - the caller's id never appears on that envelope.
+    const echoed = envelope === "scope" ? result.json.requestId : error.requestId;
+    assert(typeof echoed === "string" && echoed.length > 0,
+      label + ": the refusal carries no request id " + describeResponse(result));
+    if (envelope === "scope") {
+      assert(echoed === expectation.requestId,
+        label + ": the refusal is about request id " + echoed + ", not the caller's " + expectation.requestId);
+    }
+  }
+  return error;
+}
+
+/**
+ * Is this response exactly this typed refusal? The same rule as `assertTypedRefusal`, with the
+ * failure swallowed, for the one place a branch must CLASSIFY a refusal instead of requiring it: a
+ * baseline that refuses with the frozen NOT_FOUND because the fixture's pane resolves no native
+ * transcript is a missing prerequisite (BLOCKED), while any other refusal on that route is a
+ * protocol failure the branch must report as one. Implementing the predicate as the assertion means
+ * the two can never drift apart.
+ */
+export function isTypedRefusal(result, expectation) {
+  try {
+    assertTypedRefusal(result, { ...expectation, label: expectation.label || "typed refusal" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The control half of every negative branch: the SAME request shape against the real target must
+ * reach the layer under test. Without it, a refusal produced by an earlier fence satisfies the
+ * negative assertion and the branch passes while the guarded path was never reached.
+ */
+export function assertReadControl(result, label) {
+  assert(result && typeof result.status === "number", label + ": no control response");
+  assert(result.status === 200,
+    label + ": the control read did not answer 200 (got " + result.status + " " + describeResponse(result) + ")");
+  assert(result.json && typeof result.json === "object",
+    label + ": the control read carries no JSON body " + describeResponse(result));
+  return result.json;
+}
+
+
 /* ------------------------------------------------------------------ QA-01 */
 scenario("QA-01", {
   async happy(ctx) {
@@ -1626,7 +1860,6 @@ scenario("QA-03", {
     const { host, session } = localContext(ctx);
     const http = httpHelpers(ctx, host);
     const first = await http.read(session, "history", { limit: 20 }, "history");
-    const body = first.json;
     const foreign = await http.read(session, "history", {
       limit: 20,
       cursor: 0,
@@ -1634,19 +1867,89 @@ scenario("QA-03", {
     }, "history");
     const malformed = await http.read(session, "history", { limit: 20, cursor: "not-a-cursor" }, "history");
     const oversized = await http.read(session, "history", { limit: REFERENCE_HISTORY_MAX_LIMIT + 5000 }, "history");
+    // The control: a cursor guard can only be judged against a pane that CAN serve a page. When the
+    // baseline is not a page, every probe below is refused by that earlier fence and the branch would
+    // pass while no cursor was ever examined.
+    //
+    // Exactly ONE baseline outcome is a missing fixture prerequisite: the frozen NOT_FOUND refusal
+    // that says nothing identifies a store for this pane (history.rs
+    // resolve_reference_history_stream). An auth failure, an unreadable envelope or a 5xx here is a
+    // PROTOCOL failure and is asserted as one below - it is never laundered into a blocker.
+    const baselineMissingNativeTranscript = isTypedRefusal(first, {
+      status: "NOT_FOUND",
+      code: "NOT_FOUND",
+      envelope: "machine",
+    });
     const report = {
-      baseline: { status: first.status, generation: body && body.generation },
-      foreignCursor: { status: foreign.status, body: foreign.json },
-      malformedCursor: { status: malformed.status, body: malformed.json },
-      oversizedLimit: { status: oversized.status, turns: oversized.json && oversized.json.turns ? oversized.json.turns.length : null },
+      control: {
+        status: first.status,
+        envelope: referenceEnvelopeOf(first.json),
+        missingNativeTranscript: baselineMissingNativeTranscript,
+        body: redactForEvidence(first.json),
+      },
+      foreignCursor: { status: foreign.status, envelope: referenceEnvelopeOf(foreign.json), body: redactForEvidence(foreign.json) },
+      malformedCursor: { status: malformed.status, envelope: referenceEnvelopeOf(malformed.json), body: redactForEvidence(malformed.json) },
+      oversizedLimit: {
+        status: oversized.status,
+        envelope: referenceEnvelopeOf(oversized.json),
+        turns: oversized.json && Array.isArray(oversized.json.turns) ? oversized.json.turns.length : null,
+        body: redactForEvidence(oversized.json),
+      },
     };
     ctx.record("qa-03-failure.json", report);
-    assert(foreign.status !== 200 || (foreign.json && foreign.json.generation !== body.generation),
-      "a cursor minted against another stream was served as if it belonged to this one");
-    assert(malformed.status !== 200, "a malformed cursor was accepted");
+    if (baselineMissingNativeTranscript) {
+      throw blocked(
+        "baseline-missing",
+        "the fixture's pane resolves no native transcript (404 NOT_FOUND), so no cursor guard is " +
+          "reachable: " + describeResponse(first),
+      );
+    }
+    const baseline = assertReadControl(first, "QA-03 baseline");
+    assert(Array.isArray(baseline.turns),
+      "the baseline page carries no turns array, so this route is not serving pages: " + describeResponse(first));
+    // A cursor minted against another stream is refused when the page is cut: TARGET_EXPIRED (410).
+    assertTypedRefusal(foreign, {
+      label: "QA-03 foreign cursor",
+      status: "TARGET_EXPIRED",
+      code: "TARGET_EXPIRED",
+      envelope: "machine",
+    });
+    // A cursor that names no stream is refused before any store is touched: INVALID_REQUEST (400).
+    const cursorWithoutStream = await http.read(session, "history", { limit: 20, cursor: 0 }, "history");
+    report.cursorWithoutStream = {
+      status: cursorWithoutStream.status,
+      envelope: referenceEnvelopeOf(cursorWithoutStream.json),
+      body: redactForEvidence(cursorWithoutStream.json),
+    };
+    ctx.record("qa-03-failure.json", report);
+    assertTypedRefusal(cursorWithoutStream, {
+      label: "QA-03 cursor without a stream",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
+    // A non-numeric cursor never reaches the route: the query extractor refuses it. That refusal is
+    // still required to be a TYPED envelope - a bodyless 400 is not evidence of a guard.
+    assertTypedRefusal(malformed, {
+      label: "QA-03 non-numeric cursor",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
+    // An oversized limit is either clamped to the frozen maximum or refused. Both outcomes are
+    // asserted, so neither can silently skip the check.
     if (oversized.status === 200) {
-      assert(oversized.json.turns.length <= REFERENCE_HISTORY_MAX_LIMIT,
-        "an oversized limit returned more turns than the frozen maximum");
+      assert(
+        Array.isArray(oversized.json.turns) && oversized.json.turns.length <= REFERENCE_HISTORY_MAX_LIMIT,
+        "an oversized limit returned more turns than the frozen maximum: " + describeResponse(oversized),
+      );
+    } else {
+      assertTypedRefusal(oversized, {
+        label: "QA-03 oversized limit",
+        status: "INVALID_REQUEST",
+        code: "INVALID_REQUEST",
+        envelope: "machine",
+      });
     }
     return { status: "pass", observed: report };
   },
@@ -1663,40 +1966,60 @@ scenario("QA-04", {
       attachmentIds: [],
       origin: "chat",
     });
-    const data = assertScopeResult(submitted.json, requestId, "QA-04 submit");
     const duplicate = await http.mutate(session, "submit", requestId, {
       text: "HERDR_QA04_SINGLE",
       attachmentIds: [],
       origin: "chat",
     });
-    const duplicateData = assertScopeResult(duplicate.json, requestId, "QA-04 duplicate submit");
     const conflicting = await http.mutate(session, "submit", requestId, {
       text: "HERDR_QA04_DIFFERENT",
       attachmentIds: [],
       origin: "chat",
     });
+    // Recorded before any assertion: the two reuses of one request id are judged below, and a shape
+    // mismatch must be diagnosable from the receipt instead of only from an assertion message.
     const report = {
-      accepted: data,
-      duplicate: duplicateData,
-      conflicting: { status: conflicting.status, body: conflicting.json },
-      stage: data.receipt && data.receipt.stage,
+      accepted: { status: submitted.status, envelope: referenceEnvelopeOf(submitted.json), body: redactForEvidence(submitted.json) },
+      duplicate: { status: duplicate.status, envelope: referenceEnvelopeOf(duplicate.json), body: redactForEvidence(duplicate.json) },
+      conflicting: { status: conflicting.status, envelope: referenceEnvelopeOf(conflicting.json), body: redactForEvidence(conflicting.json) },
     };
     ctx.record("qa-04-happy.json", report);
+    // The control: a well-formed submit is ACCEPTED, so the two reuses below are judged against a
+    // route that demonstrably reaches its own request-id rule on this target.
+    assert(submitted.status === 200, "the control submit was not accepted: " + describeResponse(submitted));
+    const data = assertScopeResult(submitted.json, requestId, "QA-04 submit");
     assert(data.receipt && data.receipt.stage === "accepted", "submit did not reach the accepted stage");
     assert(data.receipt.requestId === requestId || data.receipt.requestId === undefined,
       "the receipt names a different request id");
-    if (duplicate.json && duplicate.json.ok === false) {
-      assert(false, "a duplicate request id with an identical payload was not served from its record");
-    }
-    assert(conflicting.status !== 200 || (conflicting.json && conflicting.json.ok === false),
-      "a conflicting payload for the same request id was accepted");
+    // An identical payload under the SAME request id is served from its record: the identical
+    // delivery receipt, not a second write (reference_chat/input.rs `Claim::Duplicate`).
+    const duplicateData = assertScopeResult(duplicate.json, requestId, "QA-04 duplicate submit");
+    assert.deepEqual(duplicateData.receipt, data.receipt,
+      "an identical duplicate was not answered from its own record");
+    // A DIFFERENT payload under the same id is the frozen typed conflict: 409 REQUEST_CONFLICT on the
+    // ScopeResult envelope, echoing the caller's request id (input.rs `Claim::Conflict`).
+    assertTypedRefusal(conflicting, {
+      label: "QA-04 conflicting payload",
+      status: "REQUEST_CONFLICT",
+      code: "REQUEST_CONFLICT",
+      envelope: "scope",
+      requestId,
+    });
+    report.stage = data.receipt.stage;
+    report.duplicateServedFromRecord = true;
+    ctx.record("qa-04-happy.json", report);
     return { status: "pass", observed: report };
   },
   async failure(ctx) {
     const { host, session } = localContext(ctx);
     const http = httpHelpers(ctx, host);
+    // The control: a well-formed submit under the budget must be ACCEPTED. Without it a refusal from
+    // an earlier fence (a missing owner id, an unreadable envelope) satisfies the probes below and
+    // the branch passes while neither guard was reached - which is exactly what run 2 did.
     const multiline = await http.mutate(session, "submit", randomUUID(), {
-      text: "line-one\r\nline-two\nline-three",
+      text: "line-one
+line-two
+line-three",
       attachmentIds: [],
       origin: "chat",
     });
@@ -1712,20 +2035,32 @@ scenario("QA-04", {
       body: { requestId: randomUUID() },
     });
     const report = {
-      multiline: { status: multiline.status, body: multiline.json },
-      oversizedComposer: { status: unknown.status, body: unknown.json },
-      malformedEnvelope: { status: malformed.status, body: malformed.json },
+      control: { status: multiline.status, envelope: referenceEnvelopeOf(multiline.json), body: redactForEvidence(multiline.json) },
+      oversizedComposer: { status: unknown.status, envelope: referenceEnvelopeOf(unknown.json), body: redactForEvidence(unknown.json) },
+      malformedEnvelope: { status: malformed.status, envelope: referenceEnvelopeOf(malformed.json), body: redactForEvidence(malformed.json) },
       providerReadClaimed: Boolean(
         multiline.json && multiline.json.data && multiline.json.data.receipt && multiline.json.data.receipt.stage === "providerRead"),
     };
     ctx.record("qa-04-failure.json", report);
+    assert(multiline.status === 200 && multiline.json && multiline.json.ok === true,
+      "QA-04 control: a well-formed submit under the budget was not accepted " + describeResponse(multiline));
     assert(!report.providerReadClaimed,
       "a generic source claimed providerRead, which requires a matching native observation");
-    assert(malformed.status === 400 || malformed.status === 422,
-      "a mutation envelope without a target was not refused: " + malformed.status);
-    if (unknown.json && unknown.json.ok === false) {
-      assert(typeof unknown.json.error.code === "string", "an oversized composer produced no typed error code");
-    }
+    // The submit byte budget, refused by the route itself: a ScopeResult, PAYLOAD_TOO_LARGE (413).
+    assertTypedRefusal(unknown, {
+      label: "QA-04 oversized composer",
+      status: "PAYLOAD_TOO_LARGE",
+      code: "PAYLOAD_TOO_LARGE",
+      envelope: "scope",
+    });
+    // An envelope with no params never reaches the route: the extractor refuses it, so the shape is
+    // the MACHINE envelope even though the route is a mutation.
+    assertTypedRefusal(malformed, {
+      label: "QA-04 malformed envelope",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "machine",
+    });
     return { status: "pass", observed: report };
   },
 });
@@ -1773,30 +2108,80 @@ scenario("QA-05", {
   async failure(ctx) {
     const { host, session } = localContext(ctx);
     const http = httpHelpers(ctx, host);
-    const stale = await http.mutate(session, "answer", randomUUID(), {
+    // Read-only control: the prompt read answers, and it tells us whether a card is on screen at
+    // all. The live card is NEVER answered here - a real answer types into the pane and moves the
+    // screen revision, which is the very baseline the stale guard is judged against.
+    const prompt = await http.read(session, "prompt", {}, "prompt");
+    const card = prompt.json && prompt.json.prompt ? prompt.json.prompt : null;
+    const revision = prompt.json && prompt.json.screenRevision;
+    const unknownCard = await http.mutate(session, "answer", randomUUID(), {
       promptId: "stale-prompt-not-on-screen",
       screenRevision: "stale-revision",
       answer: { optionIndex: 0 },
     });
+    const staleScreen = card
+      ? await http.mutate(session, "answer", randomUUID(), {
+          promptId: card.id,
+          screenRevision: "stale-revision",
+          answer: { optionIndex: 0 },
+        })
+      : null;
     const screenBefore = await http.read(session, "screen", {}, "screen");
     const screenAfter = await http.read(session, "screen", {}, "screen");
     const report = {
-      staleAnswer: { status: stale.status, body: stale.json },
+      control: { promptStatus: prompt.status, cardPresent: Boolean(card), screenRevision: revision },
+      unknownCardAnswer: { status: unknownCard.status, body: redactForEvidence(unknownCard.json) },
+      staleScreenAnswer: staleScreen
+        ? { status: staleScreen.status, body: redactForEvidence(staleScreen.json) }
+        : "no-card-on-screen",
       screenRevisionBefore: screenBefore.json && screenBefore.json.revision,
       screenRevisionAfter: screenAfter.json && screenAfter.json.revision,
     };
     ctx.record("qa-05-failure.json", report);
-    assert(stale.status !== 200 || (stale.json && stale.json.ok === false),
-      "an answer for a card that is not on the current screen was accepted");
+    assertReadControl(prompt, "QA-05 prompt control");
+    // An answer naming no card this pane's parser detected is the parser-origin fence:
+    // INVALID_REQUEST (400) as a ScopeResult (prompts.rs REFERENCE_PROMPT_UNKNOWN_CARD_MESSAGE).
+    assertTypedRefusal(unknownCard, {
+      label: "QA-05 unknown card",
+      status: "INVALID_REQUEST",
+      code: "INVALID_REQUEST",
+      envelope: "scope",
+    });
+    // Nothing was sent, so the screen must not have moved. This is the no-op half of the claim.
+    assert(report.screenRevisionBefore === report.screenRevisionAfter,
+      "a refused answer moved the screen revision: " + report.screenRevisionBefore + " -> " + report.screenRevisionAfter);
+    if (!card) {
+      throw blocked(
+        "no-prompt-card",
+        "the pane's screen shows no prompt card, so the stale-screen fence cannot be exercised",
+      );
+    }
+    // The stale-screen fence: the card's own id with a revision that is not the card's screen.
+    assertTypedRefusal(staleScreen, {
+      label: "QA-05 stale screen",
+      status: "REQUEST_CONFLICT",
+      code: "REQUEST_CONFLICT",
+      envelope: "scope",
+    });
     return { status: "pass", observed: report };
   },
 });
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error) => {
-    const code = error instanceof RunnerError ? error.code : EXIT.INTERACTION;
-    process.stderr.write((error.reason || "runner-failed") + ": " + (error.detail || error.message) + "\n");
-    process.exit(code);
-  });
+/* Run only when this file IS the program. The typed-refusal and control helpers above are
+   exported so the neighbouring regression suite can import them; importing must never start a
+   run. Invoked as a file (the PowerShell wrapper does exactly that), process.argv[1] is this
+   module and the runner behaves as before. */
+const invokedAsProgram =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedAsProgram) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      const code = error instanceof RunnerError ? error.code : EXIT.INTERACTION;
+      process.stderr.write((error.reason || "runner-failed") + ": " + (error.detail || error.message) + "\n");
+      process.exit(code);
+    });
+}
 
