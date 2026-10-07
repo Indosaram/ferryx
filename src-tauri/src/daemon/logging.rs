@@ -128,6 +128,39 @@ pub(crate) fn panic_record(location: &str, thread: &str, payload: &str) -> Strin
     )
 }
 
+/// Formats the termination-signal record written by [`next_shutdown_signal`].
+///
+/// Split out so the shape is testable without installing a process-wide handler.
+pub(crate) fn signal_record(signal: i32) -> String {
+    format!("daemon_signal signal={signal} action=shutdown\n")
+}
+
+/// Appends one durable record to the private daemon log.
+pub(crate) fn append_record(record: &str) {
+    if let Ok(mut file) = open_log() {
+        let _ = append_bounded(&mut file, record.as_bytes());
+    }
+}
+
+/// Resolves on the first `SIGTERM`, `SIGINT`, or `SIGHUP` this daemon receives.
+///
+/// The daemon had no signal handling at all, which is why the 2026-10-07 death produced no record:
+/// a plain `SIGTERM` terminates the process with the default disposition and no code of ours runs,
+/// so every PTY it owned vanished with nothing in `daemon.log` to say why. Owning the signal turns
+/// that silence into a timestamped line plus a flush of what outlives the process.
+#[cfg(unix)]
+pub(crate) async fn next_shutdown_signal() -> Option<i32> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate()).ok()?;
+    let mut interrupt = signal(SignalKind::interrupt()).ok()?;
+    let mut hangup = signal(SignalKind::hangup()).ok()?;
+    tokio::select! {
+        _ = terminate.recv() => Some(libc::SIGTERM),
+        _ = interrupt.recv() => Some(libc::SIGINT),
+        _ = hangup.recv() => Some(libc::SIGHUP),
+    }
+}
+
 /// Appends every panic to the persistent daemon log before chaining to the previous hook.
 ///
 /// A panic is the event that explains a daemon's death, and stderr is not durable here: the
@@ -162,9 +195,7 @@ pub(crate) fn install_panic_recorder() {
             .unwrap_or("unnamed")
             .to_string();
         let record = panic_record(&location, &thread, &payload);
-        if let Ok(mut file) = open_log() {
-            let _ = append_bounded(&mut file, record.as_bytes());
-        }
+        append_record(&record);
         previous(info);
     }));
 }
@@ -264,7 +295,7 @@ fn append_bounded(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::panic_record;
+    use super::{panic_record, signal_record};
 
     #[test]
     fn panic_record_carries_location_thread_and_payload() {
@@ -273,6 +304,11 @@ mod tests {
             record,
             "daemon_panic thread=tokio-runtime-worker at=src/daemon/server.rs:42:9 payload=boom\n"
         );
+    }
+
+    #[test]
+    fn signal_record_names_the_signal() {
+        assert_eq!(signal_record(15), "daemon_signal signal=15 action=shutdown\n");
     }
 
     #[test]

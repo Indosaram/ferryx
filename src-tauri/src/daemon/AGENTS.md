@@ -1,6 +1,6 @@
 # src-tauri/src/daemon
 
-<!-- Score: 12 | Domain: Background PTY daemon, UDS protocol v2, launchd service -->
+<!-- Score: 12 | Domain: Background PTY daemon, UDS protocol v5, launchd helper -->
 
 ## OVERVIEW
 Standalone background daemon managing persistent terminal PTY processes, session metadata, and Unix domain socket IPC.
@@ -10,13 +10,16 @@ Standalone background daemon managing persistent terminal PTY processes, session
 |---|---|---|
 | UDS client & reconnect logic | `client.rs` | Connection retry classification, streaming channels, request proxy |
 | UDS server & concurrency | `server.rs` | Socket listener, `flock` lockfile, UID validation, session registry |
-| Wire protocol serialization | `protocol.rs` | Wire schemas v2 (`DaemonRequest`/`Response`), Base64 stream encoding |
-| macOS launchd integration | `launchd.rs` | `com.rorca.daemon` plist generation, install, uninstall |
+| Wire protocol serialization | `protocol.rs` | Wire schemas v5 (`DaemonRequest`/`Response`), Base64 stream encoding |
+| macOS launchd ownership | `launchd.rs` | `com.ferryx.daemon` agent: `RunAtLoad` + conditional `KeepAlive`; the daemon outlives the GUI |
 | Module entry & exports | `mod.rs` | Public re-exports of client, server, protocol, and launchd |
 
 ## CONVENTIONS
+- **Daemon Lifetime**: The daemon owns every PTY, so it must outlive the GUI. On macOS a launchd
+  agent (`launchd.rs`) owns it and restarts abnormal deaths; everywhere else the daemon is spawned
+  detached (`util::detach_launched_child`). Never re-parent it back under the GUI process group.
 - **Socket Security & Isolation**: Sockets reside in `/tmp/rorca-{uid}/daemon.sock` (mode 0700); verifies UID ownership, strictly forbids symlinks, and locks `daemon.lock` via `flock`.
-- **Protocol Versioning**: Current protocol is `DAEMON_PROTOCOL_VERSION = 2`. Raw byte payloads are Base64 framed.
+- **Protocol Versioning**: Current protocol is `DAEMON_PROTOCOL_VERSION = 5`. Raw byte payloads are Base64 framed.
 - **Retry-Safety Classification**: Idempotent reads/spawns/handshakes are retry-safe; mutating commands (`write`, `resize`, `signal`, `close`, `saveSession`) are NEVER retried if the connection drops post-send.
 
 ## ANTI-PATTERNS
