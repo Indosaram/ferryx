@@ -897,6 +897,23 @@ export function sshProjectsStorePath(hostStorePath) {
   return join(dirname(hostStorePath), SSH_PROJECTS_STORE_FILENAME);
 }
 
+/**
+ * The owner a target must carry, read from the record the launcher actually wrote.
+ *
+ * The contract is NESTED: `record.gateway.referenceOwnerId`, written by the isolated gateway's own
+ * launch beside `gateway.referenceHostId` because one incarnation published both. A host record has
+ * NO top-level `referenceOwnerId` - reading one there always yields null, which the fail-closed check
+ * below then reports as an unavailable owner for a gateway that published one. That mismatch failed
+ * every owner-bearing branch of the executed Linux QA while the run's own fixtures.json carried the
+ * value. This reads the canonical location and nothing else: a configured ownerId is an INPUT, never
+ * an authority, and no top-level look-alike is accepted.
+ */
+export function publishedReferenceOwnerId(hostRecord) {
+  const gateway = hostRecord && hostRecord.gateway;
+  const ownerId = gateway ? gateway.referenceOwnerId : null;
+  return isNonEmptyText(ownerId) ? ownerId : null;
+}
+
 function isNonEmptyText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -1489,12 +1506,9 @@ async function main() {
     // whose gateway published no owner cannot produce a usable target, so that is recorded as a
     // BLOCKER here - never as a row with no owner, which would read as a pass with nothing bound.
     const localHostRecord = hosts.find((entry) => entry.transport === "local") || null;
-    const publishedOwnerId =
-      localHostRecord &&
-      typeof localHostRecord.referenceOwnerId === "string" &&
-      localHostRecord.referenceOwnerId.trim().length > 0
-        ? localHostRecord.referenceOwnerId
-        : null;
+    // From the gateway record, which is where the launcher writes it beside the reference host id;
+    // there is no top-level referenceOwnerId to read.
+    const publishedOwnerId = publishedReferenceOwnerId(localHostRecord);
     if (publishedOwnerId === null) {
       blockers.push({
         kind: "reference-owner-unavailable",

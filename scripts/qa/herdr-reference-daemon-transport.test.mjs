@@ -66,6 +66,7 @@ import {
   SSH_RECEIPT_PROBE_PLATFORM,
   SSH_HOST_STORE_FILENAME,
   SSH_PROJECTS_STORE_FILENAME,
+  publishedReferenceOwnerId,
   remoteSpawnRequest,
   remoteExecutableProbeCommand,
   remoteOwnerHostReceipt,
@@ -870,6 +871,77 @@ test('a provider is required and is never defaulted by the validator', () => {
   const ok = validateFixtureManifest(manifestFor(LOCAL_HOST, { provider: 'codex' }));
   assert.equal(ok.ok, true, JSON.stringify(ok.errors));
   assert.equal(ok.sessions[0].provider, 'codex');
+});
+
+// ---- the published owner is read from the gateway record ---------------------
+// The producer writes `record.gateway = { referenceHostId, referenceOwnerId }` and reads the owner
+// back from that SAME nested location. Reading it at host-record top level - where no such field
+// exists - yielded null for a gateway that had published one, and the fail-closed check turned that
+// into a `reference-owner-unavailable` blocker for every owner-bearing branch of the executed Linux
+// QA even though the run's own fixtures.json carried the value. These pin the location and the
+// authority rule: the value comes from the gateway record, and nothing is substituted for it.
+
+// The exact shape the launcher writes for a local host. The top-level keys are the ones the
+// executed run's fixtures.json actually contained; `referenceOwnerId` is deliberately absent from
+// them, because a top-level read is what the defect was.
+const REAL_PUBLISHED_OWNER_ID = 'fa682dc3-e4f0-40ad-9103-f2e89cfe54bf';
+const LOCAL_HOST_RECORD = {
+  id: 'local-linux',
+  transport: 'local',
+  url: 'http://127.0.0.1:43821',
+  urlRedacted: 'http://127.0.0.1:43821/',
+  credentialFile: '/tmp/ferryx-herdr-ref-local-linux-j6k1dV/data/reference-chat-token',
+  daemonEpoch: '1791339805058',
+  daemonPid: 3576617,
+  started: true,
+  access: { hostId: 'local-linux', transport: 'local', kind: 'local-daemon', providedBy: 'isolated-launch' },
+  daemonTransport: { kind: 'unix-socket', platform: 'linux', endpoint: '/tmp/runtime/daemon.sock' },
+  gateway: {
+    contract: 'ferryx-herdr-reference.isolated-gateway/1',
+    boundAddress: '127.0.0.1:43821',
+    pinnedPort: 43821,
+    referenceHostId: 'local',
+    // Written by the launcher beside the host id, by the same incarnation that published it.
+    referenceOwnerId: REAL_PUBLISHED_OWNER_ID,
+  },
+  ownedGateway: { contract: 'ferryx-herdr-reference.isolated-gateway-ownership/1' },
+};
+
+test('the published owner is the gateway record value, not a top-level field', () => {
+  assert.equal(
+    publishedReferenceOwnerId(LOCAL_HOST_RECORD),
+    REAL_PUBLISHED_OWNER_ID,
+    'the owner the gateway published must be read from the record the launcher wrote',
+  );
+  // The top level really has no such field, so the old read could only ever produce null - this is
+  // the assertion that fails if someone reintroduces the top-level lookup.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(LOCAL_HOST_RECORD, 'referenceOwnerId'),
+    false,
+    'a host record has no top-level referenceOwnerId; reading one there is the defect',
+  );
+  assert.equal(LOCAL_HOST_RECORD.referenceOwnerId, undefined);
+  // ...and the nested one is what carries it, beside the host id the same incarnation published.
+  assert.equal(LOCAL_HOST_RECORD.gateway.referenceOwnerId, REAL_PUBLISHED_OWNER_ID);
+  assert.equal(LOCAL_HOST_RECORD.gateway.referenceHostId, 'local');
+});
+
+test('a configured owner is never an authority, and an absent one is never defaulted', () => {
+  // A session's configured ownerId sits elsewhere in the config and must never be substituted: the
+  // helper only ever sees the host record, so a configured value cannot reach it.
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, ownerId: 'configured-not-authority' }), REAL_PUBLISHED_OWNER_ID);
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, referenceOwnerId: 'top-level-lookalike' }), REAL_PUBLISHED_OWNER_ID);
+
+  // Absent, blank, or a non-string means "not published" - null, so the caller's fail-closed check
+  // raises its typed blocker rather than passing a row with no owner.
+  const withoutGateway = { ...LOCAL_HOST_RECORD, gateway: undefined };
+  assert.equal(publishedReferenceOwnerId(withoutGateway), null);
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, gateway: {} }), null);
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, gateway: { referenceOwnerId: '' } }), null);
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, gateway: { referenceOwnerId: '   ' } }), null);
+  assert.equal(publishedReferenceOwnerId({ ...LOCAL_HOST_RECORD, gateway: { referenceOwnerId: 42 } }), null);
+  assert.equal(publishedReferenceOwnerId(null), null);
+  assert.equal(publishedReferenceOwnerId(undefined), null);
 });
 
 // ---- diagnostic capture -----------------------------------------------------
