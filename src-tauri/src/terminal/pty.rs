@@ -1106,13 +1106,23 @@ mod tests {
         if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
             return false;
         }
-        let state = std::process::Command::new("/bin/ps")
+        let state = match std::process::Command::new("/bin/ps")
             .args(["-p", &pid.to_string(), "-o", "state="])
             .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-            .unwrap_or_default();
-        // `Z` is a zombie and `E` is a process trying to exit; neither is running. An empty answer
-        // means `ps` no longer sees the pid at all.
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            // The probe itself FAILED - `ps` is missing, not executable, or refused to run. That is
+            // "cannot tell", and it must NOT be folded into the empty answer below: answering "not
+            // running" for a host that cannot answer at all lets every wait built on this helper
+            // report a stop it never observed, and the close tests pass with no evidence. Reporting
+            // the child as still running sends that wait to its deadline instead, where the test
+            // fails and says so.
+            Err(_) => return true,
+        };
+        // A probe that RAN and printed nothing is a different answer from a probe that failed:
+        // `ps -p <pid> -o state=` prints nothing when the pid does not exist, so an empty answer from
+        // a successful probe means `ps` no longer sees the pid at all. `Z` is a zombie and `E` is a
+        // process trying to exit; neither is running.
         !(state.is_empty() || state.starts_with('Z') || state.starts_with('E'))
     }
 
@@ -1505,7 +1515,21 @@ mod tests {
         // close's return: the KILL reap runs on a 1 s production budget a loaded host can miss, and
         // the close reports that deadline rather than `Ok` when it does. The enclosing bound is what
         // keeps the close from hanging, so its duration is not measured again here.
-        assert_close_completed(close_result, "TERM-resistant close should escalate and succeed");
+        //
+        // Reaping is asserted HERE, on the close's own success and before anything below polls the
+        // child: `wait_until_session_ended` reads the child through `is_alive`, which reaps an exited
+        // child as a side effect, so an assertion taken after that wait cannot tell a child this
+        // close reaped from one nobody did.
+        match close_result {
+            Ok(()) => assert!(
+                stubborn_session.is_reaped(),
+                "a close that reports success must have reaped its child"
+            ),
+            Err(error) => assert_close_completed(
+                Err(error),
+                "TERM-resistant close should escalate and succeed",
+            ),
+        }
         assert!(
             wait_until_session_ended(&stubborn_session),
             "closed child must be reaped"
@@ -1536,7 +1560,18 @@ mod tests {
         let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
             .await
             .expect("close after interrupt must be bounded");
-        assert_close_completed(close, "close after interrupt must succeed after escalation");
+        // As in the TERM-resistant close above: the reap is asserted on the close's own success,
+        // before the wait below polls - and therefore reaps - the child itself.
+        match close {
+            Ok(()) => assert!(
+                session.is_reaped(),
+                "a close that reports success must have reaped its child"
+            ),
+            Err(error) => assert_close_completed(
+                Err(error),
+                "close after interrupt must succeed after escalation",
+            ),
+        }
 
         assert!(
             wait_until_session_ended(&session),

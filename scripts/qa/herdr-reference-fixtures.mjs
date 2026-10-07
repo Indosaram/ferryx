@@ -249,47 +249,33 @@ export const REFERENCE_ROUTES = [
  * validate_http_query. A runner that sends a field outside this table is refused 400 by the
  * relay before the machine sees it, so the harness builds queries from here.
  *
+ * All four reference-chat read routes — `history`, `screen`, `prompt` and the staged-file
+ * `files/{fileId}` route — deserialize the host's own `ReferenceChatReadQuery`, so each of
+ * them admits exactly that struct's fields and the same nine apply to all four. The list is
+ * written once below and backs all four entries, so the mirror cannot drift again.
+ *
  * CORRECTED IDENTITY CONTRACT (task 12 handoff): a READ OMITS hostId and the gateway resolves
  * its own reference-chat host id. ownerId, epoch and backendSessionId stay required; epoch
  * must equal the gateway's own daemon epoch or the read is refused TARGET_EXPIRED. A MUTATION
  * carries the gateway's own referenceHostId from /api/v1/capabilities — never machineId.
  */
+const REFERENCE_CHAT_READ_FIELDS = [
+  "hostId",
+  "ownerId",
+  "epoch",
+  "backendSessionId",
+  "providerSessionId",
+  "registryId",
+  "limit",
+  "cursor",
+  "cursorStream",
+];
+
 export const REFERENCE_READ_QUERY_FIELDS = {
-  history: [
-    "hostId",
-    "ownerId",
-    "epoch",
-    "backendSessionId",
-    "providerSessionId",
-    "registryId",
-    "limit",
-    "cursor",
-    "cursorStream",
-  ],
-  screen: [
-    "hostId",
-    "ownerId",
-    "epoch",
-    "backendSessionId",
-    "providerSessionId",
-    "registryId",
-  ],
-  prompt: [
-    "hostId",
-    "ownerId",
-    "epoch",
-    "backendSessionId",
-    "providerSessionId",
-    "registryId",
-  ],
-  file: [
-    "hostId",
-    "ownerId",
-    "epoch",
-    "backendSessionId",
-    "providerSessionId",
-    "registryId",
-  ],
+  history: REFERENCE_CHAT_READ_FIELDS,
+  screen: REFERENCE_CHAT_READ_FIELDS,
+  prompt: REFERENCE_CHAT_READ_FIELDS,
+  file: REFERENCE_CHAT_READ_FIELDS,
 };
 
 /** The history paging bounds, from src-tauri/src/remote/reference_chat/history.rs. */

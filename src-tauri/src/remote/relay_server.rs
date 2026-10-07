@@ -1728,14 +1728,19 @@ async fn host_http_handler(
     }
     // A refused query answers with the frozen machine envelope every other refusal on this
     // surface uses, so the caller sees a typed INVALID_REQUEST instead of the bodyless 400 a
-    // bare `StatusCode` becomes.
+    // bare `StatusCode` becomes. Only the reference-chat routes took that shape in this batch;
+    // every other route keeps the parent's bodyless 400, which is the shape the machine's own
+    // handlers still answer on those paths.
     if let Err(status) = validate_http_query(&path, request.uri().query()) {
-        return Ok(crate::remote::server::machine_error_with_details(
-            status,
-            "INVALID_REQUEST",
-            "the forwarded query is not admissible on this route",
-            serde_json::Map::new(),
-        ));
+        if reference_chat_http_path(&path) {
+            return Ok(crate::remote::server::machine_error_with_details(
+                status,
+                "INVALID_REQUEST",
+                "the forwarded query is not admissible on this route",
+                serde_json::Map::new(),
+            ));
+        }
+        return Err(status);
     }
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
@@ -5401,6 +5406,30 @@ mod tests {
         assert_eq!(parsed["error"]["code"].as_str(), Some("INVALID_REQUEST"));
         assert_eq!(parsed["error"]["retryable"].as_bool(), Some(false));
         assert!(parsed["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    /// F-5: the machine envelope is the reference-chat batch's contract only. Every other
+    /// route keeps the parent's bodyless 400, which is the shape the machine's own handlers
+    /// still answer for the same malformed query.
+    #[tokio::test]
+    async fn a_refused_query_outside_reference_chat_stays_a_bodyless_400() {
+        let state = test_state(vec![]);
+        let path = "fs/directories";
+        let request = Request::builder()
+            .uri(format!("/host/machine/api/v1/{path}?repoPath=/etc/passwd"))
+            .body(Body::empty())
+            .unwrap();
+        let result = host_http_handler(
+            State(state),
+            AxumPath(("machine".into(), path.into())),
+            None,
+            request,
+        )
+        .await;
+        let Err(status) = result else {
+            panic!("a non-reference-chat refusal must not carry the machine envelope");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
