@@ -5,17 +5,21 @@
  *
  * Mostly static and pure assertions. A handful drive the REAL client against a loopback listener
  * this file owns, because the behaviour they cover is a stream event: a missing handler does not
- * fail an assertion, it kills the process. Every listener and client a test starts is closed by
+ * fail an assertion, it kills the process. ONE test runs the producer end to end in a child
+ * process, because the behaviour it covers is a whole run that must finish and write its manifests
+ * instead of dying mid-way. Every listener and client a test starts is closed by
  * that test or by the hook below, so the suite can exit on its own. The platform is injected, so
  * the Windows branch is exercised on every host rather than only where the defect was found.
  */
 
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DAEMON_CONTROL_PROTOCOL_VERSION,
   DAEMON_LOOPBACK_HOST,
@@ -1507,6 +1511,156 @@ test('the ssh inventory path is a FILE, and the project store is its sibling', (
       (error) => error instanceof ProvisionError && error.reason === 'ssh-host-store-not-inventory-file',
       String(wrong) + ' must be refused as a directory rather than an inventory file',
     );
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * A refused gateway launch is REPORTED, never masked
+ *
+ * Defect H-1 (measured by the task-2 diagnostic, `.omo/recovery/diagnostic-003-6ad/`): when a
+ * host's gateway launch was refused, `hostTransports` held no transport for that host and the PTY
+ * stage threw `daemon-runtime-undeclared` OUT of the producer's `main()`. The process died before
+ * `fixtures.json`/`blockers.json` were written, so the launcher's own recorded reason
+ * (`isolated-gateway-lan-exposure`) and every other host's and blocker's evidence were destroyed,
+ * and the operator read an unrelated daemon-runtime failure instead.
+ *
+ * This test drives the producer's own per-host path in a CHILD PROCESS, with a real config whose
+ * single local host sets the LAN-exposure env the launcher refuses. It asserts the observable
+ * outcome rather than the mechanism: the run completes, its manifests are written, the recorded
+ * launch reason is what the operator reads, and the session is reported against that same reason
+ * instead of an uncaught throw. The launcher refuses that env BEFORE it probes the fixed gateway
+ * port, so this test needs no free port and starts no daemon.
+ * ------------------------------------------------------------------------ */
+
+const provisionScript = fileURLToPath(new URL('./herdr-reference-provision.mjs', import.meta.url));
+
+/**
+ * Run one child to completion, or fail if it does not settle inside `timeoutMs`.
+ *
+ * Event-driven and bounded: it waits on the child's own `close`, never on a sleep or a poll. The
+ * deadline is the only thing that signals the child, and the caller keeps the handle so its own
+ * teardown can too.
+ */
+const runToCompletion = (child, timeoutMs) =>
+  new Promise((resolveRun, rejectRun) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      rejectRun(new Error('the producer did not settle within ' + timeoutMs + 'ms: ' + stdout + stderr));
+    }, timeoutMs);
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      rejectRun(error);
+    });
+    child.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolveRun({ code, signal, stdout, stderr });
+    });
+  });
+
+test('a refused gateway launch is reported as its host blocker, and the run still writes its manifests', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-refused-launch-'));
+  const binary = join(dir, 'candidate-gateway');
+  const source = join(dir, 'source');
+  const out = join(dir, 'out');
+  mkdirSync(source, { recursive: true });
+  // The launcher checks only that the binary EXISTS before it reads the env, and it reads the env
+  // before it spawns anything - so this file is enough to reach the refusal without a process.
+  writeFileSync(binary, 'not-a-real-gateway\n');
+  const configPath = join(dir, 'hosts.json');
+  writeFileSync(configPath, JSON.stringify({
+    $note: 'One local host whose launch the LAN-exposure env refuses, and one session that asks for a PTY.',
+    source: { root: source, paths: [] },
+    candidate: { binary },
+    providers: [],
+    devices: [],
+    hosts: [{
+      id: 'local-refused-launch',
+      transport: 'local',
+      platform: 'unix',
+      startLocal: true,
+      realShell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash',
+      spawnSessions: true,
+      env: { FERRYX_ALLOW_INSECURE_DIRECT: '1' },
+      sessions: [{
+        registryId: 'omo',
+        provider: 'omo',
+        providerCommand: 'omo',
+        ownerId: 'owner-refused-launch',
+        cols: 80,
+        rows: 24,
+        clientRequestId: 'herdr-ref-refused-1',
+        workspaceId: 'refused-launch',
+      }],
+    }],
+  }, null, 2));
+  // The launcher creates its throwaway profile with mkdtempSync BEFORE it validates the env, so
+  // this test is what removes that profile: pointing the child's temp directory at this test's own
+  // directory keeps it inside the tree the finally below deletes. Nothing is matched by name and
+  // nothing outside this directory is touched.
+  const child = spawn(
+    process.execPath,
+    [provisionScript, '--config', configPath, '--out', out, '--allow-host', 'true', '--timeout-ms', '5000'],
+    {
+      cwd: dir,
+      env: { ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const result = await runToCompletion(child, 60_000);
+    // 1. The run COMPLETES on its own, on the producer's own BLOCKED path.
+    assert.equal(result.signal, null, 'the producer must exit on its own; stderr=' + result.stderr);
+    assert.equal(result.code, 2, 'EXIT.BLOCKED(2) is the honest outcome; stderr=' + result.stderr);
+    // 2. The manifests exist. This is exactly what the uncaught throw destroyed.
+    const fixturesPath = join(out, 'fixtures.json');
+    const blockersPath = join(out, 'blockers.json');
+    assert.ok(existsSync(fixturesPath), 'the run must still write fixtures.json; stderr=' + result.stderr);
+    assert.ok(existsSync(blockersPath), 'the run must still write blockers.json; stderr=' + result.stderr);
+    const fixture = JSON.parse(readFileSync(fixturesPath, 'utf8'));
+    const recorded = fixture.blockers.map((entry) => entry.kind + ':' + entry.reason);
+    // 3. The launcher's OWN recorded reason is what reaches the operator...
+    assert.ok(
+      recorded.includes('gateway-launch:isolated-gateway-lan-exposure'),
+      'the refused launch must be recorded with its own reason: ' + JSON.stringify(recorded),
+    );
+    // 4. ...and the session is reported against that same reason, not as a daemon-runtime failure.
+    assert.ok(
+      recorded.includes('session-spawn:isolated-gateway-lan-exposure'),
+      'the unspawnable session must name the recorded launch reason: ' + JSON.stringify(recorded),
+    );
+    // 5. No receipt requirement is fabricated for a host that never had one: a local host's identity
+    //    comes from this run's own spawn, so a SKIPPED spawn is not a missing owner-host receipt.
+    assert.ok(
+      !fixture.blockers.some((entry) => entry.kind === 'owner-host-spawn-receipt'),
+      'a skipped local spawn is not a missing owner-host receipt: ' + JSON.stringify(recorded),
+    );
+    // 6. The old failure mode is absent: the refusal is never re-reported as an unrelated
+    //    daemon-runtime failure.
+    assert.ok(
+      !result.stderr.includes('daemon-runtime-undeclared'),
+      'the refusal must not be masked as a daemon-runtime failure; stderr=' + result.stderr,
+    );
+    // 7. The PTY stage was SKIPPED, not faked: the session is still recorded and claims no spawn.
+    assert.equal(fixture.sessions.length, 1, 'the configured session is still recorded');
+    assert.equal(fixture.sessions[0].pid, null, 'no pid is invented for a session that was never spawned');
+    assert.ok(
+      !('spawnedByThisRun' in fixture.sessions[0]),
+      'a session whose PTY stage was skipped is not marked as spawned by this run',
+    );
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

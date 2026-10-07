@@ -159,6 +159,14 @@ async function mount(fetch: ReturnType<typeof fetcher>) {
 }
 
 beforeEach(() => {
+  // This file owns its inventory before it reads it. `remoteHostStore` is a module singleton
+  // whose `hosts` map hydrates from the persisted inventory at module load, and that inventory is
+  // shared with every other file in the run: `Sidebar.remote.test.tsx` writes its own `host-alpha`
+  // record through `setState` (which persists), and this file's first test then hydrates it. An
+  // exact host count is only meaningful against a store this file seeded, so start from the same
+  // empty state the teardown below already enforces after every test.
+  remoteHostStore.reset();
+  localStorage.clear();
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const cell = this.hasAttribute("data-terminal-cell-measure");
     return { x: 0, y: 0, top: 0, left: 0, right: cell ? 10 : 800, bottom: cell ? 20 : 400,

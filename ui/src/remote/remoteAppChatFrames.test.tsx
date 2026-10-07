@@ -1,7 +1,12 @@
 /**
  * Reference-chat frame regressions (plan task 12).
  *
- * AUTHORED, NOT EXECUTED: every run is deferred to the post-merge gate.
+ * Every route this lane reads is answered explicitly below, including `/api/v1/capabilities` -
+ * the one answer that carries the published owner authority the reference-chat target is built
+ * from. A route left to the catch-all leaves the lane with no target, and a scenario that then
+ * fails describes this fixture rather than the product. This repair lane authored the fixture
+ * without executing it: the file's first run is the post-merge batch gate, so nothing here is a
+ * test receipt.
  *
  * This suite used to drive the legacy `/api/v1/agent-history` poll and the chat's own raw
  * terminal socket. Both are gone: the chat reads the frozen reference-chat history route and
@@ -56,6 +61,12 @@ class StubWebSocket {
 
 const DAEMON_EPOCH = "18446744073709551615";
 
+// The owner authority the gateway publishes beside the epoch, on the same incarnation lifetime.
+// Deliberately not the workspace id the state below carries ("ferryx"): the reference-chat target
+// is built from the PUBLISHED owner, so a fixture that omits it leaves the lane with no target at
+// all - which is how this suite failed before the answer in `installFetch` existed.
+const REFERENCE_OWNER_ID = "owner-pub-1";
+
 function sessionState(sessionId: string, extraTabs: { id: string; sessionId: string; label: string }[] = []) {
   return {
     activeContext: {
@@ -100,6 +111,19 @@ function installFetch(handler: (url: string, init?: RequestInit) => Response | u
     calls.push(url);
     if (url.includes("/api/v1/socket-ticket")) {
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
+    }
+    if (url.includes("/api/v1/capabilities")) {
+      // The lane builds its target from this answer: the epoch the route compares a target
+      // against, and the owner authority published on the same incarnation. A gateway that omits
+      // either leaves the lane with no target, so it is answered here rather than by the
+      // catch-all below.
+      return jsonResponse({
+        apiVersion: 1,
+        machineId: "mach-1",
+        daemonEpoch: DAEMON_EPOCH,
+        referenceOwnerId: REFERENCE_OWNER_ID,
+        platform: "linux",
+      });
     }
     if (url.includes("/api/v1/sessions")) {
       // The host's inventory names every pane it serves, with the incarnation that serves it:

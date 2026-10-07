@@ -268,6 +268,14 @@ struct OverlappedOutputReader {
     overlapped: Box<OVERLAPPED>,
     /// True while the kernel still owns the buffer and OVERLAPPED of an issued operation.
     pending: bool,
+    /// True while THIS operation has been counted on the shared gauge.
+    ///
+    /// `pending` is set at every issuance, but the gauge is raised only when the kernel really takes
+    /// the operation, so the two are not the same thing: a read the kernel completes inline is pending
+    /// for an instant and is never counted. Only a counted operation may decrement, or an inline
+    /// completion on one reader would reap a genuinely outstanding read on another reader cloned from
+    /// the same master - the gauge is shared by all of them, `pending` is not.
+    counted: bool,
 }
 
 // SAFETY: the kernel only touches `overlapped` and the caller's buffer while an operation is
@@ -289,6 +297,7 @@ impl OverlappedOutputReader {
             cancel,
             overlapped: Box::new(unsafe { std::mem::zeroed() }),
             pending: false,
+            counted: false,
         })
     }
 
@@ -299,18 +308,27 @@ impl OverlappedOutputReader {
         self.pending = true;
     }
 
-    /// Record that the kernel owns the operation (it reported the read pending) or has completed it
-    /// inline: only then is a read outstanding, and only then is the gauge raised.
-    fn mark_kernel_owns_operation(&self) {
+    /// Record that the kernel owns the operation: it reported the read pending, so the read is
+    /// outstanding and the shared gauge is raised. This is the only place the gauge rises, and the
+    /// matching decrement is owed only by the operation that counted itself here - `counted` is what
+    /// remembers that, because `pending` alone is set on every issuance, including the ones the kernel
+    /// completes inline.
+    fn mark_kernel_owns_operation(&mut self) {
+        self.counted = true;
         self.cancel.note_outstanding_read();
     }
 
     /// Record that the outstanding operation has been reaped, which is the only point at which the
-    /// OVERLAPPED and the caller's buffer become ours again.
+    /// OVERLAPPED and the caller's buffer become ours again. Only a counted operation lowers the
+    /// gauge: an inline completion never raised it, so lowering it here would reap another reader's
+    /// read through the shared gauge.
     fn finish_pending(&mut self) {
         if self.pending {
             self.pending = false;
-            self.cancel.note_read_reaped();
+            if self.counted {
+                self.counted = false;
+                self.cancel.note_read_reaped();
+            }
         }
     }
 
@@ -673,6 +691,88 @@ mod tests {
             cancel.outstanding_read_count(),
             0,
             "a reaped read must leave the outstanding count"
+        );
+    }
+
+    /// The gauge is SHARED by every reader cloned from one master, while `pending` is per-reader. An
+    /// inline completion on one reader must therefore not reap a read another reader has genuinely
+    /// outstanding: only the operation that raised the gauge may lower it.
+    ///
+    /// This is the assertion the inline test below cannot make. That test asserts 0, which passes both
+    /// because nothing incremented and because the decrement saturates, so it cannot see a decrement
+    /// that should never have happened.
+    #[test]
+    fn an_inline_completion_on_one_reader_does_not_reap_another_readers_read() {
+        let mut first_pipe = overlapped_output_pipe().expect("a first pipe");
+        let second_pipe = overlapped_output_pipe().expect("a second pipe");
+        // ONE cancellation event for both readers: this is what one master hands to every reader
+        // cloned from it, and it is why the gauge is shared while `pending` is not.
+        let cancel = ReaderCancel::new().expect("a shared cancellation event");
+        let mut first = OverlappedOutputReader::new(
+            first_pipe.read.try_clone().expect("a duplicate read end"),
+            Arc::clone(&cancel),
+        )
+        .expect("a first reader");
+        let mut second = OverlappedOutputReader::new(
+            second_pipe.read.try_clone().expect("a duplicate read end"),
+            Arc::clone(&cancel),
+        )
+        .expect("a second reader");
+
+        // ARMED BEFORE THE READ IS ISSUED, exactly as the session arms it: the subscription waits on
+        // the state itself, so the second reader's read is observed the moment the kernel takes it.
+        let waiter_cancel = Arc::clone(&cancel);
+        let waiter = std::thread::spawn(move || {
+            waiter_cancel.await_outstanding_read(std::time::Duration::from_secs(10))
+        });
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut buf = [0u8; 16];
+            go_rx.recv().expect("the go signal");
+            let _ = done_tx.send(second.read(&mut buf));
+        });
+        go_tx.send(()).expect("release the second reader");
+        assert!(
+            waiter.join().expect("the waiter thread ends"),
+            "the armed subscription must observe the read the kernel owns"
+        );
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            1,
+            "the second reader's read must be counted exactly once"
+        );
+
+        // The FIRST reader completes an inline read while the second reader's read is still with the
+        // kernel. `pending` is set for the inline read too, so a decrement keyed on `pending` alone
+        // would take the shared gauge to zero here and report the second read as reaped.
+        first_pipe
+            .write
+            .write_all(b"inline")
+            .expect("write into the first pipe");
+        let mut buf = [0u8; 16];
+        let read = first
+            .read(&mut buf)
+            .expect("a buffered read completes inline");
+        assert_eq!(&buf[..read], b"inline");
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            1,
+            "an inline completion on one reader reaped another reader's outstanding read"
+        );
+
+        // The genuinely outstanding read is the one that lowers the gauge, when it is reaped.
+        cancel.request();
+        let outcome = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a cancelled pending read must return");
+        let error = outcome.expect_err("the read was cancelled, not completed");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        worker.join().expect("the second reader thread ends");
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            0,
+            "the reaped read must leave the shared gauge"
         );
     }
 

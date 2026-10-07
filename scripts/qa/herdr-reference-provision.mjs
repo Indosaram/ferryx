@@ -596,6 +596,40 @@ async function startIsolatedGateway(config, host, ledger, args, lease) {
 }
 
 /**
+ * Why one configured host has no control transport to spawn its PTYs through, as a reportable
+ * reason - never as a throw.
+ *
+ * A host reaches the PTY stage with a resolved transport only when this run launched its gateway
+ * or the config declared a reachable daemon for it. A host whose gateway launch was REFUSED has
+ * neither, and that refusal is ALREADY a recorded blocker: `gateway-launch` with the launcher's own
+ * reason, `host-daemon-transport` from the transport resolver, or `host-start` when the local
+ * launch was not authorized. That recorded reason is what the operator must read, so it is
+ * surfaced here instead of being replaced by a generic "no transport" string - reporting the
+ * session against its real cause is what keeps a refused launch from reading as an unrelated
+ * daemon-runtime failure.
+ */
+function hostTransportRefusal(host, hostTransports, blockers) {
+  const resolved = hostTransports.get(host.id);
+  if (resolved && resolved.error instanceof ProvisionError) {
+    return { reason: resolved.error.reason, detail: resolved.error.detail };
+  }
+  for (let index = blockers.length - 1; index >= 0; index -= 1) {
+    const entry = blockers[index];
+    if (
+      entry.hostId === host.id &&
+      (entry.kind === "gateway-launch" || entry.kind === "host-daemon-transport" || entry.kind === "host-start")
+    ) {
+      return { reason: entry.reason, detail: entry.detail || "" };
+    }
+  }
+  // No recorded refusal: this host genuinely resolved no daemon at all.
+  return {
+    reason: "daemon-runtime-undeclared",
+    detail: host.id + " resolved no daemon transport and no gateway was launched for it",
+  };
+}
+
+/**
  * Spawn one original PTY through the host's own daemon and record the exact PID and
  * executable. The session record the daemon returns is the authority for the geometry the
  * pane actually has; a mismatch with the requested geometry is reported, not smoothed over.
@@ -1564,36 +1598,60 @@ async function main() {
           // otherwise the transport the config declares for it. Never a guess.
           const hostTransport = hostTransports.get(host.id);
           const transport = hostTransport && !hostTransport.error ? hostTransport.transport : null;
-          // An ssh session goes through the product's own REMOTE startup: a different request,
-          // no local registration and no local wrapper. The local path below is unchanged.
-          const spawned = host.transport === "ssh"
-            ? await spawnRemotePty(host, session, args, transport)
-            : await spawnOriginalPty(host, {
-                ...session,
-                cols: session.cols,
-                rows: session.rows,
-              }, ledger, args, transport);
-          row.backendSessionId = spawned.backendSessionId;
-          row.epoch = spawned.epoch;
-          row.cols = spawned.cols;
-          row.rows = spawned.rows;
-          row.daemonPid = spawned.daemonPid;
-          row.daemonTransport = spawned.daemonTransport;
-          row.workspaceRegistration = spawned.workspaceRegistration;
-          row.spawnedByThisRun = true;
-          row.ptyIdentity = spawned.ptyIdentity;
-          row.ptyIdentityPath = spawned.ptyIdentityPath;
-          // The REAL create record, from the daemon's own spawn response. The correlation is
-          // verified against this rather than against anything the config asserted.
-          if (spawned.createResponse) row.createResponse = spawned.createResponse;
-          if (spawned.pid) {
-            row.pid = spawned.pid;
-            row.executablePath = spawned.executablePath;
-            row.missingIdentity = row.missingIdentity.filter((field) =>
-              !["backendSessionId", "epoch", "pid", "executablePath", "cols", "rows"].includes(field));
+          if (!transport) {
+            // A host whose transport never resolved - its gateway launch was REFUSED (an occupied
+            // port, the LAN-exposure env, a missing binary, a failed bind) or its declared daemon
+            // was refused - has no daemon to spawn through. That refusal is ALREADY a recorded
+            // blocker above (`gateway-launch` / `host-daemon-transport` / `host-start`), and it is
+            // the reason the operator must read, so it is surfaced here as THIS session's failure
+            // and the PTY stage is skipped.
+            //
+            // This must never throw. An uncaught error here would leave `main()` before
+            // fixtures.json and blockers.json are written, so the launcher's own recorded reason,
+            // every other host and every other blocker would be destroyed, and the operator would
+            // read the unrelated `daemon-runtime-undeclared` instead - which is exactly what a
+            // refused launch used to do.
+            const refusal = hostTransportRefusal(host, hostTransports, blockers);
+            blockers.push({
+              kind: "session-spawn",
+              hostId: host.id,
+              transport: host.transport,
+              backendSessionId: session.backendSessionId || null,
+              reason: refusal.reason,
+              detail: refusal.detail,
+            });
           } else {
-            row.missingIdentity = row.missingIdentity.filter((field) =>
-              !["backendSessionId", "epoch", "cols", "rows"].includes(field));
+            // An ssh session goes through the product's own REMOTE startup: a different request,
+            // no local registration and no local wrapper. The local path below is unchanged.
+            const spawned = host.transport === "ssh"
+              ? await spawnRemotePty(host, session, args, transport)
+              : await spawnOriginalPty(host, {
+                  ...session,
+                  cols: session.cols,
+                  rows: session.rows,
+                }, ledger, args, transport);
+            row.backendSessionId = spawned.backendSessionId;
+            row.epoch = spawned.epoch;
+            row.cols = spawned.cols;
+            row.rows = spawned.rows;
+            row.daemonPid = spawned.daemonPid;
+            row.daemonTransport = spawned.daemonTransport;
+            row.workspaceRegistration = spawned.workspaceRegistration;
+            row.spawnedByThisRun = true;
+            row.ptyIdentity = spawned.ptyIdentity;
+            row.ptyIdentityPath = spawned.ptyIdentityPath;
+            // The REAL create record, from the daemon's own spawn response. The correlation is
+            // verified against this rather than against anything the config asserted.
+            if (spawned.createResponse) row.createResponse = spawned.createResponse;
+            if (spawned.pid) {
+              row.pid = spawned.pid;
+              row.executablePath = spawned.executablePath;
+              row.missingIdentity = row.missingIdentity.filter((field) =>
+                !["backendSessionId", "epoch", "pid", "executablePath", "cols", "rows"].includes(field));
+            } else {
+              row.missingIdentity = row.missingIdentity.filter((field) =>
+                !["backendSessionId", "epoch", "cols", "rows"].includes(field));
+            }
           }
         }
 
@@ -1654,7 +1712,14 @@ async function main() {
             // One contract, shared with the runner: the missing prerequisite is named field by
             // field rather than reported as a blanket non-local refusal.
             blockers.push(requirement);
-          } else if (!existsSync(receiptPath)) {
+            // A receipt path that was never CONFIGURED is not a missing receipt. `receiptPath` is
+            // null exactly when this host carries no receipt requirement at all - the local
+            // transport, whose identity comes from this run's own spawn - so there is nothing to
+            // validate and nothing to report, and BOTH branches below must stay out of its way:
+            // one would fabricate a receipt requirement for a host that never had one, the other
+            // would read a null path. This is the path a refused gateway launch leaves its session
+            // on (see the PTY stage above).
+          } else if (receiptPath && !existsSync(receiptPath)) {
             blockers.push({
               kind: "owner-host-spawn-receipt",
               hostId: host.id,
@@ -1663,7 +1728,7 @@ async function main() {
               detail: receiptPath,
               reason: "the configured owner-host spawn receipt does not exist",
             });
-          } else {
+          } else if (receiptPath) {
             const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
             const receiptCheck = validateOwnerHostSpawnReceipt(receipt, {
               hostId: host.id,

@@ -11,10 +11,20 @@
  * shapes the receipts recorded, and require the helpers to reject the false positives and accept
  * the genuine refusals. Importing the runner must not start a run (it is guarded), which is what
  * makes this file possible.
+ *
+ * Two later defects are covered here as well, both measured by the 003 x 6ad diagnostic run:
+ * QA-04/happy failed with `TypeError: assert.deepEqual is not a function` because the runner called
+ * a deep-equality member on the FIXTURE's `assert(condition, message)` (which has none), and both
+ * QA-07 branches staged files with `mediaType` values that are not one of the product's five
+ * `AttachmentMediaType` variants, so the route refused the envelope before running any staging
+ * guard. The tests below pin the runner's assertion surface and its staged media types against the
+ * product's own contract, without executing a run.
  */
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { assert as fixtureAssert } from './herdr-reference-fixtures.mjs';
 import {
   REFERENCE_WIRE_STATUS,
   assertReadControl,
@@ -261,6 +271,55 @@ test('only a missing native transcript blocks the QA-03 baseline', () => {
     assert.equal(
       isTypedRefusal(other, { status: 'NOT_FOUND', code: 'NOT_FOUND', envelope: 'machine' }),
       false,
+    );
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * The runner's own assertion surface and its staged media types
+ * ------------------------------------------------------------------------ */
+
+const runnerSource = readFile(new URL('./herdr-reference-chat.mjs', import.meta.url), 'utf8');
+
+/**
+ * The five attachment variants the product's stage payload deserializes into
+ * (`AttachmentMediaType`, src-tauri/src/scoped_contracts.rs:271-283) - the same set the product's own
+ * client derives in `referenceMediaTypeFor` (ui/src/remote/chat/referenceFiles.ts:260-286).
+ */
+const PRODUCT_ATTACHMENT_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'text/plain', 'application/pdf'];
+
+test('the runner never calls a deep-equality member its own assert does not have', async () => {
+  // The runner's `assert` is the fixture's `assert(condition, message)`
+  // (herdr-reference-fixtures.mjs:531) - NOT node's. It carries no deep-equality member at all, so
+  // `assert.deepEqual(a, b)` raised `TypeError: assert.deepEqual is not a function` and QA-04/happy
+  // reported a failure for a missing method rather than on the behaviour it guards.
+  assert.equal(typeof fixtureAssert, 'function');
+  assert.equal(fixtureAssert.deepEqual, undefined, 'the fixture assert has no deepEqual member');
+  assert.equal(fixtureAssert.deepStrictEqual, undefined, 'and none under the strict name either');
+  const source = await runnerSource;
+  assert.doesNotMatch(
+    source,
+    /\bassert\.deep(?:Strict)?Equal\s*\(/,
+    'a deep-equality call on the fixture assert cannot work; it fails as a TypeError',
+  );
+  assert.match(
+    source,
+    /import \{ deepStrictEqual \} from "node:assert\/strict";/,
+    'the runner must take deep equality from node:assert/strict',
+  );
+});
+
+test('every staged media type the runner sends is one of the product attachment variants', async () => {
+  // The stage payload's `mediaType` IS the product's enum, so a category name ('image', 'file') is
+  // refused as an unreadable envelope before the route runs any staging guard - which is how both
+  // QA-07 branches came to judge a fence they were not aiming at.
+  const sent = [...(await runnerSource).matchAll(/mediaType:\s*"([^"]*)"/g)].map((match) => match[1]);
+  assert.ok(sent.length > 0, 'the runner stages at least one file');
+  for (const value of sent) {
+    assert.ok(
+      PRODUCT_ATTACHMENT_MEDIA_TYPES.includes(value),
+      'the stage payload deserializes into AttachmentMediaType (scoped_contracts.rs:271-283), so "' +
+        value + '" is refused before any staging guard runs',
     );
   }
 });

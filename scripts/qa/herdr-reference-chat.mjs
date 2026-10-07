@@ -59,6 +59,7 @@
  *     [--device-binding-out <path>] [--browser-channel chrome] [--timeout-ms 30000]
  */
 
+import { deepStrictEqual } from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import {
@@ -204,9 +205,13 @@ scenario("QA-07", {
     const http = httpHelpers(ctx, host);
     const imageBytes = Buffer.from("HERDR_QA07_IMAGE_BYTES", "utf8");
     const imageRequestId = randomUUID();
+    // The staged media type is one of the product's OWN five attachment variants
+    // (`AttachmentMediaType`, scoped_contracts.rs:271-283). It is not a category name: the wire
+    // field deserializes into that enum, so anything else is refused as an unreadable envelope
+    // before the route runs a single staging guard.
     const staged = await http.mutate(session, "files", imageRequestId, {
       name: "qa07-image.png",
-      mediaType: "image",
+      mediaType: "image/png",
       sizeBytes: imageBytes.length,
       contentBase64: imageBytes.toString("base64"),
     });
@@ -251,27 +256,33 @@ scenario("QA-07", {
     // bound. Without it a refusal from an earlier fence (an unreadable envelope, a missing owner id,
     // a dead session) satisfies the probes below and the branch passes while no file guard ran.
     const controlRequestId = randomUUID();
+    // Every staged payload names one of the product's five attachment variants
+    // (`AttachmentMediaType`, scoped_contracts.rs:271-283) - the same set the product's own client
+    // derives in `referenceMediaTypeFor` (ui/src/remote/chat/referenceFiles.ts:260-286). The wire
+    // field IS that enum, so a category name is refused as an unreadable envelope before any
+    // staging guard runs, and each probe below would then be judging the wrong fence. These
+    // payloads are ASCII text, so the honest pair for each is a `.txt` name and `text/plain`.
     const control = await http.mutate(session, "files", controlRequestId, {
       name: "qa07-control.txt",
-      mediaType: "file",
+      mediaType: "text/plain",
       sizeBytes: 4,
       contentBase64: Buffer.from("okay").toString("base64"),
     });
     const traversal = await http.mutate(session, "files", randomUUID(), {
       name: "../../escape.txt",
-      mediaType: "file",
+      mediaType: "text/plain",
       sizeBytes: 4,
       contentBase64: Buffer.from("evil").toString("base64"),
     });
     const oversize = await http.mutate(session, "files", randomUUID(), {
-      name: "qa07-oversize.bin",
-      mediaType: "file",
+      name: "qa07-oversize.txt",
+      mediaType: "text/plain",
       sizeBytes: 10 * 1024 * 1024 + 1,
       contentBase64: "",
     });
     const mismatch = await http.mutate(session, "files", randomUUID(), {
-      name: "qa07-mismatch.bin",
-      mediaType: "file",
+      name: "qa07-mismatch.txt",
+      mediaType: "text/plain",
       sizeBytes: 999999,
       contentBase64: Buffer.from("short").toString("base64"),
     });
@@ -2000,7 +2011,11 @@ scenario("QA-04", {
     // An identical payload under the SAME request id is served from its record: the identical
     // delivery receipt, not a second write (reference_chat/input.rs `Claim::Duplicate`).
     const duplicateData = assertScopeResult(duplicate.json, requestId, "QA-04 duplicate submit");
-    assert.deepEqual(duplicateData.receipt, data.receipt,
+    // A DEEP comparison, because the two receipts are the same record served twice. The fixture's
+    // own `assert` is the plain `assert(condition, message)` (herdr-reference-fixtures.mjs:531) and
+    // carries no deep-equality member at all, so calling one on it raised a TypeError instead of
+    // asserting: the branch failed for a missing method, never on the behaviour it guards.
+    deepStrictEqual(duplicateData.receipt, data.receipt,
       "an identical duplicate was not answered from its own record");
     // A DIFFERENT payload under the same id is the frozen typed conflict: 409 REQUEST_CONFLICT on the
     // ScopeResult envelope, echoing the caller's request id (input.rs `Claim::Conflict`).
