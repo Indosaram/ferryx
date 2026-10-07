@@ -68,7 +68,21 @@ const EXERCISE_EOF_COMMAND: &str = "exercise-eof";
 const EOF_ACTION_END_OUTPUT_STREAM: &str = "end-output-stream";
 /// The terminal's own end-of-stream gesture: an interactive shell exits on
 /// `exit`, which ends the PTY's output stream at its real end of file.
+///
+/// The line terminator is platform-specific. Windows ConPTY delivers Enter as CARRIAGE RETURN,
+/// so a bare `\n` never completes the line there.
+#[cfg(windows)]
+const EOF_EXIT_INPUT: &[u8] = b"exit\r\n";
+#[cfg(not(windows))]
 const EOF_EXIT_INPUT: &[u8] = b"exit\n";
+/// Bound on answering the QA-owned shell's own startup VT queries before ending its stream.
+///
+/// A freshly spawned shell sends its startup queries before its first prompt and BLOCKS until
+/// they are answered. A production pane is answered by the app's native surface host, which
+/// knows the session is starting up; this lane runs in the DAEMON, where no surface host exists,
+/// so it must answer them itself. Measured without this: the shell's ONLY published bytes were
+/// the 4-byte `ESC[6n`, with no prompt at all.
+const EOF_STARTUP_QUERY_WINDOW_MS: u64 = 1_200;
 const EOF_COLS: u16 = 80;
 const EOF_ROWS: u16 = 24;
 /// Bound on the private control watch for `exercise-eof`. The runner issues it
@@ -912,7 +926,10 @@ async fn exercise_eof_watch_in(
             continue;
         }
         if let Err(error) = end_owned_output_stream(&service, &channel).await {
-            eprintln!("FERRYX_QA_EOF_UNSETTLED: {error}");
+            // Through the daemon's own logger, not `eprintln!`: the daemon's stderr is a pipe
+            // nothing drains and a failed write there PANICS the task, destroying the very
+            // diagnosis this line carries. The runner archives this log (`archiveDaemonLog`).
+            tracing::warn!(target: "ferryx_qa_liveness", "FERRYX_QA_EOF_UNSETTLED: {error}");
         }
     }
 }
@@ -936,10 +953,53 @@ async fn end_owned_output_stream(
     };
     // 2. Subscribe through the production attach path BEFORE the stream ends, so
     //    the end is observed and never raced.
-    let mut stream = service
+    let attachment = service
         .attach_with_sequence(&session_id, None)
-        .map_err(|error| format!("QA-owned stream subscribe failed: {error}"))?
-        .receiver;
+        .map_err(|error| format!("QA-owned stream subscribe failed: {error}"))?;
+    // The snapshot carries whatever the shell published before this subscription, so the startup
+    // query is searched in BOTH it and the live receiver.
+    let mut seen: Vec<u8> = attachment.snapshot.history;
+    let mut stream = attachment.receiver;
+
+    // Answer the shell's startup VT queries. A terminal answers these, and for its QA-owned
+    // session this lane IS the terminal: the app's native surface host answers them for
+    // production panes, but only for a session it was told is starting up, and this session is
+    // spawned in the daemon where no surface host exists. Measured without this: the shell never
+    // reached a prompt, never read the `exit` below, and no EOF was ever observed.
+    let answers: [(&[u8], &[u8]); 2] = [
+        (b"\x1b[6n", b"\x1b[1;1R"), // DSR cursor position
+        (b"\x1b[c", b"\x1b[?1;2c"),  // primary device attributes
+    ];
+    let query_deadline =
+        tokio::time::Instant::now() + Duration::from_millis(EOF_STARTUP_QUERY_WINDOW_MS);
+    let mut answered = false;
+    loop {
+        for (query, answer) in answers {
+            if seen.windows(query.len()).any(|window| window == query) {
+                if service.write_input(&session_id, answer).is_ok() {
+                    answered = true;
+                }
+                seen.clear();
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= query_deadline {
+            break;
+        }
+        match tokio::time::timeout(query_deadline.saturating_duration_since(now), stream.recv()).await
+        {
+            Ok(Ok(chunk)) => {
+                seen.extend_from_slice(&chunk.bytes);
+                if answered {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+    tracing::info!(target: "ferryx_qa_eof", answered, "startup query phase done");
+
     let (pty_created_for_session_before, pty_created_total_before) = pty_created_counts(&session_id);
     let live_sessions_before = service.list_sessions().len();
 
