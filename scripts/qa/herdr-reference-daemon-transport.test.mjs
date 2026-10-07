@@ -33,6 +33,7 @@ import {
   REFERENCE_CREDENTIAL_TIERS,
   REFERENCE_HOST_ACCESS_KINDS,
   REFERENCE_NONLOCAL_TRANSPORTS,
+  REFERENCE_READ_QUERY_FIELDS,
   FIXTURE_SCHEMA,
   adoptOwnedGateway,
   boundedBytesReport,
@@ -1963,11 +1964,176 @@ test('a fully-declared non-local session binds to its receipt, and an undeclared
         label + ': no identity is stamped from a disagreeing receipt',
       );
     }
+    // The admission is scoped to ssh, and this block pins the OTHER side of that boundary: the
+    // same fully-declared config - same source, same candidate, same receipt path, the same
+    // declared backendSessionId / epoch / create record - with ONLY the transport changed to
+    // paired, must NOT bind. The owning-host receipt path can only ever produce an ssh receipt
+    // (remoteOwnerHostReceipt hardcodes transport: "ssh" and refuses a non-Linux host), so a
+    // paired declaration names a state no real acquisition can produce, and admitting it would
+    // stamp a config-declared identity that no receipt could corroborate.
+    //
+    // The observables are the ones the ssh leg turns on, inverted: the session is DEMANDED from a
+    // daemon this machine does not have, and the row keeps no pid and no identity. Reverting the
+    // guard to its older, wider form (host.transport === "local") leaves every assertion above
+    // green and fails exactly here - which is the hole this block closes.
+    const sshConfig = declaredSshConfig(source, credentialFile, binary, session);
+    const pairedConfig = { ...sshConfig, hosts: [{ ...sshConfig.hosts[0], transport: 'paired' }] };
+    const movedFields = Object.keys(pairedConfig.hosts[0])
+      .filter((field) => pairedConfig.hosts[0][field] !== sshConfig.hosts[0][field]);
+    assert.deepEqual(movedFields, ['transport'], 'the paired run must differ from the ssh run in exactly one field');
+    // The receipt the owning PAIRED host would have written for itself: the same host, session,
+    // epoch, pid, candidate id and correlation as the accepted ssh receipt, and the one field a
+    // paired host cannot borrow from an ssh one - the transport it was produced under. The receipt
+    // writer's own schema string names the ssh family and the shared validator reads sourceKind
+    // rather than schema, so this fixture omits it instead of asserting a name no paired writer
+    // produces.
+    writeFileSync(receiptPath, JSON.stringify({
+      sourceKind: HOST_SUPPLIED_SOURCE_KIND,
+      hostId: 'qa-ssh',
+      transport: 'paired',
+      backendSessionId: 'sess-ssh-1',
+      epoch: '7',
+      pid: 4242,
+      executable: '/usr/bin/ssh-helper-fixture',
+      spawnedAt: '2026-01-01T00:00:00.000Z',
+      candidate: {
+        candidateId: first.candidate.candidateId,
+        sourceManifestSha256: 'written-by-an-earlier-run',
+        binarySha256: first.candidate.binary.sha256,
+      },
+      correlation: {
+        source: 'daemon-remote-session-details',
+        daemonSessionId: 'sess-ssh-1',
+        helperSessionId: 'helper-1',
+        clientRequestId: 'req-ssh-1',
+      },
+    }, null, 2));
+    const paired = await runProvisioner('paired', pairedConfig);
+    const pairedKinds = kindsOf(paired.fixture);
+    const pairedRow = paired.fixture.sessions.find((entry) => entry.hostId === 'qa-ssh');
+    assert.ok(pairedRow, 'the paired session is recorded');
+    assert.equal(pairedRow.transport, 'paired', 'the recorded row is the paired one');
+    assert.equal(
+      pairedRow.pid,
+      null,
+      'a paired host binds no pid from a declared receipt: ' + JSON.stringify(pairedKinds),
+    );
+    assert.ok(
+      !('ptyIdentitySource' in pairedRow),
+      'no identity is stamped for a transport the admission refuses',
+    );
+    assert.equal(
+      validateFixtureManifest(paired.fixture).ok,
+      false,
+      'an unbound paired session leaves the manifest unbound',
+    );
+    assert.ok(
+      pairedKinds.some((entry) => entry.startsWith('session-spawn:')),
+      'a refused admission leaves the session demanded from a daemon this machine does not have, ' +
+        'exactly as an undeclared one is: ' + JSON.stringify(pairedKinds),
+    );
   } finally {
     if (running.child && running.child.exitCode === null && running.child.signalCode === null) {
       running.child.kill('SIGKILL');
     }
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * The harness read-field mirror is checked against the relay's own allowlist (F2R-4)
+ *
+ * REFERENCE_READ_QUERY_FIELDS in herdr-reference-fixtures.mjs is a HAND COPY of the allowlist the
+ * relay builds in validate_http_query. The two agree today, and nothing kept them that way:
+ * widening one side - a field the host's ReferenceChatReadQuery starts accepting, or a field the
+ * harness starts sending - would leave the other behind with every suite still green, and the
+ * disagreement would surface only as a 400 from a live relay.
+ *
+ * So the mirror is read back out of the relay's own source and compared with the harness table IN
+ * ORDER, and all four read routes are checked to point at that one list. The literal is located by
+ * its own identifier rather than by line number, and a literal that cannot be found FAILS this
+ * check instead of passing vacuously.
+ * ------------------------------------------------------------------------ */
+
+/** The relay source that owns the allowlist, relative to the repository root. */
+const RELAY_SOURCE_RELATIVE_PATH = 'src-tauri/src/remote/relay_server.rs';
+
+/** The identifier the relay binds its allowlist literal to. */
+const RELAY_READ_FIELDS_IDENTIFIER = 'reference_chat_read_fields';
+
+/** The four reference-chat read routes the harness mirror backs. */
+const REFERENCE_READ_MIRROR_KEYS = ['history', 'screen', 'prompt', 'file'];
+
+/**
+ * The field names in the relay's own reference_chat_read_fields literal, in source order.
+ *
+ * Answers { found: false, reason } when the literal cannot be located, so the caller reports WHAT
+ * it searched for instead of comparing against nothing.
+ */
+function relayReadFields(source) {
+  const identifier = source.indexOf(RELAY_READ_FIELDS_IDENTIFIER);
+  if (identifier === -1) {
+    return { found: false, reason: 'the identifier ' + RELAY_READ_FIELDS_IDENTIFIER + ' does not appear in the file' };
+  }
+  // The identifier is bound through a bracketed TYPE (`&[&str]`) before its literal, so the first
+  // `[` after it is not the literal's opener. Every `[` after the identifier is tried in turn and
+  // the first whose slice to its own `]` yields string literals is the literal; a type annotation
+  // cannot hold quoted strings, so this cannot select the wrong bracket - it only stops the check
+  // from reading `&str` as the allowlist.
+  const fields = [];
+  for (let open = source.indexOf('[', identifier); open !== -1; open = source.indexOf('[', open + 1)) {
+    const close = source.indexOf(']', open);
+    if (close === -1) break;
+    const candidate = [...source.slice(open + 1, close).matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+    if (candidate.length > 0) {
+      fields.push(...candidate);
+      break;
+    }
+  }
+  if (fields.length === 0) {
+    return {
+      found: false,
+      reason: 'no [ ... ] literal of string literals follows ' + RELAY_READ_FIELDS_IDENTIFIER,
+    };
+  }
+  return { found: true, fields };
+}
+
+test('the harness read-field mirror agrees with the relay allowlist it copies, in order', () => {
+  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const relayPath = join(repositoryRoot, RELAY_SOURCE_RELATIVE_PATH);
+  let source = null;
+  try {
+    source = readFileSync(relayPath, 'utf8');
+  } catch (error) {
+    assert.fail('the relay source could not be read at ' + relayPath + ': ' + error.message);
+  }
+  const located = relayReadFields(source);
+  assert.ok(
+    located.found,
+    'the relay allowlist could not be located in ' + relayPath + ' (searched for ' +
+      RELAY_READ_FIELDS_IDENTIFIER + ' followed by a [ ... ] literal of string literals): ' + located.reason,
+  );
+  const mirror = REFERENCE_READ_QUERY_FIELDS;
+  assert.deepEqual(
+    mirror.history,
+    located.fields,
+    'the harness mirror and the relay allowlist disagree, in order: relay=' + JSON.stringify(located.fields) +
+      ' mirror=' + JSON.stringify(mirror.history),
+  );
+  for (const key of REFERENCE_READ_MIRROR_KEYS) {
+    assert.ok(key in mirror, 'the mirror must carry the ' + key + ' read route');
+    assert.deepEqual(
+      mirror[key],
+      located.fields,
+      'the ' + key + ' mirror does not admit the relay fields, in order: relay=' +
+        JSON.stringify(located.fields) + ' mirror=' + JSON.stringify(mirror[key]),
+    );
+    assert.equal(
+      mirror[key],
+      mirror.history,
+      'the ' + key + ' mirror must point at the one list rather than at a copy of it',
+    );
   }
 });
 
