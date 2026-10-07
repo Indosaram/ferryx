@@ -349,7 +349,7 @@ pub(crate) struct PtySessionConfig {
     pub master: Box<dyn MasterPty + Send>,
     /// The same master's reader-interruption handle, taken before the master was boxed, so the
     /// session keeps it for the whole of its life rather than only while the master is present.
-    pub reader_interrupt: Option<Box<dyn ReaderInterrupt>>,
+    pub reader_interrupt: Option<Arc<dyn ReaderInterrupt>>,
     pub child: Box<dyn Child + Send + Sync>,
     pub writer: Box<dyn Write + Send>,
     pub reader: Box<dyn Read + Send>,
@@ -426,7 +426,7 @@ pub struct PtySession {
     /// Retained separately from `master` on purpose: a session gives its master up - after a failed
     /// handover export the master is already gone - and must still be able to end its reader when it
     /// finally closes. A platform whose reader needs no handle yields `None` and behaves as before.
-    reader_interrupt: Arc<Mutex<Option<Box<dyn ReaderInterrupt>>>>,
+    reader_interrupt: Arc<Mutex<Option<Arc<dyn ReaderInterrupt>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     child: Arc<Mutex<Option<ProcessHandle>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -542,9 +542,12 @@ impl PtySession {
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                        // Once a stop was requested this is the cancellation, not a retryable
-                        // signal: the cancel event is sticky, so retrying here would spin.
-                        if stopping {
+                        // Re-read the flag instead of the snapshot taken before this read: a stop
+                        // requested DURING the read is precisely what made it return, so the snapshot
+                        // is stale here and trusting it would issue one more read. The drain is
+                        // unaffected - a read that still has buffered bytes returns Ok, not this - and
+                        // a genuine EINTR with no stop still retries.
+                        if reader_stop_requested_task.load(Ordering::Acquire) {
                             break;
                         }
                         continue;
@@ -1170,25 +1173,38 @@ impl PtySession {
     pub(crate) fn request_reader_stop(&self) {
         self.reader_stop_requested.store(true, Ordering::Release);
         // The retained handle, not the master: this must work on a session that has already given
-        // its master up, which is exactly what a failed handover export leaves behind.
-        if let Some(interrupt) = self.reader_interrupt.lock().as_ref() {
+        // its master up, which is exactly what a failed handover export leaves behind. Cloned out of
+        // the slot first so no lock is held across the request.
+        let interrupt = self.reader_interrupt.lock().clone();
+        if let Some(interrupt) = interrupt {
             interrupt.request();
         }
     }
 
-    /// How many reads are outstanding on this session's master right now.
+    /// Whether the reader has finished. Read on the session so a caller that does not own the
+    /// reader's join handle can still observe the end of the reader.
+    pub(crate) fn await_reader_finished_for(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while !self.is_reader_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    /// Arm a subscription to this session's outstanding-read gauge and wait on it, bounded.
     ///
-    /// Test-only, and Windows-only because that is the platform whose reader can be parked by a read
-    /// the kernel owns. It is a gauge, so a non-zero value means a read is in flight at the moment of
-    /// the read - not that one was in flight at some earlier point - which is what makes a wait on it
-    /// a subscription to the current state rather than to history.
+    /// Test-only. It blocks, so the tests drive it on a blocking thread; production never waits on
+    /// this gauge.
     #[cfg(all(test, windows))]
-    pub(crate) fn outstanding_reader_reads_for_test(&self) -> u64 {
-        self.reader_interrupt
-            .lock()
-            .as_ref()
-            .map(|interrupt| interrupt.outstanding_read_count())
-            .unwrap_or(0)
+    pub(crate) fn await_outstanding_reader_for_test(&self, timeout: Duration) -> bool {
+        let interrupt = self.reader_interrupt.lock().clone();
+        match interrupt {
+            Some(interrupt) => interrupt.await_outstanding_read(timeout),
+            None => false,
+        }
     }
 
     pub(crate) fn close_output(&self) {
@@ -1217,13 +1233,27 @@ impl PtySession {
     /// once - only the drop itself is off-thread.
     fn release_master(&self) {
         let master = self.master.lock().take();
-        if let Some(master) = master {
-            // If the thread cannot be created the closure is dropped here, which is the previous
-            // behavior: the thread exists only to keep a blocking ClosePseudoConsole off this one.
-            let _ = std::thread::Builder::new()
-                .name("pty-master-release".to_string())
-                .spawn(move || drop(master));
+        let Some(master) = master else {
+            return;
+        };
+        // The drop runs ClosePseudoConsole, which waits for the console host to exit and flushes the
+        // output it still holds - the operation that can still produce the last bytes of a pane - and
+        // it can wait on a client that stopped reading. It therefore must not run on the caller: the
+        // close path has to stay free to apply the bounded cancellation, and the reader is the thread
+        // that lets the host finish.
+        //
+        // The established blocking seam does that inside a runtime, and it is the runtime's own
+        // bounded pool that owns the drop - not a fresh OS thread per closing session, and not a task
+        // whose failure can be silently discarded: `spawn_blocking` cannot fail, so there is no
+        // error path that would drop the master here instead.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || drop(master));
+            return;
         }
+        // Outside a runtime this thread is not a reactor, so dropping it here cannot block one. That
+        // is the only path where the caller waits, and it is the one path that has no error to lose.
+        tracing::debug!("releasing PTY master on the calling thread (no runtime is entered)");
+        drop(master);
     }
 
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
@@ -1419,7 +1449,9 @@ impl PtySession {
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                        if stopping {
+                        // Re-read the flag rather than the snapshot taken before this read: a stop
+                        // requested during the read is what made it return.
+                        if reader_stop_requested_task.load(Ordering::Acquire) {
                             break;
                         }
                         continue;
@@ -1767,11 +1799,11 @@ mod windows_reader_tests {
             .expect("spawn a ConPTY session");
         let session = manager.get_session(&session_id).expect("session registered");
 
-        // Subscribe to the reader's outstanding-read gauge, which reports a read in flight RIGHT
-        // NOW, rather than to a running total that an earlier completed read would also satisfy.
-        wait_until(
-            || session.outstanding_reader_reads_for_test() >= 1,
-            "the reader to park in a read the kernel owns",
+        // ARMED BEFORE THE CLOSE: the gauge is subscribed to on a blocking thread, which waits on
+        // the state itself - a read the kernel owns, right now - instead of polling for it.
+        assert!(
+            await_session_outstanding_read(&session).await,
+            "the reader never parked in a read the kernel owns"
         );
 
         // The master goes away the way a failed export takes it, leaving the reader parked on a
@@ -1806,9 +1838,10 @@ mod windows_reader_tests {
             .spawn(CommandBuilder::new("cmd.exe"), 80, 24)
             .expect("spawn a ConPTY session");
         let session = manager.get_session(&session_id).expect("session registered");
-        wait_until(
-            || session.outstanding_reader_reads_for_test() >= 1,
-            "the reader to park in a read the kernel owns",
+        // ARMED BEFORE THE CLOSE, and driven off the runtime because the subscription blocks.
+        assert!(
+            await_session_outstanding_read(&session).await,
+            "the reader never parked in a read the kernel owns"
         );
 
         tokio::time::timeout(Duration::from_secs(20), manager.close_session(&session_id))
@@ -1826,17 +1859,15 @@ mod windows_reader_tests {
     }
 }
 
-/// Wait for a state to hold, failing rather than hanging. This is a subscription to the state
-/// itself - it yields the CPU and asserts on a deadline - not a fixed sleep after which the state
-/// is hoped for.
+/// Subscribe to a session's outstanding-read gauge and wait for it, bounded.
+///
+/// The wait blocks, so it runs on a blocking thread: the test thread is a runtime thread, and the
+/// subscription is on the state itself rather than a poll loop, which is what keeps this a
+/// subscription and not a spin.
 #[cfg(all(test, windows))]
-fn wait_until(mut predicate: impl FnMut() -> bool, what: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        std::thread::yield_now();
-    }
+async fn await_session_outstanding_read(session: &Arc<PtySession>) -> bool {
+    let session = Arc::clone(session);
+    tokio::task::spawn_blocking(move || session.await_outstanding_reader_for_test(Duration::from_secs(10)))
+        .await
+        .expect("the subscription thread ends")
 }

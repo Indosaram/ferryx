@@ -17,6 +17,12 @@ use uuid::Uuid;
 
 pub(crate) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// The worst case one close can spend ending a reader: stage 1 lets the stream end it, stage 2 is the
+/// bounded cancellation fallback. The concurrent-close fence must never be shorter than the close it
+/// is waiting on, or a second close reports a timeout for a close that does happen.
+const CLOSE_FENCE_TIMEOUT: Duration =
+    Duration::from_secs(READER_SHUTDOWN_TIMEOUT.as_secs() * READER_END_STAGES);
+const READER_END_STAGES: u64 = 2;
 const TERM_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -554,20 +560,30 @@ impl PtyManager {
     /// bound below. The cancellation is only the fallback for the case this seam exists for, a host
     /// that never exits and a read the kernel owns forever; applying it first would disarm the reader
     /// before the one operation that can still produce output, which is how a tail gets truncated.
+    /// Progress is read from the READER'S OWN FLAG, never from the join's result. A spawned session
+    /// hands its reader handle to the lifecycle watcher at startup, so `join_reader_bounded` has
+    /// nothing to take and returns `Ok` at once - reading that as "the reader ended" let a close
+    /// report success while the reader was still parked, and a parked reader holds the last output
+    /// sender, so the exit record could never be written.
     async fn end_reader_after_close(session: &Arc<PtySession>) -> Result<(), PtyError> {
-        match Self::join_reader_bounded(session).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                session.request_reader_stop();
-                // The join above consumed the handle, so this observes the reader's own flag - its
-                // last act before returning - instead of joining it a second time.
-                if Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
+        // Stage 1: the stream ends the reader. The master is already given up, so the host can flush
+        // its tail and exit, and the reader delivers that tail and finishes.
+        if Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await {
+            let _ = Self::join_reader_bounded(session).await;
+            return Ok(());
         }
+        // Stage 2: the host never exited and the read is one the kernel still owns. Cancel, bounded -
+        // never the first move, because it would disarm the reader before the one operation that can
+        // still produce output.
+        session.request_reader_stop();
+        let ended = Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await;
+        let _ = Self::join_reader_bounded(session).await;
+        if ended {
+            return Ok(());
+        }
+        Err(PtyError::Other(
+            "Timed out waiting for PTY reader shutdown".into(),
+        ))
     }
 
     /// Observe the reader's finished flag, bounded. The reader sets it as its last act, so this
@@ -627,7 +643,7 @@ impl PtyManager {
                 return Ok(());
             }
 
-            let deadline = tokio::time::Instant::now() + READER_SHUTDOWN_TIMEOUT;
+            let deadline = tokio::time::Instant::now() + CLOSE_FENCE_TIMEOUT;
             while tokio::time::Instant::now() < deadline {
                 if !self.has_session(session_id) {
                     return Ok(());
@@ -987,6 +1003,43 @@ mod tests {
         .await;
         assert!(ended.is_ok(), "close left the reader running");
         assert!(session.is_reader_finished(), "close must end the session's reader");
+    }
+
+    /// Regression: a close must end the reader even when it does not own the reader's join handle.
+    ///
+    /// The lifecycle watcher takes that handle at startup for every spawned session, so the close
+    /// path's join has nothing to take and returns immediately. Reading that as "the reader ended"
+    /// let a close report success while the reader was still parked - and a parked reader holds the
+    /// last output sender, so the exit record was never written and the machine lifecycle timed out.
+    #[tokio::test]
+    async fn a_close_ends_the_reader_even_when_the_join_handle_was_taken() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // Stand in for the lifecycle watcher: take the handle before the close, exactly as
+        // `start_lifecycle_watcher` does, and keep it out of the close path's reach. Dropping a
+        // JoinHandle detaches, so the reader keeps running - which is the point.
+        let taken = session.take_reader_task();
+        assert!(taken.is_some(), "a spawned session's reader handle is takeable");
+
+        tokio::time::timeout(Duration::from_secs(20), manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded")
+            .expect("close must not report a reader that would not stop");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+        assert!(
+            session.is_reader_finished(),
+            "close must end the reader even when the join handle was taken from it"
+        );
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "close left the reader holding the output sender");
+        drop(taken);
     }
 
     /// A SUCCESSFUL export pauses the reader so the successor can own the stream, WITHOUT

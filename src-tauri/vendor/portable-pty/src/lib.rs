@@ -44,6 +44,8 @@ use libc;
 #[cfg(feature = "serde_support")]
 use serde_derive::*;
 use std::io::Result as IoResult;
+use std::sync::Arc;
+use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::prelude::{AsRawHandle, RawHandle};
 
@@ -108,14 +110,29 @@ pub trait ReaderInterrupt: Send + Sync {
     /// terminates; this note exists so no other caller has to rediscover that.)
     fn request(&self);
 
-    /// How many reads of this master are outstanding right now: issued and not yet reaped.
+    /// How many reads of this master are outstanding right now: reads the kernel reported pending
+    /// and has not reaped yet.
     ///
-    /// A gauge, not a running total - it falls again when the operation is reaped, so a caller can
-    /// distinguish "a read is in flight at this moment" from "a read was in flight at some earlier
-    /// point". It exists as a test seam for exactly that subscription, in place of inferring a
-    /// read from elapsed time. Implementations without a cancellable reader report 0.
+    /// A gauge, not a running total - it falls again when the operation is reaped - and it counts the
+    /// state the kernel owns rather than the instant a read was issued, so it can be read as "the
+    /// kernel owns a read right now". It exists as a test seam for exactly that, in place of inferring
+    /// a read from elapsed time. Implementations without a cancellable reader report 0.
     fn outstanding_read_count(&self) -> u64 {
         0
+    }
+
+    /// Block, for at most `timeout`, until a read of this master is outstanding; returns whether one
+    /// is.
+    ///
+    /// The subscription that goes with [ReaderInterrupt::outstanding_read_count]: a caller arms this
+    /// instead of polling the gauge. It waits on the state itself rather than on a notification, so it
+    /// cannot miss a rise that happened before it was called, and it never spins.
+    ///
+    /// It blocks, so it must be called from a thread that may block - never from a reactor.
+    /// Implementations without a cancellable reader report `false`.
+    fn await_outstanding_read(&self, timeout: Duration) -> bool {
+        let _ = timeout;
+        false
     }
 }
 
@@ -150,9 +167,13 @@ pub trait MasterPty: Downcast + Send {
     /// master is already gone) and must still be able to end its reader when it finally closes.
     /// Retaining the handle beside the master is what keeps that close possible.
     ///
+    /// It is shared rather than owned so a caller can take it out of its slot and use it without
+    /// holding the lock that guards the slot - a blocking wait on the handle would otherwise be able
+    /// to deadlock against the very teardown it is waiting for.
+    ///
     /// `None` (the default) means this platform's reader needs no handle: it terminates on its own
     /// when the stream ends, which is how unix behaves today.
-    fn interrupt_handle(&self) -> Option<Box<dyn ReaderInterrupt>> {
+    fn interrupt_handle(&self) -> Option<Arc<dyn ReaderInterrupt>> {
         None
     }
 

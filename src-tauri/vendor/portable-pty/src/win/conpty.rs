@@ -5,8 +5,8 @@ use anyhow::Error;
 use filedescriptor::{FileDescriptor, Pipe};
 use std::io::Read;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED};
 use winapi::um::ioapiset::{CancelIoEx, GetOverlappedResult};
@@ -120,10 +120,10 @@ impl MasterPty for ConPtyMasterPty {
         )?))
     }
 
-    fn interrupt_handle(&self) -> Option<Box<dyn ReaderInterrupt>> {
+    fn interrupt_handle(&self) -> Option<Arc<dyn ReaderInterrupt>> {
         // Cloned out of the master so it outlives it: a session gives the master up (a failed
         // handover export drops it) and must still be able to end its reader when it closes.
-        Some(Box::new(MasterInterrupt(Arc::clone(
+        Some(Arc::new(MasterInterrupt(Arc::clone(
             &self.inner.lock().unwrap().cancel,
         ))))
     }
@@ -155,11 +155,14 @@ struct BlockingInput(FileDescriptor);
 /// cloned from that same master.
 struct ReaderCancel {
     event: FileDescriptor,
-    // Reads of this master that are outstanding RIGHT NOW: issued and not yet reaped. A gauge, not
-    // a running total - it falls again when the operation is reaped, so a test can tell "a read is
-    // in flight at this moment" from "a read was in flight at some earlier point", which a
-    // monotonic counter cannot. Production never reads it.
-    outstanding_reads: AtomicU64,
+    // Reads of this master the kernel owns RIGHT NOW: reported pending and not yet reaped. A gauge,
+    // not a running total - it falls again when the operation is reaped - and it is moved at the
+    // moment the kernel takes the operation (ERROR_IO_PENDING) or completes it, never at the moment
+    // a read was merely issued, so a non-zero value means the kernel really owns a read.
+    // Guarded rather than atomic because it is waited on: `outstanding_changed` is notified under
+    // this same lock, so a rise can never slip between reading the gauge and waiting for it.
+    outstanding_reads: Mutex<u64>,
+    outstanding_changed: Condvar,
 }
 
 impl ReaderCancel {
@@ -171,7 +174,8 @@ impl ReaderCancel {
         }
         Ok(Arc::new(Self {
             event: unsafe { FileDescriptor::from_raw_handle(handle.cast()) },
-            outstanding_reads: AtomicU64::new(0),
+            outstanding_reads: Mutex::new(0),
+            outstanding_changed: Condvar::new(),
         }))
     }
 
@@ -184,15 +188,40 @@ impl ReaderCancel {
     }
 
     fn note_outstanding_read(&self) {
-        self.outstanding_reads.fetch_add(1, Ordering::Release);
+        *self.lock_outstanding() += 1;
+        self.outstanding_changed.notify_all();
     }
 
     fn note_read_reaped(&self) {
-        self.outstanding_reads.fetch_sub(1, Ordering::Release);
+        let mut outstanding = self.lock_outstanding();
+        *outstanding = outstanding.saturating_sub(1);
+        drop(outstanding);
+        self.outstanding_changed.notify_all();
     }
 
     fn outstanding_read_count(&self) -> u64 {
-        self.outstanding_reads.load(Ordering::Acquire)
+        *self.lock_outstanding()
+    }
+
+    /// The gauge, under its lock. A poisoned lock is not possible here: nothing panics while
+    /// holding it, and the only work inside is an increment or a read.
+    fn lock_outstanding(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.outstanding_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Wait for the gauge to become non-zero, or for the timeout. The wait is on the gauge itself,
+    /// so it holds no reference to a reader or a pipe and cannot be starved by one, and it is armed
+    /// under the same lock the gauge moves under, so a rise cannot slip between the read and the
+    /// wait - which is what makes arming this before issuing a read sound.
+    fn await_outstanding_read(&self, timeout: Duration) -> bool {
+        let outstanding = self.lock_outstanding();
+        let (outstanding, _) = self
+            .outstanding_changed
+            .wait_timeout_while(outstanding, timeout, |count| *count == 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *outstanding > 0
     }
 }
 
@@ -206,6 +235,10 @@ impl ReaderInterrupt for MasterInterrupt {
 
     fn outstanding_read_count(&self) -> u64 {
         self.0.outstanding_read_count()
+    }
+
+    fn await_outstanding_read(&self, timeout: Duration) -> bool {
+        self.0.await_outstanding_read(timeout)
     }
 }
 
@@ -259,10 +292,16 @@ impl OverlappedOutputReader {
         })
     }
 
-    /// Record that an operation is outstanding: the kernel owns the OVERLAPPED and the caller's
-    /// buffer until it is reaped, and this is the gauge a test subscribes to for that.
+    /// Take ownership of an operation before it is issued: from here the OVERLAPPED and the
+    /// caller's buffer must not be reused until it is reaped. The gauge is NOT moved here - a read
+    /// the kernel has not accepted is not outstanding.
     fn begin_pending(&mut self) {
         self.pending = true;
+    }
+
+    /// Record that the kernel owns the operation (it reported the read pending) or has completed it
+    /// inline: only then is a read outstanding, and only then is the gauge raised.
+    fn mark_kernel_owns_operation(&self) {
         self.cancel.note_outstanding_read();
     }
 
@@ -317,7 +356,9 @@ impl OverlappedOutputReader {
             self.finish_pending();
             return Some(transferred as usize);
         }
-        // The bytes were there, so the completion is already on its way: reap it as usual.
+        // The bytes were there, so the completion is already on its way - the kernel owns it - and
+        // is reaped as usual.
+        self.mark_kernel_owns_operation();
         self.drain_pending()
     }
 
@@ -390,9 +431,10 @@ impl Read for OverlappedOutputReader {
             self.finish_pending();
             return Err(error);
         }
+        // The kernel owns the operation from here until one of the reap paths below clears it.
+        self.mark_kernel_owns_operation();
         // The wait carries the cancellation event, so a request that arrived before or during this
-        // operation is observed here rather than missed. The operation stays counted as outstanding
-        // until one of the reap paths below clears it.
+        // operation is observed here rather than missed.
         // The wait's signature is `lpHandles: *const HANDLE`, and winapi's HANDLE points at
         // `winapi::ctypes::c_void` - a nominally distinct type from the `std::ffi::c_void` that
         // `std::os::windows::io::RawHandle` points at. The array is typed as the FFI's own handle so
@@ -552,7 +594,10 @@ mod tests {
         )
         .expect("a reader");
 
-        pipe.write_all(b"tail").expect("write into the pipe");
+        // `Pipe` is the two ENDS of a pipe, so the write goes through its `write` field.
+        pipe.write
+            .write_all(b"tail")
+            .expect("write into the pipe");
         cancel.request();
 
         let mut buf = [0u8; 16];
@@ -572,10 +617,10 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     }
 
-    /// The outstanding-read signal is a GAUGE, not a running total: it rises while a read is in
-    /// flight and falls again when that read is reaped, so a regression can subscribe to the state
-    /// that exists at the moment of the action. A monotonic counter would satisfy the wait below
-    /// but fail the two equality assertions.
+    /// The outstanding-read signal is a GAUGE, not a running total, and it is observed by
+    /// SUBSCRIBING to it rather than polling it: the subscription is armed before the read is
+    /// issued and the test is released from that subscription, not from a spin. A monotonic counter
+    /// would satisfy the subscription but fail the equality assertions around it.
     #[test]
     fn an_outstanding_read_is_a_gauge_that_falls_when_it_is_reaped() {
         let pipe = overlapped_output_pipe().expect("an overlapped output pipe");
@@ -587,24 +632,26 @@ mod tests {
         .expect("a reader");
         assert_eq!(cancel.outstanding_read_count(), 0, "nothing was issued yet");
 
-        let (issued_tx, issued_rx) = std::sync::mpsc::channel();
+        // ARMED BEFORE THE READ IS ISSUED: this thread waits on the state itself, and only then is
+        // the reader released. Nothing polls, and a rise that happened before the wait began would
+        // still be observed, because the gauge is read under the lock it moves under.
+        let waiter_cancel = Arc::clone(&cancel);
+        let waiter = std::thread::spawn(move || {
+            waiter_cancel.await_outstanding_read(std::time::Duration::from_secs(10))
+        });
+
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let mut buf = [0u8; 16];
-            let _ = issued_tx.send(());
+            go_rx.recv().expect("the go signal");
             let _ = done_tx.send(reader.read(&mut buf));
         });
-        issued_rx.recv().expect("the worker reports before it reads");
-
-        // Wait for the reader to have an operation in flight; fail rather than hang.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while cancel.outstanding_read_count() == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the reader never had a read in flight"
-            );
-            std::thread::yield_now();
-        }
+        go_tx.send(()).expect("release the reader");
+        assert!(
+            waiter.join().expect("the waiter thread ends"),
+            "the armed subscription must observe the read the kernel owns"
+        );
         // Nothing was written and nothing was cancelled, so that read is still outstanding.
         assert_eq!(
             cancel.outstanding_read_count(),
@@ -626,6 +673,34 @@ mod tests {
             cancel.outstanding_read_count(),
             0,
             "a reaped read must leave the outstanding count"
+        );
+    }
+
+    /// A read the kernel completes inline was never outstanding: the gauge moves when the kernel
+    /// takes or completes an operation, never when a read is merely issued, so a non-zero gauge
+    /// means a read is genuinely with the kernel rather than about to be.
+    #[test]
+    fn a_read_completed_inline_is_never_outstanding() {
+        let mut pipe = overlapped_output_pipe().expect("an overlapped output pipe");
+        let cancel = ReaderCancel::new().expect("a cancellation event");
+        let mut reader = OverlappedOutputReader::new(
+            pipe.read.try_clone().expect("a duplicate read end"),
+            Arc::clone(&cancel),
+        )
+        .expect("a reader");
+
+        // The bytes are already buffered, so this read cannot go pending at all.
+        // `Pipe` is the two ENDS of a pipe, so the write goes through its `write` field.
+        pipe.write
+            .write_all(b"inline")
+            .expect("write into the pipe");
+        let mut buf = [0u8; 16];
+        let read = reader.read(&mut buf).expect("a buffered read completes inline");
+        assert_eq!(&buf[..read], b"inline");
+        assert_eq!(
+            cancel.outstanding_read_count(),
+            0,
+            "a read the kernel completed inline was never outstanding"
         );
     }
 
@@ -651,7 +726,10 @@ mod tests {
             block[0] = b'A' + round;
             written.extend_from_slice(&block);
         }
-        pipe.write_all(&written).expect("write the tail into the pipe");
+        // `Pipe` is the two ENDS of a pipe, so the write goes through its `write` field.
+        pipe.write
+            .write_all(&written)
+            .expect("write the tail into the pipe");
 
         cancel.request();
 
@@ -702,14 +780,13 @@ mod tests {
             let mut buf = [0u8; 8];
             let _ = done_tx.send(second_reader.read(&mut buf));
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while second_cancel.outstanding_read_count() == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the untouched reader never issued its read"
-            );
-            std::thread::yield_now();
-        }
+        // Subscribe to the state rather than polling it. Waiting here (after the reader started)
+        // is sound because this read stays outstanding until it is cancelled: nothing is written to
+        // that pipe and no request was made, so there is no window in which the rise is missed.
+        assert!(
+            second_cancel.await_outstanding_read(std::time::Duration::from_secs(10)),
+            "the untouched reader never issued its read"
+        );
         // Its pipe holds nothing and it was never cancelled, so it can only still be waiting.
         assert!(
             done_rx.try_recv().is_err(),
