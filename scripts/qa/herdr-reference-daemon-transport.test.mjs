@@ -1977,61 +1977,78 @@ test('a fully-declared non-local session binds to its receipt, and an undeclared
     // guard to its older, wider form (host.transport === "local") leaves every assertion above
     // green and fails exactly here - which is the hole this block closes.
     const sshConfig = declaredSshConfig(source, credentialFile, binary, session);
-    const pairedConfig = { ...sshConfig, hosts: [{ ...sshConfig.hosts[0], transport: 'paired' }] };
-    const movedFields = Object.keys(pairedConfig.hosts[0])
-      .filter((field) => pairedConfig.hosts[0][field] !== sshConfig.hosts[0][field]);
-    assert.deepEqual(movedFields, ['transport'], 'the paired run must differ from the ssh run in exactly one field');
-    // The receipt the owning PAIRED host would have written for itself: the same host, session,
-    // epoch, pid, candidate id and correlation as the accepted ssh receipt, and the one field a
-    // paired host cannot borrow from an ssh one - the transport it was produced under. The receipt
-    // writer's own schema string names the ssh family and the shared validator reads sourceKind
-    // rather than schema, so this fixture omits it instead of asserting a name no paired writer
-    // produces.
-    writeFileSync(receiptPath, JSON.stringify({
-      sourceKind: HOST_SUPPLIED_SOURCE_KIND,
-      hostId: 'qa-ssh',
-      transport: 'paired',
-      backendSessionId: 'sess-ssh-1',
-      epoch: '7',
-      pid: 4242,
-      executable: '/usr/bin/ssh-helper-fixture',
-      spawnedAt: '2026-01-01T00:00:00.000Z',
-      candidate: {
-        candidateId: first.candidate.candidateId,
-        sourceManifestSha256: 'written-by-an-earlier-run',
-        binarySha256: first.candidate.binary.sha256,
-      },
-      correlation: {
-        source: 'daemon-remote-session-details',
-        daemonSessionId: 'sess-ssh-1',
-        helperSessionId: 'helper-1',
-        clientRequestId: 'req-ssh-1',
-      },
-    }, null, 2));
-    const paired = await runProvisioner('paired', pairedConfig);
-    const pairedKinds = kindsOf(paired.fixture);
-    const pairedRow = paired.fixture.sessions.find((entry) => entry.hostId === 'qa-ssh');
-    assert.ok(pairedRow, 'the paired session is recorded');
-    assert.equal(pairedRow.transport, 'paired', 'the recorded row is the paired one');
-    assert.equal(
-      pairedRow.pid,
-      null,
-      'a paired host binds no pid from a declared receipt: ' + JSON.stringify(pairedKinds),
-    );
-    assert.ok(
-      !('ptyIdentitySource' in pairedRow),
-      'no identity is stamped for a transport the admission refuses',
-    );
-    assert.equal(
-      validateFixtureManifest(paired.fixture).ok,
-      false,
-      'an unbound paired session leaves the manifest unbound',
-    );
-    assert.ok(
-      pairedKinds.some((entry) => entry.startsWith('session-spawn:')),
-      'a refused admission leaves the session demanded from a daemon this machine does not have, ' +
-        'exactly as an undeclared one is: ' + JSON.stringify(pairedKinds),
-    );
+    // BOTH refused transports are driven, not just the one this block started with: a guard
+    // widened to admit account-relay while still refusing paired (or the reverse) leaves a
+    // single-transport block green, so each transport runs the same four assertions and each is
+    // proven to differ from the accepted ssh run in exactly one field.
+    for (const refusedTransport of ['paired', 'account-relay']) {
+      const refusedConfig = {
+        ...sshConfig,
+        hosts: [{ ...sshConfig.hosts[0], transport: refusedTransport }],
+      };
+      const movedFields = Object.keys(refusedConfig.hosts[0])
+        .filter((field) => refusedConfig.hosts[0][field] !== sshConfig.hosts[0][field]);
+      assert.deepEqual(
+        movedFields,
+        ['transport'],
+        'the ' + refusedTransport + ' run must differ from the ssh run in exactly one field',
+      );
+      // The receipt the owning host of THIS transport would have written for itself: the same
+      // host, session, epoch, pid, candidate id and correlation as the accepted ssh receipt, and
+      // the one field a host of another transport cannot borrow from an ssh one - the transport it
+      // was produced under. The receipt writer's own schema string names the ssh family and the
+      // shared validator reads sourceKind rather than schema, so this fixture omits it instead of
+      // asserting a name no other-transport writer produces.
+      writeFileSync(receiptPath, JSON.stringify({
+        sourceKind: HOST_SUPPLIED_SOURCE_KIND,
+        hostId: 'qa-ssh',
+        transport: refusedTransport,
+        backendSessionId: 'sess-ssh-1',
+        epoch: '7',
+        pid: 4242,
+        executable: '/usr/bin/ssh-helper-fixture',
+        spawnedAt: '2026-01-01T00:00:00.000Z',
+        candidate: {
+          candidateId: first.candidate.candidateId,
+          sourceManifestSha256: 'written-by-an-earlier-run',
+          binarySha256: first.candidate.binary.sha256,
+        },
+        correlation: {
+          source: 'daemon-remote-session-details',
+          daemonSessionId: 'sess-ssh-1',
+          helperSessionId: 'helper-1',
+          clientRequestId: 'req-ssh-1',
+        },
+      }, null, 2));
+      const refused = await runProvisioner(refusedTransport, refusedConfig);
+      const refusedKinds = kindsOf(refused.fixture);
+      const refusedRow = refused.fixture.sessions.find((entry) => entry.hostId === 'qa-ssh');
+      assert.ok(refusedRow, 'the ' + refusedTransport + ' session is recorded');
+      assert.equal(
+        refusedRow.transport,
+        refusedTransport,
+        'the recorded row is the ' + refusedTransport + ' one',
+      );
+      assert.equal(
+        refusedRow.pid,
+        null,
+        'a ' + refusedTransport + ' host binds no pid from a declared receipt: ' + JSON.stringify(refusedKinds),
+      );
+      assert.ok(
+        !('ptyIdentitySource' in refusedRow),
+        'no identity is stamped for a transport the admission refuses',
+      );
+      assert.equal(
+        validateFixtureManifest(refused.fixture).ok,
+        false,
+        'an unbound ' + refusedTransport + ' session leaves the manifest unbound',
+      );
+      assert.ok(
+        refusedKinds.some((entry) => entry.startsWith('session-spawn:')),
+        'a refused admission leaves the session demanded from a daemon this machine does not have, ' +
+          'exactly as an undeclared one is: ' + JSON.stringify(refusedKinds),
+      );
+    }
   } finally {
     if (running.child && running.child.exitCode === null && running.child.signalCode === null) {
       running.child.kill('SIGKILL');
