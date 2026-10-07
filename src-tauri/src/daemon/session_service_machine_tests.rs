@@ -1114,6 +1114,9 @@ async fn projector_desktop_gui_child_canonical_local_target() {
     assert_eq!(projected_root.cwd, ".");
     assert_eq!((projected_root.cols, projected_root.rows), (80, 24));
     projector_child_cleanup(&service).await;
+    // Captured before teardown: the phase is a `&'static str`, so reading it here holds no extra
+    // handle on the session and cannot change the lifecycle this body is proving.
+    let reader_phase = projector_child_reader_phase(&service, &id);
     drop(service);
     drop(owner);
     // Printed last, so a timeout that still shows this stage proves the body returned and the
@@ -1124,7 +1127,7 @@ async fn projector_desktop_gui_child_canonical_local_target() {
         projected.target.machine_id,
         projected_root.cwd,
         root.display(),
-        projector_child_reader_phase(&service, &id)
+        reader_phase
     );
 }
 
@@ -1165,6 +1168,9 @@ async fn projector_desktop_gui_child_foreign_workspace() {
         "SESSION_NOT_FOUND"
     );
     projector_child_cleanup(&service).await;
+    // Captured before teardown: the phase is a `&'static str`, so reading it here holds no extra
+    // handle on the session and cannot change the lifecycle this body is proving.
+    let reader_phase = projector_child_reader_phase(&service, &id);
     drop(service);
     drop(owner);
     // Printed last, so a timeout that still shows this stage proves the body returned and the
@@ -1172,7 +1178,7 @@ async fn projector_desktop_gui_child_foreign_workspace() {
     projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR foreign workspace: session={id} worktree-mismatch=refused unregistered=refused reader_phase={}",
-        projector_child_reader_phase(&service, &id)
+        reader_phase
     );
 }
 
@@ -1213,6 +1219,9 @@ async fn projector_desktop_gui_child_root_escape() {
         "INVALID_PATH"
     );
     projector_child_cleanup(&service).await;
+    // Captured before teardown: the phase is a `&'static str`, so reading it here holds no extra
+    // handle on the session and cannot change the lifecycle this body is proving.
+    let reader_phase = projector_child_reader_phase(&service, &id);
     drop(service);
     drop(owner);
     // Printed last, so a timeout that still shows this stage proves the body returned and the
@@ -1220,7 +1229,7 @@ async fn projector_desktop_gui_child_root_escape() {
     projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR root escape: session={id} outside-root=refused missing-cwd=refused reader_phase={}",
-        projector_child_reader_phase(&service, &id)
+        reader_phase
     );
 }
 
@@ -1262,6 +1271,9 @@ async fn projector_desktop_gui_child_non_ready_workspace() {
         .project_desktop_gui_session(&id, epoch, &restored)
         .is_ok());
     projector_child_cleanup(&service).await;
+    // Captured before teardown: the phase is a `&'static str`, so reading it here holds no extra
+    // handle on the session and cannot change the lifecycle this body is proving.
+    let reader_phase = projector_child_reader_phase(&service, &id);
     drop(service);
     drop(owner);
     // Printed last, so a timeout that still shows this stage proves the body returned and the
@@ -1269,7 +1281,7 @@ async fn projector_desktop_gui_child_non_ready_workspace() {
     projector_child_stage("body-complete");
     eprintln!(
         "F1-PROJECTOR non-ready: session={id} availability=missing-refused ready-projectable reader_phase={}",
-        projector_child_reader_phase(&service, &id)
+        reader_phase
     );
 }
 

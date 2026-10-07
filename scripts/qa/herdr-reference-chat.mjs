@@ -1551,7 +1551,13 @@ export function referenceEnvelopeOf(body) {
   return "other";
 }
 
-const EVIDENCE_REDACT_KEY = /token|secret|authorization|credential|password|base64|bearer/i;
+// The credential-shaped key names, matching the list the fixture layer already redacts with
+// (`redactDiagnosticText`: token|deviceToken|machineToken|pairingToken|apiKey|authorization). An
+// API key and a private key are credentials and were missing from this pattern. A PUBLIC key is not
+// in the list on purpose: it is handed to the client by design, so replacing it would delete the
+// evidence of which machine key a request bound.
+const EVIDENCE_REDACT_KEY =
+  /token|secret|authorization|credential|password|base64|bearer|api[_-]?key|private[_-]?key/i;
 
 /**
  * A bounded, secret-free copy of a body for evidence. Any key that names a credential, a token or

@@ -178,6 +178,8 @@ test('evidence redaction removes credential-shaped keys and truncates long strin
     deviceToken: 'saved-device-token-abc',
     authorization: 'Bearer secret',
     contentBase64: 'aGVsbG8=',
+    apiKey: 'sk-not-a-real-key',
+    private_key: '-----BEGIN PRIVATE KEY-----',
     requestId: 'req-1',
     code: 'INVALID_REQUEST',
     nested: { machineAttachPublicKey: 'machine-noise-pub-key', ok: true },
@@ -186,9 +188,15 @@ test('evidence redaction removes credential-shaped keys and truncates long strin
   assert.equal(redacted.deviceToken, '[redacted]');
   assert.equal(redacted.authorization, '[redacted]');
   assert.equal(redacted.contentBase64, '[redacted]');
+  // The two credential names the fixture layer redacts with are redacted here as well.
+  assert.equal(redacted.apiKey, '[redacted]');
+  assert.equal(redacted.private_key, '[redacted]');
+  // A key that names no credential is evidence, not a secret.
   assert.equal(redacted.requestId, 'req-1');
   assert.equal(redacted.code, 'INVALID_REQUEST');
-  assert.equal(redacted.nested.machineAttachPublicKey, '[redacted]');
+  // A PUBLIC key is not a credential: it is handed to the client by design, and replacing it would
+  // delete the evidence of which machine key a request bound.
+  assert.equal(redacted.nested.machineAttachPublicKey, 'machine-noise-pub-key');
   assert.equal(redacted.nested.ok, true);
   const long = redactForEvidence('x'.repeat(500));
   assert.ok(long.length < 240);

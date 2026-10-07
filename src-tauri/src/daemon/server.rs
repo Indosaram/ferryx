@@ -2291,6 +2291,7 @@ impl DaemonServer {
                 };
                 let states = Arc::clone(&states);
                 let sessions = sessions.clone();
+                let server = Arc::clone(&server);
                 while clients.try_join_next().is_some() {}
                 clients.spawn(async move {
                     let mut reader = BufReader::new(stream);
@@ -2374,6 +2375,7 @@ impl DaemonServer {
                 let states = Arc::clone(&states);
                 let sessions = sessions.clone();
                 let token = token.clone();
+                let server = Arc::clone(&server);
                 while clients.try_join_next().is_some() {}
                 clients.spawn(async move {
                     let mut reader = BufReader::new(stream);

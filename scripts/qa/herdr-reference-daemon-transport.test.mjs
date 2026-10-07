@@ -65,6 +65,7 @@ import {
   ProvisionError,
   SSH_RECEIPT_PROBE_PLATFORM,
   SSH_HOST_STORE_FILENAME,
+  SSH_PROJECTS_STORE_FILENAME,
   remoteSpawnRequest,
   remoteExecutableProbeCommand,
   remoteOwnerHostReceipt,
@@ -1367,8 +1368,14 @@ test('a remote spawn requires the derived ssh id and a declared store', () => {
 
 test('the correlation is verified against the real spawn response, not a declaration', () => {
   // What spawnRemotePty records from the daemon's own spawnOk, with no config value involved.
-  const fromSpawn = { sessionId: daemonSessionId, clientRequestId: 'req-ssh-1' };
-  const correlated = remoteReceiptCorrelation(remoteDetails(), fromSpawn);
+  const fromSpawn = { sessionId: daemonSessionId, clientRequestId: sshSpawnSession.clientRequestId };
+  // The daemon's reply reports the request id the spawn was SENT with, so both sides of this
+  // comparison come from that ONE value. Hardcoding each side separately is how this fixture
+  // drifted, and a drift here is a false mismatch rather than a real refusal.
+  const replyForSpawn = remoteDetails({
+    descriptor: { ...remoteDetails().descriptor, clientRequestId: sshSpawnSession.clientRequestId },
+  });
+  const correlated = remoteReceiptCorrelation(replyForSpawn, fromSpawn);
   assert.equal(correlated.ok, true, JSON.stringify(correlated));
   assert.equal(correlated.daemonSessionId, daemonSessionId);
 
@@ -1400,7 +1407,14 @@ test('the ssh inventory path is a FILE, and the project store is its sibling', (
 
   // The project store is derived the way the product derives it - `with_file_name` - so it is the
   // inventory file's SIBLING. The child reading would be a path the daemon never looks at.
-  assert.equal(sshProjectsStorePath(inventory), '/tmp/herdr-ssh-qa/remote_projects.json');
+  // Platform-native: the product derives this with `Path::with_file_name`, so the expected value is
+  // built the same way rather than spelled with POSIX separators.
+  assert.equal(sshProjectsStorePath(inventory), join(dirname(inventory), SSH_PROJECTS_STORE_FILENAME));
+  assert.equal(
+    dirname(sshProjectsStorePath(inventory)),
+    dirname(inventory),
+    'the project store sits beside the inventory file, in the same directory',
+  );
   assert.notEqual(
     sshProjectsStorePath(inventory),
     join(dirname(inventory), SSH_HOST_STORE_FILENAME, SSH_PROJECTS_STORE_FILENAME),
