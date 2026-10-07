@@ -630,6 +630,83 @@ function hostTransportRefusal(host, hostTransports, blockers) {
 }
 
 /**
+ * The identity a NON-LOCAL session config fully declares, or null.
+ *
+ * A remote session (ssh, paired, account-relay) belongs to ITS host: this producer cannot create
+ * it through a local daemon it never launched, and demanding that it do so is what made a
+ * fully-factored non-local host yield `daemon-runtime-undeclared` - a blocker whose session row
+ * then carried no pid, so `validateFixtureManifest` rejected the whole manifest and the runner
+ * classified ZERO branches. One unspawnable host destroyed every other host evidence.
+ *
+ * A host that declares ALL FOUR of these has supplied everything the identity needs, and the
+ * owning host own spawn receipt - validated below against this run host, transport, session,
+ * incarnation and candidate - is what binds the pid and the executable:
+ *
+ *   backendSessionId   the session on the owning daemon
+ *   epoch              that daemon incarnation
+ *   createResponse     the create record (sessionId + clientRequestId) the receipt must corroborate
+ *   spawnReceiptPath   the owning host own spawn receipt, on disk
+ *
+ * Anything less is NOT accepted: a session that declares a bare pid, or a receipt with no create
+ * record, or a create record with no receipt, falls through to exactly the refusal it has today.
+ * Only the fully-declared case becomes runnable, so no existing refusal is weakened.
+ */
+function declaredNonLocalSessionIdentity(host, session) {
+  if (!host || host.transport === "local") return null;
+  const backendSessionId = session && isNonEmptyText(session.backendSessionId) ? session.backendSessionId : null;
+  const rawEpoch = session ? session.epoch : null;
+  const epoch =
+    rawEpoch === undefined || rawEpoch === null || String(rawEpoch).trim().length === 0
+      ? null
+      : String(rawEpoch);
+  const create = session ? session.createResponse : null;
+  const createSessionId = create && isNonEmptyText(create.sessionId) ? create.sessionId : null;
+  const createRequestId = create && isNonEmptyText(create.clientRequestId) ? create.clientRequestId : null;
+  const receiptPath = (session && session.spawnReceiptPath) || host.spawnReceiptPath || null;
+  if (!backendSessionId || !epoch || !createSessionId || !createRequestId || !isNonEmptyText(receiptPath)) {
+    return null;
+  }
+  return { backendSessionId, epoch, createSessionId, createRequestId, receiptPath };
+}
+
+/**
+ * Whether the owning host receipt CORROBORATES the create record the config declared.
+ *
+ * `declaredNonLocalSessionIdentity` accepts a create record as part of a session declaration, and
+ * a declared value this run never checks is not evidence - it is a field. The receipt the
+ * acquisition path writes carries the correlation it was built from (see remoteOwnerHostReceipt),
+ * so the declared create record is load-bearing here: the receipt must name the SAME session and
+ * the SAME create request, or the declaration is refused rather than stamped.
+ *
+ * There is nothing to corroborate when the config declared no create record, which is what keeps
+ * the behaviour of a plain `spawnReceiptPath` exactly as it is.
+ */
+function ownerHostReceiptCreateAgreement(receipt, declared) {
+  const correlation = receipt && receipt.correlation;
+  if (!correlation || typeof correlation !== "object") {
+    return {
+      ok: false,
+      detail: "the receipt carries no correlation block, so it cannot corroborate the declared create record",
+    };
+  }
+  if (correlation.daemonSessionId !== declared.createSessionId) {
+    return {
+      ok: false,
+      detail: "the receipt correlates session " + String(correlation.daemonSessionId) +
+        ", the declared create record names " + declared.createSessionId,
+    };
+  }
+  if (correlation.clientRequestId !== declared.createRequestId) {
+    return {
+      ok: false,
+      detail: "the receipt correlates request " + String(correlation.clientRequestId) +
+        ", the declared create record names " + declared.createRequestId,
+    };
+  }
+  return { ok: true, detail: "" };
+}
+
+/**
  * Spawn one original PTY through the host's own daemon and record the exact PID and
  * executable. The session record the daemon returns is the authority for the geometry the
  * pane actually has; a mismatch with the requested geometry is reported, not smoothed over.
@@ -1593,7 +1670,13 @@ async function main() {
         // daemon, so the PID and executable in the manifest are the ones this run created
         // and can prove ownership of. A host that already runs its own session supplies the
         // PID instead, and this producer never invents one.
-        if (host.spawnSessions === true && row.pid === null) {
+        //
+        // The THIRD shape is a non-local session whose owner already spawned it and whose config
+        // fully declares the result (see declaredNonLocalSessionIdentity): it is not spawned here
+        // and needs no daemon transport on this machine, because the owner own receipt -
+        // validated below - is what binds its pid and executable.
+        const declaredIdentity = declaredNonLocalSessionIdentity(host, session);
+        if (host.spawnSessions === true && row.pid === null && !declaredIdentity) {
           // The daemon this spawn goes to: the one this run launched for the host when it did,
           // otherwise the transport the config declares for it. Never a guess.
           const hostTransport = hostTransports.get(host.id);
@@ -1662,7 +1745,10 @@ async function main() {
         // session already existed. A discovered pid carries NO cleanup authority: it is evidence,
         // not an owned process, so
         // nothing here reaches the owned-process ledger.
-        if (!row.ptyIdentity && host.transport === "ssh" && host.acquireSshReceipt === true && !row.spawnReceiptPath) {
+        // Acquisition ASKS the owning host for a receipt. A session that already DECLARED one is
+        // not re-acquired - and must not be, because a declared identity is accepted precisely
+        // because this machine has no transport to that host daemon.
+        if (!row.ptyIdentity && !declaredIdentity && host.transport === "ssh" && host.acquireSshReceipt === true && !row.spawnReceiptPath) {
           try {
             const resolved = hostTransports.get(host.id);
             const acquired = await acquireSshOwnerHostReceipt({
@@ -1730,14 +1816,26 @@ async function main() {
             });
           } else if (receiptPath) {
             const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+            // A receipt the config DECLARED was written by an earlier run, and every candidate
+            // manifest carries a fresh `capturedAt`, so its own hash can never be reproduced by
+            // this run: gating a declared receipt on it would refuse every pre-existing receipt
+            // outright, which is exactly the ssh leg that could not be exercised. The binding that
+            // IS reproducible is `candidateId` - sha256(revision | dirtyPatchSha256 | binarySha256),
+            // which captureSourceProvenance now computes identically on any host - so that is what
+            // is enforced, and the receipt own manifest hash is RECORDED beside the row instead of
+            // being dropped (see below). An ACQUIRED receipt keeps the full check.
             const receiptCheck = validateOwnerHostSpawnReceipt(receipt, {
               hostId: host.id,
               transport: host.transport,
               backendSessionId: row.backendSessionId,
               epoch: row.epoch,
               candidateId: candidateManifest.candidateId,
-              sourceManifestSha256: candidateManifestSha256,
+              sourceManifestSha256: declaredIdentity ? null : candidateManifestSha256,
             });
+            // The declared create record must be corroborated by the receipt, not merely declared.
+            const createAgreement = declaredIdentity
+              ? ownerHostReceiptCreateAgreement(receipt, declaredIdentity)
+              : { ok: true, detail: "" };
             if (!receiptCheck.ok) {
               blockers.push({
                 kind: "owner-host-spawn-receipt",
@@ -1746,6 +1844,17 @@ async function main() {
                 backendSessionId: row.backendSessionId,
                 detail: receiptPath,
                 reason: "owner-host spawn receipt rejected: " + receiptCheck.errors.join("; "),
+              });
+            } else if (!createAgreement.ok) {
+              blockers.push({
+                kind: "owner-host-spawn-receipt",
+                hostId: host.id,
+                transport: host.transport,
+                backendSessionId: row.backendSessionId,
+                detail: receiptPath,
+                reason:
+                  "owner-host spawn receipt does not corroborate the declared create record: " +
+                  createAgreement.detail,
               });
             } else {
               row.ptyIdentity = bindHostSuppliedIdentity({
@@ -1763,6 +1872,24 @@ async function main() {
               });
               row.ptyIdentitySource = "owner-host-spawn-receipt";
               row.spawnReceiptPath = receiptPath;
+              // The pid and the executable are the RECEIPT validated ones - the same two values
+              // the acquisition path above records from its own receipt. Without this the row
+              // would carry a validated ptyIdentity and still no pid, and
+              // `validateFixtureManifest` would refuse the manifest it was bound to, which is the
+              // whole reason a fully-declared non-local host could not be run.
+              row.pid = receipt.pid;
+              row.executablePath = receipt.executable;
+              row.pidSource = "owner-host-spawn-receipt";
+              row.missingIdentity = row.missingIdentity.filter((field) =>
+                !["pid", "executablePath"].includes(field));
+              // A declared receipt manifest hash cannot equal this run own (a fresh `capturedAt`
+              // every run), so it is recorded as the provenance it is rather than silently
+              // dropped: a reader can see which run manifest the receipt was bound to.
+              if (declaredIdentity) {
+                row.spawnReceiptSourceManifestSha256 = receipt.candidate
+                  ? receipt.candidate.sourceManifestSha256 || null
+                  : null;
+              }
             }
           }
         }

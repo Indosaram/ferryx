@@ -591,8 +591,57 @@ export function redactUrl(raw) {
  * Provenance
  * ========================================================================== */
 
+/**
+ * The git configuration every provenance read is pinned to.
+ *
+ * A candidate identity is sha256(revision | dirtyPatchSha256 | binarySha256), so any host-local
+ * git setting that moves the BYTES of git diff or git status silently gives the SAME tree a
+ * different candidateId - and a provenance chain that means one thing on one host and another
+ * thing on the next is not a provenance chain. Every key below is one a host can set that moves
+ * those bytes, and each is pinned to git own default, so an unconfigured host hashes exactly as
+ * it always did and a configured one now hashes the same way:
+ *
+ *   diff.mnemonicprefix       rewrites the a/ b/ prefixes as i/ w/ c/ o/ per diff direction
+ *   diff.noprefix             drops the prefixes entirely
+ *   diff.srcPrefix/dstPrefix  the prefixes themselves (configurable since git 2.38)
+ *   diff.algorithm            myers | minimal | patience | histogram - decides where hunks BREAK
+ *   diff.indentHeuristic      shifts hunk boundaries to indentation (git default is true)
+ *   diff.context              lines of context around a hunk (git default is 3)
+ *   diff.interHunkContext     merges hunks closer than N lines (git default is 0)
+ *   diff.suppressBlankEmpty   whether an empty line inside a hunk is emitted (default false)
+ *   diff.renames              rename detection on, so a move is not a delete plus an add
+ *   core.autocrlf             no line-ending conversion of the compared content
+ *   core.safecrlf             no line-ending safety abort
+ *   core.bigFileThreshold     the same binary/text threshold (a lowered value renders a big file binary)
+ *   core.quotePath            paths as UTF-8, never octal-escaped
+ *   status.renames            status reports a rename as a rename, not as a delete plus an add
+ *
+ * An unknown key is ignored by git, so this list is safe on a git that predates diff.srcPrefix.
+ * Deliberately NOT pinned: diff.external and diff.<driver>.textconv, which REPLACE the diff
+ * output. An empty "-c diff.external=" is a command rather than "no external diff", so pinning it
+ * would turn a working invocation into a failed one; a host that replaces its diff command is a
+ * residual dependence, written down here instead of being papered over.
+ */
+const REPRODUCIBLE_GIT_CONFIG = [
+  "-c", "diff.mnemonicprefix=false",
+  "-c", "diff.noprefix=false",
+  "-c", "diff.srcPrefix=a/",
+  "-c", "diff.dstPrefix=b/",
+  "-c", "diff.algorithm=myers",
+  "-c", "diff.indentHeuristic=true",
+  "-c", "diff.context=3",
+  "-c", "diff.interHunkContext=0",
+  "-c", "diff.suppressBlankEmpty=false",
+  "-c", "diff.renames=true",
+  "-c", "core.autocrlf=false",
+  "-c", "core.safecrlf=false",
+  "-c", "core.bigFileThreshold=512m",
+  "-c", "core.quotePath=false",
+  "-c", "status.renames=true",
+];
+
 function git(root, args) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  const result = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, ...args], { cwd: root, encoding: "utf8" });
   if (result.status !== 0) {
     return { ok: false, stdout: (result.stdout || "").trim(), stderr: (result.stderr || "").trim() };
   }
@@ -603,12 +652,21 @@ function git(root, args) {
  * The candidate source provenance: the exact revision, the hash of every uncommitted
  * change (a dirty tree cannot be identified by HEAD alone), the tracked files the plan
  * names, and the tool versions the run used.
+ *
+ * Both hashes are host-INDEPENDENT. The patch hash is read through REPRODUCIBLE_GIT_CONFIG, so a
+ * differently-configured host cannot move it, and the status hash is scoped to TRACKED files
+ * (--untracked-files=no) so a build artifact, a log or a stray file that happens to exist on one
+ * host cannot move the identity either: an untracked file is not part of the change under
+ * verification, and "dirty" follows the same scope.
  */
 export function captureSourceProvenance(root, sourcePaths, toolVersions) {
   const revision = git(root, ["rev-parse", "HEAD"]);
-  const diff = spawnSync("git", ["diff", "HEAD", "--binary"], { cwd: root, encoding: "buffer" });
+  const diff = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, "diff", "HEAD", "--binary"], {
+    cwd: root,
+    encoding: "buffer",
+  });
   const dirtyPatchSha256 = sha256Bytes(diff.stdout || Buffer.alloc(0));
-  const status = git(root, ["status", "--porcelain=v1"]);
+  const status = git(root, ["status", "--porcelain=v1", "--untracked-files=no"]);
   const files = [];
   for (const relative of sourcePaths) {
     const absolute = resolve(root, relative);

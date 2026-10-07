@@ -24,6 +24,7 @@ use crate::terminal::{AttachmentSnapshot, OutputChunk, SessionAttachment, Termin
 use crate::worktree::{parse_host_scoped_session_id, CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
+        rejection::QueryRejection,
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path as AxumPath, Query, State,
     },
@@ -4819,6 +4820,22 @@ fn reference_chat_refusal(error: &ScopeError) -> Response {
     reference_chat_error(error.code, error.message.clone())
 }
 
+/// The read query a reference-chat read binds its target with.
+///
+/// The route binds the extractor's outcome so that a malformed query answers with the same
+/// frozen machine envelope every other refusal on this surface uses, rather than axum's own
+/// bodyless rejection.
+fn reference_chat_read_query(
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+) -> Result<ReferenceChatReadQuery, Response> {
+    query.map(|Query(query)| query).map_err(|rejection| {
+        reference_chat_refusal(&reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            format!("the read query is not readable: {rejection}"),
+        ))
+    })
+}
+
 /// The frozen ScopeResult success shape a mutation answers with.
 fn reference_chat_result_ok(request_id: &str, data: serde_json::Value) -> Response {
     (
@@ -5398,9 +5415,13 @@ async fn reference_chat_mutation_body<P: serde::de::DeserializeOwned>(
 async fn reference_chat_history(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<ReferenceChatReadQuery>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
         Ok(read) => read,
@@ -5457,9 +5478,13 @@ async fn reference_chat_history(
 async fn reference_chat_screen(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<ReferenceChatReadQuery>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
@@ -5479,9 +5504,13 @@ async fn reference_chat_screen(
 async fn reference_chat_prompt(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<ReferenceChatReadQuery>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
         Ok(read) => read,
@@ -5767,9 +5796,13 @@ async fn reference_chat_stage_file(
 async fn reference_chat_preview_file(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath((session_id, file_id)): AxumPath<(String, String)>,
-    Query(query): Query<ReferenceChatReadQuery>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
@@ -5829,9 +5862,13 @@ async fn reference_chat_preview_file(
 async fn reference_chat_delete_file(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath((session_id, file_id)): AxumPath<(String, String)>,
-    Query(query): Query<ReferenceChatReadQuery>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
@@ -6441,6 +6478,12 @@ mod preference_http_tests;
 #[cfg(test)]
 #[path = "capability_tests.rs"]
 mod capability_tests;
+
+// A malformed read query must answer the frozen machine envelope on the read routes this module
+// serves, so its regression source lives beside this module too.
+#[cfg(test)]
+#[path = "reference_chat_query_tests.rs"]
+mod reference_chat_query_tests;
 
 #[cfg(test)]
 mod tests {

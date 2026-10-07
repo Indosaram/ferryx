@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1660,6 +1660,259 @@ test('a refused gateway launch is reported as its host blocker, and the run stil
     );
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * The provenance hashes are host-INDEPENDENT (F4's P-3)
+ *
+ * Defect: `captureSourceProvenance` derived `dirtyPatchSha256` and `dirtyStatusSha256` from
+ * whatever git configuration the host happened to carry, and `candidateId` is derived from the
+ * patch hash - so the SAME candidate was assigned a DIFFERENT identity on a differently-configured
+ * host, and the provenance chain the whole verification programme rests on stopped meaning one
+ * thing.
+ *
+ * The observable is the hash itself, measured under two hosts' configurations and then with
+ * untracked noise added: neither a host's diff configuration nor an untracked build artifact may
+ * move either hash. The measurement runs in CHILD processes with their own GIT_CONFIG_GLOBAL, so
+ * 'a differently-configured host' is a real configuration and no other test in this file is
+ * affected by it.
+ * ------------------------------------------------------------------------ */
+
+const fixturesModuleUrl = new URL('./herdr-reference-fixtures.mjs', import.meta.url).href;
+
+/**
+ * One child computes this tree's provenance under one host's git configuration.
+ *
+ * The configuration is the HOST's, not this process's: the child gets its own GIT_CONFIG_GLOBAL
+ * and no system config, which is exactly the difference between two machines that made the
+ * identity move. The value read back is the harness's own, never a re-derivation here.
+ */
+function provenanceUnderHostConfig(repo, configPath) {
+  const script =
+    'import { captureSourceProvenance } from ' + JSON.stringify(fixturesModuleUrl) + ';\n' +
+    'const p = captureSourceProvenance(process.cwd(), [], {});\n' +
+    'process.stdout.write(JSON.stringify({ patch: p.dirtyPatchSha256, status: p.dirtyStatusSha256, dirty: p.dirty }));\n';
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: configPath },
+  });
+  assert.equal(child.status, 0, 'the provenance probe failed: ' + child.stderr);
+  return JSON.parse(child.stdout);
+}
+
+test('the provenance identity does not move with the host git configuration or untracked files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-provenance-'));
+  try {
+    const repo = join(dir, 'repo');
+    mkdirSync(repo, { recursive: true });
+    const clean = join(dir, 'clean.gitconfig');
+    const hostA = join(dir, 'host-a.gitconfig');
+    const hostB = join(dir, 'host-b.gitconfig');
+    // A host with no git configuration at all, and two hosts that configure diff OUTPUT
+    // differently: mnemonic prefixes and a different hunk algorithm on one, no prefixes and a
+    // third algorithm on the other. Both are ordinary user settings.
+    writeFileSync(clean, '');
+    writeFileSync(hostA, '[diff]\n\tmnemonicprefix = true\n\talgorithm = histogram\n\tindentHeuristic = false\n\tcontext = 8\n\trenames = false\n');
+    writeFileSync(hostB, '[diff]\n\tnoprefix = true\n\talgorithm = minimal\n\tsuppressBlankEmpty = true\n[core]\n\tautocrlf = true\n\tquotePath = true\n');
+    const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: clean };
+    const git = (...args) => {
+      const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: gitEnv });
+      assert.equal(result.status, 0, 'git ' + args.join(' ') + ' failed: ' + result.stderr);
+    };
+    git('init', '-q');
+    writeFileSync(join(repo, 'tracked.txt'), 'one\n');
+    git('add', 'tracked.txt');
+    git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
+    writeFileSync(join(repo, 'tracked.txt'), 'two\n');
+
+    const baseline = provenanceUnderHostConfig(repo, clean);
+    const configured = provenanceUnderHostConfig(repo, hostA);
+    const other = provenanceUnderHostConfig(repo, hostB);
+    assert.equal(baseline.dirty, true, 'a modified tracked file is what makes the tree dirty');
+    assert.ok(baseline.patch.length > 0 && baseline.status.length > 0, 'the probe read both hashes');
+    assert.equal(configured.patch, baseline.patch, 'one host diff configuration moved the patch hash');
+    assert.equal(other.patch, baseline.patch, 'another host diff configuration moved the patch hash');
+    assert.equal(configured.status, baseline.status, 'one host diff configuration moved the status hash');
+    assert.equal(other.status, baseline.status, 'another host diff configuration moved the status hash');
+
+    // Untracked files are not part of the change under verification: a build artifact or a log
+    // that exists on one host and not on another must not move the identity either.
+    writeFileSync(join(repo, 'build-noise.log'), 'noise\n');
+    const noisy = provenanceUnderHostConfig(repo, clean);
+    assert.equal(noisy.patch, baseline.patch, 'an untracked file moved the patch hash');
+    assert.equal(noisy.status, baseline.status, 'an untracked file moved the status hash');
+    assert.equal(noisy.dirty, baseline.dirty, 'an untracked file moved the dirty flag');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * A fully-declared non-local session is RUNNABLE; an undeclared one is still refused (G-11)
+ *
+ * Defect: the producer launched a gateway only for the `local` transport, so a fully-factored ssh
+ * host resolved no daemon transport, the spawn was demanded anyway, and the session row was left
+ * with no pid - which `validateFixtureManifest` refuses. ONE unspawnable host therefore destroyed
+ * the whole manifest and the runner classified zero branches, so the ssh leg could not be
+ * exercised at all.
+ *
+ * The observable is the manifest. A session whose config declares the owning host's
+ * backendSessionId, epoch, create record and spawn receipt is bound to that receipt and the
+ * manifest VALIDATES; a session that declares nothing meets exactly the refusal it always did.
+ * The producer runs in a child process, twice for the declared case, because the receipt must name
+ * the candidate id this producer freezes - read back from the first run's own manifest rather than
+ * re-derived here.
+ * ------------------------------------------------------------------------ */
+
+/** The config for one ssh host whose single session is `session`, exactly as declared. */
+function declaredSshConfig(source, credentialFile, binary, session) {
+  return {
+    $note: 'one non-local host; its session is declared by the config, never spawned on this machine',
+    source: { root: source, paths: [] },
+    candidate: { binary },
+    providers: [],
+    devices: [],
+    hosts: [{
+      id: 'qa-ssh',
+      transport: 'ssh',
+      platform: 'linux',
+      url: 'http://127.0.0.1:43821',
+      gatewayUrl: 'http://127.0.0.1:43821',
+      credentialFile,
+      spawnSessions: true,
+      sessions: [session],
+    }],
+  };
+}
+
+test('a fully-declared non-local session binds to its receipt, and an undeclared one is still refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-declared-ssh-'));
+  const running = { child: null };
+  try {
+    const source = join(dir, 'source');
+    mkdirSync(source, { recursive: true });
+    const credentialFile = join(dir, 'device.token');
+    writeFileSync(credentialFile, 'fixture-token\n');
+    // A candidate binary, because a real config names one: the candidate manifest requires a hashed
+    // binary, and the receipt the owning host writes carries that hash - so a fixture with no binary
+    // could not produce a receipt the shared validator accepts, and would be testing a state no
+    // configured host can be in.
+    const binary = join(dir, 'candidate-gateway');
+    writeFileSync(binary, 'fixture-candidate-binary\n');
+    const receiptPath = join(dir, 'ssh-owner-host-receipt.json');
+    const session = {
+      registryId: 'omo',
+      provider: 'omo',
+      providerCommand: 'omo',
+      cols: 120,
+      rows: 30,
+      backendSessionId: 'sess-ssh-1',
+      epoch: '7',
+      createResponse: { sessionId: 'sess-ssh-1', clientRequestId: 'req-ssh-1' },
+      spawnReceiptPath: receiptPath,
+    };
+    const runProvisioner = async (label, config) => {
+      const configPath = join(dir, 'hosts-' + label + '.json');
+      const out = join(dir, 'out-' + label);
+      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      running.child = spawn(
+        process.execPath,
+        [provisionScript, '--config', configPath, '--out', out, '--timeout-ms', '5000'],
+        { cwd: dir, env: { ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir }, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      await runToCompletion(running.child, 60_000);
+      return {
+        fixture: JSON.parse(readFileSync(join(out, 'fixtures.json'), 'utf8')),
+        candidate: JSON.parse(readFileSync(join(out, 'candidate.json'), 'utf8')),
+      };
+    };
+    const kindsOf = (fixture) => fixture.blockers.map((entry) => entry.kind + ':' + entry.reason);
+
+    // Run 1: declared in full, but the receipt does not exist yet. What matters here is what is NOT
+    // recorded - the spawn is not demanded from a daemon this machine does not have, and no blanket
+    // receipt requirement is fabricated over a receipt path the config DID declare.
+    const first = await runProvisioner('first', declaredSshConfig(source, credentialFile, binary, session));
+    const firstKinds = kindsOf(first.fixture);
+    assert.equal(
+      firstKinds.some((entry) => entry.startsWith('session-spawn:')),
+      false,
+      'a fully-declared session is not demanded from a daemon this machine does not have: ' + JSON.stringify(firstKinds),
+    );
+    assert.ok(
+      firstKinds.includes('owner-host-spawn-receipt:the configured owner-host spawn receipt does not exist'),
+      'the declared receipt path is what is read: ' + JSON.stringify(firstKinds),
+    );
+
+    // The receipt the owning host would have written, bound to the candidate id THIS producer froze
+    // - read from run 1's own manifest, never re-derived in the test.
+    writeFileSync(receiptPath, JSON.stringify({
+      schema: 'ferryx-herdr-reference.ssh-owner-host-receipt/1',
+      sourceKind: HOST_SUPPLIED_SOURCE_KIND,
+      hostId: 'qa-ssh',
+      transport: 'ssh',
+      backendSessionId: 'sess-ssh-1',
+      epoch: '7',
+      pid: 4242,
+      executable: '/usr/bin/ssh-helper-fixture',
+      spawnedAt: '2026-01-01T00:00:00.000Z',
+      candidate: {
+        candidateId: first.candidate.candidateId,
+        sourceManifestSha256: 'written-by-an-earlier-run',
+        // The real builder (`remoteOwnerHostReceipt`) always sets this from the candidate it was
+        // acquired against, and the shared validator requires it - so the fixture carries the
+        // binary hash of the very candidate this producer froze, read from run 1 own manifest.
+        binarySha256: first.candidate.binary.sha256,
+      },
+      correlation: {
+        source: 'daemon-remote-session-details',
+        daemonSessionId: 'sess-ssh-1',
+        helperSessionId: 'helper-1',
+        clientRequestId: 'req-ssh-1',
+      },
+    }, null, 2));
+
+    // Run 2: the same config over the same source, so the same candidate id, and now the receipt.
+    const second = await runProvisioner('second', declaredSshConfig(source, credentialFile, binary, session));
+    const verdict = validateFixtureManifest(second.fixture);
+    assert.equal(verdict.ok, true, 'the bound ssh session validates: ' + verdict.errors.join('; '));
+    const row = second.fixture.sessions.find((entry) => entry.hostId === 'qa-ssh');
+    assert.ok(row, 'the ssh session is recorded');
+    assert.equal(row.pid, 4242, 'the pid comes from the owning host receipt');
+    assert.equal(row.executablePath, '/usr/bin/ssh-helper-fixture', 'the executable comes from the receipt');
+    assert.equal(row.ptyIdentitySource, 'owner-host-spawn-receipt');
+    assert.equal(row.spawnReceiptPath, receiptPath);
+    assert.equal(row.backendSessionId, 'sess-ssh-1');
+    assert.equal(row.epoch, '7');
+    assert.ok(!('spawnedByThisRun' in row), 'a session this run did not spawn is not marked as spawned here');
+    assert.equal(
+      kindsOf(second.fixture).some((entry) => entry.startsWith('owner-host-spawn-receipt:')),
+      false,
+      'the declared receipt is accepted: ' + JSON.stringify(kindsOf(second.fixture)),
+    );
+
+    // The negative half: a host that declares NOTHING is still refused exactly as before, and its
+    // session still carries no identity - which is why such a host could never be declared at all.
+    const bare = await runProvisioner('bare', declaredSshConfig(source, credentialFile, binary, {
+      registryId: 'omo',
+      provider: 'omo',
+      providerCommand: 'omo',
+      cols: 120,
+      rows: 30,
+    }));
+    const bareKinds = kindsOf(bare.fixture);
+    assert.ok(
+      bareKinds.includes('session-spawn:daemon-runtime-undeclared'),
+      'an undeclared non-local session is still refused as daemon-runtime-undeclared: ' + JSON.stringify(bareKinds),
+    );
+    assert.equal(bare.fixture.sessions[0].pid, null, 'no pid is invented for a session that declares nothing');
+    assert.equal(validateFixtureManifest(bare.fixture).ok, false, 'an unbound session still leaves the manifest unbound');
+  } finally {
+    if (running.child && running.child.exitCode === null && running.child.signalCode === null) {
+      running.child.kill('SIGKILL');
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });

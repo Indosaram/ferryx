@@ -1726,7 +1726,17 @@ async fn host_http_handler(
     if !allowed_http_route(request.method(), &path) {
         return Err(StatusCode::FORBIDDEN);
     }
-    validate_http_query(&path, request.uri().query())?;
+    // A refused query answers with the frozen machine envelope every other refusal on this
+    // surface uses, so the caller sees a typed INVALID_REQUEST instead of the bodyless 400 a
+    // bare `StatusCode` becomes.
+    if let Err(status) = validate_http_query(&path, request.uri().query()) {
+        return Ok(crate::remote::server::machine_error_with_details(
+            status,
+            "INVALID_REQUEST",
+            "the forwarded query is not admissible on this route",
+            serde_json::Map::new(),
+        ));
+    }
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
     }
@@ -1912,6 +1922,20 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
             return Err(StatusCode::BAD_REQUEST);
         }
     }
+    // The fields the host's own `ReferenceChatReadQuery` declares. `history`, `screen`,
+    // `prompt` and the staged-file routes all deserialize that one struct, so a field it
+    // accepts must not be refused here.
+    let reference_chat_read_fields: &[&str] = &[
+        "hostId",
+        "ownerId",
+        "epoch",
+        "backendSessionId",
+        "providerSessionId",
+        "registryId",
+        "limit",
+        "cursor",
+        "cursorStream",
+    ];
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
         ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
@@ -1923,35 +1947,12 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // Chat history pages by limit/cursor. Without this the relay answers 400 and the
         // remote chat view stays empty even though the machine serves the route.
         ["agent-history", _] => &["limit", "cursor"],
-        // Reference chat. A read names its whole target in the query; the file routes carry
-        // the same target, and a mutation's target travels in its own envelope body.
-        ["reference-chat", _, "history"] => &[
-            "hostId",
-            "ownerId",
-            "epoch",
-            "backendSessionId",
-            "providerSessionId",
-            "registryId",
-            "limit",
-            "cursor",
-            "cursorStream",
-        ],
-        ["reference-chat", _, "screen" | "prompt"] => &[
-            "hostId",
-            "ownerId",
-            "epoch",
-            "backendSessionId",
-            "providerSessionId",
-            "registryId",
-        ],
-        ["reference-chat", _, "files", _] => &[
-            "hostId",
-            "ownerId",
-            "epoch",
-            "backendSessionId",
-            "providerSessionId",
-            "registryId",
-        ],
+        // Reference chat. A read names its whole target in the query; `history`, `screen`,
+        // `prompt` and the staged-file routes all deserialize the host's own
+        // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
+        // travels in its own envelope body, so its query must stay empty.
+        ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
+        ["reference-chat", _, "files", _] => reference_chat_read_fields,
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -5311,6 +5312,95 @@ mod tests {
         .await;
         // Then routing succeeds and the offline machine is reported, not forbidden.
         assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_reference_chat_read_admits_every_field_the_host_declares() {
+        // The host's own `ReferenceChatReadQuery` declares these; every reference-chat read
+        // route deserializes it, so the relay must not refuse a query the host accepts.
+        let query = "hostId=local&ownerId=owner&epoch=1&backendSessionId=s&providerSessionId=p\
+                     &registryId=codex&limit=50&cursor=3&cursorStream=codex-transcript:abc";
+        for suffix in ["history", "screen", "prompt", "files/attachment-1"] {
+            let path = format!("reference-chat/session-1/{suffix}");
+            assert!(
+                validate_http_query(&path, Some(query)).is_ok(),
+                "{path} must admit every field the host's read query declares"
+            );
+            assert!(
+                validate_http_query(&path, Some("repoPath=/etc/passwd")).is_err(),
+                "{path} must still refuse a field the contract does not define"
+            );
+        }
+    }
+
+    /// Widening the allowlist changes the response SHAPE, never the admission decisions.
+    #[test]
+    fn the_reference_chat_allowlist_still_refuses_what_it_always_refused() {
+        let path = "reference-chat/session-1/screen";
+        // A field the contract does not define.
+        assert_eq!(
+            validate_http_query(path, Some("repoPath=/etc/passwd")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A field with no `=`.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=owner&epoch")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A bad `%` escape.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=%GG")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // The same field twice.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=a&ownerId=b")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // An oversized query.
+        let oversized = format!("ownerId={}", "a".repeat(17 * 1024));
+        assert_eq!(
+            validate_http_query(path, Some(&oversized)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A control character in a value.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=%00")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // The frozen route table still denies everything outside it.
+        assert!(!allowed_http_route(&Method::GET, "reference-chat/session-1"));
+        assert!(!allowed_http_route(
+            &Method::GET,
+            "reference-chat/session-1/secret"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_query_answers_with_the_machine_envelope() {
+        // A bare `StatusCode` error becomes a bodyless 400, which is what a caller on this
+        // surface must never see.
+        let state = test_state(vec![]);
+        let path = "reference-chat/session-1/screen";
+        let request = Request::builder()
+            .uri(format!("/host/machine/api/v1/{path}?repoPath=/etc/passwd"))
+            .body(Body::empty())
+            .unwrap();
+        let response = host_http_handler(
+            State(state),
+            AxumPath(("machine".into(), path.into())),
+            None,
+            request,
+        )
+        .await
+        .expect("a refused query is a response, not a bare status");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("the refusal carries a JSON envelope");
+        assert_eq!(parsed["error"]["code"].as_str(), Some("INVALID_REQUEST"));
+        assert_eq!(parsed["error"]["retryable"].as_bool(), Some(false));
+        assert!(parsed["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
     }
 
     #[test]
