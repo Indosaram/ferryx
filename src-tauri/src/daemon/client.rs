@@ -156,6 +156,12 @@ pub struct DaemonSpawnResult {
 // start; it never delays a real failure.
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+// How long a freshly loaded launchd job is given to bind its socket before the client assumes the
+// job is loaded-but-dead and reloads it. `RunAtLoad` fires the daemon immediately, so a healthy
+// agent answers in well under this; keeping it short is what stops a stale job from costing the
+// full readiness budget on every GUI start.
+const SUPERVISED_START_WAIT: Duration = Duration::from_secs(5);
+
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
 where
     R: AsyncBufRead + Unpin,
@@ -184,6 +190,124 @@ where
             "Ferryx daemon startup timed out waiting for readiness signal",
         )
     })?
+}
+
+/// The pid of the daemon that answers on this machine's canonical endpoint, or `None` when no live
+/// daemon owns it.
+///
+/// Read-only and side-effect free: it opens its own connection, handshakes, and drops it without
+/// touching the upgrade path. A daemon that lost the instance-lock race uses this to tell "another
+/// process already serves every session" - nothing left to do, exit cleanly - apart from "this
+/// machine has no daemon", which is a real failure worth a non-zero exit and a supervisor restart.
+#[cfg(unix)]
+pub async fn endpoint_owner_pid() -> Option<u32> {
+    endpoint_owner_pid_at(&crate::daemon::server::get_socket_path()).await
+}
+
+/// [`endpoint_owner_pid`] against an explicit socket path, so the probe is testable without a
+/// process-wide socket location.
+#[cfg(unix)]
+pub async fn endpoint_owner_pid_at(socket_path: &Path) -> Option<u32> {
+    let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut json = serde_json::to_string(&DaemonRequest::Handshake {
+        version: DAEMON_PROTOCOL_VERSION,
+        token: None,
+    })
+    .ok()?;
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await.ok()?;
+    write_half.flush().await.ok()?;
+
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if read == 0 {
+        return None;
+    }
+    match serde_json::from_str::<DaemonResponse>(&line) {
+        Ok(DaemonResponse::HandshakeOk { pid, .. }) => Some(pid),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn endpoint_owner_pid() -> Option<u32> {
+    None
+}
+
+#[cfg(all(test, unix))]
+mod endpoint_owner_probe_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    fn handshake_reply(pid: u32) -> String {
+        let mut reply = serde_json::to_string(&DaemonResponse::HandshakeOk {
+            version: DAEMON_PROTOCOL_VERSION,
+            pid,
+            epoch: 7,
+            binary_path: None,
+            binary_mtime_ms: None,
+            daemon_version: None,
+        })
+        .unwrap();
+        reply.push('\n');
+        reply
+    }
+
+    #[tokio::test]
+    async fn a_live_daemon_reports_its_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            write
+                .write_all(handshake_reply(4242).as_bytes())
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(endpoint_owner_pid_at(&socket).await, Some(4242));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_absent_or_unrelated_endpoint_owns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("nothing.sock");
+        assert_eq!(endpoint_owner_pid_at(&absent).await, None);
+
+        let socket = dir.path().join("unrelated.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let mut reply = serde_json::to_string(&DaemonResponse::Pong).unwrap();
+            reply.push('\n');
+            write.write_all(reply.as_bytes()).await.unwrap();
+        });
+
+        assert_eq!(endpoint_owner_pid_at(&socket).await, None);
+        peer.await.unwrap();
+    }
 }
 /// Reads a published transport token from `path`. An absent file, or one holding only whitespace,
 /// is no credential at all: it is reported as absent so a reader treats the pair it is reading as
@@ -1398,20 +1522,78 @@ impl DaemonClient {
         // Launch external ferryx --daemon binary with exact bounded readiness event
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ferryx"));
 
-        let mut child = crate::util::no_window_tokio_command(&binary_path)
+        // Prefer the supervised agent. It owns the daemon's lifetime, so quitting the GUI can no
+        // longer take every terminal with it - the 2026-10-07 failure, where the daemon was a child
+        // of the app and died with it leaving no record. The detached spawn below stays as the
+        // fallback for platforms with no agent and for isolated runtimes, where installing one would
+        // point the user's login autostart at a test build.
+        if crate::daemon::launchd::agent_management_supported() {
+            let agent_binary = binary_path.clone();
+            let agent = crate::ipc::run_blocking(move || {
+                crate::daemon::launchd::ensure_launchd_agent(&agent_binary)
+                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+            })
+            .await;
+            match agent {
+                Ok(plist_path) => {
+                    tracing::info!(
+                        plist = %plist_path.display(),
+                        "Daemon lifetime handed to the launchd agent"
+                    );
+                    if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
+                    {
+                        return Ok(stream);
+                    }
+                    // The job is loaded but no daemon is serving: launchd already ran it once and
+                    // the process is gone (a committed handover, a duplicate-endpoint exit, or a
+                    // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
+                    // is what starts it again without waiting out the long readiness budget.
+                    let reload = crate::ipc::run_blocking({
+                        let plist_path = plist_path.clone();
+                        move || {
+                            crate::daemon::launchd::load_launchd_agent(&plist_path)
+                                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+                        }
+                    })
+                    .await;
+                    match reload {
+                        Ok(()) => match self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT).await {
+                            Ok(stream) => return Ok(stream),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "The launchd agent still published no daemon endpoint; spawning a detached daemon instead"
+                            ),
+                        },
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "Could not reload the launchd agent; spawning a detached daemon instead"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Could not hand the daemon lifetime to launchd; spawning a detached daemon instead"
+                ),
+            }
+        }
+
+        let mut command = tokio::process::Command::new(&binary_path);
+        command
             .arg("--daemon")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                IpcError::new(
-                    IpcErrorCode::InternalError,
-                    format!(
-                        "Failed to spawn Ferryx daemon process ({}): {e}",
-                        binary_path.display()
-                    ),
-                )
-            })?;
+            .stderr(std::process::Stdio::piped());
+        // The detach must be configured on the std command: a child cannot change its session after
+        // `exec`, so `pre_exec` is the only place this can happen.
+        crate::util::detach_launched_child(command.as_std_mut());
+        let mut child = command.spawn().map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::InternalError,
+                format!(
+                    "Failed to spawn Ferryx daemon process ({}): {e}",
+                    binary_path.display()
+                ),
+            )
+        })?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             IpcError::new(
@@ -1439,6 +1621,31 @@ impl DaemonClient {
                 format!("Failed to connect to daemon socket after readiness signal: {e}"),
             )
         })
+    }
+
+    /// Waits for a supervised daemon to publish its endpoint, then connects exactly once.
+    ///
+    /// A supervised daemon has no readiness pipe to read: the agent owns the process, so the socket
+    /// becoming connectable is the only observable signal. The wait is bounded, so a refused or
+    /// crashed agent reports an error instead of hanging the GUI.
+    async fn wait_for_supervised_daemon(
+        &self,
+        timeout: Duration,
+    ) -> Result<DaemonStream, IpcError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Ok(stream) = self.try_connect_existing_socket().await {
+                return Ok(stream);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(IpcError::new(
+                    IpcErrorCode::InternalError,
+                    "Timed out waiting for the supervised daemon to publish its endpoint"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Connects and handshakes, re-reading the published pair once when the attempt that failed
@@ -1723,8 +1930,7 @@ impl DaemonClient {
             )
         })?;
 
-        if let Err(error) =
-            wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
+        if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
             let _ = child.kill().await;
             return Err(error);

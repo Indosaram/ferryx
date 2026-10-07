@@ -1284,6 +1284,32 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            // Hand the daemon's lifetime to the supervisor before a terminal can ask for one, so
+            // quitting, crashing, or replacing this app can no longer take the PTYs with it. The
+            // daemon client repeats this on demand, which is what makes the race harmless; this
+            // call exists so the agent is armed even when no terminal is ever opened. A failure is
+            // not fatal: the client falls back to spawning a detached daemon.
+            #[cfg(target_os = "macos")]
+            {
+                if crate::daemon::launchd::agent_management_supported() {
+                    tauri::async_runtime::spawn_blocking(|| {
+                        let binary = std::env::current_exe().map_err(|error| error.to_string());
+                        match binary.and_then(|binary| {
+                            crate::daemon::launchd::ensure_launchd_agent(&binary)
+                                .map_err(|error| error.to_string())
+                        }) {
+                            Ok(plist) => tracing::info!(
+                                plist = %plist.display(),
+                                "Launchd agent owns the daemon lifetime"
+                            ),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "Could not arm the launchd agent; the daemon will be spawned detached"
+                            ),
+                        }
+                    });
+                }
+            }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {
