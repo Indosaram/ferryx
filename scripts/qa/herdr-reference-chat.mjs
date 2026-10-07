@@ -756,11 +756,25 @@ async function openChatPage(ctx, host, session) {
   await page.goto(host.url, { waitUntil: "domcontentloaded" });
   await page.waitForSelector('[data-testid="mobile-chat-workspace"], [data-testid="remote-workspace-loading"]',
     { timeout: ctx.args.timeoutMs });
+  // The rendered page is the evidence the JSON artifact below only names. A capture that
+  // fails must not take down a branch that otherwise passes, so the failure is recorded in
+  // that same artifact instead of being thrown.
+  const screenshotName = "browser-" + scenarioSafeName(ctx) + ".png";
+  let screenshot = null;
+  let screenshotError = null;
+  try {
+    ctx.recordFile(screenshotName, await page.screenshot());
+    screenshot = screenshotName;
+  } catch (error) {
+    screenshotError = String(error && error.message ? error.message : error);
+  }
   ctx.record("browser-" + scenarioSafeName(ctx) + ".json", {
     hostId: host.id,
     urlRedacted: host.urlRedacted || host.url,
     pageErrors,
     backendSessionId: session.backendSessionId,
+    screenshot,
+    screenshotError,
   });
   return {
     page,
