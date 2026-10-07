@@ -410,10 +410,14 @@ impl PtyManager {
         drop(pair.slave);
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
+        // Taken while the master is still in hand: the session keeps it for the whole of its life,
+        // so a close can end the reader even after a failed export took the master away.
+        let reader_interrupt = pair.master.interrupt_handle();
         let session = Arc::new(PtySession::new(PtySessionConfig {
             input,
             id: session_id.clone(),
             master: pair.master,
+            reader_interrupt,
             child,
             writer,
             reader,
@@ -481,6 +485,9 @@ impl PtyManager {
                     Ok(None) => {}
                     Err(error) => {
                         session.mark_failed(error.to_string());
+                        // The session is being torn down, so its reader must stop; the retained
+                        // handle reaches it here, before the master is given up just below.
+                        session.request_reader_stop();
                         session.close_io();
                         session.close_output();
                         manager.remove_from_registry(&session_id);
@@ -510,6 +517,10 @@ impl PtyManager {
             return;
         }
 
+        // The child has already exited, so everything it produced is either read or sitting in the
+        // pipe. Requesting the stop only now is what preserves the output-before-exit contract: the
+        // reader is told to stop after the process that produced the output is gone, never before.
+        session.request_reader_stop();
         session.close_io();
         let _ = Self::join_reader_bounded(&session).await;
         session.mark_exited(Some(code));
@@ -655,6 +666,10 @@ impl PtyManager {
             }
         }
 
+        // The child has been reaped above (or was already gone), so its output is settled and the
+        // reader can be told to stop and deliver the tail before it ends. This ordering is the
+        // contract: the stop is requested only after the process that produced the output is dead.
+        session.request_reader_stop();
         session.close_io();
 
         if let Err(reader_error) = Self::join_reader_bounded(&session).await {
@@ -895,6 +910,44 @@ mod tests {
         );
 
         let _ = manager.close_session(&session_id);
+    }
+
+    /// The other half of the same lifecycle: a session whose export FAILED is still this daemon's
+    /// to close, and that close must end its reader instead of leaving one parked behind.
+    ///
+    /// On Windows this is the case the retained interrupt handle exists for: the master is already
+    /// gone, so nothing left on the session can reach the reader without it.
+    #[tokio::test]
+    async fn a_session_whose_export_failed_still_closes_and_ends_its_reader() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // Force the export to fail the way it fails in the field: the master descriptor is gone.
+        session.close_io();
+        let failed = manager.export_session(&session_id);
+        assert!(failed.is_err(), "exporting a session with no master must fail");
+        assert!(
+            !session.is_reader_finished(),
+            "a failed export must leave the reader running"
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded")
+            .expect("a session whose export failed must still close");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+
+        // The reader holds the last output sender, so this channel closing is the exact moment the
+        // reader thread exited - an event to await, not a delay to wait out.
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "close left the reader running");
+        assert!(session.is_reader_finished(), "close must end the session's reader");
     }
 
     /// A SUCCESSFUL export pauses the reader so the successor can own the stream, WITHOUT

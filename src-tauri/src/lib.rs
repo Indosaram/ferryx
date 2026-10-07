@@ -1,3 +1,9 @@
+// Raised for the native terminal's WGPU types: resolving the `Send`/`Sync` obligations they carry
+// walks a deep chain of `wgpu-core` containers (`NumericDimension` -> `NumericType` -> `InterfaceVar`
+// -> `Varying` -> ... -> `ShaderModule` -> `RenderPipeline` -> ... -> `ResourceState`), which
+// exceeds the default 128-step budget in the non-test build. This only raises that budget.
+#![recursion_limit = "256"]
+
 pub mod account;
 pub mod agent_detect;
 pub mod agent_transcript;

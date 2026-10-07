@@ -86,6 +86,30 @@ impl Default for PtySize {
     }
 }
 
+/// A handle that ends a reader's blocking read without the master that produced it.
+///
+/// Obtained from [MasterPty::interrupt_handle] while the master is still present. Contract for
+/// every implementation:
+/// * Idempotent, and safe to call before any read was issued or after the reader finished.
+/// * Must not close the writer, resize the pane, or terminate the child.
+/// * A read in flight must return once this is called. The call itself is not required to be
+///   synchronous with that return, but it must not leave a read that can block forever.
+/// * Scoped to the readers cloned from THIS master: cancelling one master must never end another
+///   master's read.
+pub trait ReaderInterrupt: Send + Sync {
+    /// Ask this master's readers to stop waiting. Safe to call from any thread.
+    fn request(&self);
+
+    /// How many reads of this master the kernel has reported pending so far.
+    ///
+    /// A test seam: the exact signal a regression subscribes to in order to know a read is
+    /// genuinely in flight, instead of inferring one from elapsed time. Implementations without a
+    /// cancellable reader report 0.
+    fn pending_read_count(&self) -> u64 {
+        0
+    }
+}
+
 /// Represents the master/control end of the pty
 pub trait MasterPty: Downcast + Send {
     /// Inform the kernel and thus the child process that the window resized.
@@ -106,6 +130,21 @@ pub trait MasterPty: Downcast + Send {
     #[cfg(windows)]
     fn try_clone_input_handle(&self) -> Result<std::os::windows::io::OwnedHandle, Error> {
         anyhow::bail!("nonblocking input handle unavailable")
+    }
+
+    /// Private Ferryx extension: a handle that ends a read already in flight on a reader obtained
+    /// from [MasterPty::try_clone_reader], so a teardown can join that reader instead of leaking
+    /// the thread that issued the read.
+    ///
+    /// The handle is returned instead of the interruption being performed here because it has to
+    /// outlive this master: a session gives the master up (after a failed handover export the
+    /// master is already gone) and must still be able to end its reader when it finally closes.
+    /// Retaining the handle beside the master is what keeps that close possible.
+    ///
+    /// `None` (the default) means this platform's reader needs no handle: it terminates on its own
+    /// when the stream ends, which is how unix behaves today.
+    fn interrupt_handle(&self) -> Option<Box<dyn ReaderInterrupt>> {
+        None
     }
 
     /// If applicable to the type of the tty, return the local process id

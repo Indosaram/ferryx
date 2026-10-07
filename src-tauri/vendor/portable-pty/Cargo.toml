@@ -114,6 +114,10 @@ features = [
     "fileapi",
     "namedpipeapi",
     "synchapi",
+    # Cancellable output reader: OVERLAPPED is declared in minwinbase, and
+    # CancelIoEx/GetOverlappedResult in ioapiset. Nothing else is added.
+    "minwinbase",
+    "ioapiset",
 ]
 
 [target."cfg(windows)".dependencies.winreg]
