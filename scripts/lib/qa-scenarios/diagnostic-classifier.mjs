@@ -289,13 +289,25 @@ export async function runNativeDiagnosticClassifier(ctx, plan, budget = new Mono
   }
 
   // 5. Post-release marker output verification
+  //
+  // The receipt is awaited BY MATCH, not by index. The marker is typed at three points, and the
+  // first two happen while the `presentation` barrier holds the pane's frames - this scenario
+  // arms it from boot on purpose - so a receipt from those legitimately carries
+  // `frameSubmitted: false`. Index 0 would assert a submitted frame against the wrong marker.
+  // What this step is about is a marker whose frame really was submitted, so that is what it
+  // awaits; the read settles as soon as such a receipt exists, however many precede it.
   if (ctx.platformPreflight === 'win32') {
     await focusWindowWindows(evidence, pid);
     await typeMarkerWindows(evidence, pid);
   } else {
     await typeMarkerDarwin(evidence, pid);
   }
-  const markerReceipt = await barrierHub.awaitReceipt('marker-output', 0, budget.consume(BUDGETS.stagePresentationMs, 'marker output'));
+  const markerReceipt = await barrierHub.awaitReceiptMatching('marker-output', {
+    match: receipt => receipt?.frameSubmitted === true
+      && String(receipt?.output ?? '').includes(MARKER_TEXT),
+    timeoutMs: budget.consume(BUDGETS.stagePresentationMs, 'marker output'),
+    label: 'marker output with a submitted frame',
+  });
   if (!String(markerReceipt?.output ?? '').includes(MARKER_TEXT)) {
     throw new HarnessError('ASSERTION_FAILURE', `marker ${MARKER_TEXT} not observed after classifier recovery: ${JSON.stringify(markerReceipt)}`);
   }
