@@ -632,7 +632,7 @@ function hostTransportRefusal(host, hostTransports, blockers) {
 /**
  * The identity a NON-LOCAL session config fully declares, or null.
  *
- * A remote session (ssh, paired, account-relay) belongs to ITS host: this producer cannot create
+ * A remote session belongs to ITS host: this producer cannot create
  * it through a local daemon it never launched, and demanding that it do so is what made a
  * fully-factored non-local host yield `daemon-runtime-undeclared` - a blocker whose session row
  * then carried no pid, so `validateFixtureManifest` rejected the whole manifest and the runner
@@ -650,9 +650,16 @@ function hostTransportRefusal(host, hostTransports, blockers) {
  * Anything less is NOT accepted: a session that declares a bare pid, or a receipt with no create
  * record, or a create record with no receipt, falls through to exactly the refusal it has today.
  * Only the fully-declared case becomes runnable, so no existing refusal is weakened.
+ *
+ * The admission is scoped to the `ssh` transport, because ssh is the only transport the
+ * owning-host receipt path can produce: `remoteOwnerHostReceipt` hardcodes `transport: "ssh"`
+ * and refuses to build a receipt at all for a non-Linux host, so a `paired` or `account-relay`
+ * declaration could never be corroborated by a receipt that path is able to write. Admitting
+ * them here would accept a config-declared state no real acquisition can produce, so they are
+ * refused exactly as before.
  */
 function declaredNonLocalSessionIdentity(host, session) {
-  if (!host || host.transport === "local") return null;
+  if (!host || host.transport !== "ssh") return null;
   const backendSessionId = session && isNonEmptyText(session.backendSessionId) ? session.backendSessionId : null;
   const rawEpoch = session ? session.epoch : null;
   const epoch =

@@ -1909,6 +1909,60 @@ test('a fully-declared non-local session binds to its receipt, and an undeclared
     );
     assert.equal(bare.fixture.sessions[0].pid, null, 'no pid is invented for a session that declares nothing');
     assert.equal(validateFixtureManifest(bare.fixture).ok, false, 'an unbound session still leaves the manifest unbound');
+
+    // The corroboration half: a receipt whose correlation DISAGREES with the declared create
+    // record must be refused, and the refusal must name the corroboration rather than the receipt
+    // as a whole. Without this the agreement check could be deleted outright and every assertion
+    // above would stay green - which is exactly the hole this run closes.
+    //
+    // Everything but the corroboration input is the ACCEPTED receipt: the same host, transport,
+    // session, epoch, pid and candidate id, so the only thing that can produce the blocker is the
+    // disagreement itself.
+    const receiptWithCorrelation = (correlation) => ({
+      schema: 'ferryx-herdr-reference.ssh-owner-host-receipt/1',
+      sourceKind: HOST_SUPPLIED_SOURCE_KIND,
+      hostId: 'qa-ssh',
+      transport: 'ssh',
+      backendSessionId: 'sess-ssh-1',
+      epoch: '7',
+      pid: 4242,
+      executable: '/usr/bin/ssh-helper-fixture',
+      spawnedAt: '2026-01-01T00:00:00.000Z',
+      candidate: {
+        candidateId: first.candidate.candidateId,
+        sourceManifestSha256: 'written-by-an-earlier-run',
+        binarySha256: first.candidate.binary.sha256,
+      },
+      ...(correlation ? { correlation } : {}),
+    });
+    const disagreementCases = [
+      ['no correlation block', null,
+        'the receipt carries no correlation block, so it cannot corroborate the declared create record'],
+      ['a different daemon session',
+        { source: 'daemon-remote-session-details', daemonSessionId: 'sess-ssh-other', helperSessionId: 'helper-1', clientRequestId: 'req-ssh-1' },
+        'the receipt correlates session sess-ssh-other, the declared create record names sess-ssh-1'],
+      ['a different create request',
+        { source: 'daemon-remote-session-details', daemonSessionId: 'sess-ssh-1', helperSessionId: 'helper-1', clientRequestId: 'req-ssh-other' },
+        'the receipt correlates request req-ssh-other, the declared create record names req-ssh-1'],
+    ];
+    for (let index = 0; index < disagreementCases.length; index += 1) {
+      const [label, correlation, expectedDetail] = disagreementCases[index];
+      writeFileSync(receiptPath, JSON.stringify(receiptWithCorrelation(correlation), null, 2));
+      const disagreeing = await runProvisioner('disagreeing-' + index, declaredSshConfig(source, credentialFile, binary, session));
+      const disagreeingKinds = kindsOf(disagreeing.fixture);
+      assert.ok(
+        disagreeingKinds.includes(
+          'owner-host-spawn-receipt:owner-host spawn receipt does not corroborate the declared create record: ' + expectedDetail,
+        ),
+        label + ': a receipt that disagrees with the declared create record is refused as a corroboration failure: ' + JSON.stringify(disagreeingKinds),
+      );
+      const disagreeingRow = disagreeing.fixture.sessions.find((entry) => entry.hostId === 'qa-ssh');
+      assert.equal(disagreeingRow.pid, null, label + ': no pid is bound from a disagreeing receipt');
+      assert.ok(
+        !('ptyIdentitySource' in disagreeingRow),
+        label + ': no identity is stamped from a disagreeing receipt',
+      );
+    }
   } finally {
     if (running.child && running.child.exitCode === null && running.child.signalCode === null) {
       running.child.kill('SIGKILL');
