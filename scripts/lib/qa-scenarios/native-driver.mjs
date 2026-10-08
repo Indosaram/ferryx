@@ -1578,9 +1578,160 @@ export async function typeMarkerWindows(evidence, pid) {
   return { markerCommand: markerShellCommand, shell: 'powershell' };
 }
 
+// ---------------------------------------------------------------------------
+// Linux (Wayland) native driver
+//
+// Wayland exposes no screen coordinates to a client and no accessibility bridge
+// for a Tauri webview surface by default, so this driver composes the two real
+// surfaces a Wayland session does provide: the compositor's own client list
+// (`hyprctl clients -j`, which reports the owning PID and the surface geometry)
+// and the virtual-keyboard protocol (`wtype`), with `grim` for capture. Every
+// step is an observed fact or an explicit typed failure - nothing is inferred.
+// ---------------------------------------------------------------------------
+
+/// Runs a command to completion and returns its exit code and streams. Never
+/// throws on a nonzero exit: the caller decides what the exit means.
+async function runCapture(command, args) {
+  const child = spawn(command, args);
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', chunk => { stdout += chunk; });
+  child.stderr?.on('data', chunk => { stderr += chunk; });
+  const code = await new Promise(resolvePromise => {
+    child.once('error', () => resolvePromise(-1));
+    child.once('exit', c => resolvePromise(c));
+  });
+  return { code, stdout, stderr };
+}
+
+/// The single mapped compositor client owned by `pid`.
+///
+/// A missing or ambiguous owner is a typed failure rather than a guess: the
+/// scenario's whole claim is that the marker landed in THIS run's window.
+async function hyprctlOwnedClient(pid) {
+  const result = await runCapture('hyprctl', ['clients', '-j']);
+  if (result.code !== 0) {
+    throw new HarnessError('CAPTURE_DENIED', `hyprctl clients failed (exit ${result.code}): ${result.stderr.trim()}`);
+  }
+  let clients;
+  try {
+    clients = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new HarnessError('CAPTURE_DENIED', `hyprctl clients returned unparseable JSON: ${error.message}`);
+  }
+  if (!Array.isArray(clients)) {
+    throw new HarnessError('CAPTURE_DENIED', 'hyprctl clients did not return an array');
+  }
+  const owned = clients.filter(client => client && client.pid === pid);
+  if (owned.length === 0) {
+    throw new HarnessError('ASSERTION_FAILURE', `no compositor client is owned by pid ${pid}`);
+  }
+  if (owned.length > 1) {
+    throw new HarnessError('ASSERTION_FAILURE', `PID_NOT_UNIQUE: ${owned.length} compositor clients are owned by pid ${pid}`);
+  }
+  return owned[0];
+}
+
+function clientBounds(client) {
+  const at = Array.isArray(client.at) ? client.at : null;
+  const size = Array.isArray(client.size) ? client.size : null;
+  if (!at || !size || at.length < 2 || size.length < 2) {
+    throw new HarnessError('CAPTURE_DENIED', `compositor client has no usable geometry: ${JSON.stringify({ at: client.at, size: client.size })}`);
+  }
+  const [x, y] = at.map(Number);
+  const [width, height] = size.map(Number);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    throw new HarnessError('CAPTURE_DENIED', `compositor client geometry is not a positive rect: ${JSON.stringify({ x, y, width, height })}`);
+  }
+  return { x, y, width, height };
+}
+
+export async function focusWindowLinux(evidence, pid) {
+  const client = await hyprctlOwnedClient(pid);
+  // Try modern Lua dispatch first (Hyprland with Lua configuration),
+  // falling back to legacy string syntax.
+  const luaExpr = `hl.dsp.focus({window="pid:${pid}"})`;
+  let result = await runCapture('hyprctl', ['dispatch', luaExpr]);
+  if (result.code !== 0 || !/^ok/i.test(result.stdout.trim())) {
+    result = await runCapture('hyprctl', ['dispatch', 'focuswindow', `pid:${pid}`]);
+  }
+  if (result.code !== 0 || !/^ok/i.test(result.stdout.trim())) {
+    throw new HarnessError('ASSERTION_FAILURE', `hyprctl focuswindow failed for pid ${pid} (exit ${result.code}): ${result.stdout.trim()} ${result.stderr.trim()}`);
+  }
+  evidence.action({
+    action: 'focus-window-by-pid',
+    pid,
+    selector: { pid, compositor: 'hyprland', address: client.address ?? null },
+    surface: 'hyprctl dispatch hl.dsp.focus/focuswindow',
+  });
+}
+
+export async function getWindowBoundsLinux(evidence, pid) {
+  const client = await hyprctlOwnedClient(pid);
+  const bounds = clientBounds(client);
+  evidence.action({ action: 'compositor-window-bounds', pid, bounds, address: client.address ?? null });
+  return bounds;
+}
+
+export async function captureOwnedWindowLinux(evidence, path, pid) {
+  const bounds = await getWindowBoundsLinux(evidence, pid);
+  const geometry = `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`;
+  const result = await runCapture('grim', ['-g', geometry, path]);
+  evidence.action({ action: 'grim-owned-window', exitCode: result.code, path, bounds, geometry });
+  if (result.code !== 0 || !existsSync(path)) {
+    throw new HarnessError('CAPTURE_DENIED', `grim capture of the owned window failed (exit ${result.code}): ${result.stderr.trim()}`);
+  }
+  const screenshotSha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
+  const targetPaneBounds = {
+    x: bounds.x + Math.round(bounds.width / 2),
+    y: bounds.y,
+    width: Math.round(bounds.width / 2),
+    height: bounds.height,
+  };
+  return {
+    windowBounds: bounds,
+    targetPaneBounds,
+    focused: true,
+    screenshotSha256,
+    path,
+  };
+}
+
+/// Types the marker command into the focused surface and presses Return.
+///
+/// `wtype` is the Wayland virtual-keyboard client, so the keystrokes reach
+/// whichever surface the compositor has focused - which is why the caller must
+/// focus the owned window first. Both invocations must succeed; a refused
+/// keystroke is never read as a delivered one.
+export async function typeMarkerLinux(evidence, pid) {
+  const typed = await runCapture('wtype', [MARKER_COMMAND_UNIX]);
+  if (typed.code !== 0) {
+    throw new HarnessError('ASSERTION_FAILURE', `wtype could not type the marker command (exit ${typed.code}): ${typed.stderr.trim()}`);
+  }
+  const submitted = await runCapture('wtype', ['-k', 'Return']);
+  if (submitted.code !== 0) {
+    throw new HarnessError('ASSERTION_FAILURE', `wtype could not submit the marker command (exit ${submitted.code}): ${submitted.stderr.trim()}`);
+  }
+  evidence.action({
+    action: 'type-marker',
+    pid,
+    markerCommand: MARKER_COMMAND_UNIX,
+    shell: 'sh',
+    surface: 'wtype virtual-keyboard into the focused compositor surface',
+  });
+  return { markerCommand: MARKER_COMMAND_UNIX, shell: 'sh' };
+}
+
+/// Linux has no in-tree pane/split automation yet. These are typed refusals
+/// rather than no-ops, so a scenario that needs them fails loudly instead of
+/// silently skipping a step it claims to have performed.
+async function linuxUnsupported(step) {
+  throw new HarnessError('NATIVE_AUTOMATION_UNSUPPORTED', `the Linux driver has no ${step} implementation; only scenarios whose plan sets no pane step can run here`);
+}
+
 export function assertNativeAutomationSupported() {
   const p = platform();
-  if (p !== 'darwin' && p !== 'win32') {
+  if (p !== 'darwin' && p !== 'win32' && p !== 'linux') {
     throw new HarnessError('NATIVE_AUTOMATION_UNSUPPORTED', `native desktop automation is not implemented for platform ${p}`);
   }
 }
@@ -1606,6 +1757,16 @@ export function selectNativeDriver(ctx) {
       typeMarker: typeMarkerDarwin,
       retry: clickRetryDarwin,
       capture: captureOwnedWindowDarwin,
+    };
+  }
+  if (ctx.platformPreflight === 'linux') {
+    return {
+      focus: focusWindowLinux,
+      split: () => linuxUnsupported('split affordance'),
+      newPane: () => linuxUnsupported('new-pane affordance'),
+      typeMarker: typeMarkerLinux,
+      retry: () => linuxUnsupported('retry affordance'),
+      capture: captureOwnedWindowLinux,
     };
   }
   // Mock/unsupported contexts never focus, click, type, or capture a real window.

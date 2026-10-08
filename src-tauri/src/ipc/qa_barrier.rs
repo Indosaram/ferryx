@@ -116,14 +116,13 @@ impl QaFixtureKind {
         match self {
             Self::Source | Self::Idle => FixtureCreation::PlainSpawn,
             Self::Created => FixtureCreation::LocalSplit,
-            // A stopped-but-unowned session needs a REAL external stop of a
-            // fixture PTY. This process holds no PID for a daemon-owned PTY (the
-            // daemon's describe does not carry one) and the local describe arm
-            // reports no ownership attribution, so neither half of the kind
-            // exists in the GUI lane.
-            Self::ExternallyStopped => FixtureCreation::Unsupported(
-                "needs a real external stop of a fixture PTY plus local-describe ownership attribution: terminal/qa_liveness.rs::run_suspension_ownership_check observes an already-stopped unowned session but never stops one, and daemon/session_service.rs's local describe arm hardcodes registry_suspended/suspension_source to None, so externally-stopped cannot be attested from the GUI lane",
-            ),
+            // A stopped-but-unowned session is a plain spawn whose process is then
+            // really stopped through the PTY signal path. Measured: that path sends
+            // a raw `SIGSTOP` (`terminal/session.rs` `TerminalSignal::Stop =>
+            // libc::SIGSTOP`) and never touches `suspension.rs::ownership()`, so the
+            // suspension ledger holds no entry and `classify_stop_source` reports
+            // `External` - the honest classification for a stop it did not actuate.
+            Self::ExternallyStopped => FixtureCreation::StoppedPlainSpawn,
             // An adopted session needs a real retained handover: the
             // predecessor-export/successor-adopt producers over daemon/handover.rs.
             Self::Adopted => FixtureCreation::Unsupported(
@@ -142,6 +141,13 @@ pub enum FixtureCreation {
     /// The local-split create path (`prepare_local_split_until` ->
     /// `create_local_split_until`), the path the GUI's create-only branch uses.
     LocalSplit,
+    /// The daemon's plain spawn, followed by an external stop of the fixture's
+    /// process through the PTY signal path (`TerminalSignal::Stop` -> `SIGSTOP`).
+    /// That path deliberately does NOT go through the suspension ownership ledger
+    /// (`terminal/suspension.rs::ownership()`), so the resulting stop is exactly
+    /// what this kind means: a real, kernel-observed stop that the suspension
+    /// subsystem never actuated and must therefore never claim or auto-resume.
+    StoppedPlainSpawn,
     /// Not constructible from this lane: the exact hook the kind needs.
     Unsupported(&'static str),
 }
@@ -1267,12 +1273,23 @@ fn classify_fixture_session(
                 ..observation
             },
         },
-        // This lane cannot construct these kinds (the creation step reports the
-        // hook each one needs), so it never claims them either.
-        QaFixtureKind::ExternallyStopped | QaFixtureKind::Adopted => FixtureClassification {
+        // `adopted` needs a real retained handover (a second daemon adopting this
+        // one's sessions over `daemon/handover.rs`), which is not a session this
+        // lane can build, so the claim is refused with that reason instead of being
+        // downgraded. `externally-stopped` is deliberately absent from this arm: it
+        // is constructible now, and a real external stop is already returned as an
+        // observation above.
+        QaFixtureKind::Adopted => FixtureClassification {
             refusal: Some("kind-not-constructible-in-this-lane"),
             ..observation
         },
+        // Constructible, but it can only be CLAIMED from the observation above: a
+        // session whose kernel stop the daemon does not attribute to itself is the
+        // kind, and the classification for one that is still running is whatever the
+        // daemon's own reply describes it as. Reaching here means the fixture's stop
+        // was not observed, so the honest answer is the observation - never a claim
+        // that the session is stopped when the daemon reports otherwise.
+        QaFixtureKind::ExternallyStopped => observation,
     }
 }
 
@@ -1640,6 +1657,9 @@ async fn create_gui_fixture_sessions(
                         FixtureCreation::LocalSplit => {
                             create_split_fixture_session(client, &cwd, deadline).await
                         }
+                        FixtureCreation::StoppedPlainSpawn => {
+                            create_stopped_fixture_session(client, &cwd, deadline).await
+                        }
                         // Filtered out above; reported rather than panicking if it
                         // ever is not.
                         FixtureCreation::Unsupported(hook) => Err(hook.to_string()),
@@ -1712,6 +1732,43 @@ async fn create_plain_fixture_session(
     .map_err(|_| "daemon spawn timed out".to_string())?
     .map_err(|error| format!("daemon spawn failed: {error:?}"))?;
     Ok(spawned.session_id)
+}
+
+/// One fixture session for the `externally-stopped` kind: the plain spawn, then a
+/// real stop of its process through the PTY signal path.
+///
+/// The stop is verified before this returns. `fixture-setup` settles from the
+/// daemon's own describe answer, so returning while the kernel has not yet applied
+/// the stop would report a session that is about to be stopped as a running one -
+/// the kind's whole claim is that it was observed stopped, so the observation is
+/// what this waits for. The bounded wait keeps a stop that never lands a reported
+/// failure instead of a fixture that silently is not what it says it is.
+async fn create_stopped_fixture_session(
+    client: &crate::daemon::DaemonClient,
+    cwd: &str,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    let session_id = create_plain_fixture_session(client, cwd, deadline).await?;
+    client
+        .signal_terminal(&session_id, crate::terminal::TerminalSignal::Stop)
+        .await
+        .map_err(|error| format!("fixture external stop failed: {error:?}"))?;
+    loop {
+        match client.describe_session(&session_id).await {
+            Ok(details) if details.kernel_stopped == Some(true) => return Ok(session_id),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(format!("fixture stop verification failed: {error:?}"))
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "fixture external stop was not observed by the daemon's own describe before the deadline"
+                    .to_string(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 /// One fixture session through the local-split create path: the same two calls
@@ -2790,18 +2847,24 @@ mod tests {
         );
     }
 
-    // Only the kinds with a real product path are constructible here; the two
-    // that are not must each report their own hook, never a session this lane
-    // cannot attest.
+    // Only the kinds with a real product path are constructible here; the one that
+    // is not must report its own hook, never a session this lane cannot attest.
     #[test]
     fn unconstructible_fixture_kinds_report_a_hook_instead_of_a_session() {
         assert_eq!(QaFixtureKind::Source.creation(), FixtureCreation::PlainSpawn);
         assert_eq!(QaFixtureKind::Idle.creation(), FixtureCreation::PlainSpawn);
         // `created` is the only kind with local-split-create provenance.
         assert_eq!(QaFixtureKind::Created.creation(), FixtureCreation::LocalSplit);
+        // `externally-stopped` is constructible: a plain spawn whose process is then
+        // really stopped through the PTY signal path, which never touches the
+        // suspension ownership ledger and so is honestly unowned.
+        assert_eq!(
+            QaFixtureKind::ExternallyStopped.creation(),
+            FixtureCreation::StoppedPlainSpawn
+        );
 
         let mut hooks = Vec::new();
-        for kind in [QaFixtureKind::ExternallyStopped, QaFixtureKind::Adopted] {
+        for kind in [QaFixtureKind::Adopted] {
             match kind.creation() {
                 FixtureCreation::Unsupported(hook) => hooks.push(hook),
                 other => panic!("{} must not be constructible: {other:?}", kind.as_str()),
@@ -2934,12 +2997,10 @@ mod tests {
         assert_eq!(unclaimed.stop_probe_state, None);
         assert_eq!(unclaimed.refusal, None);
 
-        // 5. The kinds this lane cannot construct are refused with a reason.
-        for kind in [QaFixtureKind::Adopted, QaFixtureKind::ExternallyStopped] {
-            let refused = classify_fixture_session(&base(), None, Some(kind));
-            assert_eq!(refused.refusal, Some("kind-not-constructible-in-this-lane"));
-            assert_eq!(refused.kind, "source");
-        }
+        // 5. The kind this lane cannot construct is refused with a reason.
+        let refused = classify_fixture_session(&base(), None, Some(QaFixtureKind::Adopted));
+        assert_eq!(refused.refusal, Some("kind-not-constructible-in-this-lane"));
+        assert_eq!(refused.kind, "source");
     }
 
     // The settlement carries the construction audit, so a kind that could not be

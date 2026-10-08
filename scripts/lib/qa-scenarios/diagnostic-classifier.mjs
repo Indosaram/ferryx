@@ -77,11 +77,29 @@ export function buildIsolatedEnv(context) {
   // appears here is either a product override the app itself reads
   // (FERRYX_DATA_DIR / FERRYX_RUNTIME_DIR / FERRYX_SESSION_DIR) or a QA channel
   // key this harness owns - never an ambient value.
+  // Linux GUI sessions need their own display environment, and the allowlist
+  // above deliberately carries none of it. Measured on omarchy: with only
+  // PATH/HOME the app aborts inside `tao` with "Failed to initialize GTK", so
+  // the webview never comes up and no product stage can settle - the run stalls
+  // at `fixture-setup` with `barriers: []`, which reads like a product defect
+  // and is not one. GTK needs XDG_RUNTIME_DIR plus a display socket
+  // (WAYLAND_DISPLAY or DISPLAY), and GLib wants the session bus. These are
+  // socket locations and paths only - no token, credential or FERRYX_* value -
+  // so they are passed on Linux and nowhere else, and the FERRYX_* leak guard
+  // below still applies to the assembled environment.
+  const displayEnv = process.platform === 'linux'
+    ? Object.fromEntries(
+      ['XDG_RUNTIME_DIR', 'WAYLAND_DISPLAY', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS',
+        'XDG_SESSION_TYPE', 'XDG_CURRENT_DESKTOP', 'XAUTHORITY']
+        .filter(key => typeof process.env[key] === 'string' && process.env[key].length > 0)
+        .map(key => [key, process.env[key]]))
+    : {};
   const env = {
     PATH: process.env.PATH,
     HOME: homeDir,
     APPDATA: appDataDir,
     LOCALAPPDATA: localAppDataDir,
+    ...displayEnv,
     ...(QA_PINNED_SHELL ? { FERRYX_QA_SHELL: QA_PINNED_SHELL } : {}),
     FERRYX_DATA_DIR: dataDir,
     FERRYX_RUNTIME_DIR: runtimeDir,

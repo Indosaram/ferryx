@@ -2902,8 +2902,26 @@ impl DaemonSessionService {
                 // real reader/kernel facts, and this arm has the session in hand.
                 reader_paused: Some(pty_session.is_reader_paused()),
                 kernel_stopped: Some(pty_session.process_stopped()),
-                registry_suspended: None,
-                suspension_source: None,
+                // The suspension ownership subsystem's own answer for this session,
+                // computed from the session's real identity: whether the stop the
+                // kernel reports is one this daemon actuated. Reporting `None` here
+                // made every stop unattributable, so a genuinely external stop could
+                // not be told apart from a Ferryx-owned one and `externally-stopped`
+                // could never be attested from any lane.
+                registry_suspended: Some(
+                    self.terminal_service.process_state(session_id)
+                        == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended),
+                ),
+                suspension_source: Some(
+                    match pty_session.suspension_target().ok().and_then(|target| {
+                        crate::terminal::suspension::classify_stop_source(&target).ok()
+                    }) {
+                        Some(crate::terminal::suspension::SuspensionSource::FerryxOwned) => "ferryx-owned",
+                        Some(crate::terminal::suspension::SuspensionSource::External) => "external-kernel",
+                        _ => "unknown",
+                    }
+                    .to_string(),
+                ),
                 incarnation: pty_session.incarnation().map(str::to_owned),
             },
         }

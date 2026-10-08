@@ -1267,7 +1267,9 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
   const path = join(root, 'screenshot.png');
   writeFileSync(path, Buffer.from('fixture-screenshot'));
   try {
-    for (const platformPreflight of ['mock', 'linux', undefined]) {
+    // `linux` is NOT in this bucket: it has a real driver now (hyprctl/grim/wtype),
+  // so it must be asserted as a real one rather than as a mock that never acts.
+  for (const platformPreflight of ['mock', undefined]) {
       const driver = native.selectNativeDriver({ platformPreflight });
       const evidence = { action: () => { throw new Error('mock driver emitted a native action'); } };
       await driver.focus(evidence, 1234);
@@ -1278,6 +1280,21 @@ test('driver dispatch is explicit, mock-safe, and accepts an injected adapter dr
       expect(await driver.capture(evidence, path, 1234)).toEqual({ path, screenshotSha256: computeSourceDigest([path]) });
       await expect(driver.capture(evidence, join(root, 'missing.png'), 1234)).rejects.toThrow();
     }
+
+  // The Linux driver is a real one: focus/typeMarker/capture are implemented
+  // against the compositor and Wayland tools, and the three steps this lane has
+  // no implementation for are typed refusals - never silent no-ops that would let
+  // a scenario claim a step it did not perform.
+  {
+    const driver = native.selectNativeDriver({ platformPreflight: 'linux' });
+    expect(driver.focus).toBe(native.focusWindowLinux);
+    expect(driver.typeMarker).toBe(native.typeMarkerLinux);
+    expect(driver.capture).toBe(native.captureOwnedWindowLinux);
+    const evidence = { action: () => {} };
+    for (const step of ['split', 'newPane', 'retry']) {
+      await expect(driver[step](evidence, 1234)).rejects.toThrowError(/NATIVE_AUTOMATION_UNSUPPORTED/);
+    }
+  }
 
     const calls = [];
     const driver = {
@@ -2739,6 +2756,35 @@ test('split scenarios declare the pre-trigger pane step; scenarios that never sp
   for (const scenario of ['retained-handover', 'handover-abort', 'suspension-ownership']) {
     expect([scenario, Boolean(SCENARIO_PLANS[scenario].pane)]).toEqual([scenario, false]);
   }
+});
+
+// The handover scenarios declare the session that GETS handed over, never an
+// `adopted` session. Adoption is the scenario's own outcome: `fixture-setup`
+// settles at boot, before the runner's `trigger-handover` drives the real upgrade,
+// so an `adopted` fixture was unsatisfiable by construction. Measured on the
+// Linux lane, both scenarios failed at fixture time with
+// `fixture-setup requires at least one adopted session, got 0` and never reached
+// their own handover. What proves the adoption is the transfer receipt the
+// scenario already asserts, so a re-added `adopted` requirement must fail here.
+test('handover scenarios require the handed-over session, not a pre-existing adopted fixture', () => {
+  // Each scenario proves the transfer from its OWN receipt - the successor's
+  // `handover-transfer` for the retained case, the rollback's
+  // `rollback-relinquishment` for the abort case - never from a fixture.
+  const proof = {
+    'retained-handover': ['handover-transfer', 'handoverPreservesIncarnation'],
+    'handover-abort': ['rollback-relinquishment', 'relinquishmentBeforeResume'],
+  };
+  for (const scenario of ['retained-handover', 'handover-abort']) {
+    expect([scenario, SCENARIO_FIXTURE_REQUIREMENTS[scenario]]).toEqual([scenario, ['created']]);
+    expect(SCENARIO_FIXTURE_REQUIREMENTS[scenario]).not.toContain('adopted');
+    const [receipt, invariant] = proof[scenario];
+    expect(SCENARIO_PLANS[scenario].receipts).toContain(receipt);
+    expect(SCENARIO_PLANS[scenario].invariants).toContain(invariant);
+  }
+  // `suspension-ownership` genuinely needs its externally-stopped fixture: the
+  // scenario checks that a real external stop is left alone, and that stop is
+  // provisioned before the trigger.
+  expect(SCENARIO_FIXTURE_REQUIREMENTS['suspension-ownership']).toContain('externally-stopped');
 });
 
 // H-18: the conflicting-fingerprint rejection. The `split-concurrent` batch drives
