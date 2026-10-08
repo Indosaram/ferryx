@@ -243,8 +243,20 @@ export const SCENARIO_FIXTURE_REQUIREMENTS = Object.freeze({
   'split-attach-stall': Object.freeze(['source']),
   'split-cancel': Object.freeze(['source']),
   'split-concurrent': Object.freeze(['source']),
-  'retained-handover': Object.freeze(['adopted', 'created']),
-  'handover-abort': Object.freeze(['adopted', 'created']),
+  // `retained-handover` and `handover-abort` do NOT require an `adopted` fixture.
+  // Adoption is the scenario's own OUTCOME, not a session that can exist before the
+  // scenario runs: `fixture-setup` settles at boot, before any trigger, and the
+  // adoption only happens when the runner's `trigger-handover` drives the real
+  // upgrade (`ipc/terminal.rs::run_handover_watcher` -> `upgrade_binary`). Requiring
+  // the kind at fixture time was therefore unsatisfiable by construction, which is
+  // exactly the measured `fixture-setup requires at least one adopted session, got
+  // 0`. What the scenario must prove is already asserted from the transfer receipt
+  // itself (`handoverPreservesIncarnation` + `singleReader` over
+  // `handover-transfer`), which carries `adoptedBackendSessionId`,
+  // `adoptedIncarnation` and the live adopted reader. So the fixture these two need
+  // is the session that gets handed over - `created`.
+  'retained-handover': Object.freeze(['created']),
+  'handover-abort': Object.freeze(['created']),
   'suspension-ownership': Object.freeze(['created', 'externally-stopped', 'idle']),
   'stale-binding': Object.freeze(['source']),
 });
