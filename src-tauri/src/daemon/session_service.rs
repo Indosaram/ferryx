@@ -2611,6 +2611,8 @@ impl DaemonSessionService {
                             tracing::warn!(%error, "Machine metadata subscription failed")
                         }
                     }
+                    let had_durable_exit = durable_exit.is_some();
+                    let gui_exit_workspaces = Arc::clone(&lifecycle_workspaces);
                     if let Some(mut record) = durable_exit {
                         record.session.running = false;
                         record.exit = Some(crate::remote::machine_protocol::ExitMetadata {
@@ -2650,7 +2652,40 @@ impl DaemonSessionService {
                     cleanup_cache
                         .lock()
                         .retain(|_, entry| entry.session_id != cleanup_session_id);
-                    if let Some(meta) = cleanup_metadata.write().remove(&cleanup_session_id) {
+                    let removed_meta = cleanup_metadata.write().remove(&cleanup_session_id);
+                    if let Some(meta) = removed_meta {
+                        if !had_durable_exit {
+                            // A desktop GUI session has no machine journal record, but the machine
+                            // inventory still has to learn it exited.
+                            let exit_workspaces = Arc::clone(&gui_exit_workspaces);
+                            let workspace_id = meta.workspace_id.clone();
+                            let event_session_id = cleanup_session_id.clone();
+                            if let Err(error) = crate::ipc::run_blocking(move || {
+                                let catalog = exit_workspaces
+                                    .catalog()
+                                    .map_err(crate::ipc::IpcError::internal)?;
+                                if catalog.workspaces.contains_key(&workspace_id)
+                                    && !crate::ssh::projects::is_remote(&workspace_id)
+                                    && !workspace_id.starts_with("ssh:")
+                                    && !workspace_id.contains("::")
+                                {
+                                    exit_workspaces.machine_events.publish(
+                                        "sessionExited",
+                                        Some(&workspace_id),
+                                        Some(&event_session_id),
+                                        serde_json::json!({
+                                            "sessionId": event_session_id,
+                                            "workspaceId": workspace_id,
+                                        }),
+                                    );
+                                }
+                                Ok(())
+                            })
+                            .await
+                            {
+                                tracing::error!(%error, session_id = %cleanup_session_id, "Desktop session exit event publication failed");
+                            }
+                        }
                         if let Some(claim) = meta.provider_claim {
                             cleanup_claims
                                 .lock()
