@@ -2554,7 +2554,28 @@ impl DaemonSessionService {
                         }
                         result
                     }
-                    _ => Ok(()),
+                    _ => {
+                        // A desktop GUI session has no machine journal record, but the machine
+                        // inventory still has to learn it started.
+                        if let Ok(catalog) = workspace_service.catalog() {
+                            if catalog.workspaces.contains_key(&workspace_id_owned)
+                                && !crate::ssh::projects::is_remote(&workspace_id_owned)
+                                && !workspace_id_owned.starts_with("ssh:")
+                                && !workspace_id_owned.contains("::")
+                            {
+                                workspace_service.machine_events.publish(
+                                    "sessionStarted",
+                                    Some(&workspace_id_owned),
+                                    Some(&session_id),
+                                    serde_json::json!({
+                                        "sessionId": session_id,
+                                        "workspaceId": workspace_id_owned,
+                                    }),
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
                 };
                 #[cfg(test)]
                 if machine.is_some() && persisted.is_ok() {

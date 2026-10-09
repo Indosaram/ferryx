@@ -19,9 +19,7 @@ import { suggestDeviceName } from "./deviceIdentity";
 import {
   contextName,
   getRemoteDocumentTitle,
-  mirrorInventory,
   normalizeRemoteWorkspaceState,
-  renderedPaneOrder,
   RemoteWorkspaceMirror,
   type RemoteContextOption,
   type RemoteTerminalTabInfo,
@@ -1827,11 +1825,13 @@ export const RemoteHostConnection: React.FC<{
   // Swipe order mirrors the inventory the sidebar renders, so the gesture, the position
   // header, and the aria-selected row describe one sequence. -1 means no rendered row
   // holds the selection: swipes are no-ops instead of first-row jumps.
-  const swipePanes = useMemo(
-    () => renderedPaneOrder(mirrorInventory(model, activeMachineId)),
-    [activeMachineId, model],
-  );
-  const currentIndex = swipePanes.findIndex((tab) => tab.id === model.context.activeTabId);
+  // Swipe follows the published tab order (terminalTabs), so a swipe can reach a tab whose
+  // published worktree differs from the current one.
+  const swipePanes = useMemo(() => model.context.terminalTabs ?? [], [model.context.terminalTabs]);
+  const activeSwipeIndex = model.context.activeTabId
+    ? swipePanes.findIndex((tab) => tab.id === model.context.activeTabId)
+    : 0;
+  const currentIndex = activeSwipeIndex >= 0 ? activeSwipeIndex : 0;
 
   const handleSwipePreviousTab = useCallback(() => {
     if (swipePanes.length <= 1 || currentIndex <= 0 || !model.context.workspaceId) return;
@@ -1848,7 +1848,7 @@ export const RemoteHostConnection: React.FC<{
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, swipePanes]);
 
   const handleSwipeNextTab = useCallback(() => {
-    if (swipePanes.length <= 1 || currentIndex < 0 || currentIndex >= swipePanes.length - 1 || !model.context.workspaceId) return;
+    if (swipePanes.length <= 1 || currentIndex >= swipePanes.length - 1 || !model.context.workspaceId) return;
     const nextTab = swipePanes[currentIndex + 1];
     if (nextTab) {
       void selectContext({

@@ -115,9 +115,10 @@ export default defineConfig({
     host: DEV_HOST,
     port: DEV_PORT,
     strictPort: true,
-    // No hard-coded host/clientPort: the HMR client follows the port the server actually bound.
     hmr: {
       protocol: "ws",
+      host: DEV_HOST,
+      clientPort: DEV_PORT,
     },
     proxy: {
       "/api/account/v1": devRelayProxy,
