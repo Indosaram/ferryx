@@ -204,6 +204,7 @@ pub enum ErrorDetail {
     EpochUnknown { epoch: u64 },
     InstanceRetired,
     OwnerUnreachable,
+    SpawnFailed,
 }
 
 impl ErrorDetail {
@@ -232,6 +233,7 @@ impl ErrorDetail {
             EpochUnknown { .. } => 20,
             InstanceRetired => 21,
             OwnerUnreachable => 22,
+            SpawnFailed => 23,
         }
     }
 
@@ -277,7 +279,7 @@ impl ErrorDetail {
             ProtocolViolation(reason) => reason.enc(&mut w),
             StaleSubscribe { current_attach_seq } => w.put_u64(*current_attach_seq),
             EpochUnknown { epoch } => w.put_u64(*epoch),
-            CorruptFrame | SessionNotFound | StaleViewport | InstanceRetired | OwnerUnreachable => {}
+            CorruptFrame | SessionNotFound | StaleViewport | InstanceRetired | OwnerUnreachable | SpawnFailed => {}
         }
         w
     }
@@ -309,6 +311,7 @@ impl ErrorDetail {
             20 => EpochUnknown { epoch: r.u64()? },
             21 => InstanceRetired,
             22 => OwnerUnreachable,
+            23 => SpawnFailed,
             _ => return Err(Reason::BadEnum),
         })
     }

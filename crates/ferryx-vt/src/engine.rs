@@ -3,7 +3,7 @@ use std::ffi::{c_int, c_void};
 use std::ptr;
 
 use fxsh::types::{
-    Cell, ClipboardTarget, Color, Cursor, CursorStyle, Modes, MouseEncoding, MouseMode, Palette, RowData, UiEvent, UiEventKind,
+    Cell, ClipboardTarget, Color, Cursor, CursorStyle, Delta, Hyperlink, Modes, MouseEncoding, MouseMode, Palette, RowData, UiEvent, UiEventKind,
 };
 use session_core::replica::{normalize_size, Replica};
 
@@ -547,18 +547,48 @@ pub struct HostTerminal {
     pub links: LinkTable,
     next_line_id: u64,
     next_event_id: u64,
+    row_bytes: VecDeque<usize>,
+    scrollback_bytes: usize,
+    trimmed: usize,
+}
+
+fn encoded_len<T: fxsh::Codec>(v: &T) -> usize {
+    let mut w = Vec::new();
+    v.enc(&mut w);
+    w.len()
 }
 
 pub struct Advance {
     pub rewritten: bool,
+    pub changed: bool,
+    pub delta: Option<Delta>,
     pub vt_replies: Vec<Vec<u8>>,
     pub ui_events: Vec<UiEvent>,
+}
+
+struct Light {
+    screen: Vec<RowData>,
+    cursor: Cursor,
+    modes: Modes,
+    palette: Palette,
+    title: String,
+    links: BTreeMap<u32, String>,
+    had_scrollback: bool,
 }
 
 impl HostTerminal {
     pub fn new(cols: u16, rows: u16, scrollback_lines: usize) -> Self {
         let engine = VtEngine::new(cols, rows, scrollback_lines);
-        let mut t = HostTerminal { replica: Replica::new(engine.cols(), engine.rows()), engine, links: LinkTable::default(), next_line_id: 1, next_event_id: 1 };
+        let mut t = HostTerminal {
+            replica: Replica::new(engine.cols(), engine.rows()),
+            engine,
+            links: LinkTable::default(),
+            next_line_id: 1,
+            next_event_id: 1,
+            row_bytes: VecDeque::new(),
+            scrollback_bytes: 0,
+            trimmed: 0,
+        };
         t.rebuild(true);
         t
     }
@@ -567,34 +597,54 @@ impl HostTerminal {
         self.next_event_id
     }
 
+    fn light(&self) -> Light {
+        let r = &self.replica;
+        Light {
+            screen: r.screen.clone(),
+            cursor: r.cursor.clone(),
+            modes: r.modes.clone(),
+            palette: r.palette.clone(),
+            title: r.title.clone(),
+            links: r.hyperlinks.clone(),
+            had_scrollback: !r.scrollback.is_empty(),
+        }
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Advance {
+        let light = self.light();
         let step = self.engine.feed(bytes);
-        self.advance(step)
+        self.advance(step, light)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> Advance {
+        let light = self.light();
         let step = self.engine.resize(cols, rows);
-        self.advance(step)
+        self.advance(step, light)
     }
 
-    fn advance(&mut self, step: Step) -> Advance {
+    fn advance(&mut self, step: Step, light: Light) -> Advance {
+        let mut appended_rows: Vec<(u64, RowData)> = Vec::new();
+        let mut evicted_any = false;
         let rewritten = match step {
             Step::Rewritten => {
                 self.rebuild(true);
                 true
             }
             Step::Appended { evicted, appended } => {
-                for _ in 0..evicted.min(self.replica.scrollback.len()) {
-                    self.replica.scrollback.pop_front();
+                let from_trimmed = evicted.min(self.trimmed);
+                self.trimmed -= from_trimmed;
+                for _ in 0..(evicted - from_trimmed).min(self.replica.scrollback.len()) {
+                    self.pop_front_row();
+                    evicted_any = true;
                 }
                 let sb = self.engine.scrollback_rows();
                 let from = sb.saturating_sub(appended);
                 let rows = self.engine.read_scrollback(from, &mut self.links);
                 for row in rows {
-                    self.replica.scrollback.push_back((self.next_line_id, row));
-                    self.next_line_id += 1;
+                    appended_rows.push((self.next_line_id, row.clone()));
+                    self.push_back_row(row);
                 }
-                if self.replica.scrollback.len() != sb {
+                if self.replica.scrollback.len() + self.trimmed != sb {
                     self.rebuild(true);
                     true
                 } else {
@@ -614,7 +664,71 @@ impl HostTerminal {
                 }
             }
         }
-        Advance { rewritten, vt_replies, ui_events }
+        evicted_any |= self.enforce_limit(&mut appended_rows);
+        let delta = (!rewritten).then(|| self.build_delta(&light, appended_rows, evicted_any, &ui_events));
+        let changed = rewritten || delta.as_ref().is_some_and(state_changed);
+        Advance { rewritten, changed, delta, vt_replies, ui_events }
+    }
+
+    fn push_back_row(&mut self, row: RowData) {
+        let n = encoded_len(&row) + 8;
+        self.row_bytes.push_back(n);
+        self.scrollback_bytes += n;
+        self.replica.scrollback.push_back((self.next_line_id, row));
+        self.next_line_id += 1;
+    }
+
+    fn pop_front_row(&mut self) {
+        self.replica.scrollback.pop_front();
+        if let Some(n) = self.row_bytes.pop_front() {
+            self.scrollback_bytes -= n;
+        }
+    }
+
+    fn non_scrollback_len(&self) -> usize {
+        let r = &self.replica;
+        let screen: usize = r.screen.iter().map(encoded_len).sum();
+        let links: usize = r.hyperlinks.iter().map(|(_, u)| 8 + u.len()).sum();
+        256 + screen + encoded_len(&r.cursor) + encoded_len(&r.modes) + encoded_len(&r.palette) + 4 + r.title.len() + links
+    }
+
+    /// Keeps canonical_encode(S) at or below S_MAX (§2.2) by evicting the
+    /// oldest scrollback rows; returns whether any row was evicted.
+    fn enforce_limit(&mut self, appended: &mut Vec<(u64, RowData)>) -> bool {
+        let limit = session_core::replica::S_MAX;
+        let fixed = self.non_scrollback_len();
+        let mut evicted = false;
+        while fixed + self.scrollback_bytes > limit && !self.replica.scrollback.is_empty() {
+            self.pop_front_row();
+            self.trimmed += 1;
+            evicted = true;
+        }
+        if evicted {
+            let first = self.replica.first_line_id().unwrap_or(self.next_line_id);
+            appended.retain(|(id, _)| *id >= first);
+        }
+        evicted
+    }
+
+    fn build_delta(&self, light: &Light, appended: Vec<(u64, RowData)>, evicted: bool, ui_events: &[UiEvent]) -> Delta {
+        let r = &self.replica;
+        let evicted_before = (evicted && light.had_scrollback).then(|| r.first_line_id().unwrap_or(self.next_line_id));
+        Delta {
+            subscription_id: 0,
+            base_revision: 0,
+            new_revision: 0,
+            size: None,
+            cursor: (light.cursor != r.cursor).then(|| r.cursor.clone()),
+            modes: (light.modes != r.modes).then(|| r.modes.clone()),
+            palette: (light.palette != r.palette).then(|| r.palette.clone()),
+            title: (light.title != r.title).then(|| r.title.clone()),
+            dirty_rows: r.screen.iter().enumerate().filter(|(i, row)| light.screen.get(*i) != Some(row)).map(|(i, row)| (i as u16, row.clone())).collect(),
+            hyperlinks_added: r.hyperlinks.iter().filter(|(id, uri)| light.links.get(id) != Some(uri)).map(|(id, uri)| Hyperlink { id: *id, uri: uri.clone() }).collect(),
+            scrollback_appended: appended,
+            scrollback_evicted_before: evicted_before,
+            exit_info: None,
+            ui_events: ui_events.to_vec(),
+        }
     }
 
     fn rebuild(&mut self, scrollback: bool) {
@@ -622,9 +736,11 @@ impl HostTerminal {
         if scrollback {
             let rows = self.engine.read_scrollback(0, &mut self.links);
             self.replica.scrollback = VecDeque::new();
+            self.row_bytes.clear();
+            self.scrollback_bytes = 0;
+            self.trimmed = 0;
             for row in rows {
-                self.replica.scrollback.push_back((self.next_line_id, row));
-                self.next_line_id += 1;
+                self.push_back_row(row);
             }
         }
         let r = &mut self.replica;
@@ -643,4 +759,17 @@ impl HostTerminal {
     pub fn set_exit(&mut self, exit: fxsh::types::ExitInfo) {
         self.replica.exit_info = Some(exit);
     }
+}
+
+pub fn state_changed(d: &Delta) -> bool {
+    d.size.is_some()
+        || d.cursor.is_some()
+        || d.modes.is_some()
+        || d.palette.is_some()
+        || d.title.is_some()
+        || !d.dirty_rows.is_empty()
+        || !d.hyperlinks_added.is_empty()
+        || !d.scrollback_appended.is_empty()
+        || d.scrollback_evicted_before.is_some()
+        || d.exit_info.is_some()
 }

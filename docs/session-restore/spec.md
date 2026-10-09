@@ -531,6 +531,7 @@ enum: `client_kind` u8 = 1 gui_window, 2 remote_client, 3 policy_daemon. `superv
 | 20 | EPOCH_UNKNOWN | epoch u64 |
 | 21 | INSTANCE_RETIRED | (none) |
 | 22 | OWNER_UNREACHABLE | (none. Sent to the client by the daemon when it cannot connect to the owning partition. The host does not send it) |
+| 23 | SPAWN_FAILED | (none. The host could not start the child process or open its PTY; the `Error` message carries the operating system reason. The error response is the stored result of the operation, §7.5) |
 
 ### 7.7 capability bits
 bit0 Input lease (including LeaseVacated), bit1 Resize lease (including LeaseVacated), bit2 Snapshot/Delta, bit3 UI events, bit4 EpochState. A v1 host MUST provide all of bit0–4.

@@ -267,9 +267,10 @@ fn every_error_code_detail_roundtrips() {
         ErrorDetail::EpochUnknown { epoch: 2 },
         ErrorDetail::InstanceRetired,
         ErrorDetail::OwnerUnreachable,
+        ErrorDetail::SpawnFailed,
     ];
     let codes: Vec<u16> = all.iter().map(ErrorDetail::code).collect();
-    assert_eq!(codes, (1u16..=22).collect::<Vec<_>>());
+    assert_eq!(codes, (1u16..=23).collect::<Vec<_>>());
     for d in all {
         let frame = d.to_frame("m");
         assert_eq!(ErrorDetail::decode_detail(frame.code, &frame.detail.0), Ok(d.clone()));

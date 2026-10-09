@@ -149,11 +149,20 @@ proptest! {
             };
             if adv.rewritten {
                 client = t.replica.clone();
+                rev += 1;
             } else {
-                let d = diff(&prev, &t.replica, 1, rev, rev + 1).expect("an Appended step never rewrites scrollback");
+                let mut d = adv.delta.clone().expect("a non-rewrite step carries its Delta");
+                let oracle = diff(&prev, &t.replica, 1, rev, rev + 1).expect("an Appended step never rewrites scrollback");
+                prop_assert_eq!(adv.changed, ferryx_vt::state_changed(&d));
+                prop_assert_eq!(adv.changed, oracle.dirty_rows != vec![] || oracle.cursor.is_some() || oracle.modes.is_some() || oracle.palette.is_some() || oracle.title.is_some() || !oracle.hyperlinks_added.is_empty() || !oracle.scrollback_appended.is_empty() || oracle.scrollback_evicted_before.is_some());
+                d.subscription_id = 1;
+                d.base_revision = rev;
+                d.new_revision = if adv.changed { rev + 1 } else { rev };
                 client.apply_delta(&d);
+                if adv.changed {
+                    rev += 1;
+                }
             }
-            rev += 1;
             prop_assert_eq!(fxsh::state_digest(&client.to_body()), fxsh::state_digest(&t.replica.to_body()));
             let body = t.replica.to_body();
             let mut w = Vec::new();
