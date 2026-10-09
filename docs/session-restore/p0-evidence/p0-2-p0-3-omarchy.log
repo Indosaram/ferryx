@@ -1,0 +1,19 @@
+EXTRACT cols=200 rows=60 scrollback_rows=215 bytes=895696 ms=3.1 ms_repeat=3.1 deterministic=yes cells=110000 graphemes=1096 link_cells=3148 styled=6576
+ALT mode1049=1 active_screen=1 bytes=31629
+EXIT=0
+REWRITE case=plain_output_scroll sb_before=58 sb_after=59 cols_after=80 first_ref=has(0)@0,0 mid_ref=has(0)@0,20 history_prefix_hash_changed=no
+REWRITE case=ED3_clear_scrollback sb_before=58 sb_after=0 cols_after=80 first_ref=has(0)@0,0 mid_ref=has(0)@0,0 history_prefix_hash_changed=yes
+REWRITE case=resize_cols_reflow sb_before=58 sb_after=58 cols_after=60 first_ref=has(0)@0,0 mid_ref=has(0)@0,20 history_prefix_hash_changed=yes
+REWRITE case=resize_rows_only sb_before=58 sb_after=54 cols_after=80 first_ref=has(0)@0,0 mid_ref=has(0)@0,20 history_prefix_hash_changed=yes
+REWRITE case=RIS_reset sb_before=58 sb_after=0 cols_after=80 first_ref=lost(-4)@0,0 mid_ref=lost(-4)@0,0 history_prefix_hash_changed=yes
+REWRITE case=alt_screen_enter sb_before=58 sb_after=0 cols_after=80 first_ref=has(0)@0,0 mid_ref=has(0)@0,20 history_prefix_hash_changed=yes
+REWRITE case=DECSTBM_scroll_region_scroll sb_before=58 sb_after=58 cols_after=80 first_ref=has(0)@0,0 mid_ref=has(0)@0,20 history_prefix_hash_changed=no
+EXIT=0
+---
+EXTRACT cols=200 rows=60 scrollback_rows=9768 bytes=31952499 ms=135.9 ms_repeat=136.2 deterministic=yes cells=3931200 graphemes=39308 link_cells=112624 styled=235848
+ALT mode1049=1 active_screen=1 bytes=31629
+EXIT=0
+DETECT runs=300 steps=45000 truth_rewrites=9837 missed=0 false_positives=1145
+EXIT=0
+DETECT_COST cols=200 per_step_us=36.09 (includes one vt_write of 6 bytes)
+EXIT=0

@@ -1,0 +1,28 @@
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=13 reader_paused_ms=0 elapsed_ms=121086 received_len=0 order_and_bytes_equal=false
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=11 reader_paused_ms=1500 elapsed_ms=120915 received_len=0 order_and_bytes_equal=false
+
+--- diag ---
+CHILD wait_result=258 child_diag=start stdin_handle=0x8 getmode_ok=0 mode=0x0
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=14 reader_paused_ms=0 elapsed_ms=20915 received_len=0 order_and_bytes_equal=false
+
+--- fixed (STARTF_USESTDHANDLES) ---
+[31;1mwarning: value assigned to `write_done_ms` is never read[0m
+[31;1m   --> main.rs:183:37[0m
+[31;1m    |[0m
+[31;1m183 |             let mut write_done_ms = 0u128;[0m
+[31;1m    |                                     ^^^^^ this value is reassigned later and never used[0m
+[31;1m...[0m
+[31;1m206 |             write_done_ms = t0.elapsed().as_millis();[0m
+[31;1m    |             ---------------------------------------- `write_done_ms` is overwritten here before the previous value is read[0m
+[31;1m    |[0m
+[31;1m    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default[0m
+[31;1m[0m
+WRITES_DONE_MS=1208
+CHILD wait_result=0 child_diag=progress got=1048576 reads=256
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=11 reader_paused_ms=0 elapsed_ms=1419 received_len=1048576 order_and_bytes_equal=true
+WRITES_DONE_MS=970
+CHILD wait_result=0 child_diag=progress got=1048576 reads=256
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=12 reader_paused_ms=1500 elapsed_ms=1800 received_len=1048576 order_and_bytes_equal=true
+WRITES_DONE_MS=1028
+CHILD wait_result=0 child_diag=progress got=1048576 reads=256
+P0-1 platform=windows-conpty total=1048576 partial_writes=0 would_block_events=15 max_single_write_call_us=11 reader_paused_ms=4000 elapsed_ms=4314 received_len=1048576 order_and_bytes_equal=true
