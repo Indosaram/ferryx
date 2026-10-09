@@ -131,6 +131,7 @@ describe("agentConflictAdoption", () => {
         cols: 100,
         rows: 30,
         running: true,
+        incarnation: "incarnation-live",
       };
       const describe = vi.fn(async () => described);
 
@@ -155,6 +156,7 @@ describe("agentConflictAdoption", () => {
           cols: 100,
           rows: 30,
           running: true,
+          incarnation: "incarnation-live",
         },
       });
       expect(describe).toHaveBeenCalledWith("backend-live-456");

@@ -7,7 +7,7 @@ import type { StructuredIpcError, TerminalSession } from "./types";
 
 type ReconnectAction =
   | { type: "SET_RECONNECT_LIFECYCLE"; sessionId: string; lifecycle: "validating" | "spawning" | "binding" | "failed"; error?: StructuredIpcError | null; requestId?: string | null }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null };
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null; incarnation?: string | null };
 
 export type AgentReconnectDependencies = {
   getSessions: () => Readonly<Record<string, TerminalSession>>;
@@ -89,6 +89,7 @@ export function reconnectAgentSession(
         backendSessionId: spawned.sessionId,
         cwd: spawned.session.cwd ?? current.cwd,
         daemonEpoch: spawned.daemonEpoch,
+        incarnation: spawned.session.incarnation ?? null,
       });
       return spawned;
     } catch (error) {

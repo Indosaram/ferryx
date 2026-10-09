@@ -622,6 +622,8 @@ export type AttachTerminalRequest = {
   sessionId: string;
   afterSequence?: string | null;
   splitAttempt?: SplitAttachAttempt | null;
+  /** The seven-field pane binding; required by `cmd_terminal_attach` for a backend the native host has not bound yet. */
+  attachTuple?: PaneAttachTuple | null;
 };
 
 export type AttachTerminalResponse = {

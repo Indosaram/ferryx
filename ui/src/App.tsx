@@ -1383,6 +1383,7 @@ function WorkspaceApp({
               backendSessionId: result.sessionId,
               cwd: result.session.cwd ?? localSession.cwd,
               daemonEpoch: result.daemonEpoch,
+              incarnation: result.session.incarnation ?? null,
             });
             await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
           },
