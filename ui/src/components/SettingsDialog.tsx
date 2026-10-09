@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bell,
   Bot,
+  CreditCard,
   Globe,
   Keyboard,
   Palette,
@@ -14,12 +15,14 @@ import {
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
+import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
+import { PlanSection } from "./settings/PlanSection";
 import { RemoteSection } from "./settings/RemoteSection";
 import type { MachineProjectTarget, RemoteContext } from "../lib/machineNavigation";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
@@ -57,6 +60,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "remote",
   "permissions",
   "ssh",
+  "plan",
 ];
 
 function sanitizeSectionId(candidate: unknown): SectionId {
@@ -67,11 +71,45 @@ function sanitizeSectionId(candidate: unknown): SectionId {
   return "general";
 }
 
+function resolveInitialSection(candidate: unknown, signedIn: boolean): SectionId {
+  const section = sanitizeSectionId(candidate);
+  if (section === "plan" && !signedIn) return "general";
+  return section;
+}
+
+interface PlanAuth {
+  readonly origin: string;
+  readonly token: string | null;
+}
+
+function resolvePlanAuth(accountOrigin?: string): PlanAuth {
+  const origin = accountOrigin ?? getConfiguredAccountOrigin();
+  return { origin, token: getStoredAccountSessionToken(origin) };
+}
+
 function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, remoteContext, accountOrigin }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
-  const [section, setSection] = useState<SectionId>(sanitizeSectionId(initialSection));
+  const [planAuth, setPlanAuth] = useState<PlanAuth>(() => resolvePlanAuth(accountOrigin));
+  const [planUnavailable, setPlanUnavailable] = useState(false);
+  const planAvailable = planAuth.token !== null && !planUnavailable;
+  const [section, setSection] = useState<SectionId>(() =>
+    resolveInitialSection(initialSection, planAuth.token !== null),
+  );
   const isMac = isMacShortcutPlatform();
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  const handleAccountSessionChange = useCallback((token: string | null, origin: string) => {
+    setPlanAuth({ origin, token });
+    setPlanUnavailable(false);
+    if (token === null) {
+      setSection((current) => (current === "plan" ? "general" : current));
+    }
+  }, []);
+
+  const hidePlanSection = useCallback(() => {
+    setPlanUnavailable(true);
+    setSection((current) => (current === "plan" ? "general" : current));
+  }, []);
 
   useEffect(() => {
     if (!remoteContext?.machine) backButtonRef.current?.focus();
@@ -151,6 +189,9 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
             <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote" onClick={() => setSection("remote")} />
+            {planAvailable ? (
+              <NavButton active={section === "plan"} icon={<CreditCard />} label="Plan" onClick={() => setSection("plan")} />
+            ) : null}
           </nav>
         </div>
       </aside>
@@ -198,6 +239,14 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               onOpenProject={onOpenMachineProject}
               onOpenSshProject={onOpenSshProject}
               accountOrigin={accountOrigin}
+              onAccountSessionChange={handleAccountSessionChange}
+            />
+          ) : null}
+          {section === "plan" && planAvailable ? (
+            <PlanSection
+              accountOrigin={planAuth.origin}
+              accountSessionToken={planAuth.token}
+              onUnavailable={hidePlanSection}
             />
           ) : null}
         </div>

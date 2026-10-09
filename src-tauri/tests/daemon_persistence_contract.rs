@@ -327,6 +327,7 @@ impl TestDaemonClient {
                 startup: None,
                 // Legacy spawn fixture: no local-split envelope on the wire.
                 local_split: None,
+                session_id: None,
                 cols,
                 rows,
             })
@@ -408,7 +409,7 @@ impl TestDaemonClient {
             })
             .await?;
         match resp {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             other => Err(format!("DescribeSession failed: {other:?}").into()),
         }
     }
@@ -1210,7 +1211,10 @@ async fn test_daemon_gui_process_non_ownership_and_process_tree() {
 
 #[test]
 fn test_launchd_plist_generation_and_identity_contract() {
-    let plist = generate_launchd_plist("/Applications/Ferryx.app/Contents/MacOS/ferryx");
+    let plist = generate_launchd_plist(
+        "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+        std::path::Path::new("/tmp/ferryx-test-logs"),
+    );
     assert!(
         plist.contains("<string>com.rorca.daemon</string>"),
         "Must preserve com.rorca.daemon compatibility identifier in launchd plist"

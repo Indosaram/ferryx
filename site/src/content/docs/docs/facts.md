@@ -52,9 +52,9 @@ current build rather than a pinned tag:
 curl -fsSL https://relay.ferryx.dev/install.sh | bash
 ```
 
-The release pipeline stages `ferryx-cli` beside the Linux AppImage and `.deb` (and, on macOS,
+Local release assembly stages `ferryx-cli` beside the Linux AppImage and `.deb` (and, on macOS,
 as a universal binary), so the installer has a current artifact to fetch; it falls back to the
-GitHub release asset if the relay has no local copy. `cargo build --release --bin ferryx-cli`
+GitHub release asset if the relay has no local copy. `cargo build --manifest-path src-tauri/Cargo.toml --release --bin ferryx-cli`
 remains available for building from source.
 
 Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can be checked with
@@ -75,7 +75,7 @@ Detection drives the pane status indicator, notifications, and the macOS Dock at
 
 | Fact | Value | Source |
 | :--- | :--- | :--- |
-| Managed worktree path | `.orca-worktrees/wt-<slug>` inside the repository | `src-tauri/src/worktree/` |
+| Managed worktree path | `.orca-worktrees/<workspace-id>/<slug>` inside the repository | `src-tauri/src/worktree/manager.rs` |
 | Branch naming | `orca/<workspace-id>/<slug>` | `src-tauri/src/worktree/` |
 | Path safety | Managed worktree paths are jailed to the repository root | `src-tauri/src/worktree/` |
 
@@ -90,7 +90,8 @@ The application manages worktree creation, naming, and removal using these conve
 | Output buffer | 512 KiB ring buffer per session with monotonic sequence numbers | `src-tauri/src/terminal/output_hub.rs` |
 | Reconnect behaviour | Missed output is replayed; if the buffer wrapped, the client is told there is a gap instead of being shown a corrupted transcript | `src-tauri/src/terminal/output_hub.rs` |
 
-Closing or reloading the desktop window does not kill running agent processes.
+Closing or reloading the desktop window does not kill running agent processes while their daemon
+remains alive. Stopping the daemon or rebooting its host can end live PTYs.
 
 ## Remote access
 
@@ -112,7 +113,7 @@ it, and prefer a trusted network path.
 | Desktop renderer | WGPU native child surfaces (Metal, Vulkan, DX12) | `src-tauri/src/native_terminal/renderer/` |
 | Application shell | Tauri v2 with the OS webview; no Electron or bundled Chromium | `src-tauri/tauri.conf.json` |
 | Embedded browser | Native WebView split-tabs beside terminal panes | `ui/src/components/browser/` |
-| UI | React 18 with Zustand state and binary pane split trees | `ui/src/state/` |
+| UI | React 18 with a hook-based workspace store and binary pane split trees | `ui/src/state/` |
 
 ## What is not claimed
 

@@ -1,10 +1,15 @@
 import { filePreviewController } from "../lib/filePreview";
+import * as switchDebugModule from "../lib/switchDebug";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
 import type { TerminalActivity } from "../lib/activity";
-import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
+import {
+  resetNativeTerminalLifecycleForTest,
+  subscribeNativeTerminalPresentation,
+  type NativeTerminalPresentationReceipt,
+} from "../lib/nativeTerminalLifecycle";
 import { attachNativeTerminalRebind, terminalEventBus } from "../lib/terminalEvents";
 import { useShortcuts } from "../lib/shortcuts";
 import {
@@ -257,31 +262,6 @@ function createSession(
     backendSessionId,
     lifecycle: "working",
   };
-}
-
-// Pins the host to macOS for tests that exercise Cmd-modifier semantics, restoring
-// the original property descriptors (not just values) so later tests see the real host.
-async function withMacHost<T>(fn: () => T | Promise<T>): Promise<T> {
-  const overrides: Array<[object, string, unknown]> = [
-    [process, "platform", "darwin"],
-    [navigator, "platform", "MacIntel"],
-    [navigator, "userAgent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"],
-  ];
-  const saved = overrides.map(([target, key]) => [target, key, Object.getOwnPropertyDescriptor(target, key)] as const);
-  try {
-    for (const [target, key, value] of overrides) {
-      Object.defineProperty(target, key, { value, configurable: true });
-    }
-    return await fn();
-  } finally {
-    for (const [target, key, descriptor] of saved) {
-      if (descriptor) {
-        Object.defineProperty(target, key, descriptor);
-      } else {
-        delete (target as Record<string, unknown>)[key];
-      }
-    }
-  }
 }
 
 describe("NativeTerminalPane IPC failure reporting and visible error state", () => {
@@ -1503,6 +1483,40 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     vi.unstubAllGlobals();
   });
 
+  async function withMacHost<T>(fn: () => T | Promise<T>): Promise<T> {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "darwin",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "MacIntel",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        configurable: true,
+      });
+      return await fn();
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  }
+
   it("focuses the hidden input sink and notifies native focus after successful attach", async () => {
     const session = createSession("term-session-1", "daemon-pty-123");
     const { getByTestId } = render(
@@ -1598,6 +1612,42 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("records an intercepted pointer even when pane input is disabled", () => {
+    const debugSpy = vi.spyOn(switchDebugModule, "switchDebug");
+    try {
+      const session = createSession("term-session-intercepted");
+      render(
+        <NativeTerminalVisibilityProvider visible={false}>
+          <NativeTerminalPane session={session} />
+        </NativeTerminalVisibilityProvider>,
+      );
+      const overlay = document.createElement("div");
+      overlay.setAttribute("data-testid", "intercepting-overlay");
+      document.body.appendChild(overlay);
+      try {
+        fireEvent(overlay, new MouseEvent("pointerdown", {
+          bubbles: true,
+          clientX: 24,
+          clientY: 36,
+        }));
+        expect(debugSpy).toHaveBeenCalledWith(
+          "terminal.surface.input.gate.pointer",
+          expect.objectContaining({
+            backendSessionId: "term-session-intercepted",
+            visible: false,
+            reachesPane: false,
+            targetTestId: "intercepting-overlay",
+          }),
+        );
+        expect(tauriCoreMocks.invoke.mock.calls.some(([command]) => command === "cmd_native_terminal_mouse")).toBe(false);
+      } finally {
+        overlay.remove();
+      }
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
   it("forwards a primary pointer press for native selection without cancelling the gesture", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,
@@ -1641,6 +1691,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     );
     expect(pressCall?.[1]).toEqual({
       sessionId: "term-session-1",
+      requestId: expect.stringMatching(/^req-.*-term-session-1-\d+$/),
       event: {
         action: "Press",
         button: "Left",
@@ -1728,6 +1779,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       );
       expect(mouseCalls.find(([, args]) => args.event.action === "Motion")?.[1]).toEqual({
         sessionId: "term-session-1",
+        requestId: expect.stringMatching(/^req-/),
         event: {
           action: "Motion",
           button: null,
@@ -1745,6 +1797,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       });
       expect(mouseCalls.find(([, args]) => args.event.action === "Release")?.[1]).toEqual({
         sessionId: "term-session-1",
+        requestId: expect.stringMatching(/^req-/),
         event: {
           action: "Release",
           button: null,
@@ -1929,6 +1982,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -1962,6 +2016,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -2014,6 +2069,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(event.defaultPrevented).toBe(true);
       await waitFor(() => {
         expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+          requestId: expect.stringMatching(/^req-/),
           sessionId: "term-session-1",
           input: {
             keyEvent: {
@@ -2065,6 +2121,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       await waitFor(() => {
         expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+          requestId: expect.stringMatching(/^req-/),
           sessionId: "term-session-1",
           input: {
             keyEvent: {
@@ -2105,6 +2162,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: {
           keyEvent: {
@@ -4184,6 +4242,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       window.removeEventListener("ferryx:open-file-preview", onOpen);
       openSpy.mockRestore();
     }));
+
   it("shows a link underline only while hovering a token with the modifier", () =>
     withMacHost(async () => {
       const session = createSession("hover-file", "hover-backend");
@@ -4972,6 +5031,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         preedit: null,
       });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: { text: "한글" },
       });
@@ -5006,6 +5066,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-1",
         input: { text: "a" },
       });
@@ -5024,6 +5085,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-1",
       input: {
         text: "a",
@@ -5052,6 +5114,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(keyEvent.defaultPrevented).toBe(true);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledTimes(1);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-1",
       input: {
         text: "a",
@@ -5388,6 +5451,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     expect(chord.defaultPrevented).toBe(true);
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "term-session-plain-ctrlalt",
       input: {
         keyEvent: {
@@ -5620,6 +5684,7 @@ describe("active prop and pane focus event dispatch", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "backend-claim-test",
         input: { text: "a" },
       });
@@ -5649,6 +5714,7 @@ describe("active prop and pane focus event dispatch", () => {
     });
 
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "backend-inactive-test",
       input: { text: "z" },
     });
@@ -5679,6 +5745,40 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     resetNativeTerminalPaneForTest();
     resetNativeTerminalLifecycleForTest();
   });
+
+  async function withMacHost<T>(fn: () => T | Promise<T>): Promise<T> {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "darwin",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "MacIntel",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        configurable: true,
+      });
+      return await fn();
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  }
 
   it("routes attach, bounds, focus, input, and detach to backendSessionId when id and backendSessionId intentionally differ", async () => {
     const frontendId = "frontend-pane-leaf-abc";
@@ -5739,6 +5839,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: daemonSessionId,
       input: { text: "echo hi\n" },
     });
@@ -5836,6 +5937,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "daemon-pty-fresh-123",
       input: { text: "resumed input" },
     });
@@ -5878,6 +5980,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       leftInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: "backend-resumed-left",
       input: { text: "left only" },
     });
@@ -6037,6 +6140,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-capture-fallback",
         input: { text: "a" },
       });
@@ -6079,6 +6183,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     // The store-derived `active` prop must keep deciding body-targeted keydowns even when this
     // pane was the last natively focused terminal (mixed terminal+browser splits).
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      requestId: expect.stringMatching(/^req-/),
       sessionId: backendSessionId,
       input: { text: "a" },
     });
@@ -6218,6 +6323,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "switch-session-incoming",
         input: { text: "x" },
       });
@@ -6317,6 +6423,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "daemon-native-ime-switch",
         input: { text: "가" },
       });
@@ -6345,6 +6452,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-plain-ctrlc",
         input: {
           keyEvent: {
@@ -6396,6 +6504,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await act(async () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-waiting-ctrlc",
         input: {
           keyEvent: {
@@ -6747,6 +6856,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-working-ctrlc",
         input: {
           keyEvent: {
@@ -6789,6 +6899,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(koreanCtrlC.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-korean-ctrlc",
         input: {
           keyEvent: {
@@ -6838,6 +6949,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(koreanCtrlL.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-korean-ctrll",
         input: {
           keyEvent: {
@@ -6886,6 +6998,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await act(async () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-no-activity-ctrlc",
         input: {
           keyEvent: {
@@ -6940,6 +7053,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(ctrlCEvent.defaultPrevented).toBe(true);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.stringMatching(/^req-/),
         sessionId: "term-session-agent-working-override-ctrlc",
         input: {
           keyEvent: {
@@ -8044,4 +8158,292 @@ describe("terminal link UX (U1-U3)", () => {
       expect(interacted).toContain("frontend-focus-session");
     });
   });
+});
+
+describe("NativeTerminalPane positive presentation receipt gating", () => {
+  let restorePaneRect: () => void;
+  let frameSpy: { mockRestore: () => void } | undefined;
+  const releases: Array<() => void> = [];
+  const pending: Array<{ dispatched: boolean; settle: () => void; processed: Promise<void> }> = [];
+
+  function signal() {
+    let resolve: () => void = () => { throw new Error("Signal not initialized"); };
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  async function observe(promise: Promise<void>) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await act(async () => {
+        await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Presentation signal not received")), 2000);
+          }),
+        ]);
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Observe the real consumer chain through its finally callback, not a guessed
+  // number of microtasks. All callbacks still execute with native Promise semantics.
+  function boundsRequest() {
+    type Receipt = { presented: boolean; renderDeferred: boolean } | undefined;
+    const dispatched = signal();
+    const processed = signal();
+    class ReceiptPromise<T> extends Promise<T> {
+      override finally(onfinally?: (() => void) | null): Promise<T> {
+        return super.finally(() => {
+          try { onfinally?.(); }
+          finally { processed.resolve(); }
+        });
+      }
+    }
+    let resolve: (receipt: Receipt) => void = () => { throw new Error("Receipt not initialized"); };
+    const promise = new ReceiptPromise<Receipt>((done) => { resolve = done; });
+    const owned = { dispatched: false, settle: () => resolve(undefined), processed: processed.promise };
+    pending.push(owned);
+    return {
+      dispatch: () => { owned.dispatched = true; dispatched.resolve(); return promise; },
+      dispatched: dispatched.promise,
+      processed: processed.promise,
+      resolve,
+    };
+  }
+
+  function installBounds(...requests: ReturnType<typeof boundsRequest>[]) {
+    let index = 0;
+    tauriCoreMocks.invoke.mockImplementation((command) => {
+      if (command !== "cmd_native_terminal_set_bounds") return Promise.resolve(undefined);
+      const request = requests[index++];
+      if (!request) throw new Error("Unexpected set-bounds dispatch");
+      return request.dispatch();
+    });
+  }
+
+  function subscribe(filter: Parameters<typeof subscribeNativeTerminalPresentation>[0] = {}) {
+    const received: NativeTerminalPresentationReceipt[] = [];
+    releases.push(subscribeNativeTerminalPresentation(filter, (receipt) => received.push(receipt)));
+    return received;
+  }
+
+  function frames() {
+    const callbacks: FrameRequestCallback[] = [];
+    frameSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    });
+    return callbacks;
+  }
+
+  function resize(height: number) {
+    HTMLElement.prototype.getBoundingClientRect = () => new DOMRect(10, 20, 812, height);
+    act(() => {
+      const record = resizeRecords.at(-1);
+      if (!record) throw new Error("Resize observer not registered");
+      record.callback([], record.observer);
+    });
+  }
+
+  const boundsDispatches = () => tauriCoreMocks.invoke.mock.calls.filter(
+    ([command]) => command === "cmd_native_terminal_set_bounds",
+  ).length;
+  const positive = { presented: true, renderDeferred: false };
+  const deferred = { presented: false, renderDeferred: true };
+
+  beforeEach(() => {
+    restorePaneRect = stubPaneRect();
+    tauriCoreMocks.invoke.mockReset();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+    tauriCoreMocks.isTauri.mockReset();
+    tauriCoreMocks.isTauri.mockReturnValue(true);
+    tauriWindowMocks.reset();
+    nativeTerminalEventMocks.scrollbarListener = null;
+    nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.inputReceiptListeners = [];
+    nativeTerminalEventMocks.pasteListeners = [];
+    nativeTerminalEventMocks.copyOrInterruptListeners = [];
+    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
+    nativeTerminalEventMocks.onNativeTerminalPaste.mockClear();
+    nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt.mockClear();
+    nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
+    nativeTerminalEventMocks.scrollbarOverlayCalls = [];
+    nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay.mockClear();
+    resizeRecords.length = 0;
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    frameSpy = undefined;
+  });
+
+  afterEach(async () => {
+    // Unmount first so settling an abandoned receipt cannot schedule new work.
+    cleanup();
+    for (const release of releases.splice(0)) release();
+    const owned = pending.splice(0);
+    for (const request of owned) request.settle();
+    try {
+      await observe(Promise.all(owned.filter((request) => request.dispatched)
+        .map((request) => request.processed)).then(() => undefined));
+    } finally {
+      frameSpy?.mockRestore();
+      frameSpy = undefined;
+      restorePaneRect();
+      resetNativeTerminalLifecycleForTest();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("emits a positive presentation receipt with the attempt identity frozen at dispatch", async () => {
+    const session = createSession("term-session-positive");
+    const request = boundsRequest();
+    installBounds(request);
+    const received = subscribe({ frontendSessionId: "fs-positive", attemptGeneration: 3 });
+    render(<NativeTerminalPane sessionId={session.id} session={session}
+      splitAttempt={{ frontendSessionId: "fs-positive", generation: 3 }} />);
+    await observe(request.dispatched);
+    request.resolve(positive);
+    await observe(request.processed);
+    expect(boundsDispatches()).toBe(1);
+    expect(received).toEqual([{
+      frontendSessionId: "fs-positive", paneIdentity: session.id,
+      backendSessionId: session.id, bindingKey: "term-session-positive::0:", attemptGeneration: 3,
+    }]);
+  });
+
+  it("does not emit when the set-bounds receipt is missing", async () => {
+    const session = createSession("term-session-missing-receipt");
+    const request = boundsRequest();
+    installBounds(request);
+    const received = subscribe();
+    render(<NativeTerminalPane sessionId={session.id} session={session} />);
+    await observe(request.dispatched);
+    request.resolve(undefined);
+    await observe(request.processed);
+    expect(boundsDispatches()).toBe(1);
+    expect(received).toEqual([]);
+  });
+
+  it("schedules exactly one frame retry for a false receipt and emits only after it recovers", async () => {
+    const session = createSession("term-session-false-retry");
+    const first = boundsRequest();
+    const second = boundsRequest();
+    installBounds(first, second);
+    const callbacks = frames();
+    const received = subscribe();
+    render(<NativeTerminalPane sessionId={session.id} session={session} />);
+    await observe(first.dispatched);
+    first.resolve({ presented: false, renderDeferred: false });
+    await observe(first.processed);
+    expect(callbacks).toHaveLength(1);
+    expect(received).toEqual([]);
+    act(() => callbacks[0]?.(0));
+    await observe(second.dispatched);
+    second.resolve(positive);
+    await observe(second.processed);
+    expect(boundsDispatches()).toBe(2);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ frontendSessionId: session.id, attemptGeneration: 0 });
+    expect(callbacks).toHaveLength(1);
+  });
+
+  it("emits nothing for a deferred receipt and recovers on the next positive presentation", async () => {
+    const session = createSession("term-session-deferred-positive");
+    const first = boundsRequest();
+    const second = boundsRequest();
+    installBounds(first, second);
+    const callbacks = frames();
+    const received = subscribe();
+    render(<NativeTerminalPane sessionId={session.id} session={session}
+      splitAttempt={{ frontendSessionId: "fs-deferred", generation: 4 }} />);
+    await observe(first.dispatched);
+    first.resolve(deferred);
+    await observe(first.processed);
+    expect(received).toEqual([]);
+    expect(callbacks).toHaveLength(0);
+    resize(704);
+    await observe(second.dispatched);
+    second.resolve(positive);
+    await observe(second.processed);
+    expect(boundsDispatches()).toBe(2);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ frontendSessionId: "fs-deferred", attemptGeneration: 4 });
+    expect(callbacks).toHaveLength(0);
+  });
+
+  it("never emits or schedules frame retries across sustained deferral", async () => {
+    const session = createSession("term-session-deferred-deadline");
+    const requests = [boundsRequest(), boundsRequest(), boundsRequest()];
+    installBounds(...requests);
+    const callbacks = frames();
+    const received = subscribe();
+    render(<NativeTerminalPane sessionId={session.id} session={session} />);
+    for (const [index, request] of requests.entries()) {
+      if (index > 0) resize(700 + index * 4);
+      await observe(request.dispatched);
+      request.resolve(deferred);
+      await observe(request.processed);
+      expect(boundsDispatches()).toBe(index + 1);
+      expect(received).toEqual([]);
+      expect(callbacks).toHaveLength(0);
+    }
+    // The bounded readiness deadline is owned by the coordinator lane.
+  });
+
+  it("drops a positive receipt that resolves after the pane re-binds", async () => {
+    const session = createSession("term-session-stale-rebind");
+    const first = boundsRequest();
+    const second = boundsRequest();
+    installBounds(first, second);
+    const received = subscribe({ backendSessionId: session.id });
+    const { rerender } = render(<NativeTerminalPane sessionId={session.id} session={session} />);
+    await observe(first.dispatched);
+    rerender(<NativeTerminalPane sessionId={session.id} session={{ ...session, daemonEpoch: "epoch-2" }} />);
+    first.resolve(positive);
+    await observe(first.processed);
+    await observe(second.dispatched);
+    expect(received).toEqual([]);
+    second.resolve(deferred);
+    await observe(second.processed);
+    expect(boundsDispatches()).toBe(2);
+    expect(received).toEqual([]);
+  });
+
+  it.each(["in-flight", "settled"] as const)(
+    "dispatches attempt 2's own request with unchanged geometry when attempt 1 is %s",
+    async (state) => {
+      const session = createSession("term-session-retry");
+      const first = boundsRequest();
+      const second = boundsRequest();
+      installBounds(first, second);
+      const attempt1 = subscribe({ frontendSessionId: "fs-retry", attemptGeneration: 1 });
+      const attempt2 = subscribe({ frontendSessionId: "fs-retry", attemptGeneration: 2 });
+      const { rerender } = render(<NativeTerminalPane sessionId={session.id} session={session}
+        splitAttempt={{ frontendSessionId: "fs-retry", generation: 1 }} />);
+      await observe(first.dispatched);
+      if (state === "settled") {
+        first.resolve(positive);
+        await observe(first.processed);
+      }
+      expect(boundsDispatches()).toBe(1);
+      rerender(<NativeTerminalPane sessionId={session.id} session={session}
+        splitAttempt={{ frontendSessionId: "fs-retry", generation: 2 }} />);
+      if (state === "in-flight") {
+        first.resolve(positive);
+        await observe(first.processed);
+      }
+      await observe(second.dispatched);
+      expect(boundsDispatches()).toBe(2);
+      expect(attempt1).toHaveLength(1);
+      expect(attempt2).toEqual([]);
+      second.resolve(positive);
+      await observe(second.processed);
+      expect(attempt1[0]).toMatchObject({ attemptGeneration: 1 });
+      expect(attempt2).toHaveLength(1);
+      expect(attempt2[0]).toMatchObject({ frontendSessionId: "fs-retry", attemptGeneration: 2 });
+    },
+  );
 });

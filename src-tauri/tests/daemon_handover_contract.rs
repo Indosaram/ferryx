@@ -113,6 +113,7 @@ impl TestDaemonClient {
                 startup: None,
                 // Legacy spawn fixture: no local-split envelope on the wire.
                 local_split: None,
+                session_id: None,
                 cols,
                 rows,
             })
@@ -175,7 +176,7 @@ impl TestDaemonClient {
             })
             .await?;
         match resp {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             other => Err(format!("DescribeSession failed: {other:?}").into()),
         }
     }

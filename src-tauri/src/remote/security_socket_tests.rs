@@ -154,6 +154,8 @@ struct SocketBackend {
     attach_gate: Option<Arc<Gate>>,
     input_gate: Arc<Gate>,
     completed_inputs: AtomicUsize,
+    resize_calls: Arc<AtomicUsize>,
+    restore_calls: Arc<AtomicUsize>,
 }
 
 impl SocketBackend {
@@ -167,6 +169,8 @@ impl SocketBackend {
             attach_gate,
             input_gate: Arc::new(Gate::default()),
             completed_inputs: AtomicUsize::new(0),
+            resize_calls: Arc::new(AtomicUsize::new(0)),
+            restore_calls: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -253,6 +257,14 @@ impl RemoteSessionBackend for SocketBackend {
         })
     }
     fn resize<'a>(&'a self, _: &'a str, _: u16, _: u16) -> BoxFuture<'a, Result<(), String>> {
+        self.resize_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+    fn restore_desktop_geometry<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        self.restore_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     }
     fn signal<'a>(&'a self, _: &'a str, _: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
@@ -801,4 +813,53 @@ async fn revoke_before_raw_upgrade_is_not_lost() {
 #[tokio::test]
 async fn revoke_before_grid_upgrade_is_not_lost() {
     revocation_before_upgrade_callback("/api/v1/terminal/session?render=grid").await;
+}
+
+#[tokio::test]
+async fn socket_close_restores_desktop_geometry_only_if_resized() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(backend.clone());
+    let (token, _) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(state).await;
+
+    // 1. Socket connects, does NOT resize, and closes: restore_calls must stay 0.
+    {
+        let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session", Some(&token)).await;
+        let _ = frame(&mut socket).await;
+        write_client_ws_frame(&mut socket, 8, &[]).await;
+        while !matches!(frame(&mut socket).await, ServerWebSocketFrame::Close) {}
+        drop(socket);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        backend.restore_calls.load(Ordering::SeqCst),
+        0,
+        "a socket that never resized must not trigger restore on close"
+    );
+
+    // 2. Socket connects, performs a resize, and closes: restore_calls must be 1.
+    {
+        let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session", Some(&token)).await;
+        let _ = frame(&mut socket).await;
+        write_client_ws_frame(
+            &mut socket,
+            1,
+            br#"{"type":"resize","cols":100,"rows":30}"#,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(backend.resize_calls.load(Ordering::SeqCst), 1);
+
+        write_client_ws_frame(&mut socket, 8, &[]).await;
+        while !matches!(frame(&mut socket).await, ServerWebSocketFrame::Close) {}
+        drop(socket);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        backend.restore_calls.load(Ordering::SeqCst),
+        1,
+        "a socket that resized must trigger restore on close"
+    );
+
+    server.stop().await;
 }

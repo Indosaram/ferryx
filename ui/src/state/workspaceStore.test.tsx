@@ -451,7 +451,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(reboundSession.lifecycle).toBe("running");
   });
 
-  it("closes deferred spawned backend session if the pane is closed before spawn resolves", async () => {
+  it("cancels the owned deferred creation after the pane is closed", async () => {
     let resolveDeferredSpawn!: (backendId: string) => void;
     const deferredSpawnPromise = new Promise<string>((resolve) => {
       resolveDeferredSpawn = resolve;

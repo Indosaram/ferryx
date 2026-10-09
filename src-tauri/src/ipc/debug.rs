@@ -144,7 +144,20 @@ fn switch_debug_sink_enabled_here() -> bool {
 }
 
 pub fn should_persist_event(event: &str) -> bool {
-    switch_debug_sink_enabled_here() || is_release_persisted_event(event)
+    should_persist_entry(switch_debug_sink_enabled_here(), event)
+}
+
+pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
+    debug_enabled || is_release_persisted_event(event)
+        || event.starts_with("terminal.surface.input.dropped")
+        || event.starts_with("terminal.surface.input.gate")
+        || event.starts_with("terminal.surface.input.slow")
+        || event.starts_with("terminal.surface.input.in_flight")
+        || event.starts_with("terminal.surface.input.backend")
+        || event.starts_with("terminal.surface.input.stage")
+        || event.starts_with("terminal.surface.input.stall")
+        || event.starts_with("app.watchdog")
+        || event.starts_with("terminal.render.")
 }
 
 fn switch_debug_path(root: &std::path::Path) -> std::path::PathBuf {
@@ -633,6 +646,50 @@ mod tests {
     #[test]
     fn release_builds_stay_silent_by_default() {
         assert!(!switch_debug_sink_enabled(false, None));
+        assert!(should_persist_entry(false, "terminal.surface.input.sent"));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.dropped.overflow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.dropped.outage"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.gate.unclaimed"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.in_flight_slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.backend.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.stage.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.stall.resolved"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "app.watchdog.hang_detected"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "app.watchdog.recovered"
+        ));
+        assert!(should_persist_entry(false, "terminal.render.attach"));
+        assert!(should_persist_entry(false, "terminal.render.reattach"));
+        assert!(should_persist_entry(false, "terminal.render.redraw"));
     }
 
     #[test]

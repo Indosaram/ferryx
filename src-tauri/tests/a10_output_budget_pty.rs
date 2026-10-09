@@ -24,7 +24,7 @@ async fn run_publisher(inject_failure: bool) {
     let hub = TerminalOutputHub::default();
     hub.register_session("publisher");
     let held = hub.subscribe_machine("publisher", None).unwrap().unwrap();
-    let MachineAttachment { snapshot, mut receiver } = hub.subscribe_machine("publisher", None).unwrap().unwrap();
+    let MachineAttachment { snapshot, mut receiver, .. } = hub.subscribe_machine("publisher", None).unwrap().unwrap();
     drop(snapshot);
     let manager = PtyManager::new();
     let mut cmd = CommandBuilder::new("/bin/sh");

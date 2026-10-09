@@ -20,6 +20,8 @@ const RELEASE_PERSISTED_INPUT_EVENTS = new Set([
   "terminal.surface.presented",
   "terminal.surface.bounds_acknowledged",
   "terminal.surface.input.dropped.overflow",
+  "terminal.surface.input.dropped.outage",
+  "terminal.surface.input.dropped.quarantined",
   "terminal.surface.input.dropped.rate",
   "terminal.surface.input.dropped.owner_mismatch",
   "terminal.surface.input.dropped.summary",
@@ -31,7 +33,13 @@ const RELEASE_PERSISTED_INPUT_EVENTS = new Set([
 ]);
 
 export function isReleasePersistedInputEvent(event: string): boolean {
-  return RELEASE_PERSISTED_INPUT_EVENTS.has(event);
+  return RELEASE_PERSISTED_INPUT_EVENTS.has(event)
+    || event.startsWith("terminal.surface.input.gate")
+    || event.startsWith("terminal.surface.input.slow")
+    || event.startsWith("terminal.surface.input.in_flight")
+    || event.startsWith("terminal.surface.input.backend")
+    || event.startsWith("terminal.surface.input.stage")
+    || event.startsWith("terminal.surface.input.stall");
 }
 
 type SwitchDebugLoggerOptions = {
@@ -92,6 +100,7 @@ const debugEnabled = resolveSwitchDebugEnabled({
   VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
 });
 const runId = safeRandomUUID();
+export const switchDebugRunId = runId;
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();
 let pendingSinkCount = 0;

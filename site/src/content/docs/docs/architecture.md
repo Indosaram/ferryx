@@ -107,15 +107,15 @@ Desktop interfaces crash or hot-reload during development. If your terminal emul
 Ferryx solves this with a headless daemon architecture:
 
 1. **Independent Process Lifetime:** The daemon process runs separately from the Tauri GUI (`src-tauri/src/daemon/server.rs`). Active subshells and agents continue running even if the window closes.
-2. **Sequenced Stream Protocol:** Every terminal output chunk carries a monotonic sequence counter (`src-tauri/src/daemon/protocol.rs:249`).
-3. **Ring Buffer Replay:** An in-memory ring buffer keeps recent session history. When the GUI reconnects, `DaemonClient::attach` passes the `last_seen_sequence` (`src-tauri/src/daemon/server.rs:874-885`). The daemon responds with `AttachOk`, sending missed chunks before resuming the live stream.
+2. **Sequenced Stream Protocol:** Every terminal output chunk carries a monotonic sequence counter (`src-tauri/src/daemon/protocol.rs`, `TerminalOutput`).
+3. **Ring Buffer Replay:** An in-memory ring buffer keeps recent session history. When the GUI reconnects, `DaemonClient::attach` passes `after_sequence` (`src-tauri/src/daemon/client.rs`). The daemon responds with `AttachOk`, sending missed chunks before resuming the live stream.
 4. **Gap Recovery:** If the client was disconnected long enough for the ring buffer to wrap, the daemon emits an explicit `replayGap` payload so the frontend can request a full snapshot rather than displaying corrupted output.
 
 This design gives developers the session persistence of a multiplexer with the comfort of a modern graphical interface.
 
 ## 5. Remote Web Companion: Custom DOM Grid Without xterm.js
 
-On 2026-08-25, we eliminated `xterm.js` and all `@xterm/*` dependencies from Ferryx (`docs/xterm-removal-verification.md`).
+The current remote client does not depend on `xterm.js` or the `@xterm/*` packages (`ui/package.json`).
 
 Instead of embedding a bulky web terminal parser on mobile browsers, the remote companion uses a custom DOM terminal grid (`ui/src/remote/RemoteTerminal.tsx` and `ui/src/remote/terminalGridProtocol.ts`):
 
@@ -131,7 +131,7 @@ The core Ferryx codebase targets macOS, Linux, and Windows. The following integr
 
 - **CoreText Glyph Rasterization:** Native subpixel font rasterization and Apple Color Emoji rendering (`src-tauri/src/native_terminal/renderer/coretext_raster.rs`).
 - **Dock Badge Counters:** Live agent attention counters displayed on the macOS Dock icon (`src-tauri/src/notification/badge.rs`).
-- **launchd Daemon Supervision:** Automatic background daemon bootstrapping on user login via generated `.plist` files (`src-tauri/src/daemon/launchd.rs:8-96`).
+- **launchd helper (not wired):** macOS-specific `.plist` generation code exists, but no production caller installs a LaunchAgent; the GUI starts the daemon on demand (`src-tauri/src/daemon/launchd.rs`).
 - **Window Vibrancy:** Native macOS visual effect material behind transparent toolbars and split gutters.
 
 Linux and Windows support core terminal sessions and daemon communication, while platform-specific rasterizers and service managers are added incrementally.

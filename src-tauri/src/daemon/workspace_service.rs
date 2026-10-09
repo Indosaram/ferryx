@@ -224,6 +224,8 @@ impl DaemonWorkspaceService {
     }
 
     pub fn register(&self, workspace_id: &str, repo_root: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(probe) = self.transaction_probe.read().clone() { probe("registerWorkspace"); }
         let workspace_gate = self.worktree_gate(workspace_id);
         let _workspace_gate = workspace_gate.lock();
         let _gate = self.mutation_gate.lock();

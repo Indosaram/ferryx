@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900">
+  <defs>
+    <!-- Background Ambient Glow -->
+    <radialGradient id="bg-glow" cx="72%" cy="50%" r="45%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.08" />
+      <stop offset="60%" stop-color="#2dd4bf" stop-opacity="0.01" />
+      <stop offset="100%" stop-color="#0b0b0d" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Teal Glow for Active Box -->
+    <filter id="teal-glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="0" stdDeviation="22" flood-color="#2dd4bf" flood-opacity="0.32" />
+    </filter>
+
+    <!-- Arrow Glow -->
+    <filter id="arrow-glow" x="-20%" y="-50%" width="140%" height="200%">
+      <feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#2dd4bf" flood-opacity="0.5" />
+    </filter>
+  </defs>
+
+  <!-- Dark Background -->
+  <rect width="1600" height="900" fill="#0b0b0d" />
+  <rect width="1600" height="900" fill="url(#bg-glow)" />
+
+  <!-- Box 1: Shell Exited (Dimmed Problem State) -->
+  <rect x="220" y="350" width="430" height="200" rx="24" fill="#121316" stroke="#2a2b30" stroke-width="2.5" />
+  <text x="435" y="450" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" font-size="50" font-weight="600" text-anchor="middle" dominant-baseline="central">Shell Exited</text>
+
+  <!-- Recovery Flow Arrow -->
+  <g filter="url(#arrow-glow)">
+    <line x1="685" y1="450" x2="885" y2="450" stroke="#2dd4bf" stroke-width="5" stroke-linecap="round" />
+    <polygon points="880,436 915,450 880,464" fill="#2dd4bf" stroke="#2dd4bf" stroke-width="2" stroke-linejoin="round" />
+  </g>
+
+  <!-- Box 2: Respawn Pane (Highlighted Recovery Target) -->
+  <rect x="950" y="350" width="430" height="200" rx="24" fill="#0b1a1c" stroke="#2dd4bf" stroke-width="3" filter="url(#teal-glow)" />
+  <text x="1165" y="450" fill="#2dd4bf" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" font-size="50" font-weight="700" text-anchor="middle" dominant-baseline="central">Respawn Pane</text>
+</svg>

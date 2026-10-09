@@ -1,6 +1,7 @@
 use super::*;
 use crate::{daemon::server::DaemonServer, remote::machine_protocol::*, scoped_contracts::Epoch};
 use futures_util::FutureExt;
+include!("wip_desktop_inventory_tests.rs");
 
 #[test]
 fn served_session_cwd_falls_back_when_the_stored_value_is_probe_output() {
@@ -511,3 +512,9 @@ async fn machine_session_capacity_limit_is_configurable() {
     std::env::remove_var("FERRYX_MAX_MACHINE_SESSIONS");
     assert_eq!(service.max_machine_sessions(), 64);
 }
+
+
+
+
+
+

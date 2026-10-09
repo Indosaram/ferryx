@@ -646,7 +646,6 @@ pub(crate) fn auto_resume_suspension(
             Err(super::SuspensionError::NotOwned { pid: target.pid }),
     }
 }
-
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
@@ -690,7 +689,6 @@ mod preparation_tests {
         assert!(matches!(result, Err(super::super::SuspensionError::IdentityMismatch { .. })));
         assert!(!actuated.get());
     }
-
     #[tokio::test]
     async fn preparation_resolved_spawn_context_and_probe_permit_lifetime() {
         let service = TerminalService::default();

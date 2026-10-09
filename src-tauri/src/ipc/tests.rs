@@ -129,6 +129,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -212,6 +213,7 @@ async fn poisoned_requested_cwd_falls_back_to_the_worktree_root() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -277,6 +279,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -500,6 +503,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -581,6 +585,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -644,6 +649,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -853,6 +859,7 @@ async fn test_project_registration_then_daemon_spawn() {
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await
@@ -898,6 +905,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         create_only: None, // Ordinary spawn fixture.
         prepared_local_split: None,
         remaining_ms: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -941,6 +949,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         create_only: None, // Ordinary spawn fixture.
         prepared_local_split: None,
         remaining_ms: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -1015,6 +1024,7 @@ async fn agent_resume_startup_cwd_jail_enforcement() {
         create_only: None, // Ordinary spawn fixture.
         prepared_local_split: None,
         remaining_ms: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -1248,6 +1258,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         create_only: None, // Ordinary spawn fixture.
         prepared_local_split: None,
         remaining_ms: None,
+        session_id: None,
         shell: None,
         startup: None,
     };
@@ -1322,6 +1333,7 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         create_only: None, // Ordinary spawn fixture.
         prepared_local_split: None,
         remaining_ms: None,
+        session_id: None,
         shell: None,
         startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
             agent_type: "claude".into(),

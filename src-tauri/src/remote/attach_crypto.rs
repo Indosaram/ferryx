@@ -365,6 +365,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    include!("attach_probe.rs");
 
     const SENTINEL: &str = "FERRYX_E2EE_SENTINEL";
 

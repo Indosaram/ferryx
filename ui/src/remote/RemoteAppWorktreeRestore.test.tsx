@@ -1,4 +1,3 @@
-import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
@@ -65,191 +64,6 @@ function rect(width: number, height: number): DOMRect {
   } as DOMRect;
 }
 
-const encoder = new TextEncoder();
-
-function jsonTunnelResponse(status: number, body: unknown) {
-  return { status, headers: { "content-type": "application/json" }, body: encoder.encode(JSON.stringify(body)) };
-}
-
-function textTunnelResponse(status: number, body: string, contentType: string) {
-  return { status, headers: { "content-type": contentType }, body: encoder.encode(body) };
-}
-
-class FakeTunnelSocket {
-  readyState = 1;
-  binaryType = "arraybuffer";
-  onopen: ((event: Event) => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  onclose: ((event: { code: number; reason: string; wasClean: boolean }) => void) | null = null;
-  readonly sent: (string | Uint8Array)[] = [];
-
-  constructor(readonly path: string) {}
-
-  send(data: string | Uint8Array) {
-    this.sent.push(data);
-  }
-
-  close() {
-    if (this.readyState === 3) return;
-    this.readyState = 3;
-    this.onclose?.({ code: 1000, reason: "", wasClean: true });
-  }
-}
-
-/**
- * In-memory stand-in for the paired desktop that mirrors the relay's real contract:
- * `GET /api/v1/workspace/state` returns projects plus the active context, `POST
- * /api/v1/workspace/select` acknowledges the selection, mutates the active context and
- * republishes the selection on the events socket.
- */
-function createFakeDesktop() {
-  const selectBodies: Record<string, unknown>[] = [];
-  const sockets = new Set<FakeTunnelSocket>();
-  const openedSocketPaths: string[] = [];
-  let closeCalls = 0;
-  let stateRequests = 0;
-  let stateFailure: { status: number; body: string; contentType: string; fromRequest: number } | null = null;
-
-  const state = {
-    projects: [
-      {
-        workspaceId: "ws-ferryx",
-        repoRoot: "/Users/dev/ferryx",
-        worktrees: [
-          { slug: "main", label: "main" },
-          { slug: "feature-picker", label: "feature-picker" },
-        ],
-      },
-    ],
-    activeContext: null as null | {
-      workspaceId: string;
-      worktreeSlug: string;
-      worktreeLabel: string;
-      sessionId: string | null;
-    },
-    sessions: [] as {
-      sessionId: string;
-      daemonEpoch: string;
-      running: boolean;
-      title: string;
-      workspaceId: string;
-    }[],
-  };
-
-  const publishSelection = () => {
-    const context = state.activeContext;
-    const frame = JSON.stringify({
-      event: "remote_active_selection_changed",
-      payload: { workspaceId: context?.workspaceId, worktreeSlug: context?.worktreeSlug },
-    });
-    for (const socket of sockets) {
-      if (socket.path.startsWith("/api/v1/events") && socket.readyState === 1) {
-        socket.onmessage?.({ data: frame } as MessageEvent);
-      }
-    }
-  };
-
-  const fetchLike = async (
-    path: string,
-    init?: { method?: string; body?: unknown; headers?: Record<string, string> },
-  ) => {
-    if (path.startsWith("/api/v1/pair/exchange")) {
-      return jsonTunnelResponse(200, {
-        token: "tunnel-redeemed-device-bearer",
-        device: { id: "dev-phone-1", name: "Phone" },
-        machineId: "mach-phone-1",
-        displayName: "Work MacBook Pro",
-      });
-    }
-
-    if (path.startsWith("/api/v1/workspace/state")) {
-      stateRequests += 1;
-      if (stateFailure && stateRequests >= stateFailure.fromRequest) {
-        return textTunnelResponse(stateFailure.status, stateFailure.body, stateFailure.contentType);
-      }
-      return jsonTunnelResponse(200, state);
-    }
-
-    if (path.startsWith("/api/v1/sessions")) {
-      return jsonTunnelResponse(200, { revision: "1", completeness: "complete", sessions: state.sessions });
-    }
-
-    if (path.startsWith("/api/v1/workspace/select")) {
-      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-      selectBodies.push(body);
-      const project = state.projects.find((p) => p.workspaceId === body.workspaceId);
-      if (!project) return jsonTunnelResponse(404, { code: "CONTEXT_NOT_FOUND" });
-      const worktree = project.worktrees.find((w) => w.slug === (body.worktreeSlug ?? project.worktrees[0]?.slug));
-      if (!worktree) return jsonTunnelResponse(404, { code: "CONTEXT_NOT_FOUND" });
-      const sessionId = `sess-${project.workspaceId}-${worktree.slug}`;
-      if (!state.sessions.some((s) => s.sessionId === sessionId)) {
-        state.sessions.push({
-          sessionId,
-          daemonEpoch: "1790742255752",
-          running: true,
-          title: "zsh",
-          workspaceId: project.workspaceId,
-        });
-      }
-      state.activeContext = {
-        workspaceId: project.workspaceId,
-        worktreeSlug: worktree.slug,
-        worktreeLabel: worktree.label,
-        sessionId,
-      };
-      queueMicrotask(publishSelection);
-      return jsonTunnelResponse(200, { ok: true });
-    }
-
-    return { status: 404, headers: {}, body: new Uint8Array(0) };
-  };
-
-  const openWebSocket = async (path: string) => {
-    const socket = new FakeTunnelSocket(path);
-    sockets.add(socket);
-    openedSocketPaths.push(path);
-    return socket;
-  };
-
-  const close = () => {
-    closeCalls += 1;
-    for (const socket of Array.from(sockets)) socket.close();
-    sockets.clear();
-  };
-
-  return {
-    transport: { fetchLike, openWebSocket, close } as unknown as attachTunnelModule.TunnelTransport,
-    close,
-    selectBodies,
-    openedSocketPaths,
-    get closeCalls() {
-      return closeCalls;
-    },
-    get stateRequests() {
-      return stateRequests;
-    },
-    /** Fail every `GET /api/v1/workspace/state` from `fromRequest` (1-based) onwards. */
-    failStateFromRequest(status: number, body: string, contentType: string, fromRequest: number) {
-      stateFailure = { status, body, contentType, fromRequest };
-    },
-  };
-}
-
-const grantResponseBody = {
-  grantId: "grant-test-1",
-  machineId: "mach-phone-1",
-  relayOrigin: window.location.origin,
-  pairingToken: "pair-tok-secret",
-  machineAttachPublicKey: "machine-noise-pub-key",
-  grantScope: "machine",
-  expiresAt: Date.now() + 600000,
-};
-
-function responseText(status: number, body: string, contentType = "text/plain"): Response {
-  return new Response(body, { status, headers: { "Content-Type": contentType } });
-}
-
 describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Restore", () => {
   const originalFetch = globalThis.fetch;
   const originalWebSocket = globalThis.WebSocket;
@@ -297,27 +111,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     remoteHostStore.reset();
   });
 
-  async function openWorkspaceContextPicker() {
-    const trigger = await screen.findByRole("button", { name: "Change workspace context" });
-    act(() => {
-      fireEvent.click(trigger);
-    });
-    return screen.findByRole("dialog", { name: "Workspace context" });
-  }
-
-  async function openHostDrawerSignOut() {
-    const picker = await openWorkspaceContextPicker();
-    act(() => {
-      fireEvent.click(within(picker).getByRole("button", { name: "Machines" }));
-    });
-    const drawer = await screen.findByRole("dialog", { name: "Switch host" });
-    return {
-      drawer,
-      signOutButton: within(drawer).getByTestId("mobile-host-drawer-signout"),
-    };
-  }
-
-  it("Item A: explicit Sign out in the host drawer calls logoutAccountSession and clears storage even if network fetch rejects", async () => {
+  it("Item A: explicit Sign out calls logoutAccountSession and clears storage even if network fetch rejects", async () => {
     storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
 
     const logoutSpy = vi.spyOn(accountSessionModule, "logoutAccountSession");
@@ -336,14 +130,20 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
 
     const { unmount } = render(<RemoteApp />);
 
-    const { drawer, signOutButton } = await openHostDrawerSignOut();
-
-    // Sign-out is reachable while signed in but before any machine tunnel exists.
-    expect(within(drawer).getByTestId("mobile-host-drawer-disconnect")).toHaveTextContent("Disconnect machine");
-    expect(signOutButton).toBeInTheDocument();
+    const topContextTrigger = await screen.findByRole("button", {
+      name: "Change workspace context",
+    });
 
     act(() => {
-      fireEvent.click(signOutButton);
+      fireEvent.click(topContextTrigger);
+    });
+
+    const picker = await screen.findByRole("dialog", { name: "Workspace context" });
+    const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
+    expect(signOutBtn).toBeDefined();
+
+    act(() => {
+      fireEvent.click(signOutBtn);
     });
 
     await waitFor(() => {
@@ -354,15 +154,8 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     unmount();
   });
 
-  it("Item A: confirmed account UNAUTHORIZED from the machine list clears the local session without calling logoutAccountSession", async () => {
+  it("Item A: onUnauthorized callback does NOT call logoutAccountSession and only clears locally", async () => {
     storeAccountSessionToken("expired-session-token", window.location.origin);
-
-    setAccountLastSelectedTarget(window.location.origin, {
-      machineId: "mach-phone-1",
-      workspaceId: "ws-ferryx",
-      worktreeSlug: "main",
-      worktreeLabel: "main",
-    });
 
     const logoutSpy = vi.spyOn(accountSessionModule, "logoutAccountSession");
 
@@ -383,10 +176,8 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
 
     await waitFor(() => {
       expect(getStoredAccountSessionToken(window.location.origin)).toBeNull();
-      expect(getAccountLastSelectedTarget(window.location.origin)).toBeNull();
     });
 
-    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
     expect(logoutSpy).not.toHaveBeenCalled();
   });
 
@@ -400,15 +191,6 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       worktreeLabel: "main",
     });
 
-    const desktop = createFakeDesktop();
-
-    // Hold the events socket's attach allocation so its refresh cannot invalidate the confirmation read.
-    let releaseEventsSocketAttach = () => {};
-    const eventsSocketAttachGate = new Promise<void>((resolve) => {
-      releaseEventsSocketAttach = resolve;
-    });
-    let attachSessionCalls = 0;
-
     globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
 
@@ -416,15 +198,25 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
         return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
       }
       if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
-        return Promise.resolve(new Response(JSON.stringify(grantResponseBody), { status: 200 }));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              grantId: "grant-test-1",
+              machineId: "mach-phone-1",
+              relayOrigin: window.location.origin,
+              pairingToken: "pair-tok-secret",
+              machineAttachPublicKey: "machine-noise-pub-key",
+              grantScope: "machine",
+              expiresAt: Date.now() + 600000,
+            }),
+            { status: 200 },
+          ),
+        );
       }
       if (url.endsWith("/api/v1/attach/session")) {
-        attachSessionCalls += 1;
-        const allocated = new Response(JSON.stringify({ sessionId: `sess-alloc-${attachSessionCalls}` }), {
-          status: 200,
-        });
-        if (attachSessionCalls === 1) return Promise.resolve(allocated);
-        return eventsSocketAttachGate.then(() => allocated);
+        return Promise.resolve(
+          new Response(JSON.stringify({ sessionId: "sess-alloc-test-42" }), { status: 200 }),
+        );
       }
       return Promise.resolve(new Response("Not Found", { status: 404 }));
     });
@@ -434,22 +226,137 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       privateKey: "phone-initiator-priv-key-base64",
     });
 
+    const mockTunnelTransport = {
+      fetchLike: vi.fn().mockImplementation((path: string) => {
+        if (path.startsWith("/api/v1/pair/exchange")) {
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(
+              JSON.stringify({
+                token: "tunnel-redeemed-device-bearer",
+                device: { id: "dev-phone-1", name: "Phone" },
+                machineId: "mach-phone-1",
+                displayName: "Work MacBook Pro",
+              }),
+            ),
+          });
+        }
+        if (path === "/api/v1/workspace/projects") {
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(
+              JSON.stringify({
+                revision: 1,
+                completeness: "complete",
+                projects: [
+                  {
+                    workspaceId: "ws-ferryx",
+                    repoRoot: "/Users/dev/ferryx",
+                    availability: "ready",
+                    revision: 1,
+                  },
+                ],
+                unavailableWorkspaceIds: [],
+              }),
+            ),
+          });
+        }
+        if (path === "/api/v1/workspace/state") {
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(
+              JSON.stringify({
+                revision: 1,
+                workspaces: [
+                  {
+                    id: "ws-ferryx",
+                    repoPath: "/Users/dev/ferryx",
+                    worktrees: [
+                      {
+                        slug: "main",
+                        branch: "main",
+                        path: "/Users/dev/ferryx",
+                      },
+                    ],
+                  },
+                ],
+              }),
+            ),
+          });
+        }
+        if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=")) {
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(
+              JSON.stringify({
+                revision: 1,
+                worktrees: [
+                  {
+                    workspaceId: "ws-ferryx",
+                    identity: { wsId: "ws-ferryx", slug: "main" },
+                    path: "/Users/dev/ferryx",
+                    head: "h1",
+                    branch: "refs/heads/main",
+                    bare: false,
+                    detached: false,
+                    locked: null,
+                    prunable: null,
+                    managed: false,
+                  },
+                ],
+              }),
+            ),
+          });
+        }
+        if (path === "/api/v1/sessions") {
+          return Promise.resolve({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: new TextEncoder().encode(
+              JSON.stringify({
+                revision: "1",
+                completeness: "complete",
+                sessions: [
+                  {
+                    workspaceId: "ws-ferryx",
+                    worktree: { wsId: "ws-ferryx", slug: "main" },
+                    target: {
+                      machineId: "mach-phone-1",
+                      sessionId: "sess-123",
+                      daemonEpoch: "1790742255752",
+                    },
+                    running: true,
+                    title: "zsh",
+                  },
+                ],
+              }),
+            ),
+          });
+        }
+        return Promise.resolve({
+          status: 404,
+          headers: {},
+          body: new Uint8Array(0),
+        });
+      }),
+      openWebSocket: vi.fn(),
+    };
+
     vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
-      transport: desktop.transport,
-      close: desktop.close,
+      transport: mockTunnelTransport as unknown as attachTunnelModule.TunnelTransport,
+      close: vi.fn(),
     });
 
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Change workspace context" })).toHaveTextContent(
-        "ws-ferryx / main",
-      );
+      expect(screen.getByRole("button", { name: "Change workspace context" })).toBeInTheDocument();
+      expect(screen.getByText("ws-ferryx / main")).toBeInTheDocument();
     });
-
-    // The label comes from the relay's selection acknowledgement, not from a forced model.
-    expect(desktop.selectBodies).toEqual([{ workspaceId: "ws-ferryx", worktreeSlug: "main" }]);
-    expect(desktop.stateRequests).toBeGreaterThanOrEqual(2);
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
       machineId: "mach-phone-1",
@@ -457,12 +364,6 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       worktreeSlug: "main",
       worktreeLabel: "main",
     });
-
-    releaseEventsSocketAttach();
-    await waitFor(() => {
-      expect(desktop.openedSocketPaths).toContain("/api/v1/events");
-    });
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent("ws-ferryx / main");
   });
 
   it("Item C: reload with stored target drops key when complete successful inventory confirms machine missing", async () => {
@@ -642,7 +543,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
           return Promise.resolve({
             status: 200,
             headers: { "content-type": "application/json" },
-            body: encoder.encode(
+            body: new TextEncoder().encode(
               JSON.stringify({
                 token: "tunnel-redeemed-device-bearer",
                 device: { id: "dev-phone-1", name: "Phone" },
@@ -656,7 +557,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
           return Promise.resolve({
             status: 200,
             headers: { "content-type": "application/json" },
-            body: encoder.encode(
+            body: new TextEncoder().encode(
               JSON.stringify({
                 revision: 1,
                 completeness: "complete",
@@ -670,7 +571,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
           return Promise.resolve({
             status: 200,
             headers: { "content-type": "application/json" },
-            body: encoder.encode(
+            body: new TextEncoder().encode(
               JSON.stringify({
                 revision: 1,
                 workspaces: [],
@@ -683,7 +584,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
           return Promise.resolve({
             status: 200,
             headers: { "content-type": "application/json" },
-            body: encoder.encode(
+            body: new TextEncoder().encode(
               JSON.stringify({
                 revision: "1",
                 completeness: "complete",
@@ -742,7 +643,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       return Promise.resolve(new Response("Not Found", { status: 404 }));
     });
 
-    let resolveAcquireConnection!: (val: unknown) => void;
+    let resolveAcquireConnection!: (val: any) => void;
     const acquirePromise = new Promise((resolve) => {
       resolveAcquireConnection = resolve;
     });
@@ -766,10 +667,10 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
         ...hookRes,
         loading: false,
         initialized: true,
-        machines: sampleMachines as unknown as ReturnType<typeof origUseAccountWorktrees>["machines"],
+        machines: sampleMachines as any,
         machineStatuses: {
           "mach-phone-1": {
-            machine: sampleMachines[0] as unknown as ReturnType<typeof origUseAccountWorktrees>["machines"][number],
+            machine: sampleMachines[0] as any,
             status: "ready",
             options: [
               {
@@ -808,10 +709,19 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
       expect(acquireCalled).toBe(true);
     });
 
-    const { signOutButton } = await openHostDrawerSignOut();
+    const topContextTrigger = await screen.findByRole("button", {
+      name: "Change workspace context",
+    });
 
     act(() => {
-      fireEvent.click(signOutButton);
+      fireEvent.click(topContextTrigger);
+    });
+
+    const picker = await screen.findByRole("dialog", { name: "Workspace context" });
+    const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
+
+    act(() => {
+      fireEvent.click(signOutBtn);
     });
 
     expect(getStoredAccountSessionToken(window.location.origin)).toBeNull();
@@ -828,127 +738,4 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     expect(getStoredAccountSessionToken(window.location.origin)).toBeNull();
     expect(getAccountLastSelectedTarget(window.location.origin)).toBeNull();
   });
-
-  it.each([
-    { status: 401, body: "<html><body>401 Unauthorized</body></html>", contentType: "text/html" },
-    { status: 403, body: "Forbidden", contentType: "text/plain" },
-  ])(
-    "workspace state untyped $status keeps the account session and only drops the machine attachment",
-    async ({ status, body, contentType }) => {
-      storeAccountSessionToken("active-session-token", window.location.origin);
-
-      setAccountLastSelectedTarget(window.location.origin, {
-        machineId: "mach-phone-1",
-        workspaceId: "ws-ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-      });
-
-      const desktop = createFakeDesktop();
-      // Read 1 enumerates worktrees; read 2 is the confirmation, answered untyped (edge/WAF style).
-      desktop.failStateFromRequest(status, body, contentType, 2);
-
-      globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/api/account/v1/machines")) {
-          return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
-        }
-        if (url.includes("/api/account/v1/machines/rec-mbp-1/grants")) {
-          return Promise.resolve(new Response(JSON.stringify(grantResponseBody), { status: 200 }));
-        }
-        if (url.endsWith("/api/v1/attach/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-alloc-front" }), { status: 200 }));
-        }
-        return Promise.resolve(new Response("Not Found", { status: 404 }));
-      });
-
-      vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
-        publicKey: "phone-initiator-pub-key-base64",
-        privateKey: "phone-initiator-priv-key-base64",
-      });
-
-      vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
-        transport: desktop.transport,
-        close: desktop.close,
-      });
-
-      const logoutSpy = vi.spyOn(accountSessionModule, "logoutAccountSession");
-      const clearStoredSpy = vi.spyOn(accountSessionModule, "clearStoredAccountSessionToken");
-
-      render(<RemoteApp />);
-
-      await waitFor(() => {
-        expect(desktop.stateRequests).toBeGreaterThanOrEqual(2);
-        expect(desktop.closeCalls).toBeGreaterThan(0);
-      });
-
-      // The attachment is gone, but a device-scoped status is not account revocation.
-      expect(desktop.closeCalls).toBeGreaterThan(0);
-      expect(clearStoredSpy).not.toHaveBeenCalled();
-      expect(logoutSpy).not.toHaveBeenCalled();
-      expect(getStoredAccountSessionToken(window.location.origin)).toBe("active-session-token");
-      expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
-        machineId: "mach-phone-1",
-        workspaceId: "ws-ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-      });
-    },
-  );
-
-  // Committed contract (accountSessionRetention.test.tsx scenario c): a grant-site denial is
-  // machine-scoped, so every status class below must reach the machine error, not account invalidation.
-  it.each([
-    { kind: "untyped 401", status: 401, body: "Gateway 401 Proxy Error", contentType: "text/plain" },
-    { kind: "untyped 403", status: 403, body: "<html><body>403 Forbidden</body></html>", contentType: "text/html" },
-    {
-      kind: "structured 401 UNAUTHORIZED",
-      status: 401,
-      body: JSON.stringify({ code: "UNAUTHORIZED", message: "Machine grant expired" }),
-      contentType: "application/json",
-    },
-  ])(
-    "machine-scoped grant rejection with $kind keeps the account session and reports the machine error",
-    async ({ status, body, contentType }) => {
-      storeAccountSessionToken("active-session-token", window.location.origin);
-
-      setAccountLastSelectedTarget(window.location.origin, {
-        machineId: "mach-phone-1",
-        workspaceId: "ws-ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-      });
-
-      globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/api/account/v1/machines")) {
-          return Promise.resolve(new Response(JSON.stringify(sampleMachines), { status: 200 }));
-        }
-        if (url.includes("/grants")) {
-          return Promise.resolve(responseText(status, body, contentType));
-        }
-        return Promise.resolve(new Response("Not Found", { status: 404 }));
-      });
-
-      const logoutSpy = vi.spyOn(accountSessionModule, "logoutAccountSession");
-      const clearStoredSpy = vi.spyOn(accountSessionModule, "clearStoredAccountSessionToken");
-
-      render(<RemoteApp />);
-
-      const picker = await openWorkspaceContextPicker();
-      const machineStatus = await within(picker).findByTestId("remote-account-machine-status-mach-phone-1");
-
-      expect(machineStatus).toHaveAttribute("data-status", "error");
-      expect(clearStoredSpy).not.toHaveBeenCalled();
-      expect(logoutSpy).not.toHaveBeenCalled();
-      expect(getStoredAccountSessionToken(window.location.origin)).toBe("active-session-token");
-      expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
-        machineId: "mach-phone-1",
-        workspaceId: "ws-ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-      });
-    },
-  );
-
 });

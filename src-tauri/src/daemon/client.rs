@@ -452,6 +452,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::Resume { .. }
             | DaemonRequest::ListSessions
             | DaemonRequest::SpawnOperationStatus { .. }
+            | DaemonRequest::ResourceUsage
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
@@ -501,6 +502,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
+        DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
@@ -853,6 +855,7 @@ struct ActiveConnection {
     writer: OwnedWriteHalf,
 }
 
+
 impl ActiveConnection {
     async fn request(
         &mut self,
@@ -1087,6 +1090,9 @@ pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
+    /// Spawn-only connection so a new terminal never queues behind slow general
+    /// requests (listSessions/describe loops, registerWorkspace) on `connection`.
+    spawn_connection: Arc<Mutex<Option<ActiveConnection>>>,
     remote_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<RemoteSessionSlot>>>>,
     local_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<LocalSessionSlot>>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
@@ -1101,11 +1107,13 @@ impl Default for DaemonClient {
 }
 
 impl DaemonClient {
+
     pub fn new() -> Self {
         Self {
             socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
@@ -1119,6 +1127,7 @@ impl DaemonClient {
             socket_path,
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
@@ -1443,6 +1452,7 @@ impl DaemonClient {
             rows: prepared.rows,
             shell: prepared.shell.clone(),
             startup: None,
+            session_id: None,
             local_split: Some(LocalSplitEnvelope {
                 origin_epoch,
                 expires_at_unix_ms: identity.expires_at_unix_ms,
@@ -2042,6 +2052,7 @@ impl DaemonClient {
             socket_path: self.socket_path.clone(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::clone(&self.remote_connections),
             local_connections: Arc::clone(&self.local_connections),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
@@ -2271,8 +2282,7 @@ impl DaemonClient {
             )
         })?;
 
-        if let Err(error) =
-            wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
+        if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
             let _ = child.kill().await;
             return Err(error);
@@ -2599,7 +2609,8 @@ impl DaemonClient {
             )
         })?;
 
-        if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
+        if let Err(error) =
+            wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
             let _ = child.kill().await;
             return Err(error);
@@ -3026,6 +3037,7 @@ impl DaemonClient {
                 rows,
                 shell,
                 None,
+                None,
             )
             .await?
             .session_id)
@@ -3041,9 +3053,10 @@ impl DaemonClient {
         rows: u16,
         shell: Option<String>,
         startup: Option<TerminalStartup>,
+        session_id: Option<String>,
     ) -> Result<DaemonSpawnResult, IpcError> {
         let resp = self
-            .send_request(DaemonRequest::Spawn {
+            .send_on_connection(&self.spawn_connection, DaemonRequest::Spawn {
                 client_request_id,
                 workspace_id,
                 worktree,
@@ -3053,6 +3066,7 @@ impl DaemonClient {
                 shell,
                 startup,
                 local_split: None,
+                session_id,
             })
             .await?;
 
@@ -3095,8 +3109,14 @@ impl DaemonClient {
                 expected_version,
                 received_version,
             )),
-            DaemonResponse::Error { message, .. } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            // Keep the daemon's structured code (e.g. SESSION_ID_CONFLICT, INVALID_ARGUMENT).
+            DaemonResponse::Error { message, code, details } => {
+                let mut error = IpcError::new(
+                    code.as_deref().map(IpcErrorCode::from_code_str).unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(error)
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -3629,6 +3649,7 @@ impl DaemonClient {
         }
     }
 
+
     pub async fn remote_session_status(
         &self,
         session_id: &str,
@@ -4075,6 +4096,18 @@ impl DaemonClient {
         }
     }
 
+    pub async fn resource_usage(
+        &self,
+    ) -> Result<crate::daemon::resource_usage::HostResourceSnapshot, IpcError> {
+        match self.send_request(DaemonRequest::ResourceUsage).await? {
+            DaemonResponse::ResourceUsageOk { snapshot } => Ok(snapshot),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
     pub async fn ping(&self) -> Result<(), IpcError> {
         let resp = self.send_request(DaemonRequest::Ping).await?;
         match resp {
@@ -4290,6 +4323,7 @@ impl DaemonClient {
         }
     }
 }
+
 
 #[cfg(test)]
 mod local_control_isolation_tests {

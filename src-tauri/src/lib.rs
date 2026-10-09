@@ -36,6 +36,7 @@ pub mod ssh;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
+pub mod watchdog;
 
 use crate::daemon::DaemonClient;
 #[cfg(all(target_os = "windows", feature = "native-terminal"))]
@@ -1403,6 +1404,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 worktree_rescan_registry,
             );
+            let watchdog_handle = crate::watchdog::start_watchdog(
+                app.handle().clone(),
+                crate::watchdog::WatchdogConfig::default(),
+            );
+            app.manage(watchdog_handle);
             browser_remote_service_setup.set_snapshot_source(Arc::new(
                 crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(
                     app.handle().clone(),
@@ -1461,14 +1467,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let builder = builder.manage(native_terminal_surface_host);
 
     builder.invoke_handler(tauri::generate_handler![
+        crate::ipc::account::cmd_account_enrollment_status,
+        crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_list,
         crate::ipc::paired_host::paired_host_operation,
         crate::ipc::paired_host::paired_host_capabilities,
         crate::ipc::paired_host::paired_host_read,
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
-        crate::ipc::account::cmd_account_enrollment_status,
-        crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::file_preview::cmd_file_preview_open,
@@ -1538,6 +1544,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_get_active_selection,
         cmd_project_initial,
         cmd_boot_trace,
+        crate::ipc::system_resources::cmd_system_resources,
         cmd_project_register,
         ipc::project_remote::cmd_project_register_remote,
         ipc::project_remote::cmd_ssh_list_directories,
@@ -2370,6 +2377,13 @@ pub fn run() {
         .try_init();
 
     create_app(tauri::Builder::default())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
+                    watchdog.stop();
+                }
+            }
+        });
 }

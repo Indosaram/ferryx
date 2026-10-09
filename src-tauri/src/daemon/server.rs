@@ -1358,6 +1358,7 @@ pub struct DaemonServer {
     paired_hosts: crate::paired_host::service::PairedHostService,
     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
     pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
+    resource_sampler: Arc<crate::daemon::resource_usage::ResourceSampler>,
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
     remote_state: Arc<RemoteGatewayState>,
@@ -2134,7 +2135,12 @@ impl DaemonServer {
                 .join()
                 .expect("workspace catalog initialization panicked")
         });
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
         let session_service = Arc::new(DaemonSessionService {
+            epoch,
             workspace_service,
             terminal_service: Arc::clone(&terminal_service),
             session_router: Arc::clone(&session_router),
@@ -2199,11 +2205,6 @@ impl DaemonServer {
                 .with_machine_services(Arc::clone(&session_service)),
         );
 
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(1);
-
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
             .daemon_epoch
@@ -2261,6 +2262,7 @@ impl DaemonServer {
             paired_hosts,
             session_router,
             handover_manager,
+            resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
             terminal_service,
             workspace_registry,
             remote_state,
@@ -3313,6 +3315,23 @@ impl DaemonServer {
         Ok(())
     }
 
+    fn resource_probes(&self) -> Vec<crate::daemon::resource_usage::SessionProbe> {
+        self.terminal_service
+            .list_sessions()
+            .into_iter()
+            .filter_map(|session_id| {
+                let session = self.terminal_service.get_session(&session_id)?;
+                Some(crate::daemon::resource_usage::SessionProbe {
+                    session_id,
+                    pid: session.pid(),
+                    worktree_path: session
+                        .worktree_path()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+            })
+            .collect()
+    }
+
     pub async fn handle_client<S>(self: Arc<Self>, stream: S)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -3394,6 +3413,15 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Ping) => DaemonResponse::Pong,
+                Ok(DaemonRequest::ResourceUsage) => {
+                    let probes = self.resource_probes();
+                    let sampler = Arc::clone(&self.resource_sampler);
+                    let runtime_dir = get_runtime_dir();
+                    match crate::ipc::run_blocking(move || Ok(sampler.sample(&probes, &runtime_dir))).await {
+                        Ok(snapshot) => DaemonResponse::ResourceUsageOk { snapshot },
+                        Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -3556,6 +3584,7 @@ impl DaemonServer {
                     shell,
                     startup,
                     local_split,
+                    session_id: requested_session_id,
                 }) => {
                     if let Some(envelope) = local_split {
                         if startup.is_some() {
@@ -3572,8 +3601,8 @@ impl DaemonServer {
                             }
                         }
                     } else {
-                    let res = self
-                        .handle_spawn(
+                    let res = self.session_service
+                        .handle_spawn_requested(
                             &client_request_id,
                             &workspace_id,
                             worktree,
@@ -3582,6 +3611,9 @@ impl DaemonServer {
                             rows,
                             shell,
                             startup,
+                            requested_session_id,
+                            #[cfg(test)]
+                            self.helper_home.clone(),
                         )
                         .await;
                     match res {
@@ -3610,6 +3642,11 @@ impl DaemonServer {
                         Err(SpawnError::InvalidAgentResume(message)) => {
                             DaemonResponse::AgentResumeInvalid { message }
                         }
+                        Err(SpawnError::Structured(error)) => DaemonResponse::Error {
+                            message: error.message,
+                            code: Some(error.code.to_string()),
+                            details: error.details,
+                        },
                         Err(e) => daemon_error(e.to_string(),),
                     }
                     }

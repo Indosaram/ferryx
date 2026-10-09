@@ -1,5 +1,5 @@
 //! Machine-only output admission. No producer waits for socket progress.
-use super::{AttachmentSnapshot, OutputChunk, TerminalOutputHub};
+use super::{AttachmentSnapshot, HistoryRange, OutputChunk, TerminalOutputHub};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 
@@ -30,6 +30,7 @@ pub struct ChargedOutput<T> {
 pub struct MachineAttachment {
     pub snapshot: ChargedOutput<AttachmentSnapshot>,
     pub receiver: MachineReceiver,
+    pub history_ranges: Vec<HistoryRange>,
 }
 
 #[derive(Debug)]
@@ -49,6 +50,10 @@ impl MachineReceiver {
 
     pub fn pending_bytes(&self) -> usize {
         MACHINE_OUTPUT_BYTES - self.budget.available_permits()
+    }
+
+    pub fn try_charge(&self, bytes: usize) -> Result<OwnedSemaphorePermit, MachineOutputError> {
+        charge(&self.budget, bytes)
     }
 
     pub async fn recv(&mut self) -> Result<ChargedOutput<OutputChunk>, MachineOutputError> {
@@ -155,22 +160,30 @@ impl TerminalOutputHub {
         });
         let build = || {
             let controls = charge(&budget, MACHINE_CONTROL_BYTES)?;
-            // Preflight retained bytes before allocating any replay copies.
-            // A suffix may be smaller than retained history.
+            let first = hub.buffer.start_sequence();
+            let gap = after_sequence.zip(first).and_then(|(requested, first)| {
+                (requested < first.saturating_sub(1)).then_some(())
+            });
+            let full = after_sequence.is_none() || gap.is_some();
             let replay_bytes: usize = hub
                 .buffer
                 .chunks
                 .iter()
-                .filter(|chunk| after_sequence.is_none_or(|after| chunk.sequence > after))
+                .filter(|chunk| full || Some(chunk.sequence) > after_sequence)
                 .map(|chunk| chunk.bytes.len())
-                .sum();
+                .sum::<usize>()
+                .saturating_add(if full && hub.buffer.bracketed_paste_enabled() { 8 } else { 0 });
+
+            let range_count = hub.resize_ledger.len().saturating_add(1);
+            let range_capacity = range_count.next_power_of_two().max(4);
+            let max_range_bytes = range_capacity.saturating_mul(std::mem::size_of::<HistoryRange>());
             let permit = charge(
                 &budget,
-                replay_bytes.saturating_add(8 + MACHINE_FRAME_OVERHEAD),
+                replay_bytes.saturating_add(8 + MACHINE_FRAME_OVERHEAD + max_range_bytes),
             )?;
-            let (history, history_start_sequence, history_end_sequence, gap) = hub
+            let (history, history_ranges, history_start_sequence, history_end_sequence, gap) = hub
                 .buffer
-                .snapshot_after_ring(after_sequence);
+                .snapshot_after_ranges(after_sequence, &hub.resize_ledger);
             let gap = gap.or_else(|| {
                 hub.replay_gap.clone().filter(|gap| {
                     after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
@@ -194,6 +207,7 @@ impl TerminalOutputHub {
                     budget: Arc::clone(&budget),
                     _controls: controls,
                 },
+                history_ranges,
             })
         };
         let result = build();

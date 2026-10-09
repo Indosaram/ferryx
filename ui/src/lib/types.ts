@@ -58,7 +58,6 @@ export interface SplitAttachAttempt {
 }
 
 export type SplitDelivery = "notSent" | "ambiguous" | "confirmed";
-
 export interface SplitErrorDetails {
   readonly requestId: string;
   readonly originEpoch: string;
@@ -106,7 +105,6 @@ export interface PanePresentationReceipt {
   readonly presented: boolean;
   readonly presentationTimeUnixMs?: number;
 }
-
 export type WorktreeIdentity = {
   wsId: string;
   slug: string;

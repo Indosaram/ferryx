@@ -684,7 +684,6 @@ fn trace_revealed_view(view: &FerryxNativeTerminalView) {
         );
     });
 }
-
 impl Drop for MacosCompositorTarget {
     fn drop(&mut self) {
         let raw_view_ptr = self.view_ptr.as_ptr() as usize;

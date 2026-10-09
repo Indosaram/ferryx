@@ -129,4 +129,39 @@ describe("switchDebug", () => {
       ).toBe(false);
     });
   });
+
+  describe("isReleasePersistedInputEvent", () => {
+    it("persists overflow and input drop events", () => {
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.overflow")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.outage")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.quarantined")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.owner_mismatch")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.rate")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.dropped.summary")).toBe(true);
+    });
+
+    it("persists gate events", () => {
+      expect(isReleasePersistedInputEvent("terminal.surface.input.gate.unclaimed")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.gate.sink_dropped")).toBe(true);
+    });
+
+    it("persists slow and in-flight stall events", () => {
+      expect(isReleasePersistedInputEvent("terminal.surface.input.slow")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.in_flight_slow")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.stall.in_flight")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.stall.resolved")).toBe(true);
+    });
+
+    it("persists backend phase timing events", () => {
+      expect(isReleasePersistedInputEvent("terminal.surface.input.backend.slow")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.stage.slow")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.stage.error")).toBe(true);
+    });
+
+    it("preserves main sent and presentation receipts but omits capture events", () => {
+      expect(isReleasePersistedInputEvent("terminal.surface.input.sent")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.input.capture")).toBe(false);
+      expect(isReleasePersistedInputEvent("terminal.surface.presented")).toBe(true);
+    });
+  });
 });

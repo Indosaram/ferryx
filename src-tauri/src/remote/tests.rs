@@ -2262,6 +2262,8 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
         &repo_dir,
         &[
             "-c",
+            "commit.gpgsign=false",
+            "-c",
             "user.name=Test User",
             "-c",
             "user.email=test@example.com",
@@ -2378,6 +2380,13 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
         serde_json::from_str(&ws_state_body).expect("parse ws state");
     assert_eq!(ws_state.sessions.len(), 1);
     assert_eq!(ws_state.sessions[0].session_id, session_id);
+    assert_eq!(ws_state.active_context.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(ws_state.active_context.workspace_id.as_deref(), Some(ws_id));
+    assert_eq!(ws_state.active_context.worktree_slug, None);
+    assert_eq!(ws_state.active_context.worktree_label.as_deref(), Some("main"));
+    let state_wire: serde_json::Value =
+        serde_json::from_str(&ws_state_body).expect("workspace state wire JSON");
+    assert_eq!(state_wire["daemonEpoch"].as_str(), Some("1"));
 
     // 8. Perform authenticated terminal WebSocket handshake / attach
     let ws_status = ws_handshake_status(
@@ -2390,6 +2399,28 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
         ws_status, 101,
         "WebSocket attach to active terminal must upgrade with 101"
     );
+
+    daemon_client
+        .remote_set_active_selection(Some(RemoteActiveDesktopSelection {
+            workspace_id: Some(ws_id.to_string()),
+            worktree_slug: None,
+            worktree_label: Some("main".to_string()),
+            session_id: Some("unknown-desktop-session".to_string()),
+            ..Default::default()
+        }))
+        .await
+        .expect("set unknown selection for fail-closed epoch assertion");
+    let (unknown_status, unknown_body) = http_request(
+        bound_addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(unknown_status, 200);
+    let unknown_wire: serde_json::Value = serde_json::from_str(&unknown_body).unwrap();
+    assert_eq!(unknown_wire["daemonEpoch"], serde_json::Value::Null);
 
     // 9. Cleanly disable & abort test daemon
     daemon_client
@@ -2642,6 +2673,12 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
     );
     assert_eq!(state.sessions.len(), 1);
     assert_eq!(state.sessions[0].session_id, session_id);
+    assert_eq!(state.active_context.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(state.active_context.workspace_id.as_deref(), Some(workspace_id));
+    assert_eq!(state.active_context.worktree_slug.as_deref(), Some(worktree_slug));
+    assert_eq!(state.active_context.worktree_label.as_deref(), Some("mobile-control"));
+    let state_wire: serde_json::Value = serde_json::from_str(&state_body).unwrap();
+    assert_eq!(state_wire["daemonEpoch"].as_str(), Some("1"));
 
     let mut socket = tokio::time::timeout(
         std::time::Duration::from_secs(2),

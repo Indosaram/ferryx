@@ -507,6 +507,11 @@ pub struct SpawnTerminalRequest {
     pub prepared_local_split: Option<crate::daemon::protocol::PreparedLocalSplit>,
     #[serde(default)]
     pub remaining_ms: Option<u64>,
+    /// GUI-minted canonical UUID for the new session so the pane can mount before
+    /// the daemon replies. The response `sessionId` is authoritative (older daemons
+    /// ignore this and mint their own).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4234,6 +4239,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 rows,
                 None,
                 Some(TerminalStartup::RemoteSsh { host_store_path }),
+                None,
             )
             .await?
     } else if is_paired_workspace {
@@ -4881,6 +4887,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 rows,
                 effective_shell,
                 request.startup,
+                request.session_id,
             )
             .await
         {

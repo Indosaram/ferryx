@@ -267,6 +267,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stagingDir "Assets") | Out
 try {
     # Copy executable
     Copy-Item $resolvedExePath -Destination (Join-Path $stagingDir "ferryx.exe") -Force
+    Set-Content -Path (Join-Path $stagingDir "msix.marker") -Value "msix" -NoNewline
 
     # Match tauri.conf.json resource destinations; never depend on caller CWD.
     $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path

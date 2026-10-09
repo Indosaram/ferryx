@@ -566,6 +566,7 @@ async fn session_id_resolves_the_live_local_terminal_cwd() {
             create_only: None,
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await

@@ -22,7 +22,7 @@ async fn charge_survives_receive_when_frame_is_in_flight() {
     // Given unequal sizes totaling the exact available payload budget.
     let hub = TerminalOutputHub::default();
     hub.register_session("held");
-    let MachineAttachment { snapshot, mut receiver } = hub.subscribe_machine("held", None).unwrap().unwrap();
+    let MachineAttachment { snapshot, mut receiver, .. } = hub.subscribe_machine("held", None).unwrap().unwrap();
     drop(snapshot);
     let first_size = 333_333;
     let second_size = MACHINE_OUTPUT_BYTES - MACHINE_CONTROL_BYTES - 2 * MACHINE_FRAME_OVERHEAD - first_size;
@@ -46,7 +46,7 @@ async fn overflow_signals_when_writer_holds_an_in_flight_frame() {
     // Given a frame filling every available byte and a separately subscribed signal.
     let hub = TerminalOutputHub::default();
     hub.register_session("held");
-    let MachineAttachment { snapshot, mut receiver } = hub.subscribe_machine("held", None).unwrap().unwrap();
+    let MachineAttachment { snapshot, mut receiver, .. } = hub.subscribe_machine("held", None).unwrap().unwrap();
     drop(snapshot);
     hub.publish("held", vec![1; MACHINE_OUTPUT_BYTES - MACHINE_CONTROL_BYTES - MACHINE_FRAME_OVERHEAD]).unwrap();
     let frame = receiver.recv().await.unwrap();
@@ -96,7 +96,7 @@ async fn snapshot_precedes_live_output_when_replay_has_a_gap() {
     hub.register_session("held");
     hub.publish("held", b"old!".to_vec());
     hub.publish("held", b"new!".to_vec());
-    let MachineAttachment { snapshot, mut receiver } = hub.subscribe_machine("held", Some(0)).unwrap().unwrap();
+    let MachineAttachment { snapshot, mut receiver, .. } = hub.subscribe_machine("held", Some(0)).unwrap().unwrap();
     // When a publisher emits after the atomic attachment.
     let chunk = hub.publish("held", b"live".to_vec()).unwrap();
     // Then replay ends immediately before live output and Arc payload identity survives.

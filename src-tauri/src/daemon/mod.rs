@@ -19,6 +19,7 @@ pub mod proxy;
 // Pane-liveness QA barrier producers (handover transfer/rollback, held remote RPC).
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub mod qa_producers;
+pub mod resource_usage;
 pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;

@@ -1,6 +1,7 @@
 import { remoteApiUrl } from "./remoteClient";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatWorkItem, ToolCallCardProps, ToolStatus } from "./chat/MobileChatComponents";
+import type { TunnelResponse, TunnelTransport } from "./attachTunnel";
 
 /** A tool call made by an assistant record; its result arrives as a later `toolResult` record. */
 export interface ConversationToolCall {
@@ -531,29 +532,51 @@ function toPage(body: unknown): ConversationPage {
   };
 }
 
-export async function fetchAgentConversation(args: {
+export interface FetchAgentConversationArgs {
   baseUrl: string;
   sessionId: string;
   token: string;
   limit?: number;
   cursor?: number | null;
   signal?: AbortSignal;
-}): Promise<ConversationPage> {
-  const { baseUrl, sessionId, token, cursor, signal } = args;
+  transport?: Pick<TunnelTransport, "fetchLike"> | null;
+}
+
+export async function fetchAgentConversation(args: FetchAgentConversationArgs): Promise<ConversationPage> {
+  const { baseUrl, sessionId, token, cursor, signal, transport } = args;
   const limit = args.limit ?? 200;
   let path = `/api/v1/agent-history/${encodeURIComponent(sessionId)}?limit=${limit}`;
   if (typeof cursor === "number") {
     path += `&cursor=${cursor}`;
   }
+
   let response: Response;
-  try {
-    response = await fetch(remoteApiUrl(baseUrl, path), {
-      headers: { Authorization: `Bearer ${token}` },
-      signal,
+  if (transport) {
+    signal?.throwIfAborted();
+    let raw: TunnelResponse;
+    try {
+      raw = await transport.fetchLike(path, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ConversationFetchError("NETWORK_ERROR", error instanceof Error ? error.message : String(error));
+    }
+    signal?.throwIfAborted();
+    response = new Response(raw.body.slice().buffer, {
+      status: raw.status,
+      headers: raw.headers,
     });
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new ConversationFetchError("NETWORK_ERROR", error instanceof Error ? error.message : String(error));
+  } else {
+    try {
+      response = await fetch(remoteApiUrl(baseUrl, path), {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ConversationFetchError("NETWORK_ERROR", error instanceof Error ? error.message : String(error));
+    }
   }
   if (response.ok) {
     let body: unknown;

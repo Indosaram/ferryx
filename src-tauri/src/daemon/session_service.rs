@@ -66,6 +66,7 @@ pub(crate) struct MachineSpawn {
 }
 tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
 tokio::task_local! { static LOCAL_SPLIT_SPAWN: tokio::time::Instant; }
+tokio::task_local! { static REQUESTED_SESSION_ID: Option<String>; }
 
 #[derive(Clone)]
 pub(super) struct SpawnCacheEntry {
@@ -163,6 +164,8 @@ pub(super) enum SpawnError {
     },
     #[error("{0}")]
     InvalidAgentResume(String),
+    #[error("{0}")]
+    Structured(crate::ipc::IpcError),
     #[error("{0}")]
     Other(String),
 }
@@ -342,6 +345,7 @@ impl Drop for MachineSocketLease {
 /// Headless session authority; owns metadata, claims and spawn idempotency.
 /// Holds no server/gateway or AppHandle. Handover is weak to avoid a callback cycle.
 pub struct DaemonSessionService {
+    pub(super) epoch: u64,
     pub(crate) workspace_service: Arc<DaemonWorkspaceService>,
     pub(super) terminal_service: Arc<TerminalService>,
     pub(super) session_router: Arc<super::proxy::SessionRouter>,
@@ -728,7 +732,30 @@ impl DaemonSessionService {
             .try_read_until(deadline)
             .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
         let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?;
-        let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+        let Some(session) = meta.machine_session.as_ref() else {
+            drop(metadata);
+            if target.daemon_epoch.0 != self.epoch {
+                return Err("STALE_EPOCH".into());
+            }
+            let catalog = self
+                .workspace_service
+                .catalog
+                .try_lock_until(deadline)
+                .ok_or("MACHINE_SERVICE_UNAVAILABLE")?
+                .as_ref()
+                .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
+                .clone();
+            let session = self.project_desktop_gui_session(
+                &target.session_id, target.daemon_epoch, &catalog,
+            )?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            if !session.running {
+                return Err("SESSION_EXPIRED".into());
+            }
+            return Ok(session);
+        };
         if session.target != *target {
             return Err("STALE_EPOCH".into());
         }
@@ -1068,6 +1095,7 @@ impl DaemonSessionService {
         result.map_err(|e| match e {
             SpawnError::AgentSessionConflict { .. } => "AGENT_SESSION_CONFLICT".into(),
             SpawnError::InvalidAgentResume(_) => "AGENT_RESUME_INVALID".into(),
+            SpawnError::Structured(error) => error.code.to_string(),
             SpawnError::Other(code) => match code.as_str() {
                 "UNAUTHORIZED"
                 | "TIMEOUT"
@@ -1881,6 +1909,33 @@ impl DaemonSessionService {
         Ok(())
     }
 
+    pub(super) async fn handle_spawn_requested(
+        &self,
+        client_request_id: &str,
+        workspace_id: &str,
+        worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        shell: Option<String>,
+        startup: Option<TerminalStartup>,
+        requested_session_id: Option<String>,
+        #[cfg(test)] helper_home: Option<String>,
+    ) -> Result<String, SpawnError> {
+        if let Some(id) = &requested_session_id {
+            if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id) {
+                return Err(SpawnError::Structured(crate::ipc::IpcError::new(
+                    crate::ipc::IpcErrorCode::InvalidArgument,
+                    "sessionId must be a canonical lowercase UUID",
+                )));
+            }
+        }
+        REQUESTED_SESSION_ID.scope(requested_session_id, self.handle_spawn(
+            client_request_id, workspace_id, worktree, cwd, cols, rows, shell, startup,
+            #[cfg(test)] helper_home,
+        )).await
+    }
+
     pub(super) async fn handle_spawn(
         &self,
         client_request_id: &str,
@@ -1994,6 +2049,7 @@ impl DaemonSessionService {
                 };
             }
         }
+        let requested_session_id = REQUESTED_SESSION_ID.try_with(Clone::clone).ok().flatten();
         let provider_claim = ProviderSessionClaimKey::from_startup(startup.as_ref());
         let spawn_fingerprint = SpawnRequestFingerprint {
             workspace_id: workspace_id.to_string(),
@@ -2004,9 +2060,7 @@ impl DaemonSessionService {
             shell: shell.clone(),
             provider_claim: provider_claim.clone(),
             startup: startup.clone(),
-            // This path has no client-requested session id: the daemon mints the id. Only the
-            // machine/adopted path carries one (machine_owner.rs).
-            requested_session_id: None,
+            requested_session_id: requested_session_id.clone(),
         };
         self.prune_dead_spawn_ownership(now);
         {
@@ -2045,6 +2099,15 @@ impl DaemonSessionService {
                 },
             );
             return Ok(live_session_id);
+        }
+
+        if let Some(id) = &requested_session_id {
+            if self.session_router.is_local_session(id) || self.session_metadata.read().contains_key(id) {
+                return Err(SpawnError::Structured(crate::ipc::IpcError::new(
+                    crate::ipc::IpcErrorCode::SessionIdConflict,
+                    "Requested session ID is already owned",
+                )));
+            }
         }
 
         // Claim the in-flight spawn slot for the whole registered-session lifecycle so a
@@ -2359,7 +2422,7 @@ impl DaemonSessionService {
                     }
                     machine.target.session_id.clone()
                 } else {
-                    uuid::Uuid::new_v4().to_string()
+                    requested_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
                 };
                 #[cfg(test)]
                 if machine.is_some() {

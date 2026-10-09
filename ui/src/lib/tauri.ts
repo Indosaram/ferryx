@@ -535,7 +535,6 @@ export async function spawnTerminalDetailed(
   } };
   return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", payload);
 }
-
 export async function spawnTerminalSplitOperation(
   request: SplitOperationRequest,
 ): Promise<SplitOperationResponse> {
@@ -1324,6 +1323,32 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
   return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
 }
 
+export type AccountEnrollmentStatus = {
+  enrolled: boolean;
+  accountOrigin: string | null;
+  enrolledAt: number | null;
+};
+
+export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    return { enrolled: false, accountOrigin: null, enrolledAt: null };
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
+}
+
+export async function enrollThisMachine(
+  origin: string,
+  enrollmentCode: string,
+): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    throw new Error("Linking this computer is available only in the desktop app");
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
+    origin,
+    enrollmentCode,
+  });
+}
+
 export type DagRunUpdatedEvent = {
   projectPath: string;
   generation?: number;
@@ -1357,32 +1382,6 @@ export async function listenDagWatchStatus(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<DagWatchStatusEvent>("dag-watch-status", (event) => handler(event.payload));
-}
-
-export type AccountEnrollmentStatus = {
-  enrolled: boolean;
-  accountOrigin: string | null;
-  enrolledAt: number | null;
-};
-
-export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    return { enrolled: false, accountOrigin: null, enrolledAt: null };
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
-}
-
-export async function enrollThisMachine(
-  origin: string,
-  enrollmentCode: string,
-): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    throw new Error("Linking this computer is available only in the desktop app");
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
-    origin,
-    enrollmentCode,
-  });
 }
 
 export type DagWatchProjectResult = {

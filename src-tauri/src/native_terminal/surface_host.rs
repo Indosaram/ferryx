@@ -4898,7 +4898,6 @@ impl NativeTerminalSurfaceHostState {
         );
         Some(outcome)
     }
-
     /// Resident replay cursor as `(daemon_epoch, last_sequence)`. The epoch travels with the
     /// sequence because a cursor is only meaningful inside the epoch that issued it.
     pub fn session_replay_cursor(&self, session_id: &str) -> Option<(u64, u64)> {
@@ -10831,7 +10830,6 @@ mod liveness_tests {
             state.teardown();
         }
     }
-
     #[test]
     fn pane_liveness_diagnostics_prearmed_held_presentation_barrier() {
         let state = NativeTerminalSurfaceHostState::default();

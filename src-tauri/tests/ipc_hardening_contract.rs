@@ -128,6 +128,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
             create_only: None, // Ordinary spawn fixture.
             prepared_local_split: None,
             remaining_ms: None,
+            session_id: None,
         },
     )
     .await

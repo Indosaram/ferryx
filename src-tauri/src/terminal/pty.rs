@@ -564,7 +564,6 @@ impl PtyManager {
             let Some(session) = manager.get_session(&session_id) else {
                 return;
             };
-
             loop {
                 let Some(session) = manager.get_session(&session_id) else {
                     break;
@@ -632,7 +631,12 @@ impl PtyManager {
 
     async fn join_reader_bounded(session: &Arc<PtySession>) -> Result<(), PtyError> {
         let Some(mut reader_task) = session.take_reader_task() else {
-            return Ok(());
+            if session.is_reader_finished() {
+                return Ok(());
+            }
+            return Err(PtyError::Other(
+                "PTY reader join handle was consumed before close completed".into(),
+            ));
         };
 
         match tokio::time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_task).await {

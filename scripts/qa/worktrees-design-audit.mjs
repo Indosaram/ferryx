@@ -38,9 +38,9 @@ const STATES = ["filled", "loading", "error", "empty", "offline"];
 const SELECT_VIEWPORTS = new Set(["tablet", "desktop"]);
 
 const ALPHA = "mach-qa-alpha";
-const OFFLINE = "mach-qa-offline";
 const TARGET = { workspaceId: "ws-ferryx", worktreeSlug: "feature-picker" };
-const TARGET_LABEL = `QA Workstation Alpha / ${TARGET.workspaceId} / ${TARGET.worktreeSlug}`;
+const TARGET_LABEL = `${TARGET.workspaceId} / ${TARGET.worktreeSlug}`;
+const MACHINE_NAMES = /QA Workstation Alpha|QA Linux Server|mach-qa-/;
 const ERROR_TEXT = "QA relay unavailable (503)";
 
 const summary = {
@@ -97,18 +97,16 @@ async function assertPreselection(page, tag) {
 }
 
 async function assertPickerState(page, state, tag) {
+  const dialog = page.getByRole("dialog", { name: "Workspace context" });
+  await dialog.waitFor({ state: "visible", timeout: WAIT_MS });
   const status = page.getByTestId("remote-account-inventory-status");
-  await status.waitFor({ state: "visible", timeout: WAIT_MS });
-  const offlineRow = page.getByTestId(`remote-account-machine-status-${OFFLINE}`);
   const target = page.getByRole("button", { name: TARGET_LABEL, exact: true });
 
   if (state === "filled") {
     await target.waitFor({ state: "visible", timeout: WAIT_MS });
     check(`${tag}: exact worktree option visible`, true);
-    await offlineRow.waitFor({ state: "visible", timeout: WAIT_MS });
-    check(`${tag}: offline machine row`, (await offlineRow.getAttribute("data-status")) === "offline");
   } else if (state === "loading") {
-    const loading = status.getByText("Loading machines...", { exact: true });
+    const loading = status.getByText("Loading worktrees...", { exact: true });
     await loading.waitFor({ state: "visible", timeout: WAIT_MS });
     check(`${tag}: loading row visible`, true);
   } else if (state === "error") {
@@ -116,23 +114,19 @@ async function assertPickerState(page, state, tag) {
     await alert.waitFor({ state: "visible", timeout: WAIT_MS });
     const text = (await alert.textContent())?.trim();
     check(`${tag}: error alert text`, text === ERROR_TEXT, { text });
-  } else if (state === "empty") {
+  } else if (state === "empty" || state === "offline") {
     await page.waitForFunction(
       (fn) => window.__ferryxQa?.accountCalls.some((c) => c.fn === fn),
       "listMachines",
       { timeout: WAIT_MS },
     );
-    await page.getByText("Loading machines...", { exact: true }).waitFor({ state: "detached", timeout: WAIT_MS });
-    const rows = await status.locator("[data-testid^='remote-account-machine-status-']").count();
-    check(`${tag}: no machine rows`, rows === 0, { rows });
-  } else if (state === "offline") {
-    await offlineRow.waitFor({ state: "visible", timeout: WAIT_MS });
-    check(`${tag}: offline machine row`, (await offlineRow.getAttribute("data-status")) === "offline");
+    await page.getByText("Loading worktrees...", { exact: true }).waitFor({ state: "detached", timeout: WAIT_MS });
   }
 
+  const dialogText = (await dialog.textContent()) ?? "";
+  check(`${tag}: no machine names or machine rows in picker`, !MACHINE_NAMES.test(dialogText), { dialogText });
   if (state !== "filled") {
-    const options = await page.getByRole("dialog", { name: "Workspace context" })
-      .getByRole("button", { name: /^QA Workstation Alpha \// }).count();
+    const options = await dialog.getByRole("button", { name: TARGET_LABEL, exact: true }).count();
     check(`${tag}: no selectable worktree options`, options === 0, { options });
   }
   check(`${tag}: no select POST while picker open`, (await selectPostCount(page)) === 0);

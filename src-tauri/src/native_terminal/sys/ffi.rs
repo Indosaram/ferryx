@@ -5,11 +5,11 @@ use std::ffi::{c_int, c_void};
 use super::types::{
     GhosttyAllocator, GhosttyCell, GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
     GhosttyMouseEncoder, GhosttyMouseEvent, GhosttyMousePosition, GhosttyPoint,
-    GhosttyPointCoordinate, GhosttyRenderState, GhosttyRenderStateRowCells,
+    GhosttyPointCoordinate, GhosttyReader, GhosttyRenderState, GhosttyRenderStateRowCells,
     GhosttyRenderStateRowIterator, GhosttySelection, GhosttySelectionGesture,
-    GhosttySelectionGestureEvent, GhosttyTerminal, GhosttyTerminalScrollViewport,
-    GhosttyTerminalSelectLineOptions, GhosttyTerminalSelectWordOptions,
-    GhosttyTerminalSelectionFormatOptions,
+    GhosttySelectionGestureEvent, GhosttySnapshotDecoder, GhosttyTerminal,
+    GhosttyTerminalScrollViewport, GhosttyTerminalSelectLineOptions,
+    GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions, GhosttyWriter,
 };
 
 extern "C" {
@@ -250,5 +250,80 @@ extern "C" {
         terminal: GhosttyTerminal,
         data: c_int,
         value: *mut c_void,
+    ) -> c_int;
+
+    // Snapshot encode and decode APIs matching `ghostty/vt/snapshot.h`.
+    pub fn ghostty_snapshot_encode(
+        terminal: GhosttyTerminal,
+        writer: GhosttyWriter,
+    ) -> c_int;
+    pub fn ghostty_snapshot_encode_buf(
+        terminal: GhosttyTerminal,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> c_int;
+    pub fn ghostty_snapshot_encode_alloc(
+        terminal: GhosttyTerminal,
+        allocator: *const GhosttyAllocator,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    pub fn ghostty_snapshot_decoder_new(
+        allocator: *const GhosttyAllocator,
+        decoder: *mut GhosttySnapshotDecoder,
+        reader: GhosttyReader,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_new_buf(
+        allocator: *const GhosttyAllocator,
+        decoder: *mut GhosttySnapshotDecoder,
+        ptr: *const u8,
+        len: usize,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_free(decoder: GhosttySnapshotDecoder);
+    pub fn ghostty_snapshot_decoder_set(
+        decoder: GhosttySnapshotDecoder,
+        option: c_int,
+        value: *const c_void,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_ready(
+        decoder: GhosttySnapshotDecoder,
+        terminal: *mut GhosttyTerminal,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_next(decoder: GhosttySnapshotDecoder) -> c_int;
+    pub fn ghostty_snapshot_decoder_decode(
+        decoder: GhosttySnapshotDecoder,
+        terminal: *mut GhosttyTerminal,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_get(
+        decoder: GhosttySnapshotDecoder,
+        data: c_int,
+        out: *mut c_void,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_get_multi(
+        decoder: GhosttySnapshotDecoder,
+        count: usize,
+        keys: *const c_int,
+        values: *mut *mut c_void,
+        out_written: *mut usize,
+    ) -> c_int;
+
+    // Terminal continuation APIs matching `ghostty/vt/terminal.h`.
+    pub fn ghostty_terminal_continuation_write(
+        terminal: GhosttyTerminal,
+        writer: GhosttyWriter,
+    ) -> c_int;
+    pub fn ghostty_terminal_continuation_buf(
+        terminal: GhosttyTerminal,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> c_int;
+    pub fn ghostty_terminal_continuation_alloc(
+        terminal: GhosttyTerminal,
+        allocator: *const GhosttyAllocator,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
     ) -> c_int;
 }

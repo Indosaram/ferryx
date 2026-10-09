@@ -15,6 +15,10 @@ pub enum MachineTerminalControl {
         signal: String,
     },
     Ping,
+    Scroll {
+        generation: crate::scoped_contracts::Epoch,
+        rows: i16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +297,8 @@ pub struct RemoteWorktreeInfo {
 pub struct RemoteWorkspaceState {
     pub projects: Vec<RemoteProjectInfo>,
     pub active_context: RemoteActiveDesktopSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_epoch: Option<crate::scoped_contracts::Epoch>,
     pub active_workspace_id: String,
     pub worktrees: Vec<RemoteWorktreeInfo>,
     pub sessions: Vec<RemoteTerminalSession>,

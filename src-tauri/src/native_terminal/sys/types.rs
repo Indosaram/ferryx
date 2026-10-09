@@ -11,6 +11,13 @@ pub struct GhosttyTerminalImpl {
 }
 pub type GhosttyTerminal = *mut GhosttyTerminalImpl;
 
+/// Opaque foreign snapshot decoder handle matching `include/ghostty/vt/types.h`.
+#[repr(C)]
+pub struct GhosttySnapshotDecoderImpl {
+    _private: [u8; 0],
+}
+pub type GhosttySnapshotDecoder = *mut GhosttySnapshotDecoderImpl;
+
 /// C callback for writing terminal VT reports (CPR, DA, etc.) back to PTY.
 #[allow(dead_code)]
 pub type GhosttyTerminalWritePtyFn = unsafe extern "C" fn(
@@ -19,6 +26,37 @@ pub type GhosttyTerminalWritePtyFn = unsafe extern "C" fn(
     data: *const u8,
     len: usize,
 );
+
+/// C callback for reading bytes from a source into a buffer matching `include/ghostty/vt/io.h`.
+pub type GhosttyReaderFn = unsafe extern "C" fn(
+    userdata: *mut c_void,
+    buffer: *mut u8,
+    capacity: usize,
+    out_read: *mut usize,
+) -> bool;
+
+/// C callback for writing bytes from a source slice to a destination matching `include/ghostty/vt/io.h`.
+pub type GhosttyWriterFn = unsafe extern "C" fn(
+    userdata: *mut c_void,
+    data: *const u8,
+    len: usize,
+) -> bool;
+
+/// Byte source callback and its opaque context matching `include/ghostty/vt/io.h`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GhosttyReader {
+    pub read: GhosttyReaderFn,
+    pub userdata: *mut c_void,
+}
+
+/// Byte destination callback and its opaque context matching `include/ghostty/vt/io.h`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GhosttyWriter {
+    pub write: GhosttyWriterFn,
+    pub userdata: *mut c_void,
+}
 
 /// Opaque foreign render state handle.
 #[repr(C)]

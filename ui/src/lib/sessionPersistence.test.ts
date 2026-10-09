@@ -248,6 +248,25 @@ describe("sessionPersistence v3 serialization and migration", () => {
     expect(restored.sessions["sess-1"].backendSessionId).toBe("backend-1");
   });
 
+  it("a persisted session missing from a non-authoritative live map keeps its backendSessionId and does NOT become 'exited'", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+
+    // Non-authoritative container query
+    const nonAuthContainer = { authoritative: false, sessions: [] };
+    const restoredFromContainer = deserializeWorkspaceState("default", saved, nonAuthContainer)!;
+    expect(restoredFromContainer.sessions["sess-1"].backendSessionId).toBe("backend-1");
+    expect(restoredFromContainer.sessions["sess-1"].lifecycle).not.toBe("exited");
+    expect(restoredFromContainer.sessions["sess-1"].remoteConnectionState).toBe("reconnecting");
+
+    // Non-authoritative Map instance
+    const liveMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
+    (liveMap as any).authoritative = false;
+    const restoredFromMap = deserializeWorkspaceState("default", saved, liveMap)!;
+    expect(restoredFromMap.sessions["sess-1"].backendSessionId).toBe("backend-1");
+    expect(restoredFromMap.sessions["sess-1"].lifecycle).not.toBe("exited");
+    expect(restoredFromMap.sessions["sess-1"].remoteConnectionState).toBe("reconnecting");
+  });
+
   it("quarantines an invalid paired workspace without affecting another row", () => {
     const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
     const badId = `daemon:${"b".repeat(64)}`;

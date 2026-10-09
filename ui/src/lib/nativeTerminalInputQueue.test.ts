@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import * as switchDebugModule from "./switchDebug";
 import {
   NativeTerminalInputQueueManager,
   NativeTerminalQueueOverflowError,
@@ -29,6 +30,31 @@ describe("NativeTerminalInputQueueManager", () => {
       maxQueueBytes: 1024,
       maxQueueEntries: 4,
     });
+  });
+
+  it("reports the age of the in-flight input when the queue overflows", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = createDeferred();
+      const first = queue.enqueue("blocked", null, 1, () => pending.promise);
+      expect(queue.getRunningAgeMs("blocked")).toBe(0);
+      vi.advanceTimersByTime(125);
+      expect(queue.getRunningAgeMs("blocked")).toBe(125);
+
+      const waiting = Array.from({ length: 3 }, () =>
+        queue.enqueue("blocked", null, 1, async () => undefined),
+      );
+      await expect(queue.enqueue("blocked", null, 1, async () => undefined))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(queue.getQueuedCount("blocked")).toBe(4);
+
+      pending.resolve();
+      await first;
+      await Promise.all(waiting);
+      expect(queue.getRunningAgeMs("blocked")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("executes tasks strictly in FIFO order per session without concurrent overlap", async () => {
@@ -466,6 +492,93 @@ describe("NativeTerminalInputQueueManager", () => {
     }
   });
 
+
+  it("emits bounded slow in-flight diagnostics and correlated request id when operation stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const debugSpy = vi.spyOn(switchDebugModule, "switchDebug");
+      debugSpy.mockClear();
+
+      const slowDeferred = createDeferred<string>();
+      let receivedRequestId = "";
+      const slowPromise = queue.enqueue("session-slow", 1, 10, async (reqId) => {
+        receivedRequestId = reqId;
+        return slowDeferred.promise;
+      }, undefined, "mouse.Press");
+
+      expect(receivedRequestId).toMatch(/^req-[a-zA-Z0-9_-]+-session-slow-\d+$/);
+      expect(queue.getInFlightRequestId("session-slow")).toBe(receivedRequestId);
+
+      // Advance time before threshold (200ms < 250ms)
+      vi.advanceTimersByTime(200);
+      expect(debugSpy).not.toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.anything(),
+      );
+
+      // Advance past threshold (250ms)
+      vi.advanceTimersByTime(50);
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          inFlightRequestId: receivedRequestId,
+          operation: "mouse.Press",
+          phase: "pending_ipc",
+        }),
+      );
+
+      // Enqueue a second item while head is blocked
+      const secondDeferred = createDeferred<string>();
+      let secondReceivedRequestId = "";
+      const secondPromise = queue.enqueue("session-slow", 1, 10, async (reqId) => {
+        secondReceivedRequestId = reqId;
+        return secondDeferred.promise;
+      });
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          inFlightRequestId: receivedRequestId,
+          trigger: "enqueue_head_blocked",
+        }),
+      );
+
+      // Enqueue a third item immediately: rate-limited, must NOT re-emit enqueue_head_blocked
+      debugSpy.mockClear();
+      const thirdDeferred = createDeferred<string>();
+      const thirdPromise = queue.enqueue("session-slow", 1, 10, async () => thirdDeferred.promise);
+      expect(debugSpy).not.toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({ trigger: "enqueue_head_blocked" }),
+      );
+
+      // Settle the slow first operation
+      slowDeferred.resolve("first-done");
+      await slowPromise;
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          requestId: receivedRequestId,
+        }),
+      );
+
+      // Verify FIFO: second operation was in flight before third
+      secondDeferred.resolve("second-done");
+      await secondPromise;
+      thirdDeferred.resolve("third-done");
+      await thirdPromise;
+
+      expect(queue.getInFlightRequestId("session-slow")).toBeNull();
+      debugSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("propagates custom requestId and operationName through enqueue and reports custom ID during in-flight execution", async () => {
     const d1 = createDeferred<string>();
     let receivedReqId = "";
@@ -639,6 +752,59 @@ describe("NativeTerminalInputQueueManager", () => {
 
       expect(queue.getInFlightRequestId("sess-queue-age")).toBeNull();
       expect(queue.getRunningAgeMs("sess-queue-age")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks in-flight request age and repeated drop accounting accurately during stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new NativeTerminalInputQueueManager({
+        maxQueueEntries: 2,
+        maxQueueBytes: 64,
+      });
+      const sessionId = "session-stall-test";
+      const debugSpy = vi.spyOn(switchDebugModule, "switchDebug").mockImplementation(() => null);
+
+      const inFlightDeferred = createDeferred<string>();
+      let inFlightRequestId = "";
+      const inFlightPromise = queue.enqueue(sessionId, null, 10, async (reqId) => {
+        inFlightRequestId = reqId;
+        return inFlightDeferred.promise;
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queue.getInFlightRequestId(sessionId)).toBe(inFlightRequestId);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(300);
+
+      const secondDeferred = createDeferred<string>();
+      const secondPromise = queue.enqueue(sessionId, null, 10, async () => {
+        return secondDeferred.promise;
+      });
+
+      let overflowError: unknown = null;
+      try {
+        await queue.enqueue(sessionId, null, 10, async () => "overflow");
+      } catch (err) {
+        overflowError = err;
+      }
+      expect(overflowError).toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(300);
+      expect(queue.getInFlightRequestId(sessionId)).toBe(inFlightRequestId);
+
+      inFlightDeferred.resolve("done-1");
+      await inFlightPromise;
+
+      secondDeferred.resolve("done-2");
+      await secondPromise;
+
+      expect(queue.getInFlightRequestId(sessionId)).toBeNull();
+      expect(queue.getRunningAgeMs(sessionId)).toBeNull();
+      debugSpy.mockRestore();
     } finally {
       vi.useRealTimers();
     }

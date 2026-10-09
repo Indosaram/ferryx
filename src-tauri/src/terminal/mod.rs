@@ -34,6 +34,7 @@ pub mod output_hub;
 pub mod paired_daemon;
 pub mod paired_runtime;
 pub mod preferences;
+pub mod protocol_dto;
 pub mod pty;
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 pub(crate) mod qa_liveness;
@@ -50,6 +51,7 @@ pub use suspension::windows::install_ownership_verifier;
 
 pub use output_hub::*;
 pub use preferences::*;
+pub use protocol_dto::*;
 pub use pty::*;
 pub use service::*;
 pub use session::*;

@@ -2,7 +2,8 @@
 
 This is the canonical operator procedure for Ferryx releases. Release artifacts are built,
 signed, assembled, and published from operator-controlled machines; GitHub Actions is not a
-release producer. Ordinary pull-request checks and Pages deployment remain enabled.
+release producer. Ordinary pull-request checks remain enabled; the site deploys separately
+to Cloudflare Workers (see [site migration](../SITE_DOMAIN_MIGRATION.md)).
 
 > **Coordinator status (2026-09-08):** Hardened and fully validated.
 > Real multi-host builds (`macbook`, `omaki`, `maho-win`), coordinator-only updater signing,
@@ -13,8 +14,8 @@ release producer. Ordinary pull-request checks and Pages deployment remain enabl
 
 | Host | Role | Required output |
 | --- | --- | --- |
-| `macbook` | Local coordinator, universal macOS builder, signing/notarization host, assembler, verifier, publisher | signed/notarized universal updater archive and universal DMG |
-| `omaki` | SSH Linux x86_64 builder | raw AppImage updater payload and DEB (signed by coordinator) |
+| `macbook` | Local coordinator, universal macOS builder, signing/notarization host, assembler, verifier, publisher | signed/notarized universal updater archive, universal DMG, and universal CLI |
+| `omaki` | SSH Linux x86_64 builder | raw AppImage updater payload, DEB, and x86_64 CLI (signed by coordinator where applicable) |
 | `maho-win` | SSH Windows x64 builder | unsigned Store-ingestion MSIX; NSIS updater installer (-setup.exe, signed by coordinator) when migration is selected |
 
 Every host builds the same 40-character source commit recorded in `plan.json`. Ghostty is a
@@ -193,8 +194,8 @@ node scripts/release-local.mjs assemble --run "$RUN"
 node scripts/release-local.mjs verify --run "$RUN"
 ```
 
-Assembly requires the macOS updater + DMG, Linux AppImage + DEB, Windows MSIX, and, when selected,
-NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
+Assembly requires the macOS updater + DMG + universal CLI, Linux AppImage + DEB + x86_64 CLI,
+Windows MSIX, and, when selected, NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
 and the selected channel matrix before creating stable aliases, `latest.json`, and
 `SHA256SUMS.txt`. `verify` checks listed bytes and independently re-derives the publish directory.
 Inspect the final inventory; no MSI or architecture-specific macOS DMG is part of this contract.
@@ -279,7 +280,7 @@ Mach-O, submits to notarytool, staples, and refuses to finish without
 
 ### Completion checklist
 
-- [ ] Pull-request checks and Pages are green; no hosted workflow builds/signs/publishes releases.
+- [ ] Pull-request checks are green; no hosted workflow builds/signs/publishes releases.
 - [ ] Config is credential-free and unchanged; all roots are dedicated and meet configured budgets.
 - [ ] Plan tag, app version, MSIX version, source SHA, Ghostty pin, channels, and updater key are reviewed.
 - [ ] All three receipts match the plan and list only the expected artifacts.
