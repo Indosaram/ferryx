@@ -1,14 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
-  Mic,
   Plus,
   Square,
   X,
   FileText,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { safeRandomUUID } from "../../lib/uuid";
+import type { AttachmentReceipt } from "../../lib/scopedContracts";
 import type { ChatAttachment } from "./MobileChatComponents";
+import { VoiceDictationControl } from "./VoiceDictationControl";
+import type { VoiceRecognitionFactory } from "./voiceToDraft";
 
 export type { ChatAttachment };
 
@@ -17,13 +20,26 @@ export interface MobileChatComposerHandle {
 }
 
 export interface MobileChatComposerProps {
-  readonly onSend: (text: string, attachments: readonly ChatAttachment[]) => void;
+  readonly onSend: (text: string, attachments: readonly ChatAttachment[]) => void | Promise<void>;
+  readonly draftText?: string;
+  readonly onDraftTextChange?: (text: string) => void;
+  readonly targetKey?: string;
+  readonly draftRevision?: number;
+  readonly draftAttachments?: readonly AttachmentReceipt[];
+  readonly onDraftAttachmentsChange?: (attachments: readonly AttachmentReceipt[]) => void;
+  readonly sendPending?: boolean;
+  readonly deliveryStage?: "staged" | "accepted" | "providerRead";
+  readonly held?: boolean;
+  readonly onRetryHeld?: () => void;
   readonly onStop?: () => void;
   readonly onClearDraft?: () => void;
   readonly isRunning?: boolean;
   readonly disabled?: boolean;
   readonly placeholder?: string;
   readonly className?: string;
+  readonly onStageAttachment?: (file: File, signal?: AbortSignal, attachmentId?: string) => Promise<AttachmentReceipt>;
+  readonly onCancelAttachment?: (attachmentId: string) => Promise<void>;
+  readonly createVoiceRecognition?: VoiceRecognitionFactory;
 }
 
 function formatFileSize(bytes: number): string {
@@ -37,19 +53,58 @@ export const MobileChatComposer = React.forwardRef<
   MobileChatComposerProps
 >(({
   onSend,
+  draftText,
+  onDraftTextChange,
+  targetKey = "mobile-chat-default-target",
+  draftRevision = 0,
+  draftAttachments,
+  onDraftAttachmentsChange,
+  sendPending = false,
+  deliveryStage,
+  held = false,
+  onRetryHeld,
   onStop,
   onClearDraft,
   isRunning = false,
   disabled = false,
   placeholder = "Ask the agent…",
   className,
+  onStageAttachment,
+  onCancelAttachment,
+  createVoiceRecognition,
 }, ref) => {
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<readonly ChatAttachment[]>([]);
+  const [localText, setLocalText] = useState("");
+  const text = draftText ?? localText;
+  const [localAttachments, setLocalAttachments] = useState<readonly ChatAttachment[]>([]);
+  const localAttachmentsRef = useRef<readonly ChatAttachment[]>([]);
+  const attachmentNamesRef = useRef<Map<string, string>>(new Map());
+  const persistedAttachments: readonly ChatAttachment[] = draftAttachments
+    ? draftAttachments.map((receipt) => ({
+        id: receipt.attachmentId,
+        attachmentId: receipt.attachmentId,
+        name: attachmentNamesRef.current.get(receipt.attachmentId) ?? receipt.attachmentId,
+        size: formatFileSize(receipt.sizeBytes),
+        type: receipt.mediaType,
+        receipt,
+      }))
+    : [];
+  const attachments: readonly ChatAttachment[] = draftAttachments
+    ? [...persistedAttachments, ...localAttachments.filter((attachment) => !attachment.receipt)]
+    : localAttachments;
+  localAttachmentsRef.current = attachments;
+  const setAttachments = (next: readonly ChatAttachment[] | ((prev: readonly ChatAttachment[]) => readonly ChatAttachment[])) => {
+    const value = typeof next === "function" ? next(localAttachmentsRef.current) : next;
+    localAttachmentsRef.current = value;
+    if (onDraftAttachmentsChange) {
+      onDraftAttachmentsChange(value.flatMap((attachment) => attachment.receipt ? [attachment.receipt] : []));
+    }
+    setLocalAttachments(value.filter((attachment) => !attachment.receipt || !onDraftAttachmentsChange));
+  };
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
   const revokeTrackedUrl = useCallback((url?: string) => {
     if (!url) return;
@@ -85,31 +140,35 @@ export const MobileChatComposer = React.forwardRef<
   }, [text, adjustHeight]);
 
   const clearDraft = useCallback(() => {
-    setText("");
+    setLocalText("");
+    onDraftTextChange?.("");
     setAttachments([]);
     revokeAllTrackedUrls();
     if (textareaRef.current) {
       textareaRef.current.style.height = "36px";
     }
     onClearDraft?.();
-  }, [revokeAllTrackedUrls, onClearDraft]);
+  }, [revokeAllTrackedUrls, onClearDraft, onDraftTextChange]);
 
   React.useImperativeHandle(ref, () => ({
     clearDraft,
   }), [clearDraft]);
 
   const handleSend = useCallback(() => {
-    if (disabled) return;
-    if (attachments.length > 0) return;
+    if (disabled || sendPending || held) return;
+    if (!onStageAttachment && attachments.length > 0) return;
+    if (attachments.some((a) => a.isStaging || !a.receipt)) return;
     const trimmed = text.trim();
-    if (!trimmed) return;
-    onSend(trimmed, []);
-    setText("");
-    setAttachments([]);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "36px";
+    if (!trimmed && attachments.length === 0) return;
+    const result = onSend(trimmed, attachments);
+    if (!onDraftTextChange && !onDraftAttachmentsChange && !(result && typeof result.then === "function")) {
+      setLocalText("");
+      setAttachments([]);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "36px";
+      }
     }
-  }, [disabled, text, attachments, onSend]);
+  }, [disabled, sendPending, held, text, attachments, onSend, onStageAttachment, onDraftTextChange, onDraftAttachmentsChange]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -139,7 +198,7 @@ export const MobileChatComposer = React.forwardRef<
   }, []);
 
   const handleFileChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
       if (!files || files.length === 0) return;
 
@@ -150,12 +209,20 @@ export const MobileChatComposer = React.forwardRef<
           url = URL.createObjectURL(file);
           objectUrlsRef.current.add(url);
         }
+        const id = safeRandomUUID();
+        const attachmentId = safeRandomUUID();
+        attachmentNamesRef.current.set(attachmentId, file.name);
+        const ctrl = new AbortController();
+        abortControllersRef.current.set(id, ctrl);
         return {
-          id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          id,
+          attachmentId,
           name: file.name,
           size: formatFileSize(file.size),
           type: file.type || "file",
           url,
+          file,
+          isStaging: Boolean(onStageAttachment),
         };
       });
 
@@ -163,24 +230,72 @@ export const MobileChatComposer = React.forwardRef<
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
+
+      if (onStageAttachment) {
+        for (const att of newAttachments) {
+          if (!att.file) continue;
+          const ctrl = abortControllersRef.current.get(att.id);
+          try {
+            const receipt = await onStageAttachment(att.file, ctrl?.signal, att.attachmentId);
+            abortControllersRef.current.delete(att.id);
+            setAttachments((prev) =>
+              prev.map((a) => (a.id === att.id ? { ...a, receipt, isStaging: false } : a))
+            );
+          } catch (err: unknown) {
+            abortControllersRef.current.delete(att.id);
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            setAttachments((prev) =>
+              prev.map((a) => (a.id === att.id ? { ...a, isStaging: false, error: errorMsg } : a))
+            );
+          }
+        }
+      }
     },
-    []
+    [onStageAttachment]
   );
 
   const handleRemoveAttachment = useCallback(
-    (id: string) => {
+    async (id: string) => {
+      const ctrl = abortControllersRef.current.get(id);
+      if (ctrl) {
+        ctrl.abort();
+        abortControllersRef.current.delete(id);
+      }
+
+      const target = attachments.find((a) => a.id === id);
+      if (target?.url) {
+        revokeTrackedUrl(target.url);
+      }
       setAttachments((prev) => {
-        const target = prev.find((a) => a.id === id);
-        if (target?.url) {
-          revokeTrackedUrl(target.url);
-        }
-        return prev.filter((a) => a.id !== id);
+        const remaining = prev.filter((a) => a.id !== id);
+        if (draftAttachments) onDraftAttachmentsChange?.(remaining.flatMap((attachment) => attachment.receipt ? [attachment.receipt] : []));
+        return remaining;
       });
+
+      const cancelId = target?.receipt?.attachmentId ?? target?.attachmentId;
+      if (cancelId && onCancelAttachment) {
+        try {
+          await onCancelAttachment(cancelId);
+        } catch (err) {
+          console.warn("Failed to cancel remote attachment", err);
+        }
+      }
     },
-    [revokeTrackedUrl]
+    [attachments, revokeTrackedUrl, onCancelAttachment]
   );
 
-  const canSubmit = text.trim().length > 0 && attachments.length === 0 && !disabled;
+  const hasStaging = attachments.some((a) => a.isStaging);
+  const hasError = attachments.some((a) => Boolean(a.error));
+  const hasUnstagedBlocked = !onStageAttachment && attachments.length > 0;
+  const allStaged = Boolean(onStageAttachment) && attachments.length > 0 && attachments.every((a) => Boolean(a.receipt));
+  const canSubmit =
+    (text.trim().length > 0 || allStaged) &&
+    !hasStaging &&
+    !hasError &&
+    !hasUnstagedBlocked &&
+    !disabled &&
+    !sendPending &&
+    !held;
 
   return (
     <div
@@ -190,7 +305,7 @@ export const MobileChatComposer = React.forwardRef<
         className
       )}
     >
-      {attachments.length > 0 && (
+      {hasUnstagedBlocked && (
         <div
           data-testid="chat-composer-attachments-blocked"
           role="status"
@@ -198,6 +313,36 @@ export const MobileChatComposer = React.forwardRef<
           className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-danger bg-chat-danger/10 border-b border-chat-danger/20"
         >
           <span>Attachments aren&apos;t supported from the phone yet. Remove them to send.</span>
+        </div>
+      )}
+      {hasStaging && (
+        <div
+          data-testid="chat-composer-attachments-staging"
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-foreground-secondary bg-chat-surface/80 border-b border-chat-border"
+        >
+          <span>Uploading attachments...</span>
+        </div>
+      )}
+      {hasError && (
+        <div
+          data-testid="chat-composer-attachments-error"
+          role="alert"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-destructive bg-destructive/10 border-b border-destructive/20"
+        >
+          <span>Attachment upload failed. Remove to proceed.</span>
+        </div>
+      )}
+      {deliveryStage && (
+        <div data-testid="mobile-chat-delivery-stage" role="status" className="px-3 py-1 text-xs text-chat-foreground-secondary">
+          {deliveryStage === "staged" ? "Staged" : deliveryStage === "accepted" ? "Accepted" : "Provider read"}
+        </div>
+      )}
+      {held && (
+        <div data-testid="mobile-chat-held" role="status" className="flex items-center justify-between px-3 py-2 text-xs">
+          <span>Not delivered. Retry explicitly when ready.</span>
+          <button type="button" data-testid="mobile-chat-retry" disabled={sendPending || disabled} onClick={onRetryHeld}>Retry</button>
         </div>
       )}
       {attachments.length > 0 && (
@@ -210,7 +355,7 @@ export const MobileChatComposer = React.forwardRef<
             return (
               <div
                 key={att.id}
-                data-testid={`attachment-preview-${att.id}`}
+                data-testid={`attachment-preview-${att.attachmentId ?? att.id}`}
                 className="group relative flex items-center gap-2 rounded-lg bg-chat-surface/90 border border-chat-border p-1.5 pr-2.5 shrink-0 max-w-[200px] shadow-sm"
               >
                 {isImage ? (
@@ -234,7 +379,7 @@ export const MobileChatComposer = React.forwardRef<
                 </div>
                 <button
                   type="button"
-                  data-testid={`remove-attachment-${att.id}`}
+                  data-testid={`remove-attachment-${att.attachmentId ?? att.id}`}
                   aria-label={`Remove attachment ${att.name}`}
                   onClick={() => handleRemoveAttachment(att.id)}
                   className="size-5 rounded-md bg-chat-surface-raised hover:bg-chat-danger/80 hover:text-chat-screen text-chat-foreground-secondary flex items-center justify-center shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -280,7 +425,7 @@ export const MobileChatComposer = React.forwardRef<
             enterKeyHint="send"
             autoComplete="off"
             inputMode="text"
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => (onDraftTextChange ? onDraftTextChange(e.target.value) : setLocalText(e.target.value))}
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
@@ -288,16 +433,15 @@ export const MobileChatComposer = React.forwardRef<
           />
         </div>
 
-        <button
-          type="button"
-          data-testid="mic-button"
-          disabled
-          aria-label="Voice input is not supported"
-          title="Voice input is not supported"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <Mic className="size-4" />
-        </button>
+        <VoiceDictationControl
+          targetKey={targetKey}
+          draftRevision={draftRevision}
+          value={text}
+          onChange={(next) => (onDraftTextChange ? onDraftTextChange(next) : setLocalText(next))}
+          createRecognition={createVoiceRecognition}
+          disabled={disabled || sendPending || held}
+          className="shrink-0"
+        />
 
         {isRunning ? (
           <button

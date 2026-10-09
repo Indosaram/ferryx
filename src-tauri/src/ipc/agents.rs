@@ -684,17 +684,81 @@ pub(crate) fn search_paths() -> Vec<PathBuf> {
 // Terminals spawn through the user's login shell, so its PATH (Homebrew, nvm,
 // mise, ~/.local/bin) is the search space that matches what a launched agent
 // would actually resolve against - the GUI process PATH alone misses most of it.
+//
+// Measured cause of the hard bound below: `-lic` sources the user's whole rc
+// chain, and on a host whose rc chain runs `pyenv rehash` the child outlives any
+// fixed caller budget - sampled live on macOS: `/bin/zsh -lic printf %s "$PATH"`
+// with `bash .../pyenv-rehash` still alive 18 s later, so `POST /api/v1/sessions`
+// never returned within its 10 s reqwest timeout. `.output()` had no deadline at
+// all; resolution is now bounded, and on expiry the child is killed and reaped
+// and `None` keeps the "could not resolve" contract so callers' fallbacks still
+// apply. The session-spawn and agent detect/discovery call paths run inside
+// `run_blocking`/`spawn_blocking`, but `search_paths()` is a plain sync fn that
+// is also reached from async code (e.g. the remote gateway's
+// `get_workspace_state` auto-spawn), so an unbounded wait here could block a
+// reactor thread too.
 fn login_shell_path() -> Option<OsString> {
     let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
-    let output = crate::util::no_window_command(&shell)
+    // 2 s: generous for a healthy rc chain (a `zsh -lic` PATH probe normally
+    // finishes in well under a second) yet well inside the 10 s caller budget.
+    // The `search_paths()` OnceLock means this runs at most once per process.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut child = crate::util::no_window_command(&shell)
         .args(["-lic", "printf %s \"$PATH\""])
         .env("PROMPT_EOL_MARK", "")
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        // `.output()` captured stderr only to discard it; null has the same
+        // observable result and cannot fill a pipe buffer if the rc chain is chatty.
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    // Drain stdout off-thread: a verbose rc chain must not fill the pipe buffer
+    // and stall its own shell (the failure mode `.output()` used to drain away).
+    let (drain_tx, drain_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let drain = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        let _ = drain_tx.send(bytes);
+    });
+    let status = loop {
+        match child.try_wait() {
+            // `try_wait` reaps the child, so the fast path leaves no zombie.
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // Timed out or unreapable: kill so the child cannot leak, then reap.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Deliberately not joining the drain here: a grandchild (the
+                // measured `pyenv-rehash`) may still hold the stdout pipe open,
+                // and joining would re-create the unbounded wait. The detached
+                // drain thread exits on pipe EOF.
+                return None;
+            }
+        }
+    };
+    // The shell exited; bound the drain too so a lingering grandchild holding
+    // the stdout pipe cannot stall the caller (100 ms floor for a just-exited child).
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(std::time::Duration::from_millis(100));
+    let Ok(bytes) = drain_rx.recv_timeout(remaining) else {
+        return None;
+    };
+    let _ = drain.join();
+    if !status.success() {
         return None;
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let value = String::from_utf8_lossy(&bytes).trim().to_string();
     if value.is_empty() {
         return None;
     }

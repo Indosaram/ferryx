@@ -4356,7 +4356,13 @@ impl DaemonServer {
         if config.mode == RemoteNetworkMode::Off {
             let prev_handle = self.remote_server_handle.lock().take();
             if let Some(handle) = prev_handle {
-                handle.stop();
+                if let Some(task) = handle.stop_with_receipt() {
+                    if let Err(error) = task.await {
+                        if !error.is_cancelled() {
+                            tracing::warn!(%error, "relay supervisor failed during shutdown");
+                        }
+                    }
+                }
             }
             *self.remote_state.config.write() = config;
             *self.remote_state.is_running.write() = false;
@@ -4782,7 +4788,7 @@ mod remote_ssh_tests;
 mod live_relay_apply_tests {
     use super::*;
 
-    struct Gateway(DaemonServer, [tokio::net::TcpListener; 2]);
+    pub(super) struct Gateway(pub(super) DaemonServer, pub(super) [tokio::net::TcpListener; 2]);
 
     impl Drop for Gateway {
         fn drop(&mut self) {
@@ -4792,7 +4798,7 @@ mod live_relay_apply_tests {
         }
     }
 
-    async fn fixture(root: &Path) -> (Gateway, std::net::SocketAddr, String) {
+    pub(super) async fn fixture(root: &Path) -> (Gateway, std::net::SocketAddr, String) {
         let server = Gateway(DaemonServer::new_with_paths(
             Some(root.join("config.json")), Some(root.join("auth.json")),
         ), [
@@ -4814,7 +4820,7 @@ mod live_relay_apply_tests {
         (server, address, token)
     }
 
-    async fn assert_listener(address: std::net::SocketAddr, token: &str) {
+    pub(super) async fn assert_listener(address: std::net::SocketAddr, token: &str) {
         let client = reqwest::Client::builder().no_proxy()
             .timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(client.get(format!("http://{address}/api/v1/health"))
@@ -4866,6 +4872,92 @@ mod live_relay_apply_tests {
             assert_eq!(server.0.remote_state.bound_address.read().as_deref(), Some(address.to_string().as_str()));
             assert_listener(address, &token).await;
         }
+    }
+}
+
+// Kept next to the existing live apply tests so the same isolated gateway is used.
+#[cfg(test)]
+mod relay_failure_ownership_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    async fn accepted(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await.unwrap().unwrap().0
+    }
+
+    async fn disconnected(mut stream: tokio::net::TcpStream) {
+        let mut bytes = [0; 4096];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match stream.read(&mut bytes).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }).await.expect("previous relay control socket must close");
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_preserves_previous_relay_task_and_listener() {
+        let root = tempfile::tempdir().unwrap();
+        let (server, address, token) = super::live_relay_apply_tests::fixture(root.path()).await;
+        let old_connection = accepted(&server.1[0]).await;
+        let old_task = server.0.remote_server_handle.lock().as_ref().unwrap()
+            .relay_task_abort_handle();
+        let epoch = server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch;
+        let before = serde_json::to_value(&*server.0.remote_state.config.read()).unwrap();
+        let path = root.path().join("config.json");
+        let previous_file = fs::read(&path).unwrap();
+        let staging = path.with_extension(format!("tmp.{}", std::process::id()));
+        fs::create_dir(&staging).unwrap(); // Opening this directory for writing must fail on every OS.
+        let mut config = server.0.remote_state.config.read().clone();
+        config.relay_url = Some(format!("http://{}", server.1[1].local_addr().unwrap()));
+        let error = server.0.configure_gateway(config).await.unwrap_err();
+        assert!(error.contains("Failed to persist remote gateway config"), "{error}");
+        assert_eq!(serde_json::to_value(&*server.0.remote_state.config.read()).unwrap(), before);
+        assert_eq!(server.0.remote_state.relay_pairing.read().as_ref().unwrap().epoch, epoch);
+        let current = server.0.remote_server_handle.lock().as_ref().unwrap()
+            .relay_task_abort_handle();
+        assert_eq!(current.id(), old_task.id());
+        assert!(!old_task.is_finished());
+        assert_eq!(fs::read(&path).unwrap(), previous_file);
+        assert!(server.0.remote_state.relay_client.read().is_some());
+        super::live_relay_apply_tests::assert_listener(address, &token).await;
+        fs::remove_dir(&staging).unwrap();
+        let handle = server.0.remote_server_handle.lock().take().unwrap();
+        let task = handle.stop_with_receipt().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), task).await.unwrap()
+            .unwrap_err().is_cancelled());
+        disconnected(old_connection).await;
+    }
+
+    #[tokio::test]
+    async fn replace_and_shutdown_join_previous_relay_and_close_control_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let (server, address, token) = super::live_relay_apply_tests::fixture(root.path()).await;
+        let old_connection = accepted(&server.1[0]).await;
+        let previous = server.0.remote_server_handle.lock().as_ref().unwrap()
+            .relay_task_abort_handle();
+        let mut config = server.0.remote_state.config.read().clone();
+        config.relay_url = Some(format!("http://{}", server.1[1].local_addr().unwrap()));
+        server.0.configure_gateway(config).await.unwrap();
+        let new_connection = accepted(&server.1[1]).await;
+        assert!(previous.is_finished(), "new relay must start only after prior supervisor exits");
+        disconnected(old_connection).await;
+        let current = server.0.remote_server_handle.lock().as_ref().unwrap()
+            .relay_task_abort_handle();
+        assert_ne!(current.id(), previous.id());
+        assert!(!current.is_finished());
+        super::live_relay_apply_tests::assert_listener(address, &token).await;
+        server.0.configure_gateway(RemoteGatewayConfig {
+            mode: RemoteNetworkMode::Off,
+            ..Default::default()
+        }).await.unwrap();
+        assert!(current.is_finished());
+        disconnected(new_connection).await;
+        assert!(server.0.remote_state.relay_pairing.read().is_none());
+        assert!(server.0.remote_state.relay_client.read().is_none());
     }
 }
 

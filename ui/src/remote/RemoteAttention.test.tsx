@@ -270,6 +270,12 @@ describe("RemoteAttention Affordance", () => {
       ...baseState,
       activeContext: {
         ...baseState.activeContext,
+        activeTerminal: {
+          sessionId: "tab-1-session",
+          workspaceId: "ferryx-ui",
+          worktreeLabel: "main",
+          running: true,
+        },
         tabId: "tab-1",
         terminalTabs: [
           { id: "tab-1", label: "Editor", activityState: "waiting" },
@@ -279,9 +285,16 @@ describe("RemoteAttention Affordance", () => {
         ],
       },
     };
-    const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(stateWithAttention))
-      .mockResolvedValue(jsonResponse({ accepted: true }));
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/sessions")) {
+        return jsonResponse({ sessions: baseState.sessions.map((session) => ({ ...session, daemonEpoch: "41" })) });
+      }
+      if (url.endsWith("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.endsWith("/api/v1/workspace/state")) return jsonResponse(stateWithAttention);
+      if (url.endsWith("/api/v1/workspace/select")) return jsonResponse({ accepted: true });
+      throw new Error(`Unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
@@ -313,7 +326,7 @@ describe("RemoteAttention Affordance", () => {
     expect(screen.queryByRole("dialog", { name: "Workspace context" })).not.toBeInTheDocument();
   });
 
-  it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {
+  it("renders attention affordance for a waiting Codex background tab", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithWaiting = {
       ...baseState,
@@ -322,7 +335,7 @@ describe("RemoteAttention Affordance", () => {
         tabId: "tab-1",
         terminalTabs: [
           { id: "tab-1", label: "Editor", activityState: "working" },
-          { id: "tab-2", label: "Codex Agent", activityState: "waiting" },
+          { id: "tab-2", label: "Codex Agent", activityState: "waiting", agentType: "codex" },
         ],
       },
     };
@@ -340,7 +353,7 @@ describe("RemoteAttention Affordance", () => {
     expect(attentionAffordance).toBeInTheDocument();
   });
 
-  it("activating the attention affordance issues exactly one context selection carrying tabId, workspaceId, and worktreeSlug", async () => {
+  it("activating the Codex attention affordance issues one target selection", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithWaiting = {
       ...baseState,
@@ -349,7 +362,7 @@ describe("RemoteAttention Affordance", () => {
         tabId: "tab-1",
         terminalTabs: [
           { id: "tab-1", label: "Editor", activityState: "working" },
-          { id: "tab-2", label: "Codex Agent", activityState: "waiting" },
+          { id: "tab-2", label: "Codex Agent", activityState: "waiting", agentType: "codex" },
         ],
       },
     };
@@ -375,11 +388,22 @@ describe("RemoteAttention Affordance", () => {
       ],
     };
 
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(stateWithWaiting))
-      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(targetSwitchedState));
+    let selectionAccepted = false;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/sessions")) {
+        return jsonResponse({ sessions: baseState.sessions.map((session) => ({ ...session, daemonEpoch: "41" })) });
+      }
+      if (url.endsWith("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.endsWith("/api/v1/workspace/state")) {
+        return jsonResponse(selectionAccepted ? targetSwitchedState : stateWithWaiting);
+      }
+      if (url.endsWith("/api/v1/workspace/select")) {
+        selectionAccepted = true;
+        return jsonResponse({ accepted: true });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
 
     vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);

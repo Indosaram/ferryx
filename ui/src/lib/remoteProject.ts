@@ -191,6 +191,7 @@ export function quoteRemotePath(path: string, platform: "posix" | "windows" | st
 }
 
 export interface RemoteWorktree {
+  path: string;
   head: string | null;
   branch: string | null;
   bare: boolean;

@@ -16,15 +16,25 @@ import {
   MobileChatMessage,
   MobileChatMessageProps,
 } from "./MobileChatMessage";
+import type { AttachmentReceipt } from "../../lib/scopedContracts";
 import {
   MobileChatComposer,
   ChatAttachment,
 } from "./MobileChatComposer";
 import { RemoteTerminal } from "../RemoteTerminal";
+import type { ResultFileListEntry } from "./remoteManagedChatService";
 
 export interface MobileChatWorkspaceProps {
   readonly messages: readonly MobileChatMessageProps[];
   readonly onSendMessage: (text: string, attachments: readonly ChatAttachment[]) => void;
+  readonly draftText?: string;
+  readonly onDraftTextChange?: (text: string) => void;
+  readonly draftAttachments?: readonly AttachmentReceipt[];
+  readonly onDraftAttachmentsChange?: (attachments: readonly AttachmentReceipt[]) => void;
+  readonly sendPending?: boolean;
+  readonly deliveryStage?: "staged" | "accepted" | "providerRead";
+  readonly held?: boolean;
+  readonly onRetryHeld?: () => void;
   readonly onStopExecution?: () => void;
   readonly isRunning?: boolean;
   readonly activityState?: ActivityState;
@@ -48,11 +58,23 @@ export interface MobileChatWorkspaceProps {
   readonly headerSubtitle?: string;
   readonly onBack?: () => void;
   readonly headerActions?: React.ReactNode;
+  readonly onStageAttachment?: (file: File, signal?: AbortSignal, attachmentId?: string) => Promise<AttachmentReceipt>;
+  readonly onCancelAttachment?: (attachmentId: string) => Promise<void>;
+  readonly resultFiles?: readonly ResultFileListEntry[];
+  readonly onOpenResultFile?: (fileId: string) => void;
 }
 
 export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   messages,
   onSendMessage,
+  draftText,
+  onDraftTextChange,
+  draftAttachments,
+  onDraftAttachmentsChange,
+  sendPending,
+  deliveryStage,
+  held,
+  onRetryHeld,
   onStopExecution,
   isRunning = false,
   activityState = "idle",
@@ -73,6 +95,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   headerSubtitle,
   onBack,
   headerActions,
+  onStageAttachment,
+  onCancelAttachment,
+  resultFiles = [],
+  onOpenResultFile,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -213,6 +239,21 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             {warnings.join(" ")}
           </div>
         ) : null}
+        {resultFiles.length > 0 && (
+          <section data-testid="chat-result-files" className="mb-3 space-y-1">
+            {resultFiles.map((file) => (
+              <button
+                key={file.fileId}
+                type="button"
+                data-testid={`result-file-open-${file.fileId}`}
+                onClick={() => onOpenResultFile?.(file.fileId)}
+                className="block text-left text-xs text-chat-link underline"
+              >
+                {file.displayName}
+              </button>
+            ))}
+          </section>
+        )}
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
@@ -315,7 +356,6 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                   embedded={true}
                   isAccountSession={isAccountSession}
                   createWebSocket={createWebSocket}
-                  followHostSize={true}
                 />
               )}
             </div>
@@ -341,10 +381,20 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           )}
           <MobileChatComposer
             onSend={onSendMessage}
+            draftText={draftText}
+            onDraftTextChange={onDraftTextChange}
+            draftAttachments={draftAttachments}
+            onDraftAttachmentsChange={onDraftAttachmentsChange}
+            sendPending={sendPending}
+            deliveryStage={deliveryStage}
+            held={held}
+            onRetryHeld={onRetryHeld}
             onStop={onStopExecution}
             isRunning={isRunning}
             disabled={disabled}
             placeholder={composerPlaceholder}
+            onStageAttachment={onStageAttachment}
+            onCancelAttachment={onCancelAttachment}
           />
         </div>
       </footer>

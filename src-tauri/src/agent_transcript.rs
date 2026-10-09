@@ -1,7 +1,10 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,25 +29,154 @@ pub fn is_valid_session_id(session_id: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Maximum number of directories visited while searching one transcript root.
+const MAX_VISITED_ENTRIES: usize = 1000;
+
+/// Maximum directory depth the walk descends into (the root itself is depth 0, so entries
+/// directly inside the root are depth 1). Nothing deeper than `MAX_WALK_DEPTH` is examined.
+const MAX_WALK_DEPTH: usize = 8;
+
+/// Byte budget for the fail-closed verification read of a filename-matched candidate file.
+/// Only this many bytes are read to decide whether a candidate holds recognized messages;
+/// a file that needs more than this to show its first recognized message is not resolved.
+const MAX_CANDIDATE_BYTES: u64 = 1024 * 1024;
+
+/// Transcript stores searched for a session, restricted to `provider` when it is known.
+///
+/// `None` keeps the legacy search order (omo first, then every provider root). `Some("omo")`
+/// selects only the omo store, and `Some("claude")` / `Some("codex")` select exactly that
+/// provider's root — using the tag [`crate::ipc::agent_history::provider_history_roots`]
+/// attaches instead of discarding it, so a same-id file in another provider's store is never
+/// searched. An unrecognized provider name yields no roots at all: resolution fails closed.
+fn transcript_roots(home: &Path, provider: Option<&str>) -> Vec<PathBuf> {
+    let omo_root = home.join(".omo").join("agent").join("sessions");
+    match provider {
+        None => {
+            let mut roots = vec![omo_root];
+            roots.extend(
+                crate::ipc::agent_history::provider_history_roots(home)
+                    .into_iter()
+                    .map(|(_, root)| root),
+            );
+            roots
+        }
+        Some("omo") => vec![omo_root],
+        Some(name) => crate::ipc::agent_history::provider_history_roots(home)
+            .into_iter()
+            .filter(|(canonical, _)| match canonical {
+                crate::scoped_contracts::CanonicalProvider::Claude => name == "claude",
+                crate::scoped_contracts::CanonicalProvider::Codex => name == "codex",
+            })
+            .map(|(_, root)| root)
+            .collect(),
+    }
+}
+
+/// True when a filename-matched candidate may be returned by the resolver.
+///
+/// A zero-byte file resolves exactly as it did before the fail-closed rule existed (existing
+/// tests assert successful resolution of empty files in the omo, Claude and Codex roots, so the
+/// carve-out is content-based rather than root-based: applying fail-closed per root would break
+/// those tests). Any nonempty file must yield at least one recognized conversation message
+/// within [`MAX_CANDIDATE_BYTES`]: Codex writes `type: "response_item"` and Claude writes
+/// `type: "user"` / `"assistant"`, which the parser does not recognize, and returning such a
+/// file would give the route a 200 with an empty list where the base commit answered a loud 404.
+///
+/// Uses [`parse_conversation_inner`] (the shared inner of `read_conversation` /
+/// `read_conversation_with_generation`) over a byte-limited reader, so the check never recurses
+/// and never reads an unbounded file.
+fn candidate_yields_message(path: &Path, len: u64, session_id: &str) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let reader = BufReader::new(file).take(MAX_CANDIDATE_BYTES);
+    let (messages, _malformed, _generation) =
+        parse_conversation_inner(reader, None, session_id, usize::MAX, None);
+    !messages.is_empty()
+}
+
+/// Finds the transcript file for `session_id` in omo's and the providers' history roots.
+///
+/// The walk is bounded and jailed: symlinks and non-regular files are rejected (never
+/// followed), a path outside the root currently being searched is never accepted, at most
+/// [`MAX_WALK_DEPTH`] levels are descended, and at most [`MAX_VISITED_ENTRIES`] directories are
+/// visited per root. A filename match is returned only if [`candidate_yields_message`] accepts
+/// it (fail closed — otherwise the search continues and may end in `None`, which drives the
+/// existing `TRANSCRIPT_NOT_FOUND` 404).
+///
+/// LIMITATION: this API returns `Option` with no structured error channel, so when a walk bound
+/// stops a root the caller cannot distinguish "bound hit" from "no match in that root" — the
+/// walk simply moves to the next root. Carrying a bound violation out would require a new error
+/// type, which is out of scope here.
 pub fn transcript_path_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
+    transcript_path_for_session_in(home, None, session_id)
+}
+
+fn transcript_path_for_session_in(
+    home: &Path,
+    provider: Option<&str>,
+    session_id: &str,
+) -> Option<PathBuf> {
     if !is_valid_session_id(session_id) {
         return None;
     }
-    let sessions_root = home.join(".omo").join("agent").join("sessions");
-    let entries = std::fs::read_dir(&sessions_root).ok()?;
     let suffix1 = format!("_{session_id}.jsonl");
+    // Codex writes `rollout-<timestamp>-<uuid>.jsonl`: the id is introduced by a HYPHEN, not an
+    // underscore, so the underscore suffix alone can never match a real Codex rollout file.
+    let suffix_hyphen = format!("-{session_id}.jsonl");
     let exact = format!("{session_id}.jsonl");
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                for sub in sub_entries.flatten() {
-                    let sub_path = sub.path();
-                    if let Some(file_name) = sub_path.file_name().and_then(|f| f.to_str()) {
-                        if file_name == exact || file_name.ends_with(&suffix1) {
-                            return Some(sub_path);
+    for root in transcript_roots(home, provider) {
+        let mut visited_dirs: usize = 0;
+        let mut pending: Vec<(PathBuf, usize)> = vec![(root.clone(), 0)];
+        while let Some((directory, depth)) = pending.pop() {
+            if visited_dirs >= MAX_VISITED_ENTRIES {
+                // Bound hit: stop THIS root's walk (see the LIMITATION above).
+                break;
+            }
+            visited_dirs += 1;
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let entry_depth = depth + 1;
+                // symlink_metadata never follows links; a symlinked directory would otherwise
+                // let the walk escape the root, and a symlinked file would be accepted by name.
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    // Directories are pushed only below the depth bound, which keeps every
+                    // examined entry at depth <= MAX_WALK_DEPTH.
+                    if entry_depth < MAX_WALK_DEPTH {
+                        pending.push((path, entry_depth));
+                    }
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue; // fifos, sockets and devices are never accepted
+                }
+                if !path.starts_with(&root) {
+                    continue; // jail: never accept a path outside the root being searched
+                }
+                if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+                    if file_name == exact
+                        || file_name.ends_with(&suffix1)
+                        || file_name.ends_with(&suffix_hyphen)
+                    {
+                        if candidate_yields_message(&path, metadata.len(), session_id) {
+                            return Some(path);
                         }
+                        // Fail closed: matched by name but holds no recognized message — keep
+                        // searching instead of returning an empty-success transcript.
                     }
                 }
             }
@@ -119,12 +251,19 @@ struct RecordEnvelope {
     id: Option<String>,
     display: Option<bool>,
     message: Option<MessageBody>,
+    /// Codex nests its conversation records one level down: `type: "response_item"` with the
+    /// message under `payload`. Kept optional so omo records (no `payload`) still deserialize.
+    payload: Option<MessageBody>,
     #[serde(default)]
     timestamp: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct MessageBody {
+    /// Codex's `payload` carries its own `type` discriminator (`"message"`, `"reasoning"`,
+    /// `"custom_tool_call"`, …); omo bodies have no such field.
+    #[serde(rename = "type")]
+    part_type: Option<String>,
     role: Option<String>,
     content: Option<serde_json::Value>,
     #[serde(rename = "toolName")]
@@ -144,8 +283,9 @@ pub fn read_conversation(
     limit: usize,
     before: Option<usize>,
 ) -> Result<(Vec<ConversationMessage>, usize), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    Ok(parse_conversation(BufReader::new(file), limit, before))
+    let (messages, malformed, _) =
+        read_conversation_with_generation(path, None, "default", limit, before)?;
+    Ok((messages, malformed))
 }
 
 /// Same filtering and windowing as [`read_conversation`], over bytes already in memory.
@@ -156,17 +296,201 @@ pub fn read_conversation_from_bytes(
     limit: usize,
     before: Option<usize>,
 ) -> (Vec<ConversationMessage>, usize) {
-    parse_conversation(std::io::Cursor::new(bytes), limit, before)
+    let (messages, malformed, _) =
+        read_conversation_bytes_with_generation(bytes, None, "default", limit, before);
+    (messages, malformed)
 }
 
-fn parse_conversation<R: BufRead>(
-    reader: R,
+/// Derives a stable authoritative conversation generation token.
+///
+/// The token is derived from the authoritative provider conversation ID and the conversation's
+/// initial genesis (session header timestamp and initial message identity).
+pub fn derive_conversation_generation(
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    session_header_timestamp: Option<&str>,
+    first_message: Option<&ConversationMessage>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let effective_id = provider_session_id.unwrap_or(session_id);
+    hasher.update(effective_id.as_bytes());
+    if let Some(ts) = session_header_timestamp {
+        hasher.update(b":hdr:");
+        hasher.update(ts.as_bytes());
+    }
+    if let Some(first) = first_message {
+        hasher.update(b":msg0:");
+        if let Some(id) = &first.id {
+            hasher.update(id.as_bytes());
+        }
+        hasher.update(first.role.as_bytes());
+        hasher.update(first.text.as_bytes());
+        if let Some(ts) = &first.timestamp {
+            hasher.update(ts.as_bytes());
+        }
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{effective_id}:{}", &digest[..16])
+}
+
+#[derive(Clone, Debug)]
+struct SessionIncarnationState {
+    provider_session_id: String,
+    prefix_hashes: Vec<[u8; 32]>,
+    incarnation: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConversationIncarnationTracker {
+    states: Arc<Mutex<HashMap<String, SessionIncarnationState>>>,
+}
+
+impl ConversationIncarnationTracker {
+    pub fn new() -> Self {
+        Self {
+            states: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Derives an authoritative conversation incarnation token for a session.
+    ///
+    /// Invariants:
+    /// 1. Independent of pagination: always computed over the full conversation's message list.
+    /// 2. Append alone preserves incarnation: if new messages extend the known prefix without
+    ///    modifying any existing message, incarnation number stays identical (no false resets).
+    /// 3. Same-first-row rewrite rotates: if message 0 is identical but any subsequent existing
+    ///    message is rewritten, the prefix hash mismatch triggers an incarnation increment.
+    /// 4. Tail truncation rotates: if the conversation length shrinks below the previous known
+    ///    count, incarnation increments.
+    /// 5. Head truncation rotates: if message 0 is removed, the entire hash chain shifts and
+    ///    incarnation increments.
+    /// 6. Replacement rotates: if provider session ID changes, incarnation resets/increments.
+    pub fn observe(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+        all_messages: &[ConversationMessage],
+    ) -> String {
+        use sha2::{Digest, Sha256};
+
+        let new_hashes: Vec<[u8; 32]> = all_messages
+            .iter()
+            .map(|m| {
+                let mut hasher = Sha256::new();
+                hasher.update(m.role.as_bytes());
+                hasher.update(b":");
+                hasher.update(m.text.as_bytes());
+                if let Some(id) = &m.id {
+                    hasher.update(b":id:");
+                    hasher.update(id.as_bytes());
+                }
+                if let Some(ts) = &m.timestamp {
+                    hasher.update(b":ts:");
+                    hasher.update(ts.as_bytes());
+                }
+                let result = hasher.finalize();
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&result);
+                out
+            })
+            .collect();
+
+        let mut lock = self.states.lock();
+        if let Some(state) = lock.get_mut(session_id) {
+            if state.provider_session_id != provider_session_id {
+                state.provider_session_id = provider_session_id.to_string();
+                state.prefix_hashes = new_hashes;
+                state.incarnation += 1;
+                return format!("{provider_session_id}:inc-{}", state.incarnation);
+            }
+
+            let prev_len = state.prefix_hashes.len();
+            let new_len = new_hashes.len();
+
+            let is_tail_truncation = new_len < prev_len;
+            let is_prefix_rewrite = if is_tail_truncation {
+                true
+            } else {
+                state
+                    .prefix_hashes
+                    .iter()
+                    .zip(new_hashes.iter())
+                    .any(|(prev_h, new_h)| prev_h != new_h)
+            };
+
+            if is_tail_truncation || is_prefix_rewrite {
+                state.incarnation += 1;
+                state.prefix_hashes = new_hashes;
+                return format!("{provider_session_id}:inc-{}", state.incarnation);
+            }
+
+            state.prefix_hashes = new_hashes;
+            return format!("{provider_session_id}:inc-{}", state.incarnation);
+        }
+
+        lock.insert(
+            session_id.to_string(),
+            SessionIncarnationState {
+                provider_session_id: provider_session_id.to_string(),
+                prefix_hashes: new_hashes,
+                incarnation: 1,
+            },
+        );
+        format!("{provider_session_id}:inc-1")
+    }
+}
+
+static GLOBAL_INCARNATION_TRACKER: OnceLock<ConversationIncarnationTracker> = OnceLock::new();
+
+pub fn global_incarnation_tracker() -> &'static ConversationIncarnationTracker {
+    GLOBAL_INCARNATION_TRACKER.get_or_init(ConversationIncarnationTracker::new)
+}
+
+pub fn read_conversation_with_generation(
+    path: &Path,
+    provider_session_id: Option<&str>,
+    session_id: &str,
     limit: usize,
     before: Option<usize>,
-) -> (Vec<ConversationMessage>, usize) {
+) -> Result<(Vec<ConversationMessage>, usize, String), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    Ok(parse_conversation_inner(
+        BufReader::new(file),
+        provider_session_id,
+        session_id,
+        limit,
+        before,
+    ))
+}
+
+pub fn read_conversation_bytes_with_generation(
+    bytes: &[u8],
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+) -> (Vec<ConversationMessage>, usize, String) {
+    parse_conversation_inner(
+        std::io::Cursor::new(bytes),
+        provider_session_id,
+        session_id,
+        limit,
+        before,
+    )
+}
+
+fn parse_conversation_inner<R: BufRead>(
+    reader: R,
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+) -> (Vec<ConversationMessage>, usize, String) {
     let mut all_messages: Vec<ConversationMessage> = Vec::new();
     let mut malformed_lines = 0;
     let mut current_ordinal = 0;
+    let mut session_header_timestamp: Option<String> = None;
 
     for line_res in reader.lines() {
         let line = match line_res {
@@ -189,28 +513,68 @@ fn parse_conversation<R: BufRead>(
             }
         };
 
+        if record.record_type.as_deref() == Some("session") {
+            if session_header_timestamp.is_none() {
+                session_header_timestamp = record.timestamp.clone();
+            }
+            continue;
+        }
+
         if record.display == Some(false) {
             continue;
         }
 
-        if record.record_type.as_deref() != Some("message") {
-            continue;
-        }
-
-        let Some(body) = record.message else {
-            continue;
+        // Resolve this record's role and content across the three known provider shapes. The three
+        // formats are structurally disjoint, so shape detection is sufficient and no provider name
+        // has to be threaded in — which also keeps this correct when the provider is unknown:
+        //   omo    — top-level `type: "message"`, body under `message`
+        //   Codex  — top-level `type: "response_item"`, message under `payload` with `payload.type == "message"`
+        //   Claude — top-level `type: "user"|"assistant"`, body under `message`
+        // Anything else (Codex `session_meta`/`event_msg`/`world_state`/`turn_context`/
+        // `token_usage_record`/`retained_context`/`reasoning`/tool calls; Claude `mode`/
+        // `permission-mode`/`file-history-snapshot`/`last-prompt`/`cost-state`/`attachment`) carries
+        // no conversation text and is skipped WITHOUT counting as malformed.
+        let (role, content, tool_name) = match record.record_type.as_deref() {
+            Some("message") => {
+                let Some(body) = record.message else {
+                    continue;
+                };
+                (body.role.unwrap_or_else(|| "user".to_string()), body.content, body.tool_name)
+            }
+            Some("response_item") => {
+                let Some(payload) = record.payload else {
+                    continue;
+                };
+                if payload.part_type.as_deref() != Some("message") {
+                    continue;
+                }
+                (
+                    payload.role.unwrap_or_else(|| "user".to_string()),
+                    payload.content,
+                    payload.tool_name,
+                )
+            }
+            Some(kind @ ("user" | "assistant")) => {
+                let Some(body) = record.message else {
+                    continue;
+                };
+                (body.role.unwrap_or_else(|| kind.to_string()), body.content, body.tool_name)
+            }
+            _ => continue,
         };
 
-        let role = body.role.unwrap_or_else(|| "user".to_string());
         let mut text = String::new();
 
-        if let Some(content) = body.content {
+        if let Some(content) = content {
             if let Some(s) = content.as_str() {
                 text.push_str(s);
             } else if let Some(arr) = content.as_array() {
                 for item in arr {
                     if let Ok(part) = serde_json::from_value::<ContentPart>(item.clone()) {
-                        if part.part_type.as_deref() == Some("text") {
+                        if matches!(
+                            part.part_type.as_deref(),
+                            Some("text") | Some("input_text") | Some("output_text")
+                        ) {
                             if let Some(t) = part.text {
                                 text.push_str(&t);
                             }
@@ -227,7 +591,7 @@ fn parse_conversation<R: BufRead>(
         }
 
         if role == "toolResult" && text.is_empty() {
-            let tool = body.tool_name.as_deref().unwrap_or("tool");
+            let tool = tool_name.as_deref().unwrap_or("tool");
             text = format!("← {tool} result");
         }
 
@@ -240,6 +604,17 @@ fn parse_conversation<R: BufRead>(
         });
         current_ordinal += 1;
     }
+
+    let generation = if let Some(provider_id) = provider_session_id {
+        global_incarnation_tracker().observe(session_id, provider_id, &all_messages)
+    } else {
+        derive_conversation_generation(
+            provider_session_id,
+            session_id,
+            session_header_timestamp.as_deref(),
+            all_messages.first(),
+        )
+    };
 
     let filtered: Vec<ConversationMessage> = match before {
         Some(cursor) => all_messages
@@ -255,7 +630,7 @@ fn parse_conversation<R: BufRead>(
         filtered
     };
 
-    (result_messages, malformed_lines)
+    (result_messages, malformed_lines, generation)
 }
 
 /// Where a paired host keeps a session's transcript, resolved from the daemon's durable store.
@@ -328,6 +703,53 @@ pub fn remote_transcript_dir(home: &str, project_path: &str) -> Option<String> {
         "{home}/.omo/agent/sessions/{}",
         slug_for_cwd(project_path)
     ))
+}
+
+/// Resolves a local transcript strictly from the authoritative provider conversation ID,
+/// searching only the store that `provider` names.
+///
+/// `provider` is the reporting agent's store — `"omo"`, `"claude"` or `"codex"`. `None` means
+/// the provider is unknown and keeps the legacy provider-blind search (omo first, then every
+/// provider root). A recognized provider restricts the walk to exactly that root, so a same-id
+/// file sitting in another provider's store can never be returned; an unrecognized provider
+/// name fails closed with `None`.
+///
+/// Fails closed (returns `None`) if `provider_session_id` is missing, empty, or invalid.
+/// Never falls back to `latest_transcript_for_cwd` or timestamp recency (`ls -t`).
+pub fn exact_transcript_path_for_provider(
+    home: &Path,
+    provider: Option<&str>,
+    provider_session_id: Option<&str>,
+) -> Option<PathBuf> {
+    let provider_id = provider_session_id?;
+    transcript_path_for_session_in(home, provider, provider_id)
+}
+
+/// Constructs a POSIX shell command to read an exact remote transcript by provider conversation ID.
+///
+/// Fails closed (returns `None`) if `provider_session_id` is missing, empty, or invalid.
+/// Queries strictly for `*_{provider_id}.jsonl` or `{provider_id}.jsonl`. Never runs `ls -t`
+/// or substitutes a different session's file.
+pub fn exact_remote_transcript_command(
+    dir: &str,
+    provider_session_id: Option<&str>,
+    budget: usize,
+) -> Option<String> {
+    let provider_id = provider_session_id?;
+    if !is_valid_session_id(provider_id) {
+        return None;
+    }
+    let quoted_dir = crate::ssh::direct::quote_posix(dir);
+    let quoted_id = crate::ssh::direct::quote_posix(provider_id);
+    let script = format!(
+        "d={quoted_dir}; \
+         f=$(ls \"$d\"/*_{quoted_id}.jsonl \"$d\"/{quoted_id}.jsonl 2>/dev/null | head -n 1); \
+         if [ -n \"$f\" ]; then \
+           n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
+           if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
+         fi"
+    );
+    Some(format!("sh -c {}", crate::ssh::direct::quote_posix(&script)))
 }
 
 #[cfg(test)]
@@ -416,6 +838,76 @@ mod tests {
         assert_eq!(transcript_path_for_session(&temp_dir, "foo\\bar"), None);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_transcript_path_resolves_omo_exact_and_suffix_names() {
+        let home = std::env::temp_dir().join(format!("test_transcript_omo_{}", uuid::Uuid::new_v4()));
+        let id = "omo-session-123";
+        let slug = home.join(".omo/agent/sessions/project-slug");
+        fs::create_dir_all(&slug).unwrap();
+        let exact = slug.join(format!("{id}.jsonl"));
+        File::create(&exact).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(exact));
+
+        fs::remove_file(&slug.join(format!("{id}.jsonl"))).unwrap();
+        let suffixed = slug.join(format!("2026-10-05_{id}.jsonl"));
+        File::create(&suffixed).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(suffixed));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_transcript_path_resolves_codex_rollout_suffix() {
+        let home = std::env::temp_dir().join(format!("test_transcript_codex_{}", uuid::Uuid::new_v4()));
+        let id = "019ec598-c800-7000-8000-000000000001";
+        let directory = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&directory).unwrap();
+        let expected = directory.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
+        File::create(&expected).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(expected));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_transcript_path_resolves_claude_session_id() {
+        let home = std::env::temp_dir().join(format!("test_transcript_claude_{}", uuid::Uuid::new_v4()));
+        let id = "7146b3c0-3a01-43e8-9fcb-374e79c404eb";
+        let directory = home.join(".claude/projects/-tmp");
+        fs::create_dir_all(&directory).unwrap();
+        let expected = directory.join(format!("{id}.jsonl"));
+        File::create(&expected).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(expected));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_transcript_path_does_not_fall_back_to_unrelated_newest_file() {
+        let home = std::env::temp_dir().join(format!("test_transcript_unrelated_{}", uuid::Uuid::new_v4()));
+        let directory = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&directory).unwrap();
+        File::create(directory.join("rollout-2026-10-05T12-00-00-other-session.jsonl")).unwrap();
+        assert_eq!(transcript_path_for_session(&home, "missing-session"), None);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_transcript_path_keeps_omo_and_codex_identity_isolated() {
+        let home = std::env::temp_dir().join(format!("test_transcript_isolation_{}", uuid::Uuid::new_v4()));
+        let id = "same-session-id";
+        let omo_dir = home.join(".omo/agent/sessions/project-slug");
+        let codex_dir = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&omo_dir).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+        let omo_path = omo_dir.join(format!("{id}.jsonl"));
+        let codex_path = codex_dir.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
+        File::create(&omo_path).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(omo_path.clone()));
+
+        fs::remove_file(&omo_path).unwrap();
+        File::create(&codex_path).unwrap();
+        assert_eq!(transcript_path_for_session(&home, id), Some(codex_path));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -675,16 +1167,8 @@ mod tests {
         let host: crate::ssh::SshHost =
             serde_json::from_value(target.host).expect("stored host deserializes");
         let budget = 200usize.saturating_mul(4096).clamp(64 * 1024, 4 * 1024 * 1024);
-        let script = format!(
-            "d={dir}; f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -n 1); \
-             if [ -n \"$f\" ]; then \
-               n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
-               if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
-             fi",
-            dir = crate::ssh::direct::quote_posix(&target.dir),
-            budget = budget,
-        );
-        let command = format!("sh -c {}", crate::ssh::direct::quote_posix(&script));
+        let command = exact_remote_transcript_command(&target.dir, Some(&session_id), budget)
+            .expect("stored provider id builds the production exact-id command");
         let plan = crate::ssh::direct::ssh_plan(&host, command, false).expect("ssh plan builds");
         let bytes = crate::ssh::direct::bounded_output_with_limit(
             &plan,
@@ -846,5 +1330,529 @@ mod tests {
         assert_eq!(messages[0].text, "checking\n→ bash");
         assert_eq!(messages[1].text, "ok");
         assert_eq!(messages[2].text, "← bash result");
+    }
+
+    #[test]
+    fn test_conversation_generation_stable_across_pagination() {
+        let session_id = format!("pagination-{}", uuid::Uuid::new_v4());
+        let transcript = concat!(
+            r#"{"type":"session","id":"sess-page-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"zero"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"one"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-3","message":{"role":"assistant","content":[{"type":"text","text":"three"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-4","message":{"role":"user","content":[{"type":"text","text":"four"}]}}"#,
+            "\n",
+        );
+
+        let (msgs_p1, _, gen_p1) = read_conversation_bytes_with_generation(
+            transcript.as_bytes(),
+            Some("sess-page-test"),
+            &session_id,
+            2,
+            None,
+        );
+        let (msgs_p2, _, gen_p2) = read_conversation_bytes_with_generation(
+            transcript.as_bytes(),
+            Some("sess-page-test"),
+            &session_id,
+            2,
+            Some(3),
+        );
+
+        assert_eq!(msgs_p1.len(), 2);
+        assert_eq!(msgs_p2.len(), 2);
+        assert_ne!(msgs_p1[0].ordinal, msgs_p2[0].ordinal);
+        assert_eq!(gen_p1, gen_p2, "pagination window must not change conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_stable_across_append() {
+        let session_id = format!("append-{}", uuid::Uuid::new_v4());
+        let initial = concat!(
+            r#"{"type":"session","id":"sess-append-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        let appended = concat!(
+            r#"{"type":"session","id":"sess-append-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"user","content":[{"type":"text","text":"how are you"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-3","message":{"role":"assistant","content":[{"type":"text","text":"doing well"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_initial) = read_conversation_bytes_with_generation(
+            initial.as_bytes(),
+            Some("sess-append-test"),
+            &session_id,
+            10,
+            None,
+        );
+        let (_, _, gen_appended) = read_conversation_bytes_with_generation(
+            appended.as_bytes(),
+            Some("sess-append-test"),
+            &session_id,
+            10,
+            None,
+        );
+
+        assert_eq!(gen_initial, gen_appended, "append alone must not rotate or reset conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_same_prefix_rewrite_rotates() {
+        let session_id = format!("sess-rewrite-{}", uuid::Uuid::new_v4());
+        let provider_id = "prov-rewrite-test";
+
+        let transcript_a = concat!(
+            r#"{"type":"session","id":"prov-rewrite-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"identical first prompt"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"original reply"}]}}"#,
+            "\n",
+        );
+
+        // Same-first-row rewrite: msg-0 is byte-for-byte identical, but msg-1 is rewritten
+        let transcript_b = concat!(
+            r#"{"type":"session","id":"prov-rewrite-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"identical first prompt"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"REWRITTEN reply"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_a) = read_conversation_bytes_with_generation(
+            transcript_a.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+        let (_, _, gen_b) = read_conversation_bytes_with_generation(
+            transcript_b.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+
+        assert_ne!(gen_a, gen_b, "same-first-row rewrite must rotate conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_truncation_rotates() {
+        let session_id = format!("sess-trunc-{}", uuid::Uuid::new_v4());
+        let provider_id = "prov-trunc-test";
+
+        let full = concat!(
+            r#"{"type":"session","id":"prov-trunc-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"first turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"second turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"assistant","content":[{"type":"text","text":"third turn to truncate"}]}}"#,
+            "\n",
+        );
+
+        // Tail-truncated: msg-0 and msg-1 are identical, msg-2 deleted
+        let tail_truncated = concat!(
+            r#"{"type":"session","id":"prov-trunc-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"first turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"second turn"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_full) = read_conversation_bytes_with_generation(
+            full.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+        let (_, _, gen_truncated) = read_conversation_bytes_with_generation(
+            tail_truncated.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+
+        assert_ne!(gen_full, gen_truncated, "tail truncation must rotate conversationGeneration");
+    }
+
+    #[test]
+    fn test_exact_provider_path_missing_provider_binding_fails_closed() {
+        let temp_dir = std::env::temp_dir().join(format!("test_prov_missing_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, None, None), None);
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, None, Some("")), None);
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, None, Some("../bad")), None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_exact_remote_command_missing_provider_binding_fails_closed() {
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", None, 65536), None);
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", Some(""), 65536), None);
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", Some("../invalid"), 65536), None);
+
+        let cmd = exact_remote_transcript_command("/home/indo/proj", Some("01a0d650-db7a"), 65536)
+            .expect("valid command generated");
+        assert!(cmd.contains("01a0d650-db7a"));
+        assert!(!cmd.contains("ls -t"), "command must never use ls -t recency fallback");
+    }
+
+    #[test]
+    fn test_wrong_session_or_host_fails_closed() {
+        let store = r#"{
+          "version": 3,
+          "remoteSessions": [
+            {
+              "descriptor": {
+                "backendSessionId": "correct-session-id",
+                "config": {
+                  "host": { "hostname": "100.91.254.71" },
+                  "environment": { "home": "/home/indo" },
+                  "projectPath": "/home/indo/project"
+                }
+              }
+            }
+          ]
+        }"#;
+
+        assert!(remote_target_from_store(store, "wrong-session-id").is_none());
+        assert!(remote_target_from_store(store, "correct-session-id").is_some());
+    }
+
+    // Codex's `response_item`/`payload` shape is now recognized, so this file must RESOLVE and PARSE.
+    // (Before the parser change it resolved by filename and then produced zero messages, which the
+    // route turned into a silent 200 with an empty list.)
+    #[test]
+    fn test_codex_shaped_transcript_parses() {
+        let home = std::env::temp_dir().join(format!("test_fdc_codex_{}", uuid::Uuid::new_v4()));
+        let id = "codex-shaped-session";
+        let directory = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
+        fs::write(
+            &candidate,
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"codex-shaped-session"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let resolved = transcript_path_for_session(&home, id)
+            .expect("a recognized Codex rollout must resolve");
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("codex"), Some(id)),
+            Some(resolved.clone()),
+            "the provider-qualified resolver must find the same file"
+        );
+        let (messages, malformed) = read_conversation(&resolved, usize::MAX, None).unwrap();
+        assert_eq!(malformed, 0, "recognized Codex records are not malformed");
+        assert_eq!(messages.len(), 1, "exactly the one conversation record");
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].text, "hello");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // Codex records that carry no conversation text must be SKIPPED, not counted as malformed - a
+    // malformed count would surface a bogus warning to the user.
+    #[test]
+    fn test_codex_non_conversation_records_are_skipped_not_malformed() {
+        let home = std::env::temp_dir().join(format!("test_codex_skip_{}", uuid::Uuid::new_v4()));
+        let directory = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("rollout-2026-10-05T12-00-00-skip.jsonl");
+        fs::write(
+            &file,
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"skip"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count"}}"#,
+                "\n",
+                r#"{"type":"world_state","payload":{}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{}}"#,
+                "\n",
+                r#"{"type":"token_usage_record","payload":{}}"#,
+                "\n",
+                r#"{"type":"retained_context","payload":{}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"reasoning","content":[]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let (messages, malformed) = read_conversation(&file, usize::MAX, None).unwrap();
+        assert_eq!(messages.len(), 0, "no conversation records present");
+        assert_eq!(malformed, 0, "skipped records must not be reported as malformed");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // Claude's top-level `user`/`assistant` shape is now recognized, so this file must RESOLVE and PARSE.
+    #[test]
+    fn test_claude_shaped_transcript_parses() {
+        let home = std::env::temp_dir().join(format!("test_fdc_claude_{}", uuid::Uuid::new_v4()));
+        let id = "claude-shaped-session";
+        let directory = home.join(".claude/projects/-tmp");
+        fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join(format!("{id}.jsonl"));
+        fs::write(
+            &candidate,
+            concat!(
+                r#"{"type":"mode","mode":"default"}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"what is 2+2"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let resolved = transcript_path_for_session(&home, id)
+            .expect("a recognized Claude session must resolve");
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("claude"), Some(id)),
+            Some(resolved.clone()),
+            "the provider-qualified resolver must find the same file"
+        );
+        let (messages, malformed) = read_conversation(&resolved, usize::MAX, None).unwrap();
+        assert_eq!(malformed, 0, "recognized Claude records are not malformed");
+        assert_eq!(messages.len(), 2, "the user turn and the assistant turn");
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "what is 2+2");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].text, "hello");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // The fail-closed rule still holds: a file whose records match NO known provider shape must not
+    // resolve, so the route returns a structured not-found rather than a silent empty conversation.
+    #[test]
+    fn test_unrecognized_shape_still_fails_closed() {
+        let home = std::env::temp_dir().join(format!("test_fdc_unknown_{}", uuid::Uuid::new_v4()));
+        let id = "unknown-shaped-session";
+        let directory = home.join(".omo/agent/sessions/--proj--");
+        fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join(format!("2026-10-05T00-00-00-000Z_{id}.jsonl"));
+        fs::write(
+            &candidate,
+            concat!(
+                r#"{"type":"telemetry","payload":{"metric":1}}"#,
+                "\n",
+                r#"{"type":"noise","message":{"role":"assistant","content":"ignored"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            transcript_path_for_session(&home, id),
+            None,
+            "records matching no known provider shape must fail closed, not resolve empty"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // Regression guard: the fail-closed rule must not disturb a real omo-shaped transcript.
+    #[test]
+    fn test_omo_transcript_still_parses() {
+        let home = std::env::temp_dir().join(format!("test_omo_parses_{}", uuid::Uuid::new_v4()));
+        let id = "omo-regression-session";
+        let directory = home.join(".omo/agent/sessions/--proj--");
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join(format!("2026-10-05T00-00-00-000Z_{id}.jsonl"));
+        fs::write(
+            &file,
+            concat!(
+                r#"{"type":"session","id":"omo-regression-session","timestamp":"2026-10-05T00:00:00Z"}"#,
+                "\n",
+                r#"{"type":"message","id":"u1","message":{"role":"user","content":[{"type":"text","text":"ping"}]}}"#,
+                "\n",
+                r#"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let resolved =
+            transcript_path_for_session(&home, id).expect("an omo transcript must still resolve");
+        assert_eq!(resolved, file);
+        let (messages, malformed) = read_conversation(&resolved, 100, None).unwrap();
+        assert_eq!(malformed, 0);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "ping");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].text, "pong");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // Fails before the fix because the walk pushed directories without any depth limit and
+    // therefore found a file sitting arbitrarily deep below the root.
+    #[test]
+    fn test_walk_depth_is_bounded() {
+        let home = std::env::temp_dir().join(format!("test_walk_depth_{}", uuid::Uuid::new_v4()));
+        let sessions = home.join(".omo/agent/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // MAX_WALK_DEPTH + 1 nested directories put this file at depth MAX_WALK_DEPTH + 2,
+        // beyond anything the bounded walk may examine.
+        let mut deep = sessions.clone();
+        for level in 0..=MAX_WALK_DEPTH {
+            deep = deep.join(format!("lvl{level}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep-session.jsonl"), "").unwrap();
+        assert_eq!(
+            transcript_path_for_session(&home, "deep-session"),
+            None,
+            "the walk must stop at MAX_WALK_DEPTH instead of descending without limit"
+        );
+
+        // Control: a file at exactly MAX_WALK_DEPTH still resolves, so the assertion above
+        // fails on the depth bound and not on a broken walk.
+        let mut shallow = sessions.clone();
+        for level in 0..(MAX_WALK_DEPTH - 1) {
+            shallow = shallow.join(format!("lvl{level}"));
+        }
+        fs::create_dir_all(&shallow).unwrap();
+        let shallow_file = shallow.join("shallow-session.jsonl");
+        fs::write(&shallow_file, "").unwrap();
+        assert_eq!(
+            transcript_path_for_session(&home, "shallow-session"),
+            Some(shallow_file)
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // Fails before the fix because `path.is_dir()` followed symlinks and the file branch
+    // accepted the symlinked entry by name, so the walk left the root it was searching.
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_in_root_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let home =
+            std::env::temp_dir().join(format!("test_symlink_root_{}", uuid::Uuid::new_v4()));
+        let sessions = home.join(".omo/agent/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Real transcript targets live OUTSIDE the root; only symlinks inside the root point at
+        // them.
+        let outside =
+            std::env::temp_dir().join(format!("test_symlink_outside_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&outside).unwrap();
+        let message = concat!(
+            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        // (a) A symlinked file whose name matches the session id.
+        let file_id = "symlink-file-session";
+        let outside_file = outside.join(format!("{file_id}.jsonl"));
+        fs::write(&outside_file, message).unwrap();
+        symlink(&outside_file, sessions.join(format!("{file_id}.jsonl"))).unwrap();
+        assert_eq!(
+            transcript_path_for_session(&home, file_id),
+            None,
+            "a symlinked file must not be accepted as the transcript"
+        );
+
+        // (b) A symlinked directory that would lead the walk outside the root.
+        let dir_id = "symlink-dir-session";
+        fs::write(outside.join(format!("{dir_id}.jsonl")), message).unwrap();
+        symlink(&outside, sessions.join("escape")).unwrap();
+        assert_eq!(
+            transcript_path_for_session(&home, dir_id),
+            None,
+            "a symlinked directory must not let the walk escape the root"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    // Fails before the fix because the provider tag was discarded at the roots and the exact
+    // resolver was provider-blind, so the codex query returned claude's file for the same id.
+    #[test]
+    fn test_provider_isolation_same_id() {
+        let home =
+            std::env::temp_dir().join(format!("test_provider_iso_{}", uuid::Uuid::new_v4()));
+        let id = "same-id-across-providers";
+        let message = concat!(
+            r#"{"type":"session","id":"same-id-across-providers","timestamp":"2026-10-05T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        let claude_dir = home.join(".claude/projects/-tmp");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_file = claude_dir.join(format!("{id}.jsonl"));
+        fs::write(&claude_file, message).unwrap();
+
+        let codex_dir = home.join(".codex/sessions/2026/10/05");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let codex_file = codex_dir.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
+        fs::write(&codex_file, message).unwrap();
+
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("claude"), Some(id)),
+            Some(claude_file),
+            "the claude query must resolve claude's own file"
+        );
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("codex"), Some(id)),
+            Some(codex_file),
+            "the codex query must resolve codex's own file, never claude's"
+        );
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("omo"), Some(id)),
+            None,
+            "the omo store holds no such file"
+        );
+        assert_eq!(
+            exact_transcript_path_for_provider(&home, Some("gemini"), Some(id)),
+            None,
+            "an unknown provider must fail closed rather than search foreign stores"
+        );
+
+        let _ = fs::remove_dir_all(&home);
     }
 }

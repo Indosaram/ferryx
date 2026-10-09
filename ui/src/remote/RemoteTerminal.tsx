@@ -9,6 +9,7 @@ import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl } from "./remoteClient";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
+import { decodeTerminalOutputFrame } from "../lib/terminalOutput";
 import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
   applyGridFrame,
@@ -89,6 +90,8 @@ type SocketRequest = {
 
 const MAX_GRID_COLS = 512;
 const MAX_GRID_ROWS = 256;
+const OUTPUT_OVERFLOW_CLOSE_CODE = 4001;
+const OUTPUT_OVERFLOW_CLOSE_REASON = "ferryx.output_overflow.v1";
 
 const KEY_SEQUENCES = {
   tab: "\t",
@@ -394,14 +397,30 @@ export function RemoteTerminal({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
-  const isComposingRef = useRef(false);
+  const composingEditorRef = useRef<"direct" | "line" | null>(null);
+  const directCompositionActiveRef = useRef(false);
+  const lineCompositionActiveRef = useRef(false);
+  const lineDraftBeforeCompositionRef = useRef("");
+  const modeDraftBeforeCompositionRef = useRef("");
+  const pendingModeRef = useRef<"direct" | "line" | null>(null);
+  const canceledCompositionRef = useRef<Set<"direct" | "line">>(new Set());
+  const canceledCompositionInputRef = useRef<string | null>(null);
   const pendingCompositionInputRef = useRef<string | null>(null);
+  const compositionCandidateRef = useRef<string | null>(null);
+  const committedCompositionMirrorRef = useRef<string | null>(null);
   const sinkEmittedCharsRef = useRef(0);
   const sinkValueRef = useRef("");
   // Text the IME has produced but the client has not sent: the sink's mutable tail, plus jamo handed
   // over one at a time by keyboards that never compose (see commitComposition).
   const sinkTailRef = useRef("");
   const heldJamoRef = useRef("");
+  // Direct keystrokes and chat-friendly line input are two visible modes of the same terminal.
+  // Each mode owns its own pending text; switching modes never dispatches either one to the PTY.
+  const [inputMode, setInputMode] = useState<"direct" | "line">("direct");
+  const [lineDraft, setLineDraft] = useState("");
+  const lineInputRef = useRef<HTMLTextAreaElement>(null);
+  const modeSwitchingRef = useRef(false);
+  const [modeSwitchPending, setModeSwitchPending] = useState(false);
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -410,6 +429,7 @@ export function RemoteTerminal({
   const lastSentGenerationRef = useRef<string | null>(null);
   const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
   const [connected, setConnected] = useState(false);
+  const [outputLoss, setOutputLoss] = useState(false);
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const [preedit, setPreedit] = useState<string | null>(null);
@@ -498,12 +518,75 @@ export function RemoteTerminal({
   }, []);
 
   const focusInput = useCallback(() => {
+    if (composingEditorRef.current !== null) return;
+    if (inputMode === "line") {
+      lineInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
     inputSinkRef.current?.focus({ preventScroll: true });
-  }, []);
+  }, [inputMode]);
+
+  const previousInputModeRef = useRef(inputMode);
+  useLayoutEffect(() => {
+    if (previousInputModeRef.current === inputMode) return;
+    if (composingEditorRef.current !== null) return;
+    previousInputModeRef.current = inputMode;
+    // The mode toggle is an explicit tap: move the caret into the mode's editor so the software
+    // keyboard opens there. Any sink blur this focus causes fires synchronously while
+    // modeSwitchingRef still guards it; releasing the guard afterwards stops it leaking into the
+    // next unrelated blur.
+    focusInput();
+    modeSwitchingRef.current = false;
+  }, [inputMode, focusInput]);
+
+  const resolveModeSwitch = () => {
+    if (composingEditorRef.current !== null) return;
+    const nextMode = pendingModeRef.current;
+    if (!nextMode) return;
+    pendingModeRef.current = null;
+    setModeSwitchPending(false);
+    setInputMode(nextMode);
+  };
+
+  const requestModeSwitch = () => {
+    modeSwitchingRef.current = true;
+    const nextMode = inputMode === "direct" ? "line" : "direct";
+    pendingModeRef.current = nextMode;
+    setModeSwitchPending(true);
+    if (inputMode === "direct") {
+      canceledCompositionRef.current.add("direct");
+      canceledCompositionInputRef.current = inputSinkRef.current?.value ?? "";
+      modeDraftBeforeCompositionRef.current = heldJamoRef.current + sinkTailRef.current;
+    }
+    if (composingEditorRef.current !== null) {
+      if (composingEditorRef.current === "direct") {
+        canceledCompositionRef.current.add("direct");
+        modeDraftBeforeCompositionRef.current = heldJamoRef.current + sinkTailRef.current;
+        canceledCompositionInputRef.current = inputSinkRef.current?.value ?? null;
+        directCompositionActiveRef.current = false;
+        composingEditorRef.current = lineCompositionActiveRef.current ? "line" : null;
+        pendingCompositionInputRef.current = null;
+        restoreDirectDraft(modeDraftBeforeCompositionRef.current);
+        inputSinkRef.current?.blur();
+      } else {
+        canceledCompositionRef.current.add("line");
+        modeDraftBeforeCompositionRef.current = lineDraftBeforeCompositionRef.current;
+        lineCompositionActiveRef.current = false;
+        composingEditorRef.current = directCompositionActiveRef.current ? "direct" : null;
+        setLineDraft(lineDraftBeforeCompositionRef.current);
+        lineInputRef.current?.blur();
+      }
+      resolveModeSwitch();
+      return;
+    }
+    resolveModeSwitch();
+  };
 
   useLayoutEffect(() => {
     // A held tail belongs to the session that was on screen; never leak it into the next one.
     resetSinkState();
+    // A line draft is typing for the tab that was on screen; it must never ride along either.
+    setLineDraft("");
     outboundBufferRef.current = [];
     outboundBytesRef.current = 0;
     droppedInputBytesRef.current = 0;
@@ -643,12 +726,19 @@ export function RemoteTerminal({
           flushOutboundBuffer();
           requestResizeRef.current();
         };
-        socket.onclose = () => {
+        socket.onclose = (event?: CloseEvent) => {
           if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
           wheelRemainderRowsRef.current = 0;
           setConnected(false);
           lastSentGenerationRef.current = null;
           generationRef.current = null;
+          const outputWasLost = event?.code === OUTPUT_OVERFLOW_CLOSE_CODE
+            || event?.reason === OUTPUT_OVERFLOW_CLOSE_REASON;
+          if (outputWasLost) {
+            setOutputLoss(true);
+            onSocketLifecycle?.(socketRequest.sessionId, "closed");
+            return;
+          }
           if (onTransportFailure) {
             onTransportFailure();
             return;
@@ -666,12 +756,23 @@ export function RemoteTerminal({
         socket.onmessage = (event: any) => {
           if (disposed || socketRef.current !== socket) return;
           const rawData = event.data;
+          let outputBytes: Uint8Array | null = null;
+          if (rawData instanceof Uint8Array) outputBytes = rawData;
+          else if (rawData instanceof ArrayBuffer) outputBytes = new Uint8Array(rawData);
+          if (outputBytes) {
+            try {
+              const outputFrame = decodeTerminalOutputFrame(outputBytes);
+              if (outputFrame.gap) {
+                setOutputLoss(true);
+                return;
+              }
+              outputBytes = outputFrame.data;
+            } catch {}
+          }
           const data = typeof rawData === "string"
             ? rawData
-            : rawData instanceof Uint8Array
-            ? new TextDecoder().decode(rawData)
-            : rawData instanceof ArrayBuffer
-            ? new TextDecoder().decode(new Uint8Array(rawData))
+            : outputBytes
+            ? new TextDecoder().decode(outputBytes)
             : String(rawData ?? "");
           if (!data.startsWith('{"type":"grid')) {
             try {
@@ -782,6 +883,14 @@ export function RemoteTerminal({
     };
   }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize]);
 
+  const recoverOutput = () => {
+    setOutputLoss(false);
+    const current = socketRequest;
+    if (current) {
+      setSocketRequest({ ...current, geometry: { ...current.geometry } });
+    }
+  };
+
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN || document.visibilityState === "hidden") {
@@ -801,6 +910,7 @@ export function RemoteTerminal({
       socket.send(JSON.stringify({ type: "scroll", rows }));
     }
   };
+
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     if (event.touches.length >= 2) {
@@ -964,6 +1074,12 @@ export function RemoteTerminal({
     resetSinkField();
   };
 
+  const restoreDirectDraft = (text: string) => {
+    heldJamoRef.current = text;
+    resetSinkField();
+    syncPreedit();
+  };
+
   /// True while the client holds text the IME has not settled or we have not forwarded.
   const sinkHasPendingText = () => {
     const sink = inputSinkRef.current;
@@ -1019,10 +1135,18 @@ export function RemoteTerminal({
   };
 
   const commitComposition = (data: string) => {
-    isComposingRef.current = false;
+    if (canceledCompositionRef.current.has("direct")) {
+      directCompositionActiveRef.current = false;
+      composingEditorRef.current = lineCompositionActiveRef.current ? "line" : null;
+      pendingCompositionInputRef.current = null;
+      restoreDirectDraft(modeDraftBeforeCompositionRef.current);
+      resolveModeSwitch();
+      return;
+    }
+    directCompositionActiveRef.current = false;
+    composingEditorRef.current = lineCompositionActiveRef.current ? "line" : null;
     const sink = inputSinkRef.current;
     // Empty compositionend is cancellation, never a request to send preedit.
-    pendingCompositionInputRef.current = data;
     const emitted = sink
       ? Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, sink.value))
       : 0;
@@ -1030,6 +1154,7 @@ export function RemoteTerminal({
     if (data.length === 0) {
       // Cancellation: the IME withdrew its own preedit.
       resetSinkField();
+      resolveModeSwitch();
       return;
     }
     // The sink is authoritative while it still carries the committed text; browsers that clear it
@@ -1041,35 +1166,70 @@ export function RemoteTerminal({
       // one arrives, so the run is reassembled and held here until something settles it. Sending a
       // commit as it arrives ships ㅇㅣㄹㅓㅎㄱㅔ for 이렇게.
       heldJamoRef.current += jamoCommitDelta(heldJamoRef.current, committed);
+      compositionCandidateRef.current = null;
+      committedCompositionMirrorRef.current = committed;
       resetSinkField();
       return;
     }
-    // A commit carrying a composed syllable is text the IME will not rewrite: send it now so echo
-    // stays immediate.
-    emitSettled(committed);
-    resetSinkState();
+    const held = heldJamoRef.current;
+    heldJamoRef.current = "";
+    emitText(held + committed);
+    committedCompositionMirrorRef.current = committed;
+    compositionCandidateRef.current = null;
+    resetSinkField();
+    resolveModeSwitch();
   };
 
   const handleSinkInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
     const sink = event.currentTarget;
     const input = event.nativeEvent as InputEvent;
-    if (isComposingRef.current || input.isComposing) {
-      isComposingRef.current = true;
+    if (inputMode !== "direct" && !directCompositionActiveRef.current) {
+      sink.value = "";
+      return;
+    }
+    if (canceledCompositionRef.current.has("direct") && directCompositionActiveRef.current) {
+      sink.value = "";
+      return;
+    }
+    if (canceledCompositionInputRef.current !== null) {
+      const canceledInput = canceledCompositionInputRef.current;
+      if (sink.value === canceledInput) {
+        canceledCompositionInputRef.current = null;
+        canceledCompositionRef.current.delete("direct");
+        resetSinkField();
+        return;
+      }
+      if (input.inputType === "insertFromComposition") {
+        canceledCompositionInputRef.current = null;
+        canceledCompositionRef.current.delete("direct");
+        resetSinkField();
+        return;
+      }
+    }
+    if (directCompositionActiveRef.current || input.isComposing) {
+      canceledCompositionRef.current.delete("direct");
+      directCompositionActiveRef.current = true;
+      composingEditorRef.current = "direct";
+      compositionCandidateRef.current = sink.value;
       sinkTailRef.current = sink.value;
       syncPreedit();
       return;
     }
-    const text = sink.value;
-    const committed = pendingCompositionInputRef.current;
-    pendingCompositionInputRef.current = null;
-    // WebKit/Chromium can deliver the final insertion after compositionend. Matching the text alone
-    // is deliberate: an insertion that reproduces exactly what was just committed is that commit's
-    // mirror whatever input type the engine reports (WebKit uses an empty or replacement type for
-    // some of them), and absorbing it twice would double the syllable.
-    if (committed !== null && committed.length > 0 && text === committed) {
-      // The mirror of a commit the client already holds; the held jamo run survives it.
-      resetSinkField();
-      return;
+    if (committedCompositionMirrorRef.current !== null) {
+      const committed = committedCompositionMirrorRef.current;
+      committedCompositionMirrorRef.current = null;
+      if (sink.value === committed || input.inputType === "insertFromComposition") {
+        resetSinkField();
+        return;
+      }
+    }
+    if (compositionCandidateRef.current !== null) {
+      const candidate = compositionCandidateRef.current;
+      compositionCandidateRef.current = null;
+      if (sink.value === candidate) {
+        settleSinkText(sink);
+        return;
+      }
     }
     settleSinkText(sink);
   };
@@ -1104,6 +1264,15 @@ export function RemoteTerminal({
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
     const sequence = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
     sendInput(new TextEncoder().encode(sequence));
+  };
+
+  /// Submit the line-mode draft: composed once, written once - the line and its terminator reach
+  /// the PTY in a single payload, so Hangul can never be split, duplicated, or reordered around the
+  /// CR. An empty draft is a plain Return.
+  const submitLineDraft = () => {
+    const composed = composeJamoRuns(lineDraft.replace(/\u00a0/g, " "));
+    sendText(composed.length > 0 ? `${composed}\r` : "\r");
+    setLineDraft("");
   };
 
   return (
@@ -1149,11 +1318,49 @@ export function RemoteTerminal({
             </span>
           ) : null}
           <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={inputMode === "line"}
+            data-testid="remote-terminal-input-mode-toggle"
+            data-mode={inputMode}
+            aria-label={inputMode === "direct" ? "Switch to line input mode" : "Switch to direct input mode"}
+            disabled={modeSwitchPending}
+            onPointerDown={() => { modeSwitchingRef.current = true; }}
+            onMouseDown={(event) => {
+              modeSwitchingRef.current = true;
+              // Keep focus where it is: the mode change moves focus itself, under the guard.
+              event.preventDefault();
+            }}
+          onClick={() => {
+            requestModeSwitch();
+          }}
+            className="shrink-0 rounded border border-[#191919] bg-[#0a0a0a] px-1.5 py-0.5 font-mono text-[10px] text-[#f5f5f5] transition-colors hover:text-[#838383]"
+          >
+            {inputMode === "direct" ? "Direct" : "Line"}
+          </button>
           <span role="status" className="font-mono text-[10px] text-[#838383]">
             {connected ? "Live" : "Connecting"}
           </span>
         </span>
       </div>
+      {outputLoss ? (
+        <div
+          data-testid="remote-terminal-output-loss"
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-100"
+        >
+          <span>Terminal output was lost or truncated. Reconnect to resync the output.</span>
+          <button
+            type="button"
+            data-testid="remote-terminal-output-loss-reconnect"
+            onClick={recoverOutput}
+            className="shrink-0 rounded border border-rose-300/50 px-2 py-1 font-medium hover:bg-rose-500/20"
+          >
+            Reconnect and resync
+          </button>
+        </div>
+      ) : null}
       <div
         ref={surfaceRef}
         data-testid="remote-terminal-grid"
@@ -1176,7 +1383,7 @@ export function RemoteTerminal({
           // input sink's composition events. Sending them here shattered Hangul into
           // isolated jamo writes, one per physical keypress.
           if (
-            isComposingRef.current ||
+            composingEditorRef.current !== null ||
             event.nativeEvent.isComposing ||
             event.keyCode === 229 ||
             event.key === "Process" ||
@@ -1192,7 +1399,7 @@ export function RemoteTerminal({
             inputSinkRef.current?.focus();
             return;
           }
-          pendingCompositionInputRef.current = null;
+          committedCompositionMirrorRef.current = null;
           const ctrlChordChar =
             event.ctrlKey && !event.metaKey && !event.altKey
               ? physicalChordChar(event.key, event.nativeEvent.code)
@@ -1210,8 +1417,14 @@ export function RemoteTerminal({
               event.preventDefault();
               sendKey(modifiedSequence);
             } else if (event.key === "Enter") {
+              if (composingEditorRef.current !== null || event.nativeEvent.isComposing || event.keyCode === 229) return;
               event.preventDefault();
-              sendKey("\r");
+              if (inputMode === "line") {
+                // Line mode owns Enter: it submits the draft as one write, never a bare CR.
+                submitLineDraft();
+              } else {
+                sendKey("\r");
+              }
             } else if (event.key === "Tab" && event.shiftKey) {
               event.preventDefault();
               sendKey("\u001b[Z");
@@ -1243,6 +1456,12 @@ export function RemoteTerminal({
               // Let the editable element own printable input, including the key
               // that starts composition before the browser reports isComposing.
               if (event.target === inputSinkRef.current) return;
+              if (inputMode === "line") {
+                // Line mode keeps text in the draft: hand focus to the line editor and let the
+                // IME own the keystroke. Nothing is written straight to the PTY from here.
+                lineInputRef.current?.focus();
+                return;
+              }
               if (event.key.charCodeAt(0) <= 0x7f) {
                 event.preventDefault();
                 sendKey(event.key);
@@ -1354,29 +1573,50 @@ export function RemoteTerminal({
             lineHeight: 1,
           }}
           onCompositionStart={() => {
-            pendingCompositionInputRef.current = null;
-            isComposingRef.current = true;
+            canceledCompositionRef.current.delete("direct");
+            canceledCompositionInputRef.current = null;
+            committedCompositionMirrorRef.current = null;
+            directCompositionActiveRef.current = true;
+            composingEditorRef.current = "direct";
+            modeDraftBeforeCompositionRef.current = heldJamoRef.current + sinkTailRef.current;
           }}
           onCompositionUpdate={(event) => {
+            compositionCandidateRef.current = event.data;
             sinkTailRef.current = event.data;
             syncPreedit();
           }}
           onCompositionEnd={(event) => {
+            if (inputMode !== "direct" && !directCompositionActiveRef.current) {
+              restoreDirectDraft(modeDraftBeforeCompositionRef.current);
+              return;
+            }
+            if (canceledCompositionRef.current.has("direct")) {
+              canceledCompositionInputRef.current = event.data || null;
+            }
             commitComposition(event.data);
           }}
           onInput={handleSinkInput}
           onBlur={() => {
-            // A live composition is canceled - its preedit was never the user's text. Jamo the IME
-            // already committed are, so they are sent before the next surface (dock key, paste,
-            // tab) takes over the sink.
-            if (isComposingRef.current) {
-              resetSinkField();
-              emitSettled("");
-            } else {
-              flushSinkText();
+            // A mode switch must never flush the editor: pending text stays with its mode and
+            // reaches the PTY only through an explicit user action.
+            if (directCompositionActiveRef.current) {
+              canceledCompositionRef.current.add("direct");
+              compositionCandidateRef.current = inputSinkRef.current?.value ?? null;
+              canceledCompositionInputRef.current = inputSinkRef.current?.value ?? null;
+              directCompositionActiveRef.current = false;
+              composingEditorRef.current = lineCompositionActiveRef.current ? "line" : null;
+              committedCompositionMirrorRef.current = null;
+              restoreDirectDraft(modeDraftBeforeCompositionRef.current);
+              if (pendingModeRef.current !== null) resolveModeSwitch();
+              return;
             }
-            isComposingRef.current = false;
-            pendingCompositionInputRef.current = null;
+            if (pendingModeRef.current !== null) return;
+            if (modeSwitchingRef.current) {
+              modeSwitchingRef.current = false;
+              return;
+            }
+            flushSinkText();
+            committedCompositionMirrorRef.current = null;
           }}
         />
         {grid?.lines.map((line) => (
@@ -1407,7 +1647,7 @@ export function RemoteTerminal({
             style={cursorOverlayStyle(grid.cursor, cellMetrics, settings.theme.cursor)}
           />
         ) : null}
-        {preedit !== null && preedit.length > 0 && cellMetrics.width > 0 && cellMetrics.height > 0 ? (
+        {preedit !== null && preedit.length > 0 ? (
           <span
             aria-hidden="true"
             data-testid="remote-terminal-preedit"
@@ -1421,13 +1661,83 @@ export function RemoteTerminal({
               color: settings.theme.foreground,
               backgroundColor: settings.theme.background,
               textDecorationLine: "underline",
-              transform: `translate(${(grid?.cursor.x ?? 0) * cellMetrics.width}px, ${(grid?.cursor.y ?? 0) * cellMetrics.height}px)`,
+              transform: cellMetrics.width > 0 && cellMetrics.height > 0
+                ? `translate(${(grid?.cursor.x ?? 0) * cellMetrics.width}px, ${(grid?.cursor.y ?? 0) * cellMetrics.height}px)`
+                : undefined,
             }}
           >
             {preedit}
           </span>
         ) : null}
       </div>
+      {inputMode === "line" ? (
+        <div className="shrink-0 border-t border-[#191919] bg-[#0a0a0a] px-2 py-1.5">
+          <textarea
+            ref={lineInputRef}
+            data-testid="remote-terminal-line-input"
+            aria-label="Terminal line input"
+            rows={1}
+            value={lineDraft}
+            placeholder="Line input - Enter sends to the terminal"
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onChange={(event) => {
+              if (!canceledCompositionRef.current.has("line")) setLineDraft(event.target.value);
+            }}
+            onCompositionStart={() => {
+              canceledCompositionRef.current.delete("line");
+              modeDraftBeforeCompositionRef.current = lineDraft;
+              lineDraftBeforeCompositionRef.current = lineDraft;
+              lineCompositionActiveRef.current = true;
+              composingEditorRef.current = "line";
+            }}
+            onCompositionEnd={(event) => {
+              if (canceledCompositionRef.current.has("line")) {
+                lineCompositionActiveRef.current = false;
+                setLineDraft(lineDraftBeforeCompositionRef.current);
+                composingEditorRef.current = directCompositionActiveRef.current ? "direct" : null;
+                canceledCompositionRef.current.delete("line");
+                resolveModeSwitch();
+                return;
+              }
+              lineCompositionActiveRef.current = false;
+              setLineDraft((draft) => {
+                const prefix = modeDraftBeforeCompositionRef.current;
+                const committed = event.data;
+                if (committed && (draft === prefix || draft.startsWith(prefix + committed))) return draft;
+                const liveSuffix = draft.startsWith(prefix) ? draft.slice(prefix.length) : committed;
+                return prefix + (committed || liveSuffix);
+              });
+              composingEditorRef.current = directCompositionActiveRef.current ? "direct" : null;
+              canceledCompositionRef.current.delete("line");
+              resolveModeSwitch();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              if (lineCompositionActiveRef.current || event.nativeEvent.isComposing || event.keyCode === 229) {
+                return;
+              }
+              event.preventDefault();
+              submitLineDraft();
+            }}
+            onBlur={() => {
+              // Losing focus never sends a line draft; native preedit is canceled by view switches.
+              if (pendingModeRef.current !== null && lineCompositionActiveRef.current) {
+                canceledCompositionRef.current.add("line");
+                setLineDraft(lineDraftBeforeCompositionRef.current);
+                lineCompositionActiveRef.current = false;
+                composingEditorRef.current = directCompositionActiveRef.current ? "direct" : null;
+                resolveModeSwitch();
+              }
+            }}
+            className="block w-full resize-none border-0 bg-transparent p-0 font-mono text-[#f5f5f5] outline-none placeholder:text-[#838383]"
+            style={{ fontSize: `${Math.max(16, activeFontSize)}px` }}
+          />
+        </div>
+      ) : null}
       <MobileKeyDock onSendKey={sendKey} />
     </div>
   );

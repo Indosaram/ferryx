@@ -11,6 +11,7 @@ class Socket {
   send = vi.fn();
   close = vi.fn();
   onopen?: () => void;
+  onclose?: (event?: CloseEvent) => void;
   onmessage?: (event: MessageEvent) => void;
   constructor(url?: string) {
     this.url = url;
@@ -382,5 +383,258 @@ describe("mobile terminal input lifecycle", () => {
     expect(grid().className).toContain("overflow-x-auto");
     expect(grid().className).toContain("overflow-y-hidden");
     expect(grid().style.touchAction).toBe("pan-x");
+  });
+
+  describe("output-loss recovery", () => {
+    it("shows a distinct output-loss state for the overflow close signal", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      act(() => Socket.latest.onclose?.({ code: 4001, reason: "ferryx.output_overflow.v1" } as CloseEvent));
+
+      const state = screen.getByTestId("remote-terminal-output-loss");
+      expect(state.getAttribute("role")).toBe("alert");
+      expect(state.textContent).toContain("Terminal output was lost or truncated");
+      expect(state.textContent).toContain("Reconnect to resync the output");
+      expect(screen.getByTestId("remote-terminal-output-loss-reconnect").textContent).toContain("Reconnect and resync");
+      expect(screen.queryByTestId("remote-terminal-overflow-indicator")).toBeNull();
+    });
+
+    it("reconnects only after the user invokes the recovery action", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const failedSocket = Socket.latest;
+      act(() => failedSocket.onclose?.({ code: 4001, reason: "ferryx.output_overflow.v1" } as CloseEvent));
+      expect(Socket.latest).toBe(failedSocket);
+
+      fireEvent.click(screen.getByTestId("remote-terminal-output-loss-reconnect"));
+      expect(Socket.latest).not.toBe(failedSocket);
+      expect(screen.queryByTestId("remote-terminal-output-loss")).toBeNull();
+    });
+
+    it.each([1000, 1006])("keeps ordinary close %s on the existing reconnect path", (code) => {
+      vi.useFakeTimers();
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const closedSocket = Socket.latest;
+      act(() => closedSocket.onclose?.({ code, reason: "" } as CloseEvent));
+      expect(screen.queryByTestId("remote-terminal-output-loss")).toBeNull();
+      act(() => vi.advanceTimersByTime(1000));
+      expect(Socket.latest).not.toBe(closedSocket);
+      vi.useRealTimers();
+    });
+
+    it("retains the existing input-overflow indicator without conflating output loss", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const originalReadyState = Socket.latest.readyState;
+      Object.defineProperty(Socket.latest, "readyState", { value: 0, configurable: true });
+      fireEvent.paste(grid(), { clipboardData: { getData: () => "x".repeat(1024 * 1024) } });
+
+      expect(screen.getAllByTestId("remote-terminal-overflow-indicator").length).toBeGreaterThan(0);
+      expect(screen.queryByTestId("remote-terminal-output-loss")).toBeNull();
+      Object.defineProperty(Socket.latest, "readyState", { value: originalReadyState, configurable: true });
+    });
+  });
+
+  describe("direct / line input mode", () => {
+    const lineInput = () => screen.queryByTestId("remote-terminal-line-input");
+    const modeToggle = () => screen.queryByTestId("remote-terminal-input-mode-toggle");
+    const decodeSends = () =>
+      Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+
+    /**
+     * Switch modes the way a user does: press first (arming the guard that keeps a
+     * mode switch from flushing the editor into the PTY), optionally deliver an
+     * in-flight blur, then click. A sinkBlur argument exercises exactly that guard.
+     */
+    const switchMode = (sinkBlur?: HTMLTextAreaElement) => {
+      const button = modeToggle();
+      expect(button).not.toBeNull();
+      fireEvent.mouseDown(button!);
+      if (sinkBlur) fireEvent.blur(sinkBlur);
+      fireEvent.click(button!);
+    };
+
+    it("defaults to direct, exposes the mode switch, and focuses the line editor only after an explicit toggle", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      expect(modeToggle()?.dataset.mode).toBe("direct");
+      expect(lineInput()).toBeNull();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      switchMode();
+      expect(modeToggle()?.dataset.mode).toBe("line");
+      expect(lineInput()).not.toBeNull();
+      // The toggle is an explicit tap: it may summon the editor (and thus the keyboard).
+      expect(document.activeElement).toBe(lineInput());
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+    });
+
+    it("keeps the line draft out of the PTY until Enter, then writes it exactly once with a trailing CR", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+
+      fireEvent.change(line, { target: { value: "모바일" } });
+      expect(line).toHaveValue("모바일");
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["모바일\r"]);
+      expect(lineInput()).toHaveValue("");
+
+      // An empty line's Enter is a plain Return: one bare CR, never a duplicate of the last line.
+      fireEvent.keyDown(lineInput()!, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["모바일\r", "\r"]);
+    });
+
+    it("never submits the line while IME composition is active and never dispatches on compositionEnd", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+
+      fireEvent.change(line, { target: { value: "안녕" } });
+      fireEvent.compositionStart(line);
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 229 });
+      fireEvent.compositionEnd(line, { data: "안녕" });
+      // Composition end alone commits nothing: only Enter dispatches the line.
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      // A native isComposing Enter (IME candidate confirm) is equally inert.
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13, isComposing: true });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["안녕\r"]);
+    });
+
+    it("keeps composing Enter inert and retains only committed line draft text on a mode switch", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+      fireEvent.change(line, { target: { value: "draft " } });
+      fireEvent.compositionStart(line);
+      fireEvent.change(line, { target: { value: "draft 안" } });
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 229, isComposing: true });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      switchMode(line as HTMLTextAreaElement);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(modeToggle()?.dataset.mode).toBe("direct");
+      expect(lineInput()).toBeNull();
+    });
+
+    it("keeps the previous line draft when a live preedit is canceled by switching", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+      fireEvent.change(line, { target: { value: "saved" } });
+      fireEvent.compositionStart(line);
+      fireEvent.change(line, { target: { value: "saved partial" } });
+      switchMode(line as HTMLTextAreaElement);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      switchMode();
+      expect(lineInput()).toHaveValue("saved");
+    });
+
+    it("cancels direct preedit on blur, keeps the prior draft, and ignores delayed composition events", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "ㅎ" }, inputType: "insertText" });
+      fireEvent.input(input, { target: { value: "ㅎㄴ" }, inputType: "insertText" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: "ㅎㄴ" }, isComposing: true, inputType: "insertCompositionText" });
+      switchMode(input);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(modeToggle()?.dataset.mode).toBe("line");
+
+      fireEvent.compositionEnd(input, { data: "ㅎㄴ" });
+      fireEvent.input(input, { target: { value: "ㅎㄴ" }, inputType: "insertFromComposition" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      switchMode();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㅎ");
+    });
+
+    it("absorbs delayed compositionend and input after direct-mode switch without PTY writes", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "ㅎ" }, inputType: "insertText" });
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㅎ");
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: "ㅎ한" }, isComposing: true, inputType: "insertCompositionText" });
+      switchMode(input);
+      expect(modeToggle()?.dataset.mode).toBe("line");
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      fireEvent.compositionEnd(input, { data: "한글" });
+      fireEvent.input(input, { target: { value: "한글" }, data: "한글", inputType: "insertFromComposition" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      switchMode();
+      // A mode switch cancels in-flight composition and restores the pre-composition draft.
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㅎ");
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+    });
+
+    it("never dispatches either mode's pending text across a mode switch (draft isolation)", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "한글" }, inputType: "insertText" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+
+      // Switch with an in-flight blur: the guard must swallow it instead of flushing.
+      switchMode(input);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+      expect(lineInput()).toHaveValue("");
+
+      const line = lineInput()!;
+      fireEvent.change(line, { target: { value: "모바일" } });
+      fireEvent.blur(line);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      // Round trip: both drafts survive back and forth with zero dispatch.
+      switchMode();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      switchMode();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(lineInput()).toHaveValue("모바일");
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+    });
+
+    it("still flushes the direct pending tail on a blur outside a mode switch", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "한글" }, inputType: "insertText" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      // One full round trip arms and then releases the guard: the next plain blur behaves as ever.
+      switchMode();
+      switchMode();
+      fireEvent.blur(input);
+      expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("한글"));
+      expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    });
+
+    it("summons the line editor from an explicit grid tap in line mode without dispatching", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+      // Start away from the field so the tap is what summons it.
+      line.blur();
+      expect(document.activeElement).not.toBe(line);
+      pointerDown("touch");
+      fireEvent.touchStart(grid(), { touches: touch(10) });
+      fireEvent.touchEnd(grid(), { touches: [], changedTouches: touch(14) });
+      expect(document.activeElement).toBe(line);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+    });
+
+    it("clears the line draft on a session change without dispatching it", () => {
+      const view = render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      fireEvent.change(lineInput()!, { target: { value: "모바일" } });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      view.rerender(<RemoteTerminal sessionId="session-456" token="token-a" />);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(lineInput()).toHaveValue("");
+    });
   });
 });

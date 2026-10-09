@@ -4,6 +4,7 @@ pub mod attach_router;
 pub mod attach_client;
 pub mod attach_crypto;
 pub mod attach_identity;
+pub mod attachment_api;
 pub mod auth;
 pub mod backend;
 pub mod browser_admission;
@@ -19,6 +20,8 @@ pub mod machine_agent_state;
 pub mod machine_events;
 pub mod machine_operation_journal;
 pub mod machine_protocol;
+pub mod managed_chat_api;
+pub mod managed_chat_lifecycle;
 pub mod mirror;
 pub mod protocol;
 pub mod push;
@@ -93,3 +96,7 @@ mod browser_security_tests;
 
 #[cfg(test)]
 mod browser_lifecycle_tests;
+
+#[cfg(test)]
+mod managed_chat_api_tests;
+

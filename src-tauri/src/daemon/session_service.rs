@@ -547,10 +547,18 @@ impl DaemonSessionService {
     pub(crate) async fn wait_machine_lifecycle(&self, id: &str) -> Result<(), String> {
         let receiver = self.machine_lifecycles.lock().get(id).cloned();
         if let Some(mut receiver) = receiver {
+            eprintln!("lifecycle wait: begin");
             tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(|done| *done))
                 .await
-                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?
-                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+                .map_err(|_| {
+                    eprintln!("lifecycle wait: timed out");
+                    eprintln!("close_machine failure branch: MACHINE_LIFECYCLE_TIMEOUT");
+                    "MACHINE_LIFECYCLE_TIMEOUT"
+                })?
+                .map_err(|_| {
+                    eprintln!("close_machine failure branch: MACHINE_LIFECYCLE_WATCH_CLOSED");
+                    "MACHINE_LIFECYCLE_WATCH_CLOSED"
+                })?;
         }
         Ok(())
     }
@@ -800,15 +808,20 @@ impl DaemonSessionService {
         let pty = self.terminal_service.get_session(id);
         if record.exit.is_none() {
             if pty.is_none() {
-                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+                eprintln!("close_machine failure branch: MACHINE_PTY_MISSING");
+                return Err("MACHINE_PTY_MISSING".into());
             }
             check()?;
             self.terminal_service
                 .close_machine_session(id, check.clone())
                 .await
-                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+                .map_err(|_| {
+                    eprintln!("close_machine failure branch: MACHINE_PTY_CLOSE_FAILED");
+                    "MACHINE_PTY_CLOSE_FAILED"
+                })?;
             if !pty.as_ref().is_some_and(|p| p.is_reaped()) {
-                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+                eprintln!("close_machine failure branch: MACHINE_PTY_NOT_REAPED");
+                return Err("MACHINE_PTY_NOT_REAPED".into());
             }
             record.session.running = false;
             record.exit = Some(ExitMetadata {
@@ -836,7 +849,10 @@ impl DaemonSessionService {
             Ok(())
         })
         .await
-        .map_err(|_| "OPERATION_OUTCOME_UNKNOWN".into())
+        .map_err(|_| {
+            eprintln!("close_machine failure branch: MACHINE_CLOSE_COMMIT_UNAVAILABLE");
+            "MACHINE_CLOSE_COMMIT_UNAVAILABLE".into()
+        })
     }
 
     pub(crate) fn retain_machine_request(
@@ -2054,7 +2070,11 @@ impl DaemonSessionService {
                     Ok(None)
                 };
                 tokio::spawn(async move {
-                    let _ = lifecycle_rx.changed().await;
+                    match lifecycle_rx.changed().await {
+                        Ok(()) => eprintln!("lifecycle worker: pump notification observed"),
+                        Err(_) => eprintln!("lifecycle worker: pump watch closed"),
+                    }
+                    eprintln!("lifecycle worker: cleanup entered");
                     match metadata_task {
                         Ok(Some(task)) => {
                             if let Err(error) = task.await {
@@ -2101,6 +2121,7 @@ impl DaemonSessionService {
                         }
                     }
                     cleanup_router.remove_workspace(&cleanup_session_id);
+                    crate::remote::managed_chat_api::unregister_managed_provider(&cleanup_session_id);
                     cleanup_agent_states.remove(&cleanup_session_id);
                     cleanup_cache
                         .lock()
@@ -2120,8 +2141,10 @@ impl DaemonSessionService {
                     }
                     if let Some(done) = lifecycle_done {
                         done.send_replace(true);
+                        eprintln!("lifecycle watch: signalled");
                         machine_lifecycles.lock().remove(&cleanup_session_id);
                     }
+                    eprintln!("lifecycle worker: cleanup exited");
                 });
 
                 persisted?;
@@ -2156,6 +2179,7 @@ impl DaemonSessionService {
     ) -> Result<(), crate::terminal::PtyError> {
         let remote = self.terminal_service.remote().contains(session_id);
         self.terminal_service.close_session(session_id).await?;
+        crate::remote::managed_chat_api::unregister_managed_provider(session_id);
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
         if remote {
@@ -2171,6 +2195,7 @@ impl DaemonSessionService {
         session_id: &str,
     ) -> Result<(), crate::terminal::PtyError> {
         self.terminal_service.hibernate_session(session_id).await?;
+        crate::remote::managed_chat_api::unregister_managed_provider(session_id);
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
         Ok(())

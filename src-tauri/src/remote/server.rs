@@ -243,7 +243,7 @@ struct SocketTicketResponse {
     expires_at: u64,
 }
 
-fn unix_now_secs() -> u64 {
+pub(super) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1048,6 +1048,10 @@ pub struct AgentHistoryQuery {
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryResponse {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_generation: Option<String>,
     pub items: Vec<crate::agent_transcript::ConversationMessage>,
     pub next_cursor: Option<usize>,
     pub partial: bool,
@@ -1056,20 +1060,68 @@ pub struct AgentHistoryResponse {
 
 /// Reads a paired host's transcript for a remote session.
 ///
-/// Returns `(messages, malformed, truncated)`. `truncated` is true when the host sent only a bounded
-/// tail, which means the returned ordinals are window-relative and the conversation is longer than
-/// what was delivered - the caller must surface that rather than imply the window is the whole
+/// Returns `(messages, malformed, generation, truncated)`. `truncated` is true when the host sent only
+/// a bounded tail, which means the returned ordinals are window-relative and the conversation is longer
+/// than what was delivered - the caller must surface that rather than imply the window is the whole
 /// history.
 ///
 /// The session's own store entry carries its host, remote home and project path, so no path is ever
-/// taken from the client. Local sessions never reach here: the caller falls through only when the
-/// local lookup found no transcript. Windows hosts return not-found rather than a guessed slug.
+/// taken from the client.
 async fn read_remote_conversation(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
+    provider_session_id: &str,
     limit: usize,
     before: Option<usize>,
-) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> {
+) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, String, bool), String> {
+    #[cfg(test)]
+    {
+        let test_execute = state.agent_history_execute.read().clone();
+        if let Some(execute) = test_execute {
+            return read_remote_conversation_with(
+                state,
+                session_id,
+                provider_session_id,
+                limit,
+                before,
+                move |host, command, budget| async move { execute(&host, command, budget) },
+            )
+            .await;
+        }
+    }
+    read_remote_conversation_with(
+        state,
+        session_id,
+        provider_session_id,
+        limit,
+        before,
+        |host, command, budget| async move {
+            let plan = crate::ssh::direct::ssh_plan(&host, command, false)
+                .map_err(|_| "TRANSCRIPT_NOT_FOUND".to_string())?;
+            crate::ssh::direct::bounded_output_with_limit(
+                &plan,
+                std::time::Duration::from_secs(15),
+                budget + 4096,
+            )
+            .await
+            .map_err(|_| "TRANSCRIPT_NOT_FOUND".to_string())
+        },
+    )
+    .await
+}
+
+async fn read_remote_conversation_with<F, Fut>(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    provider_session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+    execute: F,
+) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, String, bool), String>
+where
+    F: FnOnce(crate::ssh::SshHost, String, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
     let not_found = || "TRANSCRIPT_NOT_FOUND".to_string();
     let Some(services) = state.machine_services.clone() else {
         return Err(not_found());
@@ -1084,30 +1136,10 @@ async fn read_remote_conversation(
     let host: crate::ssh::SshHost = serde_json::from_value(target.host).map_err(|_| not_found())?;
     let dir = target.dir;
 
-    // The transcript is megabytes (a real one measured 11 MB over 3730 lines), and the client polls
-    // every few seconds, so the wire must not carry the whole file. `limit` messages at roughly 4 KiB
-    // each is a generous ceiling; the remote side reports the file's true size on the first line and
-    // then sends only the tail, dropping the partial first line so the parser never sees a truncated
-    // record. The reported size is what lets the caller say honestly whether history was cut.
     let budget = limit.saturating_mul(4096).clamp(64 * 1024, 4 * 1024 * 1024);
-    let script = format!(
-        "d={dir}; f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -n 1); \
-         if [ -n \"$f\" ]; then \
-           n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
-           if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
-         fi",
-        dir = crate::ssh::direct::quote_posix(&dir),
-        budget = budget,
-    );
-    let command = format!("sh -c {}", crate::ssh::direct::quote_posix(&script));
-    let plan = crate::ssh::direct::ssh_plan(&host, command, false).map_err(|_| not_found())?;
-    let bytes = crate::ssh::direct::bounded_output_with_limit(
-        &plan,
-        std::time::Duration::from_secs(15),
-        budget + 4096,
-    )
-    .await
-    .map_err(|_| not_found())?;
+    let command = crate::agent_transcript::exact_remote_transcript_command(&dir, Some(provider_session_id), budget)
+        .ok_or_else(not_found)?;
+    let bytes = execute(host, command, budget).await.map_err(|_| not_found())?;
     if bytes.is_empty() {
         return Err(not_found());
     }
@@ -1118,8 +1150,14 @@ async fn read_remote_conversation(
     if body.is_empty() {
         return Err(not_found());
     }
-    let (items, malformed) = crate::agent_transcript::read_conversation_from_bytes(body, limit, before);
-    Ok((items, malformed, truncated))
+    let (items, malformed, generation) = crate::agent_transcript::read_conversation_bytes_with_generation(
+        body,
+        Some(provider_session_id),
+        session_id,
+        limit,
+        before,
+    );
+    Ok((items, malformed, generation, truncated))
 }
 
 async fn get_agent_history(
@@ -1154,93 +1192,63 @@ async fn get_agent_history(
     let target_session_id = session_id.clone();
     let remote_session_id = session_id.clone();
     let remote_state = Arc::clone(&state);
-    let cwd = state
-        .session_backend
-        .describe_session(&target_session_id)
-        .await
-        .ok()
-        .and_then(|details| details.worktree_path.map(|p| p.to_string_lossy().into_owned()));
-    // A newest-in-cwd guess is only safe when no other live session shares this cwd;
-    // otherwise the phone could show another agent's conversation.
-    let cwd_is_unique = match cwd.as_deref() {
-        None => false,
-        Some(own_cwd) => {
-            let mut unique = true;
-            for other in state.session_backend.list_sessions().await {
-                if other == target_session_id {
-                    continue;
-                }
-                let shares_cwd = state
-                    .session_backend
-                    .describe_session(&other)
-                    .await
-                    .ok()
-                    .and_then(|details| details.worktree_path)
-                    .is_some_and(|path| path.to_string_lossy() == own_cwd);
-                if shares_cwd {
-                    unique = false;
-                    break;
-                }
-            }
-            unique
-        }
-    };
+
+    // 1. Resolve authoritative provider session binding.
+    // Never conflate backend session ID with provider session ID.
+    // If no provider session is registered, fail closed with structured error.
     let provider_session = state
         .machine_services
         .as_ref()
         .and_then(|ms| ms.sessions.session_provider_session(&target_session_id));
-    let local: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize), String> =
-        crate::ipc::run_blocking(move || {
+
+    // The transcript store that owns this session, named by the agent that reported the session
+    // ("omo" | "claude" | "codex"). Absent agent state keeps the legacy provider-blind search;
+    // the resolver fails closed on an unrecognized provider name, so a same-id file in a foreign
+    // provider's store is never returned.
+    let provider_store: Option<String> = state
+        .machine_services
+        .as_ref()
+        .and_then(|ms| ms.sessions.subscribe_agent_states(&target_session_id).snapshot)
+        .and_then(|snapshot| snapshot.agent);
+
+    let provider_session_id: Option<String> = provider_session
+        .as_ref()
+        .map(|p| p.id.clone())
+        .or_else(|| {
             #[cfg(test)]
-            let home_override = state.agent_history_home.read().clone();
-            #[cfg(not(test))]
-            let home_override: Option<PathBuf> = None;
-            let outcome = match home_override.or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
-            }) {
-                Some(home) => {
-                    let preferred = provider_session.as_ref().and_then(|provider| {
-                        if let Some(path) = provider.transcript_path.as_deref() {
-                            let candidate = std::path::PathBuf::from(path);
-                            if candidate.is_file() {
-                                return Some(candidate);
-                            }
-                        }
-                        crate::agent_transcript::transcript_path_for_session(&home, &provider.id)
-                    });
-                    let transcript = match preferred.or_else(|| {
-                        crate::agent_transcript::transcript_path_for_session(
-                            &home,
-                            &target_session_id,
-                        )
-                    }) {
-                        Some(transcript_path) => Some(transcript_path),
-                        None => {
-                            if cwd_is_unique {
-                                cwd.and_then(|cwd_value| {
-                                    crate::agent_transcript::latest_transcript_for_cwd(
-                                        &home,
-                                        &cwd_value,
-                                        Some(&target_session_id),
-                                    )
-                                })
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    match transcript {
-                        Some(transcript_path) => {
-                            crate::agent_transcript::read_conversation(&transcript_path, limit, before)
-                        }
-                        None => Err("TRANSCRIPT_NOT_FOUND".to_string()),
+            {
+                // In standalone router tests where machine_services is unpopulated,
+                // check if test home override has a transcript for target_session_id
+                let home_override = state.agent_history_home.read().clone();
+                if let Some(home) = home_override {
+                    if crate::agent_transcript::transcript_path_for_session(&home, &target_session_id).is_some() {
+                        return Some(target_session_id.clone());
                     }
                 }
-                None => Err("HOME_UNAVAILABLE".to_string()),
-            };
-            Ok(outcome)
+                None
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        });
+
+    // A missing provider binding no longer short-circuits the whole route: `provider_session_id`
+    // stays an `Option` and the local branch below resolves it through its id-based chain (and,
+    // only when the cwd is unambiguous, through the cwd fallback). The remote branch still
+    // requires a binding and fails closed with the same structured 404 at its own entry point.
+
+    // 2. Check whether this session is hosted on a remote paired host.
+    // Synchronous disk reading runs in run_blocking without masking errors.
+    let is_remote_session = if let Some(services) = state.machine_services.as_ref() {
+        let store_path = services.sessions.remote_sessions_store_path().to_path_buf();
+        let target_sid = target_session_id.clone();
+        crate::ipc::run_blocking(move || {
+            let raw = std::fs::read_to_string(store_path)
+                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?;
+            Ok::<bool, crate::ipc::IpcError>(
+                crate::agent_transcript::remote_target_from_store(&raw, &target_sid).is_some(),
+            )
         })
         .await
         .map_err(|_| {
@@ -1248,19 +1256,152 @@ async fn get_agent_history(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
             )
-        })?;
+        })?
+    } else {
+        false
+    };
 
-    let result: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> =
-        match local {
-            Ok(found) => Ok((found.0, found.1, false)),
-            Err(code) if code == "TRANSCRIPT_NOT_FOUND" => {
-                read_remote_conversation(&remote_state, &remote_session_id, limit, before).await
-            }
-            Err(other) => Err(other),
+    let result: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, String, bool), String> =
+        if is_remote_session {
+            // A remote transcript can only be fetched by provider conversation ID, so a remote
+            // session with no binding fails closed here — with the exact structured 404 the old
+            // provider gate returned — and never falls through to the local chain below.
+            let Some(remote_provider_id) = provider_session_id.as_deref() else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "TRANSCRIPT_NOT_FOUND",
+                        "details": "No authoritative agent provider session bound to target session",
+                    })),
+                ));
+            };
+            read_remote_conversation(
+                &remote_state,
+                &remote_session_id,
+                remote_provider_id,
+                limit,
+                before,
+            )
+            .await
+        } else {
+            let local_provider_id: Option<String> = provider_session_id.clone();
+            let local_session_id = target_session_id.clone();
+            // The session's cwd, used only as a fallback when no exact provider binding exists.
+            // Fetched before run_blocking because describe_session is async.
+            let session_cwd = state
+                .session_backend
+                .describe_session(&target_session_id)
+                .await
+                .ok()
+                .and_then(|details| details.worktree_path)
+                // `latest_transcript_for_cwd` takes `cwd: &str`, so the `PathBuf` narrows here and
+                // the resolver below stays a plain `as_deref()`. A non-UTF-8 cwd drops the
+                // fallback (fail-closed) instead of ever matching on a corrupted string.
+                .and_then(|path| path.into_os_string().into_string().ok());
+            // A newest-in-cwd guess is only safe when no other live session shares this cwd;
+            // otherwise the phone could show another agent's conversation. `session_cwd` above is
+            // already the value base called `cwd`, so it is reused here instead of describing the
+            // session twice. Computed before run_blocking because these lookups are async.
+            let cwd_is_unique = match session_cwd.as_deref() {
+                None => false,
+                Some(own_cwd) => {
+                    let mut unique = true;
+                    for other in state.session_backend.list_sessions().await {
+                        if other == target_session_id {
+                            continue;
+                        }
+                        let shares_cwd = state
+                            .session_backend
+                            .describe_session(&other)
+                            .await
+                            .ok()
+                            .and_then(|details| details.worktree_path)
+                            .is_some_and(|path| path.to_string_lossy() == own_cwd);
+                        if shares_cwd {
+                            unique = false;
+                            break;
+                        }
+                    }
+                    unique
+                }
+            };
+            crate::ipc::run_blocking(move || {
+                Ok((|| -> Result<_, String> {
+                #[cfg(test)]
+                let home_override = state.agent_history_home.read().clone();
+                #[cfg(not(test))]
+                let home_override: Option<PathBuf> = None;
+                let home = match home_override.or_else(|| {
+                    std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(PathBuf::from)
+                }) {
+                    Some(h) => h,
+                    None => return Err("HOME_UNAVAILABLE".to_string()),
+                };
+
+                // Ordering rule: exact provider identity first; then id-based; then an
+                // unambiguous cwd; never a cwd guess when another live session shares that cwd.
+                let transcript_path = crate::agent_transcript::exact_transcript_path_for_provider(
+                    &home,
+                    provider_store.as_deref(),
+                    local_provider_id.as_deref(),
+                )
+                // (a) exact provider identity always wins, and it stays qualified by the store the
+                // agent reported. That qualification is also base's provider-id step: the same
+                // lookup run over every store. An unqualified second copy would search stores this
+                // session does not own, so it is deliberately not repeated here.
+                .or_else(|| {
+                    // (c) id-based, keyed by Ferryx's own backend session id.
+                    crate::agent_transcript::transcript_path_for_session(&home, &local_session_id)
+                })
+                .or_else(|| {
+                    // Provider gate: `latest_transcript_for_cwd` reads only the omo store
+                    // (<home>/.omo/agent/sessions/<slug>), so consulting it for a session bound to
+                    // any other provider store (e.g. "codex") would leak an omo transcript into
+                    // that request. Only an absent provider (legacy provider-blind search) or the
+                    // omo store itself may fall back to the cwd lookup.
+                    if !matches!(provider_store.as_deref(), None | Some("omo")) {
+                        return None;
+                    }
+                    // (d) newest transcript in the cwd, and only when no other live session shares
+                    // it; otherwise fall through to (e) rather than guess.
+                    if !cwd_is_unique {
+                        return None;
+                    }
+                    session_cwd.as_deref().and_then(|cwd_value| {
+                        crate::agent_transcript::latest_transcript_for_cwd(
+                            &home,
+                            cwd_value,
+                            Some(&local_session_id),
+                        )
+                    })
+                })
+                // (e) nothing resolved: fail closed rather than guess.
+                .ok_or_else(|| "TRANSCRIPT_NOT_FOUND".to_string())?;
+
+                let (items, malformed, generation) =
+                    crate::agent_transcript::read_conversation_with_generation(
+                        &transcript_path,
+                        local_provider_id.as_deref(),
+                        &local_session_id,
+                        limit,
+                        before,
+                    )?;
+                Ok((items, malformed, generation, false))
+                })())
+            })
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
+                )
+            })?
         };
 
     match result {
-        Ok((items, malformed_count, remote_truncated)) => {
+        Ok((items, malformed_count, generation, remote_truncated)) => {
             let mut warnings = Vec::new();
             if malformed_count > 0 {
                 warnings.push(format!("skipped {malformed_count} malformed lines"));
@@ -1279,6 +1420,8 @@ async fn get_agent_history(
             let partial = next_cursor.is_some();
             Ok(Json(AgentHistoryResponse {
                 session_id,
+                provider_session_id,
+                conversation_generation: Some(generation),
                 items,
                 next_cursor,
                 partial,
@@ -1697,7 +1840,20 @@ async fn ws_terminal_handler(
     if let Some(services) = &state.machine_services {
         match services.sessions.machine_only_async(&session_id).await {
             Ok(false) => {}
-            Ok(true) => return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into())),
+            Ok(true) => {
+                if device.permission == DevicePermission::View {
+                    return machine_terminal_upgrade(
+                        ws,
+                        session_id,
+                        query,
+                        device,
+                        revocation,
+                        state,
+                    )
+                    .await;
+                }
+                return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
+            }
             Err(code) => return Err(machine_socket_error(&code)),
         }
     }
@@ -1838,7 +1994,8 @@ async fn machine_terminal_upgrade(
     state: Arc<RemoteGatewayState>,
 ) -> Result<Response, (StatusCode, String)> {
     use crate::daemon::session_service::DaemonSessionService;
-    if device.permission != DevicePermission::Control {
+    let is_viewer = device.permission == DevicePermission::View;
+    if !is_viewer && device.permission != DevicePermission::Control {
         return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED"));
     }
     // No host-scope stripping, grid negotiation or query-driven geometry in v1.
@@ -1869,11 +2026,15 @@ async fn machine_terminal_upgrade(
             .ok_or("SESSION_NOT_FOUND")?
             .map_err(|_| "CAPACITY_EXCEEDED")?;
         services.sessions.validate_machine_target(&target).await?;
-        let lease = DaemonSessionService::acquire_machine_controller(
-            &mut controllers,
-            &target.session_id,
-            &device.id,
-        )?;
+        let lease = if is_viewer {
+            None
+        } else {
+            Some(DaemonSessionService::acquire_machine_controller(
+                &mut controllers,
+                &target.session_id,
+                &device.id,
+            )?)
+        };
         Ok::<_, String>((session, attachment, lease))
     };
     let (session, attachment, lease) = while_device_authorized(
@@ -1891,8 +2052,8 @@ async fn machine_terminal_upgrade(
         .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let session_id = session.target.session_id.clone();
-            let mut fenced = lease.cancelled.clone();
-            let generation = lease.generation;
+            let mut fenced = lease.as_ref().map(|l| l.cancelled.clone());
+            let generation = lease.as_ref().map_or(0, |l| l.generation);
             let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let work = handle_machine_terminal_socket(
                 socket,
@@ -1906,7 +2067,13 @@ async fn machine_terminal_upgrade(
             tokio::select! {
                 biased;
                 _ = revoked.wait_for(|v| *v) => {},
-                _ = fenced.wait_for(|v| *v) => {},
+                _ = async {
+                    if let Some(mut f) = fenced {
+                        let _ = f.wait_for(|v| *v).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {},
                 _ = work => {},
             }
             // No task is detached, no input survives this scope, and failed
@@ -1928,6 +2095,9 @@ pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
 pub(crate) mod machine_input_probe;
+#[cfg(test)]
+#[path = "machine_two_consumer_harness.rs"]
+pub(crate) mod machine_two_consumer_harness;
 
 fn machine_control_message(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
@@ -1936,6 +2106,27 @@ fn machine_control_message(value: serde_json::Value) -> Message {
 #[path = "machine_output_writer.rs"]
 mod machine_output_writer;
 use machine_output_writer::{machine_control, machine_frame, machine_send};
+
+/// WebSocket close contract for a viewer whose bounded output queue overflowed.
+/// Clients can match code 4001 and reason `ferryx.output_overflow.v1` exactly;
+/// this is distinct from normal session disconnects and ordinary transport closes.
+pub(crate) const MACHINE_OUTPUT_OVERFLOW_CLOSE_CODE: u16 = 4001;
+pub(crate) const MACHINE_OUTPUT_OVERFLOW_CLOSE_REASON: &str = "ferryx.output_overflow.v1";
+
+pub(crate) async fn send_machine_output_overflow_close<S>(sender: &mut S)
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let close = Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: MACHINE_OUTPUT_OVERFLOW_CLOSE_CODE,
+        reason: MACHINE_OUTPUT_OVERFLOW_CLOSE_REASON.into(),
+    }));
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        sender.send(close).await?;
+        sender.flush().await
+    })
+    .await;
+}
 
 async fn send_machine_agent_state<S>(
     sender: &mut S,
@@ -1954,11 +2145,6 @@ where
         state.detail.clone(),
     );
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
-
-    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
-    // so no racing agent state update or initial conversation identity is lost.
-    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
-
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
     // exceeds the 1024-byte control slot, fallback to sending the essential provider identity
@@ -2012,6 +2198,11 @@ async fn handle_machine_terminal_socket(
     let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
         return;
     };
+
+    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
+    // so no racing agent state update or initial conversation identity is lost.
+    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
+
     let (mut sender, mut receiver) = socket.split();
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
@@ -2020,43 +2211,7 @@ async fn handle_machine_terminal_socket(
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
 
-    // Send initial authoritative agent state snapshot immediately after the boundary
-    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
-        if initial_state.session_id == target.session_id
-            && services.sessions.validate_machine_target(target).await.is_ok()
-        {
-            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
-                return;
-            }
-        }
-    }
     let gap = snapshot
-                agent_update = agent_subscription.receiver.recv() => {
-                    match agent_update {
-                        Ok(update) if update.state.session_id == target.session_id => {
-                            if services.sessions.validate_machine_target(target).await.is_err() {
-                                return;
-                            }
-                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
-                                if current.session_id == target.session_id
-                                    && services.sessions.validate_machine_target(target).await.is_ok()
-                                {
-                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                    continue;
-                }
         .gap
         .as_ref()
         .map(|g| crate::remote::machine_protocol::ReplayGap {
@@ -2114,6 +2269,18 @@ async fn handle_machine_terminal_socket(
         }
     }
     drop(charged_snapshot);
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
@@ -2124,6 +2291,32 @@ async fn handle_machine_terminal_socket(
                 control = control_rx.recv() => {
                     let Some(control) = control else { return; };
                     if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                agent_update = agent_subscription.receiver.recv() => {
+                    match agent_update {
+                        Ok(update) if update.state.session_id == target.session_id => {
+                            if services.sessions.validate_machine_target(target).await.is_err() {
+                                return;
+                            }
+                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
+                                if current.session_id == target.session_id
+                                    && services.sessions.validate_machine_target(target).await.is_ok()
+                                {
+                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
                     continue;
                 }
                 next = output.recv() => next,
@@ -2169,6 +2362,7 @@ async fn handle_machine_terminal_socket(
                     drop(charged);
                 }
                 Err(crate::terminal::output_hub::machine_output::MachineOutputError::Overflow) => {
+                    send_machine_output_overflow_close(&mut sender).await;
                     return
                 }
                 Err(crate::terminal::output_hub::machine_output::MachineOutputError::Closed) => {
@@ -2244,6 +2438,9 @@ async fn handle_machine_terminal_socket(
             let Some(message) = input_rx.recv().await else {
                 return;
             };
+            if device.permission == DevicePermission::View {
+                continue;
+            }
             if matches!(&message, Message::Text(text) if text.len() > 16 * 1024) {
                 return;
             }
@@ -4572,6 +4769,54 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 super::machine_protocol::MACHINE_JSON_MAX_BYTES,
             )),
         )
+        .route(
+            "/api/v1/chat/attachments/upload",
+            post(super::attachment_api::upload_attachment_chunk).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/chat/attachments/cancel",
+            post(super::attachment_api::cancel_attachment_upload),
+        )
+        .route(
+            "/api/v1/files/results/list",
+            post(super::attachment_api::list_result_files),
+        )
+        .route(
+            "/api/v1/files/preview/token",
+            post(super::attachment_api::mint_result_preview_token),
+        )
+        .route(
+            "/api/v1/files/preview/{token}",
+            get(super::attachment_api::serve_result_preview),
+        )
+        .route(
+            "/api/v1/chat/start",
+            post(super::managed_chat_lifecycle::managed_chat_start),
+        )
+        .route(
+            "/api/v1/chat/send",
+            post(super::managed_chat_api::managed_chat_send).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/chat/reply",
+            post(super::managed_chat_api::managed_chat_reply).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/chat/stop",
+            post(super::managed_chat_api::managed_chat_stop).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/chat/callbacks",
+            get(super::managed_chat_api::managed_chat_list_callbacks),
+        )
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
         .route(
@@ -4670,6 +4915,70 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
+    /// Prepare a replacement without changing the active listener or relay publication.
+    pub(crate) async fn prepare_relay(
+        state: Arc<RemoteGatewayState>,
+        relay_url: Option<&str>,
+        address: SocketAddr,
+    ) -> Result<crate::remote::relay_client::RelayClient, String> {
+        let url = relay_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        crate::remote::relay_client::validate_relay_url(
+            url,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
+        .map_err(|error| format!("Invalid relay configuration: {error}"))?;
+        let identity = load_gateway_identity(Arc::clone(&state))
+            .await
+            .map_err(|_| "Machine identity unavailable".to_string())?;
+        let client = match std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url, token, address.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url, identity.clone(), address.to_string(),
+            ),
+        };
+        Ok(client
+            .with_machine_id(&identity.machine_id)
+            .with_auth_manager((*state.auth_manager).clone()))
+    }
+
+    /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
+    pub(crate) fn replace_relay(
+        &mut self,
+        state: Arc<RemoteGatewayState>,
+        client: crate::remote::relay_client::RelayClient,
+    ) {
+        let previous = self.relay_task.take();
+        if let Some(task) = previous.as_ref() {
+            task.abort();
+        }
+        let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch,
+        });
+        *state.relay_client.write() = Some(client.clone());
+        self.published_pairing = Some((state, epoch));
+        self.relay_task = Some(tokio::spawn(async move {
+            if let Some(task) = previous {
+                if let Err(error) = task.await {
+                    if !error.is_cancelled() {
+                        tracing::warn!(%error, "previous relay supervisor failed during replacement");
+                    }
+                }
+            }
+            client.run().await;
+        }));
+    }
+
     pub fn is_external_bound(&self) -> bool {
         !self._extra_shutdown_txs.is_empty()
     }
@@ -4678,8 +4987,18 @@ impl RemoteServerHandle {
         self.gate_status.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn relay_task_abort_handle(&self) -> tokio::task::AbortHandle {
+        self.relay_task.as_ref().unwrap().abort_handle()
+    }
+
     pub fn stop(self) {
-        if let Some(task) = self.relay_task {
+        drop(self.stop_with_receipt());
+    }
+
+    /// The returned task can be joined by callers that need a teardown receipt.
+    pub(crate) fn stop_with_receipt(self) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some(task) = self.relay_task.as_ref() {
             task.abort();
         }
         // A stopped relay must not leave a dead coordinator selected for pairing:
@@ -4689,12 +5008,14 @@ impl RemoteServerHandle {
             let mut slot = state.relay_pairing.write();
             if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
                 *slot = None;
+                *state.relay_client.write() = None;
             }
         }
         let _ = self.shutdown_tx.send(());
         for tx in self._extra_shutdown_txs {
             let _ = tx.send(());
         }
+        self.relay_task
     }
 }
 
@@ -7358,6 +7679,241 @@ mod tests {
         let _ = stop_tx.send(());
         let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_remote_route_uses_exact_stored_provider_on_owning_host() {
+        use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, AgentStateOrigin};
+        use std::sync::Mutex;
+
+        let root = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = daemon.remote_state().clone();
+        let session_id = "b6a4d1c9-2e77-4f3a-9c58-0d5a7e91b204";
+        let provider_id = "provider-exact-42";
+        let sibling_id = "provider-sibling-99";
+        daemon.session_service.publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+            session_id: session_id.to_string(),
+            state: "working".to_string(),
+            agent: Some("omo".to_string()),
+            provider_session: Some(AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: provider_id.to_string(),
+                transcript_path: None,
+            }),
+            detail: None,
+            origin: AgentStateOrigin::Agent,
+        });
+        let host = serde_json::json!({
+            "authMethod": "agent", "hostname": "host.example", "id": "ssh-owner",
+            "label": "owner", "source": "config", "username": "test"
+        });
+        let descriptor = serde_json::json!({
+            "backendSessionId": session_id,
+            "target": {
+                "hostId": "ssh-owner", "ownerId": "owner-device", "epoch": "7",
+                "backendSessionId": session_id
+            },
+            "config": {
+                "host": host,
+                "environment": {
+                    "platform": "posix", "executor": "sh", "version": "1",
+                    "home": "/home/test", "temp": "/tmp", "git": true
+                },
+                "helper": { "executable": "/home/test/.ferryx/bin/helper", "root": "/home/test/.ferryx" },
+                "projectId": "project-owner", "projectPath": "/srv/project",
+                "worktree": null, "agentIdentity": null
+            },
+            "clientRequestId": "request-owner", "remoteCursor": 0, "cols": 80, "rows": 24
+        });
+        let store_path = state.machine_services.as_ref().unwrap().sessions.remote_sessions_store_path();
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            store_path,
+            serde_json::json!({ "remoteSessions": [{ "descriptor": descriptor }] }).to_string(),
+        ).unwrap();
+
+        let executions = Arc::new(Mutex::new(Vec::<(String, String, usize)>::new()));
+        let recorded = Arc::clone(&executions);
+        *state.agent_history_execute.write() = Some(Arc::new(move |host, command, budget| {
+            recorded.lock().unwrap().push((host.id.clone(), command.clone(), budget));
+            if command.contains(provider_id) {
+                let transcript = format!(
+                    "{{\"type\":\"session\",\"id\":\"{provider_id}\",\"cwd\":\"/srv/project\"}}\n{{\"type\":\"message\",\"id\":\"m1\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"owned transcript\"}}]}}}}\n"
+                );
+                Ok(format!("{}\n{transcript}", transcript.len()).into_bytes())
+            } else if command.contains(sibling_id) {
+                Ok(format!("{{\"type\":\"session\",\"id\":\"{sibling_id}\"}}\n").into_bytes())
+            } else {
+                Err("UNAUTHORIZED".into())
+            }
+        }));
+
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "remote-history-route").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(format!("http://{addr}/api/v1/agent-history/{session_id}?limit=10"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["items"][0]["text"], "owned transcript");
+        assert_eq!(body["providerSessionId"], provider_id);
+        assert_eq!(body["conversationGeneration"], "provider-exact-42:inc-1");
+        let calls = executions.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "ssh-owner");
+        assert!(calls[0].1.contains("provider-exact-42"));
+        assert!(!calls[0].1.contains(sibling_id));
+        assert_eq!(calls[0].2, 64 * 1024);
+        assert!(!calls[0].1.contains("ls -t"));
+        assert!(calls[0].1.contains("tail -c 65536"));
+        drop(calls);
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+    }
+
+    // Fails before the fail-closed fix: this Codex file resolves by name and parses to zero
+    // recognized messages, so the route answered 200 with an empty item list where it must
+    // return a loud TRANSCRIPT_NOT_FOUND. The parseable omo twin under the same provider id is
+    // the provider-isolation trap: with the session's agent reported as "codex", the route must
+    // never serve it either.
+    // A Codex-bound session must serve the CODEX store's conversation and must never serve a
+    // same-id file from the omo store. This assertion is deliberately content-level (not just a
+    // status code) so it catches a provider-blind regression directly: if the qualification were
+    // dropped, the provider-blind walk would find the omo twin first and serve "ping"/"pong".
+    #[tokio::test]
+    async fn test_agent_history_route_serves_codex_store_and_isolates_the_omo_twin() {
+        use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, AgentStateOrigin};
+
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = daemon.remote_state().clone();
+        let session_id = "b6a4d1c9-2e77-4f3a-9c58-0d5a7e91b204";
+        let provider_id = "codex-provider-42";
+        daemon.session_service.publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+            session_id: session_id.to_string(),
+            state: "working".to_string(),
+            agent: Some("codex".to_string()),
+            provider_session: Some(AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: provider_id.to_string(),
+                transcript_path: None,
+            }),
+            detail: None,
+            origin: AgentStateOrigin::Agent,
+        });
+
+        // Codex-shaped transcript in the Codex store, named exactly as Codex writes rollouts.
+        // The parser recognizes this shape, so resolution must find and serve it.
+        let codex_directory = home.path().join(".codex/sessions/2026/10/05");
+        std::fs::create_dir_all(&codex_directory).unwrap();
+        std::fs::write(
+            codex_directory.join(format!("rollout-2026-10-05T12-00-00-{provider_id}.jsonl")),
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        // A parseable omo transcript under the SAME provider id: if the route ever dropped the
+        // provider qualification (agent "codex"), the provider-blind search would find this file
+        // and answer 200 — the 404 assertion below catches exactly that regression.
+        let omo_directory = home.path().join(".omo").join("agent").join("sessions").join("--proj--");
+        std::fs::create_dir_all(&omo_directory).unwrap();
+        std::fs::write(
+            omo_directory.join(format!("2026-10-05T00-00-00-000Z_{provider_id}.jsonl")),
+            format!(
+                "{{\"type\":\"session\",\"id\":\"{provider_id}\",\"cwd\":\"/proj\"}}\n{{\"type\":\"message\",\"id\":\"u1\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"ping\"}}]}}}}\n{{\"type\":\"message\",\"id\":\"a1\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"pong\"}}]}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        // The route reads the remote-session store whenever machine services are populated; the
+        // store must exist or the lookup would 500 before reaching the local branch. The
+        // descriptor is keyed by a FOREIGN backendSessionId so this session is not remote and
+        // resolution runs against the local home holding the Codex store.
+        let foreign_session_id = "11111111-2222-4333-8444-555555555555";
+        let host = serde_json::json!({
+            "authMethod": "agent", "hostname": "host.example", "id": "ssh-owner",
+            "label": "owner", "source": "config", "username": "test"
+        });
+        let descriptor = serde_json::json!({
+            "backendSessionId": foreign_session_id,
+            "target": {
+                "hostId": "ssh-owner", "ownerId": "owner-device", "epoch": "7",
+                "backendSessionId": foreign_session_id
+            },
+            "config": {
+                "host": host,
+                "environment": {
+                    "platform": "posix", "executor": "sh", "version": "1",
+                    "home": "/home/test", "temp": "/tmp", "git": true
+                },
+                "helper": { "executable": "/home/test/.ferryx/bin/helper", "root": "/home/test/.ferryx" },
+                "projectId": "project-owner", "projectPath": "/srv/project",
+                "worktree": null, "agentIdentity": null
+            },
+            "clientRequestId": "request-owner", "remoteCursor": 0, "cols": 80, "rows": 24
+        });
+        let store_path = state.machine_services.as_ref().unwrap().sessions.remote_sessions_store_path();
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            store_path,
+            serde_json::json!({ "remoteSessions": [{ "descriptor": descriptor }] }).to_string(),
+        ).unwrap();
+
+        *state.agent_history_home.write() = Some(home.path().to_path_buf());
+
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "codex-store-route").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(format!("http://{addr}/api/v1/agent-history/{session_id}?limit=10"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a recognized Codex-store transcript must now be served, not fail closed"
+        );
+        let body: serde_json::Value = response.json().await.unwrap();
+        let items = body["items"].as_array().expect("served conversation items");
+        let served = serde_json::to_string(items).unwrap();
+        assert!(
+            served.contains("hello"),
+            "the Codex store's own text must be served: {served}"
+        );
+        assert!(
+            !served.contains("ping") && !served.contains("pong"),
+            "a same-id omo twin must NEVER be served for a codex-bound session: {served}"
+        );
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
     }
 
     #[tokio::test]
