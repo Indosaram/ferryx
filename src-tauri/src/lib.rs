@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod account;
 pub mod agent_detect;
 pub mod agent_transcript;
@@ -6,6 +8,7 @@ pub mod cli;
 pub mod clipboard_image;
 pub mod daemon;
 pub mod dag;
+pub mod ferryx_scope;
 pub mod ipc;
 #[cfg(target_os = "macos")]
 pub mod macos_file_drop;

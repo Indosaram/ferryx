@@ -12,15 +12,17 @@ vi.mock("../RemoteTerminal", () => ({
   },
 }));
 
-window.HTMLElement.prototype.scrollIntoView = vi.fn();
+const originalScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
 
 describe("MobileChatWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {
     cleanup();
+    window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
   });
 
   it("1. renders a quiet empty state with context line and no starter prompts", () => {
@@ -287,7 +289,7 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
   });
 
-  it("12. passes followHostSize to RemoteTerminal drawer", () => {
+  it("12. sizes the drawer to this device instead of the desktop grid", () => {
     render(
       <MobileChatWorkspace
         messages={[]}
@@ -305,9 +307,10 @@ describe("MobileChatWorkspace", () => {
       expect.objectContaining({
         sessionId: "sess-follow-1",
         token: "tok-follow-1",
-        followHostSize: true,
       })
     );
+    // Opening the drawer makes this device the size owner.
+    expect(mockRemoteTerminal.mock.calls.at(-1)?.[0]).not.toMatchObject({ followHostSize: true });
   });
 
   it("13. closed drawer carries inert attribute and aria-hidden true", () => {
@@ -324,5 +327,20 @@ describe("MobileChatWorkspace", () => {
     const drawer = screen.getByTestId("terminal-drawer");
     expect(drawer).toHaveAttribute("aria-hidden", "true");
     expect(drawer).toHaveAttribute("inert");
+  });
+
+  it("shows server-issued result files with the agreed open controls", () => {
+    const onOpen = vi.fn();
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        resultFiles={[{ fileId: "result-123", displayName: "step_1.txt" }]}
+        onOpenResultFile={onOpen}
+      />
+    );
+    expect(screen.getByTestId("chat-result-files")).toHaveTextContent("step_1.txt");
+    fireEvent.click(screen.getByTestId("result-file-open-result-123"));
+    expect(onOpen).toHaveBeenCalledWith("result-123");
   });
 });

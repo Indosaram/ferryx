@@ -67,6 +67,44 @@ impl MachineEvents {
     ) {
         self.publish_event(None, kind, workspace, session, payload);
     }
+    pub(crate) fn publish_callback(
+        &self,
+        session_id: &str,
+        callback: Value,
+    ) {
+        let mut sequence = self.sequence.lock();
+        *sequence = sequence
+            .checked_add(1)
+            .expect("machine event sequence exhausted");
+        let event = json!({
+            "sequence": sequence.to_string(),
+            "revision": sequence.to_string(),
+            "type": "callback",
+            "sessionId": session_id,
+            "callback": callback.clone(),
+            "payload": { "callback": callback },
+        });
+        let _ = self.sender.send(event);
+    }
+    pub(crate) fn publish_callback_resolved(
+        &self,
+        session_id: &str,
+        callback_id: &str,
+    ) {
+        let mut sequence = self.sequence.lock();
+        *sequence = sequence
+            .checked_add(1)
+            .expect("machine event sequence exhausted");
+        let event = json!({
+            "sequence": sequence.to_string(),
+            "revision": sequence.to_string(),
+            "type": "callback_resolved",
+            "sessionId": session_id,
+            "callbackId": callback_id,
+            "payload": { "callbackId": callback_id },
+        });
+        let _ = self.sender.send(event);
+    }
     pub(crate) fn publish_revision(
         &self,
         revision: u64,

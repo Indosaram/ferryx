@@ -14,6 +14,7 @@ pub mod handover_wire;
 pub mod launchd;
 pub(crate) mod logging;
 pub mod manifest;
+pub(crate) mod managed_chat;
 pub mod protocol;
 pub mod proxy;
 pub mod server;

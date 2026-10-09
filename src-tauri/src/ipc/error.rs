@@ -125,6 +125,12 @@ impl IpcErrorCode {
             "TIMEOUT" => Self::Timeout,
             "HOST_UNAVAILABLE" => Self::HostUnavailable,
             "OPERATION_OUTCOME_UNKNOWN" => Self::OperationOutcomeUnknown,
+            "MACHINE_PTY_MISSING"
+            | "MACHINE_PTY_CLOSE_FAILED"
+            | "MACHINE_PTY_NOT_REAPED"
+            | "MACHINE_LIFECYCLE_TIMEOUT"
+            | "MACHINE_LIFECYCLE_WATCH_CLOSED"
+            | "MACHINE_CLOSE_COMMIT_UNAVAILABLE" => Self::OperationOutcomeUnknown,
             "OPERATION_NOT_FOUND" => Self::OperationNotFound,
             "OPERATION_RESULT_EXPIRED" => Self::OperationResultExpired,
             "SESSION_OWNERSHIP_CHANGED" => Self::SessionOwnershipChanged,

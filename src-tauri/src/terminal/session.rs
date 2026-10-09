@@ -409,11 +409,7 @@ fn last_output_age_from(last_output_millis: u64) -> Option<u64> {
 impl PtySession {
     pub(crate) fn new(config: PtySessionConfig) -> Self {
         let output_tx = Arc::new(Mutex::new(Some(config.tx)));
-        let reader_tx = output_tx
-            .lock()
-            .as_ref()
-            .expect("output sender must exist while starting reader")
-            .clone();
+        let reader_output_tx = Arc::clone(&output_tx);
         let reader = config.reader;
         #[cfg(unix)]
         let reader_poll = {
@@ -439,6 +435,9 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
+                if reader_finished_task.load(Ordering::Acquire) {
+                    break;
+                }
                 if pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
@@ -447,8 +446,8 @@ impl PtySession {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                     reader_paused_task.store(false, Ordering::Release);
-                    // Released by teardown (`release_paused_reader`), not by a resume: the
-                    // descriptor may already belong to a successor daemon, so never read again.
+                    // Teardown releases the pause and marks the reader finished; the descriptor
+                    // may already belong to a successor daemon, so never read again.
                     if reader_finished_task.load(Ordering::Acquire) {
                         break;
                     }
@@ -459,7 +458,8 @@ impl PtySession {
                     Ok(n) => {
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
-                        if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        let output_tx = reader_output_tx.lock().clone();
+                        if output_tx.is_none_or(|tx| tx.blocking_send(buf[..n].to_vec()).is_err()) {
                             break;
                         }
                     }
@@ -1073,9 +1073,10 @@ impl PtySession {
     }
 
     pub(crate) fn close_io(&self) {
+        self.reader_finished.store(true, Ordering::Release);
         self.writer.lock().take();
         self.master.lock().take();
-        self.release_paused_reader();
+        self.pause_requested.store(false, Ordering::Release);
     }
 
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
@@ -1202,11 +1203,7 @@ impl PtySession {
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
         let output_tx = Arc::new(Mutex::new(Some(tx)));
-        let reader_tx = output_tx
-            .lock()
-            .as_ref()
-            .expect("output sender must exist while starting reader")
-            .clone();
+        let reader_output_tx = Arc::clone(&output_tx);
 
         let reader_poll = input
             .get_ref()
@@ -1229,6 +1226,9 @@ impl PtySession {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
+                if reader_finished_task.load(Ordering::Acquire) {
+                    break;
+                }
                 if pause_requested_task.load(Ordering::Acquire) {
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
@@ -1237,8 +1237,8 @@ impl PtySession {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                     reader_paused_task.store(false, Ordering::Release);
-                    // Released by teardown (`release_paused_reader`), not by a resume: the
-                    // descriptor may already belong to a successor daemon, so never read again.
+                    // Teardown releases the pause and marks the reader finished; the descriptor
+                    // may already belong to a successor daemon, so never read again.
                     if reader_finished_task.load(Ordering::Acquire) {
                         break;
                     }
@@ -1249,7 +1249,8 @@ impl PtySession {
                     Ok(n) => {
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
-                        if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        let output_tx = reader_output_tx.lock().clone();
+                        if output_tx.is_none_or(|tx| tx.blocking_send(buf[..n].to_vec()).is_err()) {
                             break;
                         }
                     }
@@ -1307,9 +1308,10 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        self.reader_finished.store(true, Ordering::Release);
         self.writer.lock().take();
         self.master.lock().take();
-        self.release_paused_reader();
+        self.pause_requested.store(false, Ordering::Release);
         self.output_tx.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();

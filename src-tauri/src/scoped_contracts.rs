@@ -172,6 +172,7 @@ pub enum ScopeErrorCode {
     Forbidden,
     NotFound,
     TargetExpired,
+    StaleCallback,
     ControlConflict,
     RequestConflict,
     ProviderOwned,

@@ -36,7 +36,7 @@ pub struct MachineAttachment {
 pub struct MachineReceiver {
     receiver: mpsc::Receiver<ChargedOutput<OutputChunk>>,
     status: watch::Receiver<Option<MachineOutputError>>,
-    budget: Arc<Semaphore>,
+    pub(crate) budget: Arc<Semaphore>,
     _controls: OwnedSemaphorePermit,
 }
 
@@ -77,6 +77,17 @@ pub(super) struct MachineSender {
     sender: mpsc::Sender<ChargedOutput<OutputChunk>>,
     status: watch::Sender<Option<MachineOutputError>>,
     budget: Arc<Semaphore>,
+    #[cfg(test)]
+    observation: Arc<std::sync::Mutex<MachineOutputObservation>>,
+}
+
+/// Test-only accounting for the actual subscriber, retained after socket teardown.
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub(crate) struct MachineOutputObservation {
+    pub high_water_bytes: usize,
+    pub overflow_pending_bytes: usize,
+    pub overflow_at: Option<std::time::Instant>,
 }
 
 fn charge(
@@ -102,6 +113,12 @@ impl MachineSender {
             .and_then(|size| charge(&self.budget, size));
         match result {
             Ok(permit) => {
+                #[cfg(test)]
+                {
+                    let pending = MACHINE_OUTPUT_BYTES - self.budget.available_permits();
+                    let mut observation = self.observation.lock().unwrap();
+                    observation.high_water_bytes = observation.high_water_bytes.max(pending);
+                }
                 let output = ChargedOutput {
                     value: chunk.clone(),
                     _charge: permit,
@@ -112,6 +129,15 @@ impl MachineSender {
             }
             Err(MachineOutputError::Overflow) => {}
             Err(MachineOutputError::Closed) => return false,
+        }
+        #[cfg(test)]
+        {
+            let mut observation = self.observation.lock().unwrap();
+            if observation.overflow_at.is_none() {
+                observation.overflow_pending_bytes =
+                    MACHINE_OUTPUT_BYTES - self.budget.available_permits();
+                observation.overflow_at = Some(std::time::Instant::now());
+            }
         }
         self.status.send_replace(Some(MachineOutputError::Overflow));
         false
@@ -132,6 +158,21 @@ impl Drop for MachineSender {
 }
 
 impl TerminalOutputHub {
+    /// Called immediately after attaching the viewer, before any other attachment.
+    #[cfg(test)]
+    pub(crate) fn last_machine_observation(
+        &self,
+        session_id: &str,
+    ) -> Option<(
+        Arc<std::sync::Mutex<MachineOutputObservation>>,
+        watch::Receiver<Option<MachineOutputError>>,
+    )> {
+        let session = self.sessions.read().get(session_id).cloned()?;
+        let hub = session.read();
+        let sender = hub.machine_senders.last()?;
+        Some((Arc::clone(&sender.observation), sender.status.subscribe()))
+    }
+
     /// Atomic machine subscription plus replay. Missing session is `None`;
     /// over-budget replay is `Some(Err(Overflow))`, never truncated silently.
     /// Machine wire uses flat history; segmented Local/SSH snapshots are unchanged.
@@ -152,6 +193,8 @@ impl TerminalOutputHub {
             sender,
             status: status_tx,
             budget: Arc::clone(&budget),
+            #[cfg(test)]
+            observation: Arc::new(std::sync::Mutex::new(MachineOutputObservation::default())),
         });
         let build = || {
             let controls = charge(&budget, MACHINE_CONTROL_BYTES)?;
@@ -203,3 +246,8 @@ impl TerminalOutputHub {
         Some(result)
     }
 }
+
+#[cfg(test)]
+#[path = "machine_output_tests.rs"]
+mod tests;
+

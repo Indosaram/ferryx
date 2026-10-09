@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
@@ -24,7 +24,21 @@ import {
   type RemoteContextOption,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
-import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration, capRetainedMessages } from "./agentConversation";
+import {
+  fetchAgentConversation,
+  ConversationFetchError,
+  mapAgentConversation,
+  formatWorkedDuration,
+  capRetainedMessages,
+  isTranscriptResponseCurrent,
+  hasConversationReset,
+  type TranscriptTargetIdentity,
+} from "./agentConversation";
+import { safeRandomUUID } from "../lib/uuid";
+import type { TargetRef, ChatDraft, DeliveryReceipt, AttachmentReceipt } from "../lib/scopedContracts";
+import { createRemoteManagedChatService, ManagedChatRemoteError, type RemoteManagedCallback, type RemoteManagedChatService } from "./chat/remoteManagedChatService";
+import { cancelRemoteAttachment } from "./chat/remoteAttachmentAdapter";
+import { draftKey, loadDraft, sameDraft, saveDraft, type HeldRequest } from "../features/ferryx/chat/drafts";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
 import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
@@ -392,6 +406,9 @@ export const RemoteHostConnection: React.FC<{
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">(() => (typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768 ? "chat" : "terminal"));
+  const chatCompositionActiveRef = useRef(false);
+  const chatDraftBeforeCompositionRef = useRef("");
+  const pendingViewModeRef = useRef<"chat" | "terminal" | null>(null);
   const [chatMessages, setChatMessages] = useState<MobileChatMessageProps[]>([]);
   const chatAttachmentUrlsRef = useRef<Set<string>>(new Set());
 
@@ -408,16 +425,41 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [revokeChatAttachmentUrls]);
   const lastConversationSessionRef = useRef<string | null>(null);
+  const lastConversationEpochRef = useRef<string | null>(null);
+  const lastConversationGenerationRef = useRef<string | null | undefined>(undefined);
+  const transcriptFetchGenerationRef = useRef(0);
+  const transcriptIdentityRef = useRef<TranscriptTargetIdentity | null>(null);
+  const [liveCallbacks, setLiveCallbacks] = useState<RemoteManagedCallback[]>([]);
+  const liveCallbacksRef = useRef<RemoteManagedCallback[]>([]);
+  const callbackTargetRef = useRef<TargetRef | null>(null);
+  const callbackSessionRef = useRef<string | null>(null);
+  const [callbackAnswers, setCallbackAnswers] = useState<Record<string, Record<string, string>>>({});
+  const [callbackErrors, setCallbackErrors] = useState<Record<string, string>>({});
+  const [replyingCallbacks, setReplyingCallbacks] = useState<Set<string>>(new Set());
+  const callbackGenerationRef = useRef(0);
+  const [authenticatedDeviceId, setAuthenticatedDeviceId] = useState<string | null>(() => {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(`ferryx_device_id_${hostId}`) : null;
+  });
   const retentionTruncatedRef = useRef(false);
   const [chatIsRunning, setChatIsRunning] = useState(false);
   const [chatWarnings, setChatWarnings] = useState<readonly string[]>([]);
+  const [mobileDraftText, setMobileDraftText] = useState("");
+  const [mobileHeldRequest, setMobileHeldRequest] = useState<HeldRequest | undefined>();
+  const mobileGenerationRef = useRef(0);
+  const mobilePendingByGenerationRef = useRef<Map<number, number>>(new Map());
+  const [mobilePending, setMobilePending] = useState(false);
+  const [mobileDeliveryStage, setMobileDeliveryStage] = useState<DeliveryReceipt["stage"]>();
+  const mobileTargetRef = useRef<TargetRef | null>(null);
+  const mobileRequestIdRef = useRef<string | null>(null);
+  const mobileDraftRef = useRef<ChatDraft>({ text: "", attachments: [] });
+  const mobileHeldRef = useRef<HeldRequest | undefined>();
+  const [mobileDraftAttachments, setMobileDraftAttachments] = useState<readonly AttachmentReceipt[]>([]);
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = remoteHostState.hosts[hostId] ?? null;
-  const transportBaseUrl = hostTransportUrl(activeHost, transport.url);
   const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
@@ -448,6 +490,14 @@ export const RemoteHostConnection: React.FC<{
     () => (initialMagicLinkRequested ? null : getStoredAccountSessionToken(relayUrl)),
   );
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
+  // Account mode has no remoteHostStore record, so hostTransportUrl would leave this
+  // pointing at the relay root. Every machine API then 404s there (the relay only serves
+  // them under /host/<machineId>), which is why the remote chat view and workspace refresh
+  // stayed empty. Derive the host-scoped base URL from the connected machine instead.
+  const accountHostBaseUrl = activeTunnelConnection && !activeHost
+    ? `${relayUrl}/host/${encodeURIComponent(activeTunnelConnection.machine.machineId)}`
+    : null;
+  const transportBaseUrl = accountHostBaseUrl ?? hostTransportUrl(activeHost, transport.url);
   // The transferred tunnel is owned here: close it when it is replaced or on unmount.
   // AccountConnection.close is idempotent, so explicit closes elsewhere are safe.
   useEffect(() => {
@@ -574,12 +624,40 @@ export const RemoteHostConnection: React.FC<{
   ]);
 
   const sessionEpochsRef = useRef<Map<string, string>>(new Map());
+  const globalDaemonEpochRef = useRef<string | null>(null);
   const [sessionEpochs, setSessionEpochs] = useState<Record<string, string>>({});
   const sessionEpochMissesRef = useRef<Map<string, number>>(new Map());
 
+  const recordSessionEpochs = useCallback((sessData: unknown) => {
+    const rows = Array.isArray(sessData)
+      ? sessData
+      : Array.isArray((sessData as any)?.sessions)
+      ? (sessData as any).sessions
+      : [];
+    const newEpochs: Record<string, string> = {};
+    for (const s of rows) {
+      const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
+      const epoch = s.daemonEpoch ?? s.target?.daemonEpoch ?? s.daemon_epoch;
+      if (sid && epoch !== undefined && epoch !== null) {
+        const epochStr = String(epoch);
+        sessionEpochsRef.current.set(sid, epochStr);
+        newEpochs[sid] = epochStr;
+      }
+    }
+    if (Object.keys(newEpochs).length > 0) {
+      setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
+    }
+  }, []);
+
   const getSessionDaemonEpoch = useCallback(async (sessionId: string): Promise<string | null> => {
-    const cached = sessionEpochsRef.current.get(sessionId);
-    if (cached) return cached;
+    const cached = sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? globalDaemonEpochRef.current;
+    if (cached) {
+      if (!sessionEpochsRef.current.has(sessionId)) {
+        sessionEpochsRef.current.set(sessionId, cached);
+        setSessionEpochs((prev) => ({ ...prev, [sessionId]: cached }));
+      }
+      return cached;
+    }
 
     const now = Date.now();
     const lastMiss = sessionEpochMissesRef.current.get(sessionId);
@@ -587,34 +665,69 @@ export const RemoteHostConnection: React.FC<{
       return null;
     }
 
-    if (activeTunnelConnection && token) {
+    if (token) {
       try {
-        const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (sessRes.status >= 200 && sessRes.status < 300) {
-          const sessText = new TextDecoder().decode(sessRes.body);
-          const sessData = JSON.parse(sessText);
-          const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
-          const newEpochs: Record<string, string> = {};
-          for (const s of rows) {
-            const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
-            const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
-            if (sid && epoch !== undefined && epoch !== null) {
-              sessionEpochsRef.current.set(sid, String(epoch));
-              newEpochs[sid] = String(epoch);
-            }
+        let sessData: any = null;
+        if (activeTunnelConnection) {
+          const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (sessRes.status >= 200 && sessRes.status < 300) {
+            const sessText = new TextDecoder().decode(sessRes.body);
+            sessData = JSON.parse(sessText);
           }
-          if (Object.keys(newEpochs).length > 0) {
-            setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
+        } else {
+          const sessRes = await fetch(apiUrl(transportBaseUrl, "/api/v1/sessions"), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (sessRes.ok) {
+            sessData = await sessRes.json();
+          }
+        }
+
+        if (sessData) {
+          recordSessionEpochs(sessData);
+          const resolved = sessionEpochsRef.current.get(sessionId);
+          if (resolved) {
+            sessionEpochMissesRef.current.delete(sessionId);
+            return resolved;
           }
         }
       } catch (err) {
-        console.warn("Failed to fetch session daemonEpoch", err);
+        console.warn("Failed to fetch session daemonEpoch from /api/v1/sessions", err);
+      }
+
+      try {
+        let capData: any = null;
+        if (activeTunnelConnection) {
+          const capRes = await activeTunnelConnection.transport.fetchLike("/api/v1/capabilities", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (capRes.status >= 200 && capRes.status < 300) {
+            capData = JSON.parse(new TextDecoder().decode(capRes.body));
+          }
+        } else {
+          const capRes = await fetch(apiUrl(transportBaseUrl, "/api/v1/capabilities"), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (capRes.ok) {
+            capData = await capRes.json();
+          }
+        }
+        if (capData?.daemonEpoch !== undefined && capData?.daemonEpoch !== null) {
+          const epochStr = String(capData.daemonEpoch);
+          globalDaemonEpochRef.current = epochStr;
+          sessionEpochsRef.current.set(sessionId, epochStr);
+          setSessionEpochs((prev) => ({ ...prev, [sessionId]: epochStr }));
+          sessionEpochMissesRef.current.delete(sessionId);
+          return epochStr;
+        }
+      } catch (err) {
+        console.warn("Failed to query capabilities daemon epoch", err);
       }
     }
 
-    const resolved = sessionEpochsRef.current.get(sessionId);
+    const resolved = sessionEpochsRef.current.get(sessionId) ?? globalDaemonEpochRef.current;
     if (resolved) {
       sessionEpochMissesRef.current.delete(sessionId);
       setSessionEpochs((prev) => (prev[sessionId] === resolved ? prev : { ...prev, [sessionId]: resolved }));
@@ -622,12 +735,18 @@ export const RemoteHostConnection: React.FC<{
     }
     sessionEpochMissesRef.current.set(sessionId, now);
     return null;
-  }, [activeTunnelConnection, token]);
+  }, [activeTunnelConnection, token, transportBaseUrl, sessionEpochs, recordSessionEpochs]);
 
   const terminalSocketRef = useRef<WebSocketLike | WebSocket | null>(null);
   const terminalSocketSessionIdRef = useRef<string | null>(null);
 
-  const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown }) => {
+  const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown; device?: { id?: string } }) => {
+    if (metadata?.device?.id) {
+      setAuthenticatedDeviceId(metadata.device.id);
+      try {
+        localStorage.setItem(`ferryx_device_id_${hostId}`, metadata.device.id);
+      } catch {}
+    }
     const machineId = optionalString(metadata?.machineId);
     const displayName = optionalString(metadata?.displayName);
     if (machineId && displayName) {
@@ -705,25 +824,46 @@ export const RemoteHostConnection: React.FC<{
           });
           if (sessRes.status >= 200 && sessRes.status < 300) {
             const sessText = new TextDecoder().decode(sessRes.body);
-            const sessData = JSON.parse(sessText);
-            const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
-            const newEpochs: Record<string, string> = {};
-            for (const s of rows) {
-              const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
-              const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
-              if (sid && epoch !== undefined && epoch !== null) {
-                sessionEpochsRef.current.set(sid, String(epoch));
-                newEpochs[sid] = String(epoch);
-              }
-            }
-            if (Object.keys(newEpochs).length > 0) {
-              setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
-            }
+            recordSessionEpochs(JSON.parse(sessText));
           }
         } catch {}
         const text = new TextDecoder().decode(res.body);
-        return normalizeRemoteWorkspaceState(JSON.parse(text));
+        const parsed = JSON.parse(text);
+        if (parsed?.daemonEpoch !== undefined && parsed?.daemonEpoch !== null) {
+          globalDaemonEpochRef.current = String(parsed.daemonEpoch);
+        }
+        return normalizeRemoteWorkspaceState(parsed);
       }
+
+      // Direct HTTP host path: resolve authoritative session daemon epochs from /api/v1/sessions
+      if (token) {
+        try {
+          const sessRes = await fetch(apiUrl(transportBaseUrl, "/api/v1/sessions"), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (sessRes.ok) {
+            const sessData = await sessRes.json();
+            recordSessionEpochs(sessData);
+          }
+        } catch (err) {
+          console.warn("Failed to query daemon session epochs on direct host", err);
+        }
+
+        try {
+          const capRes = await fetch(apiUrl(transportBaseUrl, "/api/v1/capabilities"), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (capRes.ok) {
+            const capData = await capRes.json();
+            if (capData?.daemonEpoch !== undefined && capData?.daemonEpoch !== null) {
+              globalDaemonEpochRef.current = String(capData.daemonEpoch);
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to query capabilities daemon epoch on direct host", err);
+        }
+      }
+
       const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -733,7 +873,16 @@ export const RemoteHostConnection: React.FC<{
         }
         return null;
       }
-      return normalizeRemoteWorkspaceState(await response.json());
+      const rawJson = await response.json();
+      if (rawJson && typeof rawJson === "object") {
+        if (rawJson.sessions) {
+          recordSessionEpochs(rawJson.sessions);
+        }
+        if (rawJson.daemonEpoch !== undefined && rawJson.daemonEpoch !== null) {
+          globalDaemonEpochRef.current = String(rawJson.daemonEpoch);
+        }
+      }
+      return normalizeRemoteWorkspaceState(rawJson);
     } catch {
       return null;
     }
@@ -923,11 +1072,38 @@ export const RemoteHostConnection: React.FC<{
     let connecting = false;
     const abort = new AbortController();
     const onMessage = (raw: any) => {
-      const text = typeof raw === "string"
-        ? raw
-        : raw instanceof Uint8Array
-        ? new TextDecoder().decode(raw)
-        : String(raw ?? "");
+      const payload = raw && typeof raw === "object" && "data" in raw ? raw.data : raw;
+      const text = typeof payload === "string"
+        ? payload
+        : payload instanceof Uint8Array
+        ? new TextDecoder().decode(payload)
+        : String(payload ?? "");
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") {
+          if (parsed.type === "callback" && parsed.callback) {
+            if (!parsed.sessionId || !effectiveSessionId || parsed.sessionId === effectiveSessionId) {
+              const cb = parsed.callback as RemoteManagedCallback;
+              const activeTarget = callbackTargetRef.current;
+              if (parsed.sessionId !== callbackSessionRef.current || !cb.target || !activeTarget || !cb.callbackIncarnation) return;
+              if (cb.target.backendSessionId !== activeTarget.backendSessionId || cb.target.hostId !== activeTarget.hostId || cb.target.ownerId !== activeTarget.ownerId || cb.target.epoch !== activeTarget.epoch) return;
+              const next = [...liveCallbacksRef.current.filter((c) => String(c.id) !== String(cb.id)), cb];
+              liveCallbacksRef.current = next;
+              setLiveCallbacks(next);
+            }
+          } else if (parsed.type === "callback_resolved" && parsed.callbackId) {
+            if (!parsed.sessionId || parsed.sessionId === callbackSessionRef.current) {
+              const resolved = liveCallbacksRef.current.find((c) => String(c.id) === String(parsed.callbackId));
+              if (resolved && (!parsed.callbackIncarnation || parsed.callbackIncarnation === resolved.callbackIncarnation)) {
+                const next = liveCallbacksRef.current.filter((c) => c !== resolved);
+                liveCallbacksRef.current = next;
+                setLiveCallbacks(next);
+                setCallbackErrors((prev) => { const copy = { ...prev }; delete copy[String(resolved.id)]; return copy; });
+              }
+            }
+          }
+        }
+      } catch {}
       const change = parseActiveSelectionEvent(text);
       if (!change) return;
       workspaceRefreshVersionRef.current += 1;
@@ -975,7 +1151,7 @@ export const RemoteHostConnection: React.FC<{
       };
       socket = current;
       current.onmessage = (event: any) => {
-        if (!disposed && socket === current) onMessage(event.data);
+        if (!disposed && socket === current) onMessage(event);
       };
       current.onopen = () => {
         if (disposed || socket !== current) return;
@@ -1063,6 +1239,13 @@ export const RemoteHostConnection: React.FC<{
     if (option.sessionId) {
       optimisticSocketSessionIdRef.current = option.sessionId;
       setOptimisticSessionId(option.sessionId);
+      if (option.sessionId !== effectiveSessionId) {
+        setChatMessages([]);
+        setChatWarnings([]);
+        setChatIsRunning(false);
+        setLiveCallbacks([]);
+        assistantTurnStartedAtRef.current = null;
+      }
     }
     // Bound the whole request, including a server that never sends headers.
     armConfirmationTimeout(option);
@@ -1174,6 +1357,34 @@ export const RemoteHostConnection: React.FC<{
     ? null
     : (optimisticSessionId ?? activeTerminal?.sessionId ?? null);
 
+
+  const renderedTargetKey = effectiveSessionId === null ? null : `${activeTunnelConnection?.machine.machineId ?? hostId}\u0000${authenticatedDeviceId ?? hostId}\u0000${effectiveSessionId}`;
+  const [renderedSessionId, setRenderedSessionId] = useState<string | null>(effectiveSessionId);
+  const [renderedTargetKeyState, setRenderedTargetKeyState] = useState(renderedTargetKey);
+  if (renderedTargetKeyState !== renderedTargetKey || renderedSessionId !== effectiveSessionId) {
+    setRenderedTargetKeyState(renderedTargetKey);
+    setRenderedSessionId(effectiveSessionId);
+    setChatMessages([]);
+    setChatWarnings([]);
+    setChatIsRunning(false);
+    setLiveCallbacks([]);
+    liveCallbacksRef.current = [];
+    setCallbackAnswers({});
+    setCallbackErrors({});
+    setReplyingCallbacks(new Set());
+    mobileRequestIdRef.current = null;
+    mobileGenerationRef.current += 1;
+    mobilePendingByGenerationRef.current.clear();
+    setMobilePending(false);
+    mobileDraftRef.current = { text: "", attachments: [] };
+    mobileHeldRef.current = undefined;
+    setMobileDraftText("");
+    setMobileDraftAttachments([]);
+    setMobileHeldRequest(undefined);
+    setMobileDeliveryStage(undefined);
+    assistantTurnStartedAtRef.current = null;
+  }
+
   const turnDurationsRef = useRef<Map<string, string>>(new Map());
 
   const finalizeAssistantTurnDuration = useCallback(() => {
@@ -1213,10 +1424,10 @@ export const RemoteHostConnection: React.FC<{
   }, [model.context.activeTabId, model.context.terminalTabs, finalizeAssistantTurnDuration]);
 
   useEffect(() => {
-    if (activeTunnelConnection && effectiveSessionId && !(sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId))) {
+    if (effectiveSessionId && token && !(sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId) ?? globalDaemonEpochRef.current)) {
       void getSessionDaemonEpoch(effectiveSessionId);
     }
-  }, [activeTunnelConnection, effectiveSessionId, getSessionDaemonEpoch, sessionEpochs]);
+  }, [effectiveSessionId, getSessionDaemonEpoch, sessionEpochs, token]);
 
   useEffect(() => {
     if (!effectiveSessionId || !token || viewMode !== "chat") {
@@ -1328,6 +1539,270 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [effectiveSessionId, token, activeTunnelConnection, transportBaseUrl, viewMode, finalizeAssistantTurnDuration]);
 
+  const currentConversationEpoch = (effectiveSessionId
+    ? (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId))
+    : null) ?? null;
+
+  const currentTranscriptIdentity: TranscriptTargetIdentity = {
+    sessionId: effectiveSessionId ?? "",
+    targetEpoch: currentConversationEpoch,
+    generation: transcriptFetchGenerationRef.current,
+    historyGeneration: lastConversationGenerationRef.current,
+  };
+  if (
+    transcriptIdentityRef.current?.sessionId !== currentTranscriptIdentity.sessionId ||
+    transcriptIdentityRef.current?.targetEpoch !== currentTranscriptIdentity.targetEpoch ||
+    transcriptIdentityRef.current?.historyGeneration !== currentTranscriptIdentity.historyGeneration
+  ) {
+    transcriptFetchGenerationRef.current += 1;
+    transcriptIdentityRef.current = {
+      ...currentTranscriptIdentity,
+      generation: transcriptFetchGenerationRef.current,
+    };
+  }
+
+  const activeMachineId = activeTunnelConnection?.machine.machineId ?? null;
+
+  const currentTargetRef = useMemo<TargetRef | null>(() => {
+    if (!effectiveSessionId) return null;
+    const epoch = (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)) ?? globalDaemonEpochRef.current;
+    if (!epoch) {
+      return null;
+    }
+    const host = activeMachineId ?? hostId;
+    const owner = authenticatedDeviceId || (typeof localStorage !== "undefined" ? localStorage.getItem(`ferryx_device_id_${hostId}`) : null) || hostId;
+    return Object.freeze({
+      hostId: host,
+      ownerId: owner,
+      epoch: /^(0|[1-9][0-9]*)$/.test(epoch) ? epoch : "0",
+      backendSessionId: effectiveSessionId,
+    });
+  }, [effectiveSessionId, sessionEpochs, activeMachineId, hostId, authenticatedDeviceId]);
+
+  const callbackTargetKey = currentTargetRef
+    ? `${currentTargetRef.hostId}\u0000${currentTargetRef.ownerId}\u0000${currentTargetRef.epoch}\u0000${currentTargetRef.backendSessionId}`
+    : null;
+  const callbackTargetKeyRef = useRef<string | null>(callbackTargetKey);
+  callbackTargetKeyRef.current = callbackTargetKey;
+  callbackTargetRef.current = currentTargetRef;
+  callbackSessionRef.current = effectiveSessionId;
+  useEffect(() => {
+    callbackGenerationRef.current += 1;
+    liveCallbacksRef.current = [];
+    setLiveCallbacks([]);
+    setCallbackAnswers({});
+    setCallbackErrors({});
+    setReplyingCallbacks(new Set());
+  }, [callbackTargetKey]);
+
+  const mobileDraftTargetKey = currentTargetRef ? draftKey(currentTargetRef) : null;
+  useEffect(() => {
+    mobileTargetRef.current = currentTargetRef;
+    mobileRequestIdRef.current = null;
+    mobileGenerationRef.current += 1;
+    mobilePendingByGenerationRef.current.clear();
+    setMobilePending(false);
+    if (!currentTargetRef) {
+      setMobileDraftText("");
+      setMobileHeldRequest(undefined);
+      setMobileDeliveryStage(undefined);
+      mobileDraftRef.current = { text: "", attachments: [] };
+      mobileHeldRef.current = undefined;
+      setMobileDraftAttachments([]);
+      return;
+    }
+    const stored = loadDraft(localStorage, currentTargetRef);
+    const nextDraft: ChatDraft = { text: stored.text, attachments: stored.attachments };
+    mobileDraftRef.current = nextDraft;
+    setMobileDraftAttachments(nextDraft.attachments);
+    mobileHeldRef.current = stored.held;
+    setMobileDraftText(nextDraft.text);
+    setMobileHeldRequest(stored.held);
+    setMobileDeliveryStage(undefined);
+  }, [mobileDraftTargetKey]);
+
+  const updateMobileDraftText = useCallback((text: string) => {
+    const target = mobileTargetRef.current;
+    if (!target) return;
+    const next = { ...mobileDraftRef.current, text };
+    mobileDraftRef.current = next;
+    setMobileDraftText(text);
+    saveDraft(localStorage, target, next, mobileHeldRef.current);
+  }, []);
+
+  const requestChatViewMode = useCallback((next: "chat" | "terminal") => {
+    if (viewMode !== "chat" || !chatCompositionActiveRef.current) {
+      setViewMode(next);
+      return;
+    }
+    pendingViewModeRef.current = next;
+    updateMobileDraftText(chatDraftBeforeCompositionRef.current);
+    document.querySelector<HTMLTextAreaElement>('[data-testid="chat-composer-textarea"]')?.blur();
+  }, [updateMobileDraftText, viewMode]);
+
+  const finishChatComposition = useCallback(() => {
+    chatCompositionActiveRef.current = false;
+    const next = pendingViewModeRef.current;
+    if (!next) return;
+    pendingViewModeRef.current = null;
+    setViewMode(next);
+  }, []);
+
+
+  const updateMobileDraftAttachments = useCallback((attachments: readonly AttachmentReceipt[]) => {
+    const target = mobileTargetRef.current;
+    if (!target) return;
+    const next = { ...mobileDraftRef.current, attachments: attachments.slice() };
+    mobileDraftRef.current = next;
+    setMobileDraftAttachments(next.attachments);
+    saveDraft(localStorage, target, next, mobileHeldRef.current);
+  }, []);
+
+  const handleMobileAttachmentSend = useCallback((attachments: readonly ComposerAttachment[]) => {
+    const receipts = attachments.flatMap((attachment) => attachment.receipt ? [attachment.receipt] : []);
+    updateMobileDraftAttachments(receipts);
+  }, [updateMobileDraftAttachments]);
+
+  const setHeldMobileRequest = useCallback((target: TargetRef, request: HeldRequest | undefined) => {
+    if (!mobileTargetRef.current || draftKey(mobileTargetRef.current) !== draftKey(target)) return;
+    mobileHeldRef.current = request;
+    setMobileHeldRequest(request);
+    saveDraft(localStorage, target, mobileDraftRef.current, request);
+  }, []);
+
+  const beginMobileRequest = useCallback((generation: number) => {
+    const nextCount = (mobilePendingByGenerationRef.current.get(generation) ?? 0) + 1;
+    mobilePendingByGenerationRef.current.set(generation, nextCount);
+    if (generation === mobileGenerationRef.current) setMobilePending(true);
+  }, []);
+
+  const finishMobileRequest = useCallback((generation: number) => {
+    const nextCount = Math.max(0, (mobilePendingByGenerationRef.current.get(generation) ?? 1) - 1);
+    if (nextCount === 0) mobilePendingByGenerationRef.current.delete(generation);
+    else mobilePendingByGenerationRef.current.set(generation, nextCount);
+    if (generation === mobileGenerationRef.current) setMobilePending(nextCount > 0);
+  }, []);
+
+  const managedChatService = useMemo<RemoteManagedChatService>(() => {
+    return createRemoteManagedChatService({
+      baseUrl: transportBaseUrl,
+      token: () => token,
+    });
+  }, [transportBaseUrl, token]);
+
+  const [resultFiles, setResultFiles] = useState<Awaited<ReturnType<RemoteManagedChatService["fetchResultFiles"]>>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    setResultFiles([]);
+    if (viewMode !== "chat" || !currentTargetRef || !token) return;
+    const target = currentTargetRef;
+    void managedChatService.fetchResultFiles(target)
+      .then((files) => {
+        if (!cancelled && currentTargetRef && draftKey(currentTargetRef) === draftKey(target)) setResultFiles(files);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled && error instanceof ManagedChatRemoteError) {
+          setChatWarnings((prev) => [...prev, `Result file listing failed: ${error.message}`]);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [viewMode, currentTargetRef, token, managedChatService]);
+
+  const openResultFile = useCallback((fileId: string) => {
+    if (!currentTargetRef || !token) return;
+    const target = currentTargetRef;
+    void managedChatService.openResultPreview(target, fileId)
+      .then((url) => {
+        if (currentTargetRef && draftKey(currentTargetRef) === draftKey(target)) {
+          const previewWindow = window.open("about:blank", "_blank");
+          if (previewWindow) {
+            previewWindow.opener = null;
+            previewWindow.location.replace(url);
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        setChatWarnings((prev) => [...prev, `Result preview failed: ${error instanceof Error ? error.message : String(error)}`]);
+      });
+  }, [currentTargetRef, managedChatService, token]);
+
+  const submitCallbackReply = useCallback(async (callback: RemoteManagedCallback, result: unknown) => {
+    const id = String(callback.id);
+    if (replyingCallbacks.has(id)) return;
+    const stillCurrent = liveCallbacksRef.current.find((item) =>
+      String(item.id) === id && item.threadId === callback.threadId && item.turnId === callback.turnId &&
+      item.callbackIncarnation === callback.callbackIncarnation && item.target && callback.target &&
+      item.target.hostId === callback.target.hostId && item.target.ownerId === callback.target.ownerId &&
+      item.target.epoch === callback.target.epoch && item.target.backendSessionId === callback.target.backendSessionId
+    );
+    const target = currentTargetRef;
+    const keyOf = (value: TargetRef) => `${value.hostId}\u0000${value.ownerId}\u0000${value.epoch}\u0000${value.backendSessionId}`;
+        if (!target || !stillCurrent || !callback.target || !Number.isSafeInteger(callback.callbackIncarnation) || !callback.callbackIncarnation ||
+        keyOf(target) !== callbackTargetKeyRef.current || keyOf(target) !== keyOf(callback.target) ||
+        callbackSessionRef.current !== callback.target.backendSessionId) {
+      setCallbackErrors((prev) => ({ ...prev, [id]: "This callback is no longer current for the selected session. Wait for the current request before replying." }));
+      return;
+    }
+    setCallbackErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    setReplyingCallbacks((prev) => new Set(prev).add(id));
+    const generation = callbackGenerationRef.current;
+    try {
+      await managedChatService.reply(target, callback, result);
+      if (generation === callbackGenerationRef.current && callbackTargetKeyRef.current === keyOf(target) && liveCallbacksRef.current.includes(stillCurrent)) {
+        const next = liveCallbacksRef.current.filter((item) => item !== stillCurrent);
+        liveCallbacksRef.current = next;
+        setLiveCallbacks(next);
+        setCallbackAnswers((prev) => { const copy = { ...prev }; delete copy[id]; return copy; });
+      }
+    } catch (error: unknown) {
+      if (generation === callbackGenerationRef.current && callbackTargetKeyRef.current === keyOf(target) && liveCallbacksRef.current.includes(stillCurrent)) {
+        const code = error instanceof ManagedChatRemoteError ? error.code : "CALLBACK_REPLY_FAILED";
+        const message = error instanceof Error ? error.message : "Reply failed. Correct the answer or retry.";
+        setCallbackErrors((prev) => ({ ...prev, [id]: `${code}: ${message}` }));
+      }
+    } finally {
+      setReplyingCallbacks((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  }, [currentTargetRef, managedChatService, replyingCallbacks]);
+
+  const handleStageAttachment = useCallback(
+    async (file: File, signal?: AbortSignal, customAttachmentId?: string): Promise<AttachmentReceipt> => {
+      if (!currentTargetRef || !token) {
+        throw new Error("Cannot stage attachment: no active session or daemon epoch unavailable");
+      }
+      const controller = signal ? undefined : new AbortController();
+      const activeSignal = signal ?? controller!.signal;
+      const receipt = await managedChatService.stage(currentTargetRef, file, activeSignal, customAttachmentId);
+      if (receipt.hostId !== currentTargetRef.hostId || receipt.sizeBytes !== file.size) {
+        throw new Error("Attachment receipt does not match target host or size");
+      }
+      return receipt;
+    },
+    [currentTargetRef, token, managedChatService]
+  );
+
+  const handleCancelAttachment = useCallback(
+    async (attachmentIdOrReceipt: string | AttachmentReceipt): Promise<void> => {
+      if (!currentTargetRef || !token) return;
+      const attachmentId = typeof attachmentIdOrReceipt === "string"
+        ? attachmentIdOrReceipt
+        : attachmentIdOrReceipt.attachmentId;
+      try {
+        await cancelRemoteAttachment(
+          {
+            baseUrl: transportBaseUrl,
+            token,
+          },
+          currentTargetRef,
+          attachmentId
+        );
+      } catch (err: unknown) {
+        console.warn("Failed to cancel remote attachment", err);
+      }
+    },
+    [currentTargetRef, token, transportBaseUrl]
+  );
+
   useEffect(() => {
     if (viewMode !== "chat" || !effectiveSessionId || !token) return;
 
@@ -1335,13 +1810,22 @@ export const RemoteHostConnection: React.FC<{
     let fetching = false;
     const controller = new AbortController();
 
-    if (lastConversationSessionRef.current !== effectiveSessionId) {
+    const targetChanged =
+      lastConversationSessionRef.current !== effectiveSessionId ||
+      (lastConversationEpochRef.current !== null &&
+        currentConversationEpoch !== null &&
+        lastConversationEpochRef.current !== currentConversationEpoch);
+
+    if (targetChanged) {
       lastConversationSessionRef.current = effectiveSessionId;
+      lastConversationEpochRef.current = currentConversationEpoch;
+      lastConversationGenerationRef.current = undefined;
       retentionTruncatedRef.current = false;
       revokeChatAttachmentUrls();
       setChatMessages([]);
       setChatWarnings([]);
       setChatIsRunning(false);
+      setLiveCallbacks([]);
       assistantTurnStartedAtRef.current = null;
       turnDurationsRef.current.clear();
     }
@@ -1350,15 +1834,67 @@ export const RemoteHostConnection: React.FC<{
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
+
+      const fetchGeneration = transcriptFetchGenerationRef.current;
+      const targetIdentity: TranscriptTargetIdentity = {
+        sessionId: effectiveSessionId,
+        targetEpoch: currentConversationEpoch,
+        generation: fetchGeneration,
+        historyGeneration: lastConversationGenerationRef.current,
+      };
+      const fetchBaseUrl = transportBaseUrl;
+
       try {
         const page = await fetchAgentConversation({
-          baseUrl: transportBaseUrl,
+          baseUrl: fetchBaseUrl,
           sessionId: effectiveSessionId,
           token,
           limit: 200,
           signal: controller.signal,
         });
-        if (cancelled) return;
+
+        const liveEpoch = (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)) ?? null;
+        const isCurrent = isTranscriptResponseCurrent(
+          targetIdentity,
+          {
+            sessionId: effectiveSessionId,
+            targetEpoch: liveEpoch,
+            generation: transcriptFetchGenerationRef.current,
+            historyGeneration: lastConversationGenerationRef.current,
+          },
+          page,
+        );
+
+        if (!isCurrent || cancelled || transportBaseUrl !== fetchBaseUrl) {
+          return;
+        }
+
+        const resetOccurred = hasConversationReset(
+          lastConversationGenerationRef.current,
+          page.conversationGeneration,
+        );
+
+        if (page.conversationGeneration !== undefined) {
+          lastConversationGenerationRef.current = page.conversationGeneration;
+        }
+
+        let commitIdentity = targetIdentity;
+        if (resetOccurred) {
+          commitIdentity = {
+            sessionId: effectiveSessionId,
+            targetEpoch: currentConversationEpoch,
+            generation: transcriptFetchGenerationRef.current + 1,
+            historyGeneration: page.conversationGeneration,
+          };
+          transcriptFetchGenerationRef.current = commitIdentity.generation;
+          transcriptIdentityRef.current = commitIdentity;
+          revokeChatAttachmentUrls();
+          retentionTruncatedRef.current = false;
+          setChatWarnings([]);
+          assistantTurnStartedAtRef.current = null;
+          turnDurationsRef.current.clear();
+        }
+
         const retentionWarning = "Older messages are hidden to keep the phone view responsive.";
         setChatWarnings(
           retentionTruncatedRef.current && !page.warnings.includes(retentionWarning)
@@ -1366,18 +1902,27 @@ export const RemoteHostConnection: React.FC<{
             : [...page.warnings],
         );
         setChatMessages((prev) => {
+          if (
+            !isTranscriptResponseCurrent(commitIdentity, {
+              sessionId: transcriptIdentityRef.current?.sessionId ?? "",
+              targetEpoch: transcriptIdentityRef.current?.targetEpoch ?? null,
+              generation: transcriptFetchGenerationRef.current,
+              historyGeneration: transcriptIdentityRef.current?.historyGeneration,
+            })
+          ) return prev;
+          const baseMessages = resetOccurred ? [] : prev;
           const mapped = mapAgentConversation(page.items, {
             activeTurnStartedAt: assistantTurnStartedAtRef.current,
-            previousMessages: prev,
+            previousMessages: baseMessages,
             turnDurationsMap: turnDurationsRef.current,
           });
           const optimisticText = new Set(
-            prev
+            baseMessages
               .filter((message) => message.role === "user" && /^user-\d{13}$/.test(message.id))
               .map((message) => message.content),
           );
           const coveredOrdinals = new Set(page.items.map((item) => item.ordinal));
-          const kept = prev.filter((message) => {
+          const kept = baseMessages.filter((message) => {
             const match = /^(?:user|assistant)-(\d+)$/.exec(message.id);
             return match === null || !coveredOrdinals.has(Number(match[1]));
           });
@@ -1402,19 +1947,8 @@ export const RemoteHostConnection: React.FC<{
           return capped;
         });
       } catch (error) {
-        if (cancelled) return;
-        if (error instanceof ConversationFetchError && error.code === "TRANSCRIPT_NOT_FOUND") {
-          revokeChatAttachmentUrls();
-          retentionTruncatedRef.current = false;
-          setChatWarnings((prev) =>
-            prev.filter((warning) => warning !== "Older messages are hidden to keep the phone view responsive."),
-          );
-          setChatMessages([]);
-        } else {
-          const pollFailedWarning = "Transcript refresh failed; showing the last known state.";
-          setChatWarnings((prev) =>
-            prev.includes(pollFailedWarning) ? prev : [...prev, pollFailedWarning],
-          );
+        if (!cancelled && error instanceof ConversationFetchError && error.code !== "TRANSCRIPT_NOT_FOUND") {
+          console.warn("Agent conversation poll failed", error);
         }
       } finally {
         fetching = false;
@@ -1431,7 +1965,7 @@ export const RemoteHostConnection: React.FC<{
       controller.abort();
       clearInterval(timer);
     };
-  }, [viewMode, effectiveSessionId, token, transportBaseUrl]);
+  }, [viewMode, effectiveSessionId, token, transportBaseUrl, currentConversationEpoch, revokeChatAttachmentUrls]);
 
   /* Declared above the auth early return so the hook count is identical on the
      login screen and after pairing; a hook below the guard changes the order. */
@@ -1497,7 +2031,6 @@ export const RemoteHostConnection: React.FC<{
   // Signed in to the account but no worktree chosen yet: only the collapsed top picker
   // is shown and the body stays blank until an explicit choice.
   const accountPreselection = isAccountMode && !token;
-  const activeMachineId = activeTunnelConnection?.machine.machineId ?? null;
 
   const accountPickerStatus = isAccountMode ? (
     <div data-testid="remote-account-inventory-status" className="space-y-0.5 pb-1">
@@ -1705,11 +2238,11 @@ export const RemoteHostConnection: React.FC<{
             </button>
           ) : null}
 
-          <div className="hidden items-center gap-1 border-l border-chat-border/40 pl-2 sm:flex">
+          <div className="flex items-center gap-1 border-l border-chat-border/40 pl-2">
             <button
               type="button"
               data-testid="remote-view-mode-chat"
-              onClick={() => setViewMode("chat")}
+              onClick={() => requestChatViewMode("chat")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "chat"
                   ? "bg-chat-surface-raised text-chat-foreground"
@@ -1721,7 +2254,7 @@ export const RemoteHostConnection: React.FC<{
             <button
               type="button"
               data-testid="remote-view-mode-terminal"
-              onClick={() => setViewMode("terminal")}
+              onClick={() => requestChatViewMode("terminal")}
               className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
                 viewMode === "terminal"
                   ? "bg-chat-surface-raised text-chat-foreground"
@@ -1823,7 +2356,7 @@ export const RemoteHostConnection: React.FC<{
               )}
             </div>
           ) : viewMode === "chat" ? renderLazy(
-            <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
+            <div data-testid="chat-mode" aria-label="Managed Codex chat" className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden" onCompositionStart={(event) => { if ((event.target as HTMLElement).dataset.testid === "chat-composer-textarea") { chatCompositionActiveRef.current = true; chatDraftBeforeCompositionRef.current = mobileDraftRef.current.text; } }} onCompositionEnd={(event) => { if ((event.target as HTMLElement).dataset.testid === "chat-composer-textarea") finishChatComposition(); }}>
               <MobileChatWorkspace
                 headerTitle={
                   model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
@@ -1832,24 +2365,131 @@ export const RemoteHostConnection: React.FC<{
                   undefined
                 }
                 headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
+                headerActions={
+                  <button
+                    type="button"
+                    data-testid="agent-start"
+                    disabled={!currentTargetRef || !token || chatIsRunning}
+                    onClick={() => {
+                      if (!currentTargetRef || !token) return;
+                      void managedChatService
+                        .start(currentTargetRef, "codex")
+                        .then((res: { threadId: string }) => {
+                          const notice = `Managed Codex started (thread: ${res.threadId})`;
+                          setChatWarnings((prev) =>
+                            prev.includes(notice) ? prev : [...prev, notice]
+                          );
+                        })
+                        .catch((err: unknown) => {
+                          const errorMsg = `Failed to start agent: ${err instanceof Error ? err.message : String(err)}`;
+                          setChatWarnings((prev) =>
+                            prev.includes(errorMsg) ? prev : [...prev, errorMsg]
+                          );
+                          // NEVER fall back to terminal text send on start failure!
+                        });
+                    }}
+                    className="px-2 py-1 text-xs font-medium border border-chat-border text-chat-foreground bg-chat-surface/90 hover:bg-chat-surface-hover rounded transition-colors disabled:opacity-50"
+                  >
+                    Start Codex
+                  </button>
+                }
                 onBack={() => setSelectorOpen(true)}
                 messages={chatMessages}
+                resultFiles={resultFiles}
+                onOpenResultFile={openResultFile}
                 warnings={chatWarnings}
                 isRunning={chatIsRunning}
-                onSendMessage={(text: string, attachments: readonly ComposerAttachment[]) => {
-                  // Attachments are blocked by the mobile composer until remote upload is supported.
-                  if (attachments.length > 0) return;
-                  const ws = terminalSocketRef.current;
-                  const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
-
-                  if (!isSocketOpen) {
-                    const socketClosedWarning =
-                      "Message not sent: the terminal connection is closed. Reopen the terminal and try again.";
-                    setChatWarnings((prev) =>
-                      prev.includes(socketClosedWarning) ? prev : [...prev, socketClosedWarning],
-                    );
-                    console.warn("Terminal WebSocket is not open for input");
+                draftText={mobileDraftText}
+                onDraftTextChange={updateMobileDraftText}
+                draftAttachments={mobileDraftAttachments}
+                onDraftAttachmentsChange={updateMobileDraftAttachments}
+                sendPending={mobilePending}
+                deliveryStage={mobileDeliveryStage}
+                held={Boolean(mobileHeldRequest)}
+                onRetryHeld={() => {
+                  const target = mobileTargetRef.current;
+                  const held = mobileHeldRef.current;
+                  if (!target || !held || mobilePendingByGenerationRef.current.has(mobileGenerationRef.current) || draftKey(target) !== mobileDraftTargetKey) return;
+                  const generation = mobileGenerationRef.current;
+                  const requestId = held.requestId;
+                  mobileRequestIdRef.current = requestId;
+                  beginMobileRequest(generation);
+                  setMobileDeliveryStage(undefined);
+                  void managedChatService.send(target, structuredClone(held.payload), requestId)
+                    .then((receipt) => {
+                      if (mobileRequestIdRef.current !== requestId || !mobileTargetRef.current || draftKey(mobileTargetRef.current) !== draftKey(target)) return;
+                      if (receipt.requestId !== requestId || draftKey(receipt.target) !== draftKey(target) || receipt.stage === "staged") {
+                        setMobileDeliveryStage(receipt.stage);
+                        setHeldMobileRequest(target, held);
+                        setChatWarnings((prev) => [...prev, receipt.requestId !== requestId || draftKey(receipt.target) !== draftKey(target)
+                          ? "Message receipt did not match this held request. The draft remains held; retry explicitly."
+                          : "Message is staged but not yet accepted. The draft remains held; retry explicitly."]);
+                        return;
+                      }
+                      setMobileDeliveryStage(receipt.stage);
+                      setHeldMobileRequest(target, undefined);
+                      if (sameDraft(mobileDraftRef.current, held.payload)) {
+                        mobileDraftRef.current = { text: "", attachments: [] };
+                        setMobileDraftAttachments([]);
+                        setMobileDraftText("");
+                        saveDraft(localStorage, target, mobileDraftRef.current);
+                      } else {
+                        const current = { ...mobileDraftRef.current };
+                        const sentIds = new Set(held.payload.attachments.map((attachment) => attachment.attachmentId));
+                        const remaining = current.attachments.filter((attachment) => !sentIds.has(attachment.attachmentId));
+                        const text = current.text === held.payload.text ? "" : current.text;
+                        if (remaining.length !== current.attachments.length || text !== current.text) {
+                          mobileDraftRef.current = { ...current, text, attachments: remaining };
+                          setMobileDraftAttachments(remaining);
+                          if (text !== current.text) setMobileDraftText(text);
+                          saveDraft(localStorage, target, mobileDraftRef.current);
+                        }
+                      }
+                    })
+                    .catch((error: unknown) => {
+                      if (mobileRequestIdRef.current === requestId && mobileTargetRef.current && draftKey(mobileTargetRef.current) === draftKey(target)) {
+                        setHeldMobileRequest(target, held);
+                        const code = error instanceof ManagedChatRemoteError ? error.code : "";
+                        const staleTarget = code === "STALE_TARGET" || code === "TARGET_EXPIRED" || code === "TARGET_MISMATCH" || code === "RECEIPT_TARGET_MISMATCH";
+                        const mismatchedReceipt = code === "RECEIPT_REQUEST_MISMATCH" || code === "RECEIPT_TARGET_MISMATCH";
+                        setChatWarnings((prev) => [...prev, staleTarget
+                          ? "Message held because the selected target is stale. Select the current target before retrying."
+                          : mismatchedReceipt
+                          ? "Message receipt did not match this held request. The draft remains held; retry explicitly."
+                          : `Message delivery failed: ${error instanceof Error ? error.message : String(error)}`]);
+                      }
+                    })
+                    .finally(() => finishMobileRequest(generation));
+                }}
+                onStageAttachment={handleStageAttachment}
+                onCancelAttachment={handleCancelAttachment}
+                onSendMessage={async (text: string, attachments: readonly ComposerAttachment[]) => {
+                  handleMobileAttachmentSend(attachments);
+                  if (!currentTargetRef || !token) {
+                    const epochMissing = Boolean(effectiveSessionId && !(sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId) ?? globalDaemonEpochRef.current));
+                    if (epochMissing) {
+                      setChatWarnings((prev) => [...prev, "Cannot send message: daemon epoch unavailable for session"]);
+                    }
                     return;
+                  }
+                  const target = Object.freeze({ ...currentTargetRef });
+                  const targetKey = draftKey(target);
+                  const generation = mobileGenerationRef.current;
+                  const requestId = safeRandomUUID();
+                  const snapshot: ChatDraft = structuredClone({ text, attachments: attachments.flatMap((a) => a.receipt ? [a.receipt] : []) });
+                  if (snapshot.attachments.length !== attachments.length) return;
+
+                  const stagedReceipts: AttachmentReceipt[] = [];
+                  for (const att of attachments) {
+                    if (!att.receipt) {
+                      setChatWarnings((prev) => [...prev, "Cannot send message: attachments are still staging"]);
+                      return;
+                    }
+                    if (att.receipt.hostId !== target.hostId) {
+                      setChatWarnings((prev) => [...prev, "Cannot send message: attachment target mismatch"]);
+                      return;
+                    }
+                    stagedReceipts.push(att.receipt);
                   }
 
                   const userMsg: MobileChatMessageProps = {
@@ -1857,39 +2497,71 @@ export const RemoteHostConnection: React.FC<{
                     role: "user",
                     content: text,
                     timestamp: Date.now(),
-                    attachments: [],
+                    attachments: attachments.map((a) => ({
+                      id: a.id,
+                      name: a.name,
+                      type: a.type,
+                      url: a.url,
+                      size: a.size,
+                    })),
                   };
                   setChatMessages((prev) => [...prev, userMsg]);
                   assistantTurnStartedAtRef.current = Date.now();
-                  setChatIsRunning(true);
 
-                  if (effectiveSessionId && token) {
-                    const commandPayload = text.endsWith("\n") ? text : `${text}\n`;
-                    ws!.send(commandPayload);
+                  const draftPayload: ChatDraft = Object.freeze({ text, attachments: Object.freeze(stagedReceipts.slice()) });
+                  mobileRequestIdRef.current = requestId;
+                  beginMobileRequest(generation);
+                  setChatIsRunning(true);
+                  setMobileDeliveryStage(undefined);
+                  setHeldMobileRequest(target, undefined);
+
+                  // Route message strictly through ManagedChat service - ZERO PTY fallback!
+                  try {
+                    const receipt = await managedChatService.send(target, structuredClone(draftPayload), requestId);
+                    if (mobileRequestIdRef.current !== requestId || !mobileTargetRef.current || draftKey(mobileTargetRef.current) !== targetKey) return;
+                    if (receipt.requestId !== requestId || draftKey(receipt.target) !== targetKey || receipt.stage === "staged") {
+                      setMobileDeliveryStage(receipt.stage);
+                      setHeldMobileRequest(target, { requestId, payload: structuredClone(draftPayload) });
+                      return;
+                    }
+                    setMobileDeliveryStage(receipt.stage);
+                    setHeldMobileRequest(target, undefined);
+                    if (sameDraft(mobileDraftRef.current, draftPayload)) {
+                      mobileDraftRef.current = { text: "", attachments: [] };
+                      setMobileDraftAttachments([]);
+                      setMobileDraftText("");
+                      saveDraft(localStorage, target, mobileDraftRef.current);
+                    } else {
+                      const current = { ...mobileDraftRef.current };
+                      const sentIds = new Set(draftPayload.attachments.map((attachment) => attachment.attachmentId));
+                      const remaining = current.attachments.filter((attachment) => !sentIds.has(attachment.attachmentId));
+                      const currentText = current.text === draftPayload.text ? "" : current.text;
+                      if (remaining.length !== current.attachments.length || currentText !== current.text) {
+                        mobileDraftRef.current = { ...current, text: currentText, attachments: remaining };
+                        setMobileDraftAttachments(remaining);
+                        if (currentText !== current.text) setMobileDraftText(currentText);
+                        saveDraft(localStorage, target, mobileDraftRef.current);
+                      }
+                    }
+                  } catch (err: unknown) {
+                    if (mobileRequestIdRef.current === requestId && mobileTargetRef.current && draftKey(mobileTargetRef.current) === targetKey) {
+                      finalizeAssistantTurnDuration();
+                      setChatIsRunning(false);
+                      setHeldMobileRequest(target, { requestId, payload: structuredClone(draftPayload) });
+                      const staleTarget = err instanceof ManagedChatRemoteError && (err.code === "STALE_TARGET" || err.code === "TARGET_MISMATCH");
+                      setChatWarnings((prev) => [...prev, staleTarget
+                        ? "Message held because the selected target is stale. Select the current target before retrying."
+                        : `Message delivery failed: ${err instanceof Error ? err.message : String(err)}`]);
+                    }
+                  } finally {
+                    finishMobileRequest(generation);
                   }
                 }}
                 onStopExecution={() => {
-                  const ws = terminalSocketRef.current;
-                  const isSocketOpen = Boolean(ws && ws.readyState === 1 /* OPEN */);
-                  if (effectiveSessionId && token) {
-                    if (isSocketOpen) {
-                      const interruptPayload = "\x03";
-                      ws!.send(interruptPayload);
-                    } else {
-                      const interruptFailedWarning =
-                        "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
-                      setChatWarnings((prev) =>
-                        prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
-                      );
-                      console.warn("Terminal WebSocket is not open for interrupt");
-                    }
-                  } else if (!isSocketOpen) {
-                    const interruptFailedWarning =
-                      "Interrupt not sent: the terminal connection is closed. Reopen the terminal and try again.";
-                    setChatWarnings((prev) =>
-                      prev.includes(interruptFailedWarning) ? prev : [...prev, interruptFailedWarning],
-                    );
-                    console.warn("Terminal WebSocket is not open for interrupt");
+                  if (currentTargetRef && token) {
+                    void managedChatService.stop(currentTargetRef).catch((err: unknown) => {
+                      console.warn("Failed to stop agent execution via managed chat service", err);
+                    });
                   }
                   finalizeAssistantTurnDuration();
                   setChatIsRunning(false);
@@ -1917,6 +2589,86 @@ export const RemoteHostConnection: React.FC<{
                     : undefined
                 }
               />
+              {liveCallbacks.length > 0 && currentTargetRef && (
+                <div data-testid="live-callbacks-container" className="p-2 border-t border-chat-border bg-chat-surface/90 space-y-2">
+                  {liveCallbacks.map((cb) => (
+                    <div key={`${String(cb.id)}:${cb.callbackIncarnation ?? "missing"}`} data-testid={`callback-card-${cb.id}`} className="rounded-md border border-chat-border p-2 text-xs">
+                      <p className="font-semibold text-chat-foreground">{cb.kind === "approval" ? "Approval Required" : "Question"}</p>
+                      <p className="mt-1 text-chat-foreground-secondary">{cb.text}</p>
+                      {cb.kind === "question" ? (cb.questions ?? []).map((question) => {
+                        const required = (question as typeof question & { required?: boolean }).required !== false;
+                        const value = callbackAnswers[String(cb.id)]?.[question.id] ?? "";
+                        return (
+                          <label key={question.id} className="mt-2 flex flex-col gap-1">
+                            <span>{question.question}{question.isSecret ? " (secret)" : ""}</span>
+                            {question.options?.length ? (
+                              <select
+                                aria-label={question.question}
+                                data-testid={`callback-answer-${question.id}`}
+                                required={required}
+                                value={value}
+                                onChange={(event) => setCallbackAnswers((prev) => ({ ...prev, [String(cb.id)]: { ...prev[String(cb.id)], [question.id]: event.target.value } }))}
+                                className="rounded border border-border bg-background px-2 py-1"
+                              >
+                                <option value="">Select an option</option>
+                                {question.options.map((option) => <option key={option.label} value={option.label}>{option.label}{option.description ? ` - ${option.description}` : ""}</option>)}
+                              </select>
+                            ) : (
+                              <input
+                                aria-label={question.question}
+                                data-testid={`callback-answer-${question.id}`}
+                                type={question.isSecret ? "password" : "text"}
+                                required={required}
+                                value={value}
+                                autoComplete={question.isSecret ? "new-password" : undefined}
+                                onChange={(event) => setCallbackAnswers((prev) => ({ ...prev, [String(cb.id)]: { ...prev[String(cb.id)], [question.id]: event.target.value } }))}
+                                className="rounded border border-border bg-background px-2 py-1"
+                              />
+                            )}
+                          </label>
+                        );
+                      }) : null}
+                      {callbackErrors[String(cb.id)] ? <p role="alert" className="mt-2 text-destructive">{callbackErrors[String(cb.id)]} Correct the answer or retry.</p> : null}
+                      <div className="mt-2 flex gap-2">
+                        {cb.kind === "approval" ? (
+                          <>
+                            <button
+                              type="button"
+                              data-testid="approval-accept"
+                              disabled={replyingCallbacks.has(String(cb.id))}
+                              onClick={() => void submitCallbackReply(cb, { decision: "accept" })}
+                              className="px-2.5 py-1 bg-primary text-primary-foreground rounded text-xs font-medium"
+                            >
+                              Accept
+                            </button>
+                            <button
+                              type="button"
+                              data-testid="approval-decline"
+                              disabled={replyingCallbacks.has(String(cb.id))}
+                              onClick={() => {
+                                void submitCallbackReply(cb, { decision: "decline" });
+                              }}
+                              className="px-2.5 py-1 border border-border rounded text-xs font-medium"
+                            >
+                              Decline
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            data-testid="question-submit"
+                            disabled={replyingCallbacks.has(String(cb.id)) || (cb.questions ?? []).some((question) => !callbackAnswers[String(cb.id)]?.[question.id]?.trim())}
+                            onClick={() => void submitCallbackReply(cb, { answers: Object.fromEntries((cb.questions ?? []).map((question) => [question.id, callbackAnswers[String(cb.id)]?.[question.id] ?? ""])) })}
+                            className="px-2.5 py-1 bg-primary text-primary-foreground rounded text-xs font-medium"
+                          >
+                            Submit Answer
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : viewMode === "browser" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
@@ -1983,40 +2735,42 @@ export const RemoteHostConnection: React.FC<{
               )}
             </div>
           ) : effectiveSessionId && token ? renderLazy(
-            <RemoteTerminal
-              key={`${effectiveSessionId}:${terminalRetryGeneration}`}
-              sessionId={effectiveSessionId}
-              token={token}
-              title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
-              transportUrl={transportBaseUrl}
-              onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
-              activeTabId={model.context.activeTabId}
-              onBack={() => setViewMode("chat")}
-              embedded
-              onSwipePreviousTab={handleSwipePreviousTab}
-              onSwipeNextTab={handleSwipeNextTab}
-              onSocketLifecycle={handleTerminalSocketLifecycle}
-              isAccountSession={Boolean(activeTunnelConnection)}
-              daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
-              createWebSocket={
-                activeTunnelConnection
-                  ? async (path) => {
-                      let targetPath = path;
-                      if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
-                        const epoch = await getSessionDaemonEpoch(effectiveSessionId);
-                        if (!epoch) {
-                          throw new Error(
-                            `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
-                          );
+            <div data-testid="chat-mode" aria-label="Terminal" className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+              <RemoteTerminal
+                key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+                sessionId={effectiveSessionId}
+                token={token}
+                title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
+                transportUrl={transportBaseUrl}
+                onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
+                activeTabId={model.context.activeTabId}
+                onBack={() => setViewMode("chat")}
+                embedded
+                onSwipePreviousTab={handleSwipePreviousTab}
+                onSwipeNextTab={handleSwipeNextTab}
+                onSocketLifecycle={handleTerminalSocketLifecycle}
+                isAccountSession={Boolean(activeTunnelConnection)}
+                daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
+                createWebSocket={
+                  activeTunnelConnection
+                    ? async (path) => {
+                        let targetPath = path;
+                        if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
+                          const epoch = await getSessionDaemonEpoch(effectiveSessionId);
+                          if (!epoch) {
+                            throw new Error(
+                              `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
+                            );
+                          }
+                          const sep = targetPath.includes("?") ? "&" : "?";
+                          targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
                         }
-                        const sep = targetPath.includes("?") ? "&" : "?";
-                        targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
+                        return activeTunnelConnection.openWebSocket(targetPath);
                       }
-                      return activeTunnelConnection.openWebSocket(targetPath);
-                    }
-                  : undefined
-              }
-            />
+                    : undefined
+                }
+              />
+            </div>
           ) : null}
       </RemoteWorkspaceMirror>
 

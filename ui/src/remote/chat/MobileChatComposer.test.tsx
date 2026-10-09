@@ -1,13 +1,54 @@
 import "@testing-library/jest-dom/vitest";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { MobileChatComposer } from "./MobileChatComposer";
+import { VOICE_STATUS, type SpeechRecognitionEventLike, type SpeechRecognitionLike } from "./voiceToDraft";
+import type { VoiceRecognitionFactory } from "./voiceToDraft";
+
+class FakeRecognition implements SpeechRecognitionLike {
+  continuous = false;
+  interimResults = false;
+  lang = "";
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null = null;
+  onerror: ((event: { error: string; message?: string }) => void) | null = null;
+  onend: (() => void) | null = null;
+  abortCalls = 0;
+  start(): void {}
+  stop(): void {}
+  abort(): void { this.abortCalls += 1; }
+  emitFinal(text: string): void {
+    act(() => this.onresult?.({ resultIndex: 0, results: [{ isFinal: true, transcript: text }] }));
+  }
+  emitError(error: string): void {
+    act(() => this.onerror?.({ error }));
+  }
+}
+
+function ControlledComposerHarness({
+  recognition,
+  onSend,
+}: {
+  recognition: FakeRecognition;
+  onSend: (text: string, attachments: readonly import("./MobileChatComponents").ChatAttachment[]) => void;
+}) {
+  const [draftText, setDraftText] = useState("");
+  return (
+    <MobileChatComposer
+      targetKey="host/session-a"
+      draftText={draftText}
+      onDraftTextChange={setDraftText}
+      onSend={onSend}
+      createVoiceRecognition={() => recognition}
+    />
+  );
+}
 
 describe("MobileChatComposer", () => {
   beforeEach(cleanup);
   afterEach(cleanup);
 
-  it("renders the T3 composer row with attach, mic, and circular send controls", () => {
+  it("renders the composer row with truthful unsupported voice status", () => {
     const onSend = vi.fn();
     render(<MobileChatComposer onSend={onSend} />);
 
@@ -17,10 +58,76 @@ describe("MobileChatComposer", () => {
       "Ask the agent…"
     );
     expect(screen.getByTestId("attach-file-button")).toBeInTheDocument();
-    expect(screen.getByTestId("mic-button")).toBeDisabled();
+    expect(screen.getByTestId("voice-dictation-button")).toBeDisabled();
+    expect(screen.getByTestId("voice-dictation-status")).toHaveTextContent(VOICE_STATUS.unsupported);
     expect(screen.getByTestId("file-upload-input")).toBeInTheDocument();
     expect(screen.queryByTestId("mobile-chat-quick-actions")).not.toBeInTheDocument();
     expect(screen.queryByTestId("terminal-accessory-bar")).not.toBeInTheDocument();
+  });
+
+  it("puts synthetic dictation into the editable draft and requires explicit send", () => {
+    const recognition = new FakeRecognition();
+    const onSend = vi.fn();
+    render(<ControlledComposerHarness recognition={recognition} onSend={onSend} />);
+    expect(screen.getByTestId("voice-dictation-button")).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId("voice-dictation-button"));
+    const lateResult = recognition.onresult;
+    expect(lateResult).not.toBeNull();
+    fireEvent.click(screen.getByTestId("voice-dictation-button"));
+    expect(recognition.abortCalls).toBe(1);
+    recognition.emitFinal("synthetic transcript");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId("send-button")).toBeDisabled();
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    act(() => lateResult?.({ resultIndex: 0, results: [{ isFinal: true, transcript: "synthetic transcript" }] }));
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+    fireEvent.click(screen.getByTestId("voice-dictation-button"));
+    recognition.emitFinal("synthetic transcript");
+    expect(screen.getByTestId("send-button")).not.toBeDisabled();
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("synthetic transcript");
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(onSend).toHaveBeenCalledWith("synthetic transcript", []);
+    expect(recognition.abortCalls).toBe(1);
+  });
+
+  it("drops a synthetic late transcript when the managed target changes", () => {
+    const recognition = new FakeRecognition();
+    const onDraftTextChange = vi.fn();
+    const onSend = vi.fn();
+    const createVoiceRecognition: VoiceRecognitionFactory = () => recognition;
+    const { rerender } = render(
+      <MobileChatComposer targetKey="host/session-a" draftText="" onDraftTextChange={onDraftTextChange} onSend={onSend} createVoiceRecognition={createVoiceRecognition} />
+    );
+    fireEvent.click(screen.getByTestId("voice-dictation-button"));
+    const lateResult = recognition.onresult;
+    rerender(
+      <MobileChatComposer targetKey="host/session-b" draftText="" onDraftTextChange={onDraftTextChange} onSend={onSend} createVoiceRecognition={createVoiceRecognition} />
+    );
+    expect(recognition.abortCalls).toBe(1);
+    act(() => lateResult?.({ resultIndex: 0, results: [{ isFinal: true, transcript: "wrong target" }] }));
+    expect(onDraftTextChange).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("");
+  });
+
+  it("keeps denial truthful and cancellation idle without sending", () => {
+    const recognition = new FakeRecognition();
+    const onSend = vi.fn();
+    render(<MobileChatComposer draftText="existing" onDraftTextChange={vi.fn()} onSend={onSend} createVoiceRecognition={() => recognition} />);
+    const button = screen.getByTestId("voice-dictation-button");
+    fireEvent.click(button);
+    recognition.emitError("not-allowed");
+    expect(screen.getByTestId("voice-dictation-status")).toHaveTextContent(VOICE_STATUS.deniedPermission);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("existing");
+    fireEvent.click(button);
+    expect(screen.getByTestId("voice-dictation-status")).toHaveTextContent(VOICE_STATUS.listening);
+    expect(button).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(button);
+    expect(screen.queryByTestId("voice-dictation-status")).not.toBeInTheDocument();
+    expect(button).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("existing");
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("renders composer with textarea and handles Korean IME composition safely", () => {
@@ -158,6 +265,43 @@ describe("MobileChatComposer", () => {
     expect(onSend).not.toHaveBeenCalled();
 
     fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("retains controlled text until its owner settles the send snapshot", () => {
+    const onSend = vi.fn();
+    const onDraftTextChange = vi.fn();
+    const { rerender } = render(
+      <MobileChatComposer draftText="sent snapshot" onDraftTextChange={onDraftTextChange} onSend={onSend} sendPending />
+    );
+
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    expect(textarea).toHaveValue("sent snapshot");
+    expect(screen.getByTestId("send-button")).toBeDisabled();
+    fireEvent.change(textarea, { target: { value: "newer edit" } });
+    expect(onDraftTextChange).toHaveBeenCalledWith("newer edit");
+    expect(textarea).toHaveValue("sent snapshot");
+
+    rerender(
+      <MobileChatComposer draftText="newer edit" onDraftTextChange={onDraftTextChange} onSend={onSend} deliveryStage="accepted" />
+    );
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("newer edit");
+    expect(screen.getByTestId("mobile-chat-delivery-stage")).toHaveTextContent("Accepted");
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit action to retry a held send without clearing the draft", () => {
+    const onSend = vi.fn();
+    const onRetryHeld = vi.fn();
+    render(<MobileChatComposer draftText="held payload" onDraftTextChange={vi.fn()} onSend={onSend} held onRetryHeld={onRetryHeld} />);
+
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("held payload");
+    expect(screen.getByTestId("mobile-chat-held")).toBeInTheDocument();
+    expect(screen.getByTestId("send-button")).toBeDisabled();
+    expect(onRetryHeld).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("mobile-chat-retry"));
+    expect(onRetryHeld).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("held payload");
     expect(onSend).not.toHaveBeenCalled();
   });
 

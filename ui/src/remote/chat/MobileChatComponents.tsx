@@ -98,13 +98,19 @@ export const ActivityIndicator: React.FC<ActivityIndicatorProps> = ({
   );
 };
 
+import type { AttachmentReceipt } from "../../lib/scopedContracts";
+
 export interface ChatAttachment {
   id: string;
+  attachmentId?: string;
   name: string;
   type: string;
   url?: string;
   size?: number | string;
   file?: File;
+  receipt?: AttachmentReceipt;
+  isStaging?: boolean;
+  error?: string;
 }
 
 export interface AttachmentListProps {

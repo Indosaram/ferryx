@@ -9,6 +9,7 @@ use tokio::sync::watch;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Progress {
     pub pending: bool,
+    pub completed: bool,
     pub dropped: bool,
     pub queue_full: bool,
 }
@@ -38,7 +39,7 @@ pub(super) async fn observe<F: std::future::Future>(id: &str, future: F) -> F::O
     impl Drop for Pending {
         fn drop(&mut self) {
             if let Some(sender) = &self.0 {
-                sender.send_modify(|state| state.dropped = true);
+                sender.send_modify(|state| state.dropped = !state.completed);
             }
         }
     }
@@ -47,9 +48,14 @@ pub(super) async fn observe<F: std::future::Future>(id: &str, future: F) -> F::O
     tokio::pin!(future);
     std::future::poll_fn(|cx| {
         let result = future.as_mut().poll(cx);
-        if matches!(result, Poll::Pending) {
-            if let Some(sender) = &pending.0 {
-                sender.send_modify(|state| state.pending = true);
+        if let Some(sender) = &pending.0 {
+            match result {
+                Poll::Pending => {
+                    sender.send_modify(|state| state.pending = true);
+                }
+                Poll::Ready(_) => {
+                    sender.send_modify(|state| state.completed = true);
+                }
             }
         }
         result

@@ -10,7 +10,10 @@ pub enum ChatError { Unsupported, ProviderOwned, Stale, Invalid, Exited, Timeout
 pub type Result<T> = std::result::Result<T, ChatError>;
 /// The integrator implements this using the single native/managed registry.
 /// A guard releases ONLY after the supervisor confirms child exit.
-pub trait Claim: Send + Sync { fn bind(&self, key: ConversationClaimKey) -> Result<()>; }
+pub trait Claim: Send + Sync {
+ fn started(&self, _pid: u32) -> Result<()> { Ok(()) }
+ fn bind(&self, key: ConversationClaimKey) -> Result<()>;
+}
 pub trait Claims: Send + Sync { fn acquire(&self, owner: ConversationOwner, key: Option<ConversationClaimKey>) -> Result<Box<dyn Claim>>; }
 const FRAME_LIMIT: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -25,6 +28,7 @@ impl Supervisor {
   let key = resume.as_ref().map(|id| ConversationClaimKey {host_id:target.host_id.clone(),provider:CanonicalProvider::Codex,conversation_id:id.clone()});
   let claim = claims.acquire(ConversationOwner::Managed {target:target.clone()},key)?;
   let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().map_err(|_|ChatError::Exited)?;
+  claim.started(child.id().ok_or(ChatError::Exited)?)?;
   let mut input = child.stdin.take().ok_or(ChatError::Protocol)?;
   let output = child.stdout.take().ok_or(ChatError::Protocol)?;
   let (frames_tx,mut frames)=mpsc::channel(32);
@@ -98,14 +102,17 @@ impl Supervisor {
         if method=="initialized" {let _=reply.send(Ok(Value::Null));} else {pending.insert(serial,(method,reply));}
        }
        Some(Action::Callback(id,thread_id,turn,result,reply))=> {
-        let key=id.to_string();
+        let key=callbacks.keys().find(|key| {
+         callbacks.get(*key).is_some_and(|frame| frame["id"] == id ||
+          (frame["id"].is_number() && id.as_str().is_some_and(|s| s == frame["id"].to_string())))
+        }).cloned().unwrap_or_else(|| id.to_string());
         let response=match callbacks.get(&key) {
          Some(frame) if frame["params"]["threadId"]==thread_id && frame["params"]["turnId"]==turn => validate_callback(frame,&result),
          _=>Err(ChatError::Stale),
         };
         if let Err(e)=response {let _=reply.send(Err(e));continue;}
-        callbacks.remove(&key);
-        let sent=write_frame(&mut input,&json!({"id":id,"result":result})).await;
+        let Some(callback)=callbacks.remove(&key) else {let _=reply.send(Err(ChatError::Stale));continue;};
+        let sent=write_frame(&mut input,&json!({"id":callback["id"],"result":result})).await;
         let failed=sent.is_err(); let _=reply.send(sent); if failed {break;}
        }
       }

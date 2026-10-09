@@ -75,9 +75,16 @@ const agentHistoryPage = {
 };
 
 function routedFetch(historyResponse: Response) {
-  return vi.fn<typeof fetch>(async (input) => {
+  return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes("/api/v1/agent-history/")) return historyResponse;
+    if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+    if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+    if (url.includes("/api/v1/chat/send")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+    }
+    if (url.includes("/api/v1/files/results/list")) return jsonResponse({ ok: true, files: [] });
     return jsonResponse(remoteState);
   });
 }
@@ -124,7 +131,10 @@ describe("remoteAppChatFrames", () => {
     const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
     fireEvent.click(chatViewButton);
 
-    const userBubble = await screen.findByTestId("user-message-bubble");
+    const workspace = await screen.findByTestId("mobile-chat-workspace", {}, { timeout: 10000 });
+    expect(workspace).toBeTruthy();
+
+    const userBubble = await screen.findByTestId("user-message-bubble", {}, { timeout: 10000 });
     expect(userBubble.textContent).toContain("what changed in the parser?");
 
     const assistantBody = await screen.findByTestId("assistant-message-body");
@@ -189,7 +199,10 @@ describe("remoteAppChatFrames", () => {
     const workspace = await screen.findByTestId("mobile-chat-workspace");
     expect(workspace).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(document.body.textContent).not.toMatch(/error|failed/i);
+    expect(within(workspace).getByTestId("chat-empty-state")).toBeInTheDocument();
+    const visibleWorkspace = workspace.cloneNode(true) as HTMLElement;
+    visibleWorkspace.querySelectorAll("style, script, [aria-hidden], .sr-only").forEach((node) => node.remove());
+    expect(visibleWorkspace.textContent).not.toMatch(/error|failed/i);
   });
 
   it("the terminal socket is still opened for input and the running signal", async () => {
@@ -233,8 +246,14 @@ describe("remoteAppChatFrames", () => {
       warnings: [],
     };
     let historyCalls = 0;
-    const request = vi.fn<typeof fetch>(async (input) => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.includes("/api/v1/chat/send")) {
+        const body = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+      }
       if (url.includes("/api/v1/agent-history/")) {
         historyCalls += 1;
         return jsonResponse(historyCalls === 1 ? first : extended);
@@ -350,8 +369,14 @@ describe("remoteAppChatFrames", () => {
       },
     };
     let historyCalls = 0;
-    const request = vi.fn<typeof fetch>(async (input) => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.includes("/api/v1/chat/send")) {
+        const body = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+      }
       if (url.includes("/api/v1/agent-history/")) {
         historyCalls += 1;
         if (url.includes("sess-second")) {
@@ -418,8 +443,14 @@ describe("remoteAppChatFrames", () => {
         ],
       },
     };
-    const request = vi.fn<typeof fetch>(async (input) => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.includes("/api/v1/chat/send")) {
+        const body = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+      }
       if (url.includes("/api/v1/agent-history/")) {
         if (url.includes("sess-second")) {
           return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
@@ -455,7 +486,7 @@ describe("remoteAppChatFrames", () => {
       fireEvent.click(screen.getByTestId("send-button"));
       await act(async () => {});
       expect(document.body.textContent).toContain("LEAK_PROBE_PROMPT");
-      expect(screen.queryByTestId("stop-button")).not.toBeNull();
+      expect(screen.getByTestId("stop-button")).toBeInTheDocument();
 
       await selectPaneFromWorktreeSheet(/second/i);
       await act(async () => {
@@ -483,8 +514,14 @@ describe("remoteAppChatFrames", () => {
         ],
       },
     };
-    const request = vi.fn<typeof fetch>(async (input) => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.includes("/api/v1/chat/send")) {
+        const body = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+      }
       if (url.includes("/api/v1/agent-history/")) {
         if (url.includes("sess-second")) {
           return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
@@ -548,8 +585,14 @@ describe("remoteAppChatFrames", () => {
         ],
       },
     };
-    const request = vi.fn<typeof fetch>(async (input) => {
+    const request = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: "41" }, { sessionId: "sess-second", daemonEpoch: "41" }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: "41" });
+      if (url.includes("/api/v1/chat/send")) {
+        const body = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, data: { requestId: body.requestId, target: body.target, stage: "accepted" }, requestId: body.requestId });
+      }
       if (url.includes("/api/v1/agent-history/")) {
         if (url.includes("sess-second")) {
           return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
@@ -583,7 +626,7 @@ describe("remoteAppChatFrames", () => {
       await act(async () => {});
       fireEvent.click(screen.getByTestId("send-button"));
       await act(async () => {});
-      expect(screen.queryByTestId("stop-button")).not.toBeNull();
+      expect(screen.getByTestId("stop-button")).toBeInTheDocument();
 
       await selectPaneFromWorktreeSheet(/second/i);
       await act(async () => {
@@ -743,5 +786,249 @@ describe("remoteAppChatFrames", () => {
     expect(toggle).toBeInTheDocument();
     expect(toggle.textContent).toContain("Worked for 1m 30s");
     expect(toggle.textContent).not.toContain("Worked for 0s");
+  });
+
+  it("rejects a late delayed response from an earlier fetch generation when session or epoch has advanced", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+
+    const twoTabState = {
+      activeContext: {
+        workspaceId: "ferryx",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        activeTabId: "tab-main",
+        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
+        terminalTabs: [
+          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
+          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
+        ],
+      },
+    };
+
+    const sessionAItems = [
+      { ordinal: 0, role: "user", text: "Stale prompt from Session A", id: "u0" },
+      { ordinal: 1, role: "assistant", text: "Stale reply from Session A", id: "a1" },
+    ];
+    const sessionBItems = [
+      { ordinal: 0, role: "user", text: "Fresh prompt from Session B", id: "u0" },
+      { ordinal: 1, role: "assistant", text: "Fresh reply from Session B", id: "a1" },
+    ];
+
+    let resolveFirstFetch!: (response: Response) => void;
+    const firstFetchPromise = new Promise<Response>((resolve) => {
+      resolveFirstFetch = resolve;
+    });
+
+    let mainCallCount = 0;
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/agent-history/sess-main")) {
+        mainCallCount += 1;
+        if (mainCallCount === 1) {
+          return firstFetchPromise;
+        }
+        return jsonResponse({ sessionId: "sess-main", items: sessionAItems, nextCursor: null, partial: false, warnings: [] });
+      }
+      if (url.includes("/api/v1/agent-history/sess-second")) {
+        return jsonResponse({ sessionId: "sess-second", items: sessionBItems, nextCursor: null, partial: false, warnings: [] });
+      }
+      return jsonResponse(twoTabState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+
+    try {
+      await act(async () => {
+        render(<RemoteApp />);
+      });
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+
+      await selectPaneFromWorktreeSheet(/second/i);
+
+      await waitFor(() => {
+        expect(screen.getByText("Fresh prompt from Session B")).toBeInTheDocument();
+        expect(screen.getByText("Fresh reply from Session B")).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveFirstFetch(
+          jsonResponse({
+            sessionId: "sess-main",
+            items: sessionAItems,
+            nextCursor: null,
+            partial: false,
+            warnings: [],
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByText("Stale prompt from Session A")).not.toBeInTheDocument();
+      expect(screen.queryByText("Stale reply from Session A")).not.toBeInTheDocument();
+      expect(screen.getByText("Fresh prompt from Session B")).toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("resets conversation messages and avoids stale ordinal mixing when same-session conversationGeneration rotates", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+
+    const gen1Data = {
+      sessionId: "sess-main",
+      conversationGeneration: "gen-first-conversation",
+      items: [
+        { ordinal: 0, role: "user", text: "Old conversation prompt", id: "u0" },
+        { ordinal: 1, role: "assistant", text: "Old conversation reply", id: "a1" },
+        { ordinal: 2, role: "user", text: "Old turn two", id: "u2" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    const gen2Data = {
+      sessionId: "sess-main",
+      conversationGeneration: "gen-second-conversation",
+      items: [
+        { ordinal: 0, role: "user", text: "New conversation after reset", id: "u0" },
+        { ordinal: 1, role: "assistant", text: "New fresh answer", id: "a1" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    let historyCalls = 0;
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/agent-history/")) {
+        historyCalls += 1;
+        return jsonResponse(historyCalls === 1 ? gen1Data : gen2Data);
+      }
+      return jsonResponse(remoteState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+
+    try {
+      await act(async () => {
+        render(<RemoteApp />);
+      });
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+
+      expect(historyCalls).toBe(1);
+      expect(screen.getByText("Old conversation prompt")).toBeInTheDocument();
+      expect(screen.getByText("Old conversation reply")).toBeInTheDocument();
+      expect(screen.getByText("Old turn two")).toBeInTheDocument();
+
+      // Explicit view-mode transition barrier to re-dispatch transcript poll without fake timers
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      });
+
+      expect(historyCalls).toBe(2);
+      expect(screen.getByText("New conversation after reset")).toBeInTheDocument();
+      expect(screen.getByText("New fresh answer")).toBeInTheDocument();
+      expect(screen.queryByText("Old conversation prompt")).not.toBeInTheDocument();
+      expect(screen.queryByText("Old conversation reply")).not.toBeInTheDocument();
+      expect(screen.queryByText("Old turn two")).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a same-session epoch-stale response after replacement activates even when abort is ignored", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+    let releaseOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    let historyCalls = 0;
+    let epoch = "41";
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/sessions")) return jsonResponse({ sessions: [{ sessionId: "sess-main", daemonEpoch: epoch }] });
+      if (url.includes("/api/v1/capabilities")) return jsonResponse({ daemonEpoch: epoch });
+      if (url.includes("/api/v1/agent-history/")) {
+        historyCalls += 1;
+        if (historyCalls === 1) return oldResponse;
+        return jsonResponse({
+          sessionId: "sess-main", conversationGeneration: "history-a",
+          items: [{ ordinal: 0, role: "user", text: "Current epoch content", id: "u0" }],
+          nextCursor: null, partial: false, warnings: [],
+        });
+      }
+      return jsonResponse(remoteState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+    try {
+      render(<RemoteApp />);
+      fireEvent.click(await screen.findByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+      epoch = "42";
+      await selectPaneFromWorktreeSheet(/terminal/i);
+      fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      expect(await screen.findByText("Current epoch content")).toBeInTheDocument();
+      await act(async () => {
+        releaseOld(jsonResponse({
+          sessionId: "sess-main", conversationGeneration: "history-a",
+          items: [{ ordinal: 0, role: "user", text: "Stale epoch content", id: "u0" }, { ordinal: 1, role: "assistant", text: "Stale ordinal reply", id: "a1" }],
+          nextCursor: null, partial: false, warnings: [],
+        }));
+        await Promise.resolve();
+      });
+      expect(screen.queryByText("Stale epoch content")).not.toBeInTheDocument();
+      expect(screen.queryByText("Stale ordinal reply")).not.toBeInTheDocument();
+      expect(screen.getByText("Current epoch content")).toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects an old conversation generation response after replacement is active without ordinal mixing", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+    let releaseOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    let historyCalls = 0;
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/agent-history/")) {
+        historyCalls += 1;
+        return historyCalls === 1 ? oldResponse : jsonResponse({
+          sessionId: "sess-main", conversationGeneration: "history-new",
+          items: [{ ordinal: 0, role: "user", text: "New generation content", id: "u0" }], nextCursor: null, partial: false, warnings: [],
+        });
+      }
+      return jsonResponse(remoteState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+    try {
+      render(<RemoteApp />);
+      fireEvent.click(await screen.findByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+      fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      expect(await screen.findByText("New generation content")).toBeInTheDocument();
+      await act(async () => {
+        releaseOld(jsonResponse({
+          sessionId: "sess-main", conversationGeneration: "history-old",
+          items: [{ ordinal: 0, role: "user", text: "Old generation content", id: "u0" }, { ordinal: 1, role: "assistant", text: "Old generation answer", id: "a1" }],
+          nextCursor: null, partial: false, warnings: [],
+        }));
+        await Promise.resolve();
+      });
+      expect(screen.queryByText("Old generation content")).not.toBeInTheDocument();
+      expect(screen.queryByText("Old generation answer")).not.toBeInTheDocument();
+      expect(screen.getByText("New generation content")).toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
   });
 });

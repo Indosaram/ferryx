@@ -4,6 +4,11 @@ import {
   type ConversationMessage,
   capRetainedMessages,
   MAX_RETAINED_CHAT_MESSAGES,
+  fetchAgentConversation,
+  ConversationFetchError,
+  isTranscriptResponseCurrent,
+  hasConversationReset,
+  type TranscriptTargetIdentity,
 } from "./agentConversation";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ToolCallCardProps } from "./chat/MobileChatComponents";
@@ -807,5 +812,288 @@ describe("mapAgentConversation tool calls and thinking", () => {
     expect(exactResult.truncated).toBe(false);
     expect(exactResult.messages).toHaveLength(MAX_RETAINED_CHAT_MESSAGES);
     expect(exactResult.messages).toEqual(exactMessages);
+  });
+});
+
+describe("agentConversation transcript identity and generation fencing", () => {
+  it("parses valid optional conversationGeneration string from server response", async () => {
+    const rawBody = {
+      sessionId: "session-1",
+      conversationGeneration: "conv-token-42",
+      items: [
+        { ordinal: 0, role: "user", text: "hello" },
+        { ordinal: 1, role: "assistant", text: "world" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => rawBody,
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const page = await fetchAgentConversation({
+        baseUrl: "http://127.0.0.1:8899",
+        sessionId: "session-1",
+        token: "test-token",
+      });
+
+      expect(page.sessionId).toBe("session-1");
+      expect(page.conversationGeneration).toBe("conv-token-42");
+      expect(page.items).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("parses valid null conversationGeneration from server response", async () => {
+    const rawBody = {
+      sessionId: "session-1",
+      conversationGeneration: null,
+      items: [],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => rawBody,
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const page = await fetchAgentConversation({
+        baseUrl: "http://127.0.0.1:8899",
+        sessionId: "session-1",
+        token: "test-token",
+      });
+
+      expect(page.conversationGeneration).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves wire compatibility when conversationGeneration is absent from server response", async () => {
+    const rawBody = {
+      sessionId: "session-1",
+      items: [],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => rawBody,
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const page = await fetchAgentConversation({
+        baseUrl: "http://127.0.0.1:8899",
+        sessionId: "session-1",
+        token: "test-token",
+      });
+
+      expect(page.conversationGeneration).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("throws MALFORMED_RESPONSE when conversationGeneration is not a string or null", async () => {
+    for (const invalidGen of [12345, true, { id: "token" }, ["array"]]) {
+      const rawBody = {
+        sessionId: "session-1",
+        conversationGeneration: invalidGen,
+        items: [],
+        nextCursor: null,
+        partial: false,
+        warnings: [],
+      };
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => rawBody,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        await expect(
+          fetchAgentConversation({
+            baseUrl: "http://127.0.0.1:8899",
+            sessionId: "session-1",
+            token: "test-token",
+          }),
+        ).rejects.toThrowError(ConversationFetchError);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+  });
+
+  it("isTranscriptResponseCurrent enforces strict target epoch match including known-to-null transitions", () => {
+    const baseExpected: TranscriptTargetIdentity = {
+      sessionId: "sess-main",
+      targetEpoch: "epoch-10",
+      generation: 3,
+      historyGeneration: "history-a",
+    };
+
+    // Strict match
+    expect(
+      isTranscriptResponseCurrent(baseExpected, {
+        sessionId: "sess-main",
+        targetEpoch: "epoch-10",
+        generation: 3,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(true);
+
+    // Mismatched epoch string
+    expect(
+      isTranscriptResponseCurrent(baseExpected, {
+        sessionId: "sess-main",
+        targetEpoch: "epoch-11",
+        generation: 3,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(false);
+
+    // Known to null: must reject
+    expect(
+      isTranscriptResponseCurrent(baseExpected, {
+        sessionId: "sess-main",
+        targetEpoch: null,
+        generation: 3,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(false);
+
+    // Null to known: must reject
+    const nullEpochExpected: TranscriptTargetIdentity = {
+      sessionId: "sess-main",
+      targetEpoch: null,
+      generation: 3,
+      historyGeneration: "history-a",
+    };
+    expect(
+      isTranscriptResponseCurrent(nullEpochExpected, {
+        sessionId: "sess-main",
+        targetEpoch: "epoch-10",
+        generation: 3,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(false);
+
+    // Both null: accepted
+    expect(
+      isTranscriptResponseCurrent(nullEpochExpected, {
+        sessionId: "sess-main",
+        targetEpoch: null,
+        generation: 3,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(true);
+  });
+
+  it("isTranscriptResponseCurrent enforces sequence generation and session identity fencing", () => {
+    const expected: TranscriptTargetIdentity = {
+      sessionId: "sess-a",
+      targetEpoch: "epoch-1",
+      generation: 5,
+      historyGeneration: "history-a",
+    };
+
+    // Stale generation from previous poll
+    expect(
+      isTranscriptResponseCurrent(expected, {
+        sessionId: "sess-a",
+        targetEpoch: "epoch-1",
+        generation: 6,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(false);
+
+    // Mismatched current session
+    expect(
+      isTranscriptResponseCurrent(expected, {
+        sessionId: "sess-b",
+        targetEpoch: "epoch-1",
+        generation: 5,
+        historyGeneration: "history-a",
+      }),
+    ).toBe(false);
+
+    // Mismatched payload session
+    expect(
+      isTranscriptResponseCurrent(
+        expected,
+        {
+          sessionId: "sess-a",
+          targetEpoch: "epoch-1",
+          generation: 5,
+          historyGeneration: "history-a",
+        },
+        { sessionId: "sess-c" },
+      ),
+    ).toBe(false);
+
+    // Matching payload session
+    expect(
+      isTranscriptResponseCurrent(
+        expected,
+        {
+          sessionId: "sess-a",
+          targetEpoch: "epoch-1",
+          generation: 5,
+          historyGeneration: "history-a",
+        },
+        { sessionId: "sess-a" },
+      ),
+    ).toBe(true);
+
+    expect(isTranscriptResponseCurrent(expected, {
+      sessionId: "sess-a",
+      targetEpoch: "epoch-1",
+      generation: 5,
+      historyGeneration: "history-b",
+    })).toBe(false);
+  });
+
+  it("hasConversationReset detects authoritative generation change without false resets on initial load or omitted token", () => {
+    // Rotated conversation (e.g. /new or transcript truncation)
+    expect(hasConversationReset("gen-token-1", "gen-token-2")).toBe(true);
+
+    // Downgrade / cleared conversation (string -> null)
+    expect(hasConversationReset("gen-token-1", null)).toBe(true);
+
+    // Upgrade / started conversation (null -> string)
+    expect(hasConversationReset(null, "gen-token-2")).toBe(true);
+
+    // Explicitly same null state
+    expect(hasConversationReset(null, null)).toBe(false);
+
+    // Same conversation string
+    expect(hasConversationReset("gen-token-1", "gen-token-1")).toBe(false);
+
+    // Initial load: previous generation was undefined (omitted)
+    expect(hasConversationReset(undefined, "gen-token-1")).toBe(false);
+    expect(hasConversationReset(undefined, null)).toBe(false);
+
+    // Server omits token (undefined)
+    expect(hasConversationReset("gen-token-1", undefined)).toBe(false);
+    expect(hasConversationReset(null, undefined)).toBe(false);
+    expect(hasConversationReset(undefined, undefined)).toBe(false);
   });
 });

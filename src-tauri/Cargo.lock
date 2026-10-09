@@ -1682,6 +1682,7 @@ version = "2026.928.7"
 dependencies = [
  "aes",
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.23.1",
  "blake2",

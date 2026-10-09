@@ -1300,6 +1300,9 @@ export type DagWatchProjectResult = {
 
 export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
   if (!isTauri()) return { projectPath, runs: [] };
+  return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
+}
+
 export type AccountEnrollmentStatus = {
   enrolled: boolean;
   accountOrigin: string | null;
@@ -1324,9 +1327,6 @@ export async function enrollThisMachine(
     origin,
     enrollmentCode,
   });
-}
-
-  return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }
 
 export async function watchDagPairedProject(

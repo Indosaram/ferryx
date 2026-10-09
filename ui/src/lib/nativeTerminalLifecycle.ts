@@ -284,6 +284,148 @@ export function presentNativeTerminalLifecycle(sessionId: string): void {
   releasePresentationWaiters(sessionId);
 }
 
+/**
+ * Positive, identity-matched native presentation receipt.
+ *
+ * Emitted only from a received `presented === true` set-bounds receipt whose
+ * dispatch-captured identity still matches the pane's current pane identity,
+ * backend surface and binding at resolution time. Missing (`undefined`),
+ * `presented: false` and `renderDeferred` receipts never produce one, so a
+ * consumer subscribing before attach/render can treat arrival as readiness
+ * without a fallback timer of its own.
+ *
+ * This runs alongside the generic `presentNativeTerminalLifecycle` signal,
+ * never instead of it: generic present keeps releasing held detachments for
+ * every non-deferred receipt and never notifies these subscribers.
+ */
+export type NativeTerminalPresentationReceipt = {
+  readonly frontendSessionId: string;
+  readonly paneIdentity: string;
+  readonly backendSessionId: string;
+  readonly bindingKey: string | null;
+  readonly attemptGeneration: number;
+};
+
+/**
+ * Per-field matcher for `subscribeNativeTerminalPresentation`. A field left
+ * `undefined` matches anything; a provided field must be strictly equal. An
+ * explicit `bindingKey: null` matches a null binding (retained/exited surface),
+ * while an omitted `bindingKey` matches any binding.
+ */
+export type NativeTerminalPresentationSubscription = {
+  readonly frontendSessionId?: string;
+  readonly paneIdentity?: string;
+  readonly backendSessionId?: string;
+  readonly bindingKey?: string | null;
+  readonly attemptGeneration?: number;
+};
+
+type NativeTerminalPresentationListener = (
+  receipt: NativeTerminalPresentationReceipt,
+) => void;
+
+type PresentationSubscriptionRecord = {
+  readonly subscription: NativeTerminalPresentationSubscription;
+  readonly listener: NativeTerminalPresentationListener;
+};
+
+const presentationSubscriptions = new Map<number, PresentationSubscriptionRecord>();
+let nextPresentationSubscriptionId = 1;
+
+function presentationMatches(
+  subscription: NativeTerminalPresentationSubscription,
+  receipt: NativeTerminalPresentationReceipt,
+): boolean {
+  if (
+    subscription.frontendSessionId !== undefined &&
+    subscription.frontendSessionId !== receipt.frontendSessionId
+  ) return false;
+  if (
+    subscription.paneIdentity !== undefined &&
+    subscription.paneIdentity !== receipt.paneIdentity
+  ) return false;
+  if (
+    subscription.backendSessionId !== undefined &&
+    subscription.backendSessionId !== receipt.backendSessionId
+  ) return false;
+  if (
+    subscription.bindingKey !== undefined &&
+    subscription.bindingKey !== receipt.bindingKey
+  ) return false;
+  if (
+    subscription.attemptGeneration !== undefined &&
+    subscription.attemptGeneration !== receipt.attemptGeneration
+  ) return false;
+  return true;
+}
+
+/**
+ * Subscribes to positive, identity/generation-matched presentation receipts.
+ *
+ * Subscribe before attach/render so the first positive receipt for the wanted
+ * pane/binding/attempt generation is observed. Returns an unsubscribe function;
+ * subscriptions are also cleared by `resetNativeTerminalLifecycleForTest`.
+ */
+export function subscribeNativeTerminalPresentation(
+  subscription: NativeTerminalPresentationSubscription,
+  listener: NativeTerminalPresentationListener,
+): () => void {
+  const subscriptionId = nextPresentationSubscriptionId++;
+  presentationSubscriptions.set(subscriptionId, { subscription, listener });
+  switchDebug("terminal.lifecycle.presentation.subscribed", {
+    subscriptionId,
+    frontendSessionId: subscription.frontendSessionId ?? null,
+    paneIdentity: subscription.paneIdentity ?? null,
+    backendSessionId: subscription.backendSessionId ?? null,
+    bindingKey: subscription.bindingKey ?? null,
+    attemptGeneration: subscription.attemptGeneration ?? null,
+  });
+  return () => {
+    if (presentationSubscriptions.delete(subscriptionId)) {
+      switchDebug("terminal.lifecycle.presentation.unsubscribed", {
+        subscriptionId,
+      });
+    }
+  };
+}
+
+/**
+ * Delivers a positive presentation receipt to every matching subscriber.
+ *
+ * Called only by `NativeTerminalPane` after a `presented === true` receipt
+ * whose captured identity matched the pane's current binding. Returns the
+ * number of subscribers notified. A throwing listener cannot starve the rest.
+ */
+export function emitNativeTerminalPresentation(
+  receipt: NativeTerminalPresentationReceipt,
+): number {
+  let delivered = 0;
+  for (const [subscriptionId, record] of presentationSubscriptions) {
+    if (!presentationMatches(record.subscription, receipt)) continue;
+    delivered += 1;
+    try {
+      record.listener(receipt);
+    } catch (error) {
+      switchDebug("terminal.lifecycle.presentation.listener.error", {
+        subscriptionId,
+        backendSessionId: receipt.backendSessionId,
+        attemptGeneration: receipt.attemptGeneration,
+        error: String(error),
+      });
+    }
+  }
+  // Stage log: identity/generation and delivery only. Never shell input or CWD.
+  switchDebug("terminal.lifecycle.presentation.emitted", {
+    frontendSessionId: receipt.frontendSessionId,
+    paneIdentity: receipt.paneIdentity,
+    backendSessionId: receipt.backendSessionId,
+    bindingKey: receipt.bindingKey,
+    attemptGeneration: receipt.attemptGeneration,
+    delivered,
+  });
+  return delivered;
+}
+
 export function detachNativeTerminalLifecycle(
   sessionId: string,
   operation: NativeTerminalLifecycleOperation<void>,
@@ -347,4 +489,5 @@ export function resetNativeTerminalLifecycleForTest(): void {
   sessionGenerations.clear();
   pendingDetachments.clear();
   detachmentsWaitingForPresentation.clear();
+  presentationSubscriptions.clear();
 }

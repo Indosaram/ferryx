@@ -250,12 +250,14 @@ impl TerminalService {
                 );
                 output_hub.publish_with_read_timestamp(&session_id_clone, chunk, read_unix_micros);
             }
+            eprintln!("lifecycle pump: output closed");
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
             output_hub.remove_session(&session_id_clone);
             let mut registry = lifecycle.lock();
             if registry.state(&session_id_clone) != Some(SessionProcessState::Hibernated) {
                 registry.remove(&session_id_clone);
             }
+            eprintln!("lifecycle pump: exited");
         });
 
         (session_id, lifecycle_rx)

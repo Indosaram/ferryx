@@ -762,6 +762,8 @@ pub struct RemoteGatewayState {
     pub(crate) browse_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(crate) agent_history_home: RwLock<Option<PathBuf>>,
+    #[cfg(test)]
+    pub(crate) agent_history_execute: RwLock<Option<Arc<dyn Fn(&crate::ssh::SshHost, String, usize) -> Result<Vec<u8>, String> + Send + Sync>>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     /// Absent for legacy/test constructors. Presence enables no future API.
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
@@ -796,6 +798,8 @@ pub struct RemoteGatewayState {
     /// Maps ticket -> (device token, target, expiry unix seconds).
     pub socket_tickets:
         parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
+    #[cfg(test)]
+    pub(crate) managed_chat_command: parking_lot::Mutex<Option<tokio::process::Command>>,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
     pub browser_service_epoch: AtomicU64,
@@ -954,6 +958,8 @@ impl RemoteGatewayState {
             browse_probe: RwLock::new(None),
             #[cfg(test)]
             agent_history_home: RwLock::new(None),
+            #[cfg(test)]
+            agent_history_execute: RwLock::new(None),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
@@ -972,6 +978,8 @@ impl RemoteGatewayState {
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            managed_chat_command: parking_lot::Mutex::new(None),
             browser_backend: parking_lot::RwLock::new(Arc::new(
                 crate::remote::browser_backend::LocalIpcBrowserBackend::new(
                     // Platform-correct endpoint, derived from the same helper the
@@ -1178,9 +1186,24 @@ impl RemoteGatewayState {
         }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
+        let focus_changed = self.active_selection.read().as_ref().is_none_or(|previous| {
+            previous.workspace_id != selection.workspace_id
+                || previous.worktree_slug != selection.worktree_slug
+                || previous.session_id != selection.session_id
+                || previous.tab_id != selection.tab_id
+        });
+        let published_workspace = selection.workspace_id.clone();
+        let published_worktree = selection.worktree_slug.clone();
         self.active_selection_tx
             .send_replace(Some(selection.clone()));
         *self.active_selection.write() = Some(selection);
+        if focus_changed {
+            self.publish_desktop_selection_changed(
+                published_workspace.as_deref(),
+                published_worktree.as_deref(),
+                session_id.as_deref(),
+            );
+        }
         // `send` fails and discards the value when no receiver is alive, which is the normal
         // state before any remote client attaches. `send_replace` stores it regardless so a
         // later subscriber observes the current selection instead of the initial `None`.
@@ -1189,10 +1212,32 @@ impl RemoteGatewayState {
     }
 
     pub fn clear_active_selection(&self) {
-        *self.active_selection.write() = None;
+        let had_selection = self.active_selection.write().take().is_some();
         self.active_selection_tx.send_replace(None);
         self.active_session_tx.send_replace(None);
         self.emit_active_selection_changed(serde_json::Value::Null);
+        if had_selection {
+            self.publish_desktop_selection_changed(None, None, None);
+        }
+    }
+
+    /// Machine-scoped clients never see the legacy mirror's `event_tx`. A bare focus
+    /// pointer is published on their own event domain so they re-read the authoritative
+    /// desktop context; no tabs, titles or paths ride on it.
+    fn publish_desktop_selection_changed(
+        &self,
+        workspace_id: Option<&str>,
+        worktree_slug: Option<&str>,
+        session_id: Option<&str>,
+    ) {
+        if let Some(services) = &self.machine_services {
+            services.workspaces.machine_events.publish(
+                "desktopSelectionChanged",
+                workspace_id,
+                session_id,
+                serde_json::json!({"workspaceId": workspace_id, "worktreeSlug": worktree_slug}),
+            );
+        }
     }
 
     pub fn set_active_selection_opt(&self, selection: Option<RemoteActiveDesktopSelection>) {
