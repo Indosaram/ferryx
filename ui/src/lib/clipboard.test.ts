@@ -1,11 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
+const tauriCore = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  isTauri: vi.fn(() => false),
+}));
+vi.mock("@tauri-apps/api/core", () => tauriCore);
+
 import { copyTextToClipboard } from "./clipboard";
 
 describe("copyTextToClipboard", () => {
   let execCommandSpy: MockInstance;
 
   beforeEach(() => {
+    tauriCore.invoke.mockReset();
+    tauriCore.isTauri.mockReturnValue(false);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     if (!("execCommand" in document)) {
       Object.defineProperty(document, "execCommand", {
         value: () => false,
@@ -21,6 +30,41 @@ describe("copyTextToClipboard", () => {
     vi.unstubAllGlobals();
     // Clean up any stray textareas if a test failed mid-execution
     document.querySelectorAll("textarea").forEach((el) => el.remove());
+  });
+
+  it("writes through the native clipboard command on desktop without touching WebView APIs", async () => {
+    tauriCore.isTauri.mockReturnValue(true);
+    tauriCore.invoke.mockResolvedValue(undefined);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const result = await copyTextToClipboard("desktop text");
+
+    expect(result).toBe(true);
+    expect(tauriCore.invoke).toHaveBeenCalledWith("cmd_clipboard_write_text", { text: "desktop text" });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(execCommandSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to navigator.clipboard when the native clipboard command fails", async () => {
+    tauriCore.isTauri.mockReturnValue(true);
+    tauriCore.invoke.mockRejectedValue({ code: "INTERNAL_ERROR", message: "no writer" });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const result = await copyTextToClipboard("fallback desktop text");
+
+    expect(result).toBe(true);
+    expect(writeText).toHaveBeenCalledWith("fallback desktop text");
+  });
+
+  it("never invokes the native command outside Tauri", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    await copyTextToClipboard("web text");
+
+    expect(tauriCore.invoke).not.toHaveBeenCalled();
   });
 
   it("resolves via navigator.clipboard.writeText and never calls execCommand without leaving textarea in DOM", async () => {

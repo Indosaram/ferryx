@@ -1490,6 +1490,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_set_attention_frame,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
+        cmd_clipboard_write_text,
         cmd_native_terminal_paste,
         cmd_native_terminal_clipboard_content,
         cmd_native_terminal_mouse,
