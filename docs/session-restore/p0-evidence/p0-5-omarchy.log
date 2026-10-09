@@ -1,0 +1,4 @@
+DETACHED mode=destroy flush_rc=28 same_step_ms=0.017 server_ack_ms=0.162
+DETACHED mode=null-buffer flush_rc=40 same_step_ms=0.018 server_ack_ms=0.175
+DETACHED mode=destroy same_step_ms=0.009 server_ack_ms=0.124 child_map_state_after=-1 parent_children_after=0
+DETACHED mode=unmap same_step_ms=0.011 server_ack_ms=0.097 child_map_state_after=0 parent_children_after=1

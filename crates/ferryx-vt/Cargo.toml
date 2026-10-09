@@ -1,0 +1,23 @@
+[package]
+name = "ferryx-vt"
+version = "0.1.0"
+edition = "2021"
+description = "libghostty-vt adapter for the Ferryx session host: VT parsing, replicated state extraction, scrollback rewrite detection"
+license = "MIT"
+publish = false
+build = "build.rs"
+links = "ghostty-vt"
+
+[lib]
+name = "ferryx_vt"
+path = "src/lib.rs"
+
+[dependencies]
+ferryx-fxsh = { path = "../fxsh" }
+ferryx-session-core = { path = "../session-core" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace]

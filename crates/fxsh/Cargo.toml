@@ -1,0 +1,20 @@
+[package]
+name = "ferryx-fxsh"
+version = "0.1.0"
+edition = "2021"
+description = "FXSH wire codec for the Ferryx session host (spec: docs/session-restore/spec.md section 7 and appendix A)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "fxsh"
+path = "src/lib.rs"
+
+[dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+crc32c = "0.6"
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace]

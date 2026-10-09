@@ -1,0 +1,13 @@
+STEP start a1
+a1 pid=35196 parent=svchost.exe
+STEP start b2 while a1 runs
+b2 pid=19196 parent=svchost.exe
+STEP restart b2 only
+a1_unchanged_after_b2_restart=True b2_new_pid=35812
+STEP launcher process exits (this ssh session's child) - check a1 not in its job
+a1_alive_after_unrelated_parent_exit=True
+STEP retire a1 (self-exit + self-unregister)
+a1_alive=False a1_task_registered=False a1_events=retired-exit
+b2_alive=True
+STEP cleanup
+cleanup tasks_left=0
