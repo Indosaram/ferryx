@@ -153,7 +153,9 @@ async fn desktop_gui_session_inventory_and_attach_validation() {
         session_id: ssh_session_id.clone(),
     };
     let ssh_err = service.validate_machine_target(&ssh_target).await.unwrap_err();
-    assert_eq!(ssh_err, "SESSION_OWNERSHIP_CHANGED");
+    // main serves remote/SSH sessions through the remote runtime projector instead of refusing
+    // them; a target with no remote runtime details is still rejected, never validated.
+    assert!(matches!(ssh_err.as_str(), "SESSION_OWNERSHIP_CHANGED" | "SESSION_NOT_FOUND"), "{ssh_err}");
 
     // Clean up
     eprintln!("[inventory_test] closing sessions");
