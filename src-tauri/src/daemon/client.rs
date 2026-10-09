@@ -5898,6 +5898,8 @@ mod tests {
 
         let listener = UnixListener::bind(&socket_path).unwrap();
         let server = Arc::new(DaemonServer::new());
+        // Pair locally without auto-configuring the workstation's relay connection.
+        server.remote_state().config.write().mode = RemoteNetworkMode::LocalNetwork;
         let server_clone = Arc::clone(&server);
 
         let server_task = tokio::spawn(async move {
@@ -5925,7 +5927,7 @@ mod tests {
 
         // 2. Remote control typed APIs
         let status = client.remote_get_status().await.expect("remote get status");
-        assert_eq!(status.mode, RemoteNetworkMode::Off);
+        assert_eq!(status.mode, RemoteNetworkMode::LocalNetwork);
         assert!(!status.is_running);
 
         let pair_code = client

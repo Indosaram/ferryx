@@ -197,9 +197,6 @@ jobs:
             --test worktree_safety \
             -- --test-threads=1 \
             --skip native_terminal::renderer:: \
-            --skip remote::tests::test_remote_server_health_and_lifecycle \
-            --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection \
-            --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis \
             --skip terminal::tests::test_spawn_startup_command_omo
 
       # The remote grid mirror spans Rust and TypeScript: this asserts real serialized backend

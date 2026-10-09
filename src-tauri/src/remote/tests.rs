@@ -104,9 +104,12 @@ async fn test_remote_server_health_and_lifecycle() {
         relay_url: None,
     };
 
-    let (handle, addr) = start_remote_server(Arc::clone(&state))
-        .await
-        .expect("start server");
+    let (handle, addr) = start_remote_server_with_resolver(
+        Arc::clone(&state),
+        Arc::new(LoopbackOverlayResolver),
+    )
+    .await
+    .expect("start server");
     assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
 
     // Health endpoint
@@ -4390,9 +4393,12 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
         .exchange_pairing_code(&pairing_code, "HandoverTestDevice")
         .expect("pair device");
 
-    let (server_handle, addr) = start_remote_server(Arc::clone(&state))
-        .await
-        .expect("start remote server");
+    let (server_handle, addr) = start_remote_server_with_resolver(
+        Arc::clone(&state),
+        Arc::new(LoopbackOverlayResolver),
+    )
+    .await
+    .expect("start remote server");
 
     // CRITICAL: Ensure NO desktop selection is active (headless handover state)
     assert!(state.active_selection.read().is_none());
