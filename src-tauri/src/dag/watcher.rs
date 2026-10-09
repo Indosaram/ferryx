@@ -1,4 +1,4 @@
-use crate::dag::journal::{parse_run_checkpoint, DagRunSnapshot};
+use crate::dag::journal::{parse_run_checkpoint, resolve_dag_runs_dir, DagRunSnapshot};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,21 +7,6 @@ use tokio::sync::mpsc::Sender;
 
 type TaggedSink = Sender<(String, DagRunSnapshot)>;
 use tokio::time::{interval, sleep, MissedTickBehavior};
-
-fn resolve_dag_runs_dir(root: &Path) -> PathBuf {
-    let nested = root.join(".omo/senpi-task/dag");
-    if nested.join("runs").is_dir() {
-        nested.join("runs")
-    } else if nested.is_dir() {
-        nested
-    } else if root.join("runs").is_dir() {
-        root.join("runs")
-    } else if root.ends_with(".omo/senpi-task/dag") || root.ends_with("dag") {
-        root.join("runs")
-    } else {
-        nested.join("runs")
-    }
-}
 
 #[derive(Clone, Default)]
 struct WatcherHooks {
@@ -157,7 +142,8 @@ async fn run_watcher_loop_observed(
     {
         root.clone()
     } else {
-        root.join(".omo/senpi-task/dag")
+        let runs_dir = resolve_dag_runs_dir(&root);
+        runs_dir.parent().map(Path::to_path_buf).unwrap_or(runs_dir)
     };
 
     // Hydrate before arming: starting a filesystem watch can stall for seconds on a loaded
