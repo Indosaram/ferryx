@@ -402,6 +402,12 @@ export function RemoteTerminal({
   // over one at a time by keyboards that never compose (see commitComposition).
   const sinkTailRef = useRef("");
   const heldJamoRef = useRef("");
+  // Direct keystrokes and chat-friendly line input are two visible modes of the same terminal.
+  // Each mode owns its own pending text; switching modes never dispatches either one to the PTY.
+  const [inputMode, setInputMode] = useState<"direct" | "line">("direct");
+  const [lineDraft, setLineDraft] = useState("");
+  const lineInputRef = useRef<HTMLTextAreaElement>(null);
+  const modeSwitchingRef = useRef(false);
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -498,12 +504,30 @@ export function RemoteTerminal({
   }, []);
 
   const focusInput = useCallback(() => {
+    if (inputMode === "line") {
+      lineInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
     inputSinkRef.current?.focus({ preventScroll: true });
-  }, []);
+  }, [inputMode]);
+
+  const previousInputModeRef = useRef(inputMode);
+  useLayoutEffect(() => {
+    if (previousInputModeRef.current === inputMode) return;
+    previousInputModeRef.current = inputMode;
+    // The mode toggle is an explicit tap: move the caret into the mode's editor so the software
+    // keyboard opens there. Any sink blur this focus causes fires synchronously while
+    // modeSwitchingRef still guards it; releasing the guard afterwards stops it leaking into the
+    // next unrelated blur.
+    focusInput();
+    modeSwitchingRef.current = false;
+  }, [inputMode, focusInput]);
 
   useLayoutEffect(() => {
     // A held tail belongs to the session that was on screen; never leak it into the next one.
     resetSinkState();
+    // A line draft is typing for the tab that was on screen; it must never ride along either.
+    setLineDraft("");
     outboundBufferRef.current = [];
     outboundBytesRef.current = 0;
     droppedInputBytesRef.current = 0;
@@ -1106,6 +1130,15 @@ export function RemoteTerminal({
     sendInput(new TextEncoder().encode(sequence));
   };
 
+  /// Submit the line-mode draft: composed once, written once - the line and its terminator reach
+  /// the PTY in a single payload, so Hangul can never be split, duplicated, or reordered around the
+  /// CR. An empty draft is a plain Return.
+  const submitLineDraft = () => {
+    const composed = composeJamoRuns(lineDraft.replace(/\u00a0/g, " "));
+    sendText(composed.length > 0 ? `${composed}\r` : "\r");
+    setLineDraft("");
+  };
+
   return (
     <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-[#f5f5f5] ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-[#191919] bg-[#0a0a0a] px-2">
@@ -1149,6 +1182,28 @@ export function RemoteTerminal({
             </span>
           ) : null}
           <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={inputMode === "line"}
+            data-testid="remote-terminal-input-mode-toggle"
+            data-mode={inputMode}
+            aria-label={inputMode === "direct" ? "Switch to line input mode" : "Switch to direct input mode"}
+            onPointerDown={() => {
+              modeSwitchingRef.current = true;
+            }}
+            onMouseDown={(event) => {
+              modeSwitchingRef.current = true;
+              // Keep focus where it is: the mode change moves focus itself, under the guard.
+              event.preventDefault();
+            }}
+            onClick={() => {
+              setInputMode((current) => (current === "direct" ? "line" : "direct"));
+            }}
+            className="shrink-0 rounded border border-[#191919] bg-[#0a0a0a] px-1.5 py-0.5 font-mono text-[10px] text-[#f5f5f5] transition-colors hover:text-[#838383]"
+          >
+            {inputMode === "direct" ? "Direct" : "Line"}
+          </button>
           <span role="status" className="font-mono text-[10px] text-[#838383]">
             {connected ? "Live" : "Connecting"}
           </span>
@@ -1211,7 +1266,12 @@ export function RemoteTerminal({
               sendKey(modifiedSequence);
             } else if (event.key === "Enter") {
               event.preventDefault();
-              sendKey("\r");
+              if (inputMode === "line") {
+                // Line mode owns Enter: it submits the draft as one write, never a bare CR.
+                submitLineDraft();
+              } else {
+                sendKey("\r");
+              }
             } else if (event.key === "Tab" && event.shiftKey) {
               event.preventDefault();
               sendKey("\u001b[Z");
@@ -1243,6 +1303,12 @@ export function RemoteTerminal({
               // Let the editable element own printable input, including the key
               // that starts composition before the browser reports isComposing.
               if (event.target === inputSinkRef.current) return;
+              if (inputMode === "line") {
+                // Line mode keeps text in the draft: hand focus to the line editor and let the
+                // IME own the keystroke. Nothing is written straight to the PTY from here.
+                lineInputRef.current?.focus();
+                return;
+              }
               if (event.key.charCodeAt(0) <= 0x7f) {
                 event.preventDefault();
                 sendKey(event.key);
@@ -1366,6 +1432,9 @@ export function RemoteTerminal({
           }}
           onInput={handleSinkInput}
           onBlur={() => {
+            // A mode switch must never flush the editor: pending text stays with its mode and
+            // reaches the PTY only through an explicit user action.
+            if (modeSwitchingRef.current) return;
             // A live composition is canceled - its preedit was never the user's text. Jamo the IME
             // already committed are, so they are sent before the next surface (dock key, paste,
             // tab) takes over the sink.
@@ -1428,6 +1497,45 @@ export function RemoteTerminal({
           </span>
         ) : null}
       </div>
+      {inputMode === "line" ? (
+        <div className="shrink-0 border-t border-[#191919] bg-[#0a0a0a] px-2 py-1.5">
+          <textarea
+            ref={lineInputRef}
+            data-testid="remote-terminal-line-input"
+            aria-label="Terminal line input"
+            rows={1}
+            value={lineDraft}
+            placeholder="Line input - Enter sends to the terminal"
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onChange={(event) => setLineDraft(event.target.value)}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              // Composition end commits nothing here: the draft stays until Enter.
+              isComposingRef.current = false;
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              if (isComposingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) {
+                return;
+              }
+              event.preventDefault();
+              submitLineDraft();
+            }}
+            onBlur={() => {
+              // Losing focus never sends a line draft; it only releases the composing flag.
+              isComposingRef.current = false;
+            }}
+            className="block w-full resize-none border-0 bg-transparent p-0 font-mono text-[#f5f5f5] outline-none placeholder:text-[#838383]"
+            style={{ fontSize: `${Math.max(16, activeFontSize)}px` }}
+          />
+        </div>
+      ) : null}
       <MobileKeyDock onSendKey={sendKey} />
     </div>
   );

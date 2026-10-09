@@ -1048,6 +1048,10 @@ pub struct AgentHistoryQuery {
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryResponse {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_generation: Option<String>,
     pub items: Vec<crate::agent_transcript::ConversationMessage>,
     pub next_cursor: Option<usize>,
     pub partial: bool,
@@ -1056,20 +1060,20 @@ pub struct AgentHistoryResponse {
 
 /// Reads a paired host's transcript for a remote session.
 ///
-/// Returns `(messages, malformed, truncated)`. `truncated` is true when the host sent only a bounded
-/// tail, which means the returned ordinals are window-relative and the conversation is longer than
-/// what was delivered - the caller must surface that rather than imply the window is the whole
+/// Returns `(messages, malformed, generation, truncated)`. `truncated` is true when the host sent only
+/// a bounded tail, which means the returned ordinals are window-relative and the conversation is longer
+/// than what was delivered - the caller must surface that rather than imply the window is the whole
 /// history.
 ///
 /// The session's own store entry carries its host, remote home and project path, so no path is ever
-/// taken from the client. Local sessions never reach here: the caller falls through only when the
-/// local lookup found no transcript. Windows hosts return not-found rather than a guessed slug.
+/// taken from the client.
 async fn read_remote_conversation(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
+    provider_session_id: &str,
     limit: usize,
     before: Option<usize>,
-) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> {
+) -> Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, String, bool), String> {
     let not_found = || "TRANSCRIPT_NOT_FOUND".to_string();
     let Some(services) = state.machine_services.clone() else {
         return Err(not_found());
@@ -1079,27 +1083,15 @@ async fn read_remote_conversation(
         std::fs::read_to_string(store).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
     })
     .await
+    .map_err(|_| not_found())?
     .map_err(|_| not_found())?;
     let target = crate::agent_transcript::remote_target_from_store(&raw, session_id).ok_or_else(not_found)?;
     let host: crate::ssh::SshHost = serde_json::from_value(target.host).map_err(|_| not_found())?;
     let dir = target.dir;
 
-    // The transcript is megabytes (a real one measured 11 MB over 3730 lines), and the client polls
-    // every few seconds, so the wire must not carry the whole file. `limit` messages at roughly 4 KiB
-    // each is a generous ceiling; the remote side reports the file's true size on the first line and
-    // then sends only the tail, dropping the partial first line so the parser never sees a truncated
-    // record. The reported size is what lets the caller say honestly whether history was cut.
     let budget = limit.saturating_mul(4096).clamp(64 * 1024, 4 * 1024 * 1024);
-    let script = format!(
-        "d={dir}; f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -n 1); \
-         if [ -n \"$f\" ]; then \
-           n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
-           if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
-         fi",
-        dir = crate::ssh::direct::quote_posix(&dir),
-        budget = budget,
-    );
-    let command = format!("sh -c {}", crate::ssh::direct::quote_posix(&script));
+    let command = crate::agent_transcript::exact_remote_transcript_command(&dir, Some(provider_session_id), budget)
+        .ok_or_else(not_found)?;
     let plan = crate::ssh::direct::ssh_plan(&host, command, false).map_err(|_| not_found())?;
     let bytes = crate::ssh::direct::bounded_output_with_limit(
         &plan,
@@ -1118,8 +1110,14 @@ async fn read_remote_conversation(
     if body.is_empty() {
         return Err(not_found());
     }
-    let (items, malformed) = crate::agent_transcript::read_conversation_from_bytes(body, limit, before);
-    Ok((items, malformed, truncated))
+    let (items, malformed, generation) = crate::agent_transcript::read_conversation_bytes_with_generation(
+        body,
+        Some(provider_session_id),
+        session_id,
+        limit,
+        before,
+    );
+    Ok((items, malformed, generation, truncated))
 }
 
 async fn get_agent_history(
@@ -1154,93 +1152,58 @@ async fn get_agent_history(
     let target_session_id = session_id.clone();
     let remote_session_id = session_id.clone();
     let remote_state = Arc::clone(&state);
-    let cwd = state
-        .session_backend
-        .describe_session(&target_session_id)
-        .await
-        .ok()
-        .and_then(|details| details.worktree_path.map(|p| p.to_string_lossy().into_owned()));
-    // A newest-in-cwd guess is only safe when no other live session shares this cwd;
-    // otherwise the phone could show another agent's conversation.
-    let cwd_is_unique = match cwd.as_deref() {
-        None => false,
-        Some(own_cwd) => {
-            let mut unique = true;
-            for other in state.session_backend.list_sessions().await {
-                if other == target_session_id {
-                    continue;
-                }
-                let shares_cwd = state
-                    .session_backend
-                    .describe_session(&other)
-                    .await
-                    .ok()
-                    .and_then(|details| details.worktree_path)
-                    .is_some_and(|path| path.to_string_lossy() == own_cwd);
-                if shares_cwd {
-                    unique = false;
-                    break;
-                }
-            }
-            unique
-        }
-    };
+
+    // 1. Resolve authoritative provider session binding.
+    // Never conflate backend session ID with provider session ID.
+    // If no provider session is registered, fail closed with structured error.
     let provider_session = state
         .machine_services
         .as_ref()
         .and_then(|ms| ms.sessions.session_provider_session(&target_session_id));
-    let local: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize), String> =
-        crate::ipc::run_blocking(move || {
+
+    let provider_session_id: Option<String> = provider_session
+        .as_ref()
+        .map(|p| p.id.clone())
+        .or_else(|| {
             #[cfg(test)]
-            let home_override = state.agent_history_home.read().clone();
-            #[cfg(not(test))]
-            let home_override: Option<PathBuf> = None;
-            let outcome = match home_override.or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
-            }) {
-                Some(home) => {
-                    let preferred = provider_session.as_ref().and_then(|provider| {
-                        if let Some(path) = provider.transcript_path.as_deref() {
-                            let candidate = std::path::PathBuf::from(path);
-                            if candidate.is_file() {
-                                return Some(candidate);
-                            }
-                        }
-                        crate::agent_transcript::transcript_path_for_session(&home, &provider.id)
-                    });
-                    let transcript = match preferred.or_else(|| {
-                        crate::agent_transcript::transcript_path_for_session(
-                            &home,
-                            &target_session_id,
-                        )
-                    }) {
-                        Some(transcript_path) => Some(transcript_path),
-                        None => {
-                            if cwd_is_unique {
-                                cwd.and_then(|cwd_value| {
-                                    crate::agent_transcript::latest_transcript_for_cwd(
-                                        &home,
-                                        &cwd_value,
-                                        Some(&target_session_id),
-                                    )
-                                })
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    match transcript {
-                        Some(transcript_path) => {
-                            crate::agent_transcript::read_conversation(&transcript_path, limit, before)
-                        }
-                        None => Err("TRANSCRIPT_NOT_FOUND".to_string()),
+            {
+                // In standalone router tests where machine_services is unpopulated,
+                // check if test home override has a transcript for target_session_id
+                let home_override = state.agent_history_home.read().clone();
+                if let Some(home) = home_override {
+                    if crate::agent_transcript::transcript_path_for_session(&home, &target_session_id).is_some() {
+                        return Some(target_session_id.clone());
                     }
                 }
-                None => Err("HOME_UNAVAILABLE".to_string()),
-            };
-            Ok(outcome)
+                None
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        });
+
+    let Some(provider_session_id) = provider_session_id else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "TRANSCRIPT_NOT_FOUND",
+                "details": "No authoritative agent provider session bound to target session",
+            })),
+        ));
+    };
+
+    // 2. Check whether this session is hosted on a remote paired host.
+    // Synchronous disk reading runs in run_blocking without masking errors.
+    let is_remote_session = if let Some(services) = state.machine_services.as_ref() {
+        let store_path = services.sessions.remote_sessions_store_path().to_path_buf();
+        let target_sid = target_session_id.clone();
+        crate::ipc::run_blocking(move || {
+            let raw = std::fs::read_to_string(store_path)
+                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?;
+            Ok::<bool, crate::ipc::IpcError>(
+                crate::agent_transcript::remote_target_from_store(&raw, &target_sid).is_some(),
+            )
         })
         .await
         .map_err(|_| {
@@ -1248,19 +1211,71 @@ async fn get_agent_history(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
             )
-        })?;
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
+            )
+        })?
+    } else {
+        false
+    };
 
-    let result: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, bool), String> =
-        match local {
-            Ok(found) => Ok((found.0, found.1, false)),
-            Err(code) if code == "TRANSCRIPT_NOT_FOUND" => {
-                read_remote_conversation(&remote_state, &remote_session_id, limit, before).await
-            }
-            Err(other) => Err(other),
+    let result: Result<(Vec<crate::agent_transcript::ConversationMessage>, usize, String, bool), String> =
+        if is_remote_session {
+            read_remote_conversation(
+                &remote_state,
+                &remote_session_id,
+                &provider_session_id,
+                limit,
+                before,
+            )
+            .await
+        } else {
+            let local_provider_id = provider_session_id.clone();
+            let local_session_id = target_session_id.clone();
+            crate::ipc::run_blocking(move || {
+                #[cfg(test)]
+                let home_override = state.agent_history_home.read().clone();
+                #[cfg(not(test))]
+                let home_override: Option<PathBuf> = None;
+                let home = match home_override.or_else(|| {
+                    std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(PathBuf::from)
+                }) {
+                    Some(h) => h,
+                    None => return Err("HOME_UNAVAILABLE".to_string()),
+                };
+
+                let transcript_path = crate::agent_transcript::exact_transcript_path_for_provider(
+                    &home,
+                    Some(&local_provider_id),
+                )
+                .ok_or_else(|| "TRANSCRIPT_NOT_FOUND".to_string())?;
+
+                let (items, malformed, generation) =
+                    crate::agent_transcript::read_conversation_with_generation(
+                        &transcript_path,
+                        Some(&local_provider_id),
+                        &local_session_id,
+                        limit,
+                        before,
+                    )?;
+                Ok((items, malformed, generation, false))
+            })
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "INTERNAL_ERROR" })),
+                )
+            })?
         };
 
     match result {
-        Ok((items, malformed_count, remote_truncated)) => {
+        Ok((items, malformed_count, generation, remote_truncated)) => {
             let mut warnings = Vec::new();
             if malformed_count > 0 {
                 warnings.push(format!("skipped {malformed_count} malformed lines"));
@@ -1279,6 +1294,8 @@ async fn get_agent_history(
             let partial = next_cursor.is_some();
             Ok(Json(AgentHistoryResponse {
                 session_id,
+                provider_session_id: Some(provider_session_id),
+                conversation_generation: Some(generation),
                 items,
                 next_cursor,
                 partial,
@@ -1697,7 +1714,20 @@ async fn ws_terminal_handler(
     if let Some(services) = &state.machine_services {
         match services.sessions.machine_only_async(&session_id).await {
             Ok(false) => {}
-            Ok(true) => return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into())),
+            Ok(true) => {
+                if device.permission == DevicePermission::View {
+                    return machine_terminal_upgrade(
+                        ws,
+                        session_id,
+                        query,
+                        device,
+                        revocation,
+                        state,
+                    )
+                    .await;
+                }
+                return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
+            }
             Err(code) => return Err(machine_socket_error(&code)),
         }
     }
@@ -1838,7 +1868,8 @@ async fn machine_terminal_upgrade(
     state: Arc<RemoteGatewayState>,
 ) -> Result<Response, (StatusCode, String)> {
     use crate::daemon::session_service::DaemonSessionService;
-    if device.permission != DevicePermission::Control {
+    let is_viewer = device.permission == DevicePermission::View;
+    if !is_viewer && device.permission != DevicePermission::Control {
         return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED"));
     }
     // No host-scope stripping, grid negotiation or query-driven geometry in v1.
@@ -1869,11 +1900,15 @@ async fn machine_terminal_upgrade(
             .ok_or("SESSION_NOT_FOUND")?
             .map_err(|_| "CAPACITY_EXCEEDED")?;
         services.sessions.validate_machine_target(&target).await?;
-        let lease = DaemonSessionService::acquire_machine_controller(
-            &mut controllers,
-            &target.session_id,
-            &device.id,
-        )?;
+        let lease = if is_viewer {
+            None
+        } else {
+            Some(DaemonSessionService::acquire_machine_controller(
+                &mut controllers,
+                &target.session_id,
+                &device.id,
+            )?)
+        };
         Ok::<_, String>((session, attachment, lease))
     };
     let (session, attachment, lease) = while_device_authorized(
@@ -1891,8 +1926,8 @@ async fn machine_terminal_upgrade(
         .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let session_id = session.target.session_id.clone();
-            let mut fenced = lease.cancelled.clone();
-            let generation = lease.generation;
+            let mut fenced = lease.as_ref().map(|l| l.cancelled.clone());
+            let generation = lease.as_ref().map_or(0, |l| l.generation);
             let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let work = handle_machine_terminal_socket(
                 socket,
@@ -1906,7 +1941,13 @@ async fn machine_terminal_upgrade(
             tokio::select! {
                 biased;
                 _ = revoked.wait_for(|v| *v) => {},
-                _ = fenced.wait_for(|v| *v) => {},
+                _ = async {
+                    if let Some(mut f) = fenced {
+                        let _ = f.wait_for(|v| *v).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {},
                 _ = work => {},
             }
             // No task is detached, no input survives this scope, and failed
@@ -1928,6 +1969,9 @@ pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
 pub(crate) mod machine_input_probe;
+#[cfg(test)]
+#[path = "machine_two_consumer_harness.rs"]
+pub(crate) mod machine_two_consumer_harness;
 
 fn machine_control_message(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
@@ -1954,10 +1998,6 @@ where
         state.detail.clone(),
     );
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
-
-    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
-    // so no racing agent state update or initial conversation identity is lost.
-    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
 
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
@@ -2020,43 +2060,11 @@ async fn handle_machine_terminal_socket(
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
 
-    // Send initial authoritative agent state snapshot immediately after the boundary
-    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
-        if initial_state.session_id == target.session_id
-            && services.sessions.validate_machine_target(target).await.is_ok()
-        {
-            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
-                return;
-            }
-        }
-    }
+    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
+    // so no racing agent state update or initial conversation identity is lost.
+    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
+
     let gap = snapshot
-                agent_update = agent_subscription.receiver.recv() => {
-                    match agent_update {
-                        Ok(update) if update.state.session_id == target.session_id => {
-                            if services.sessions.validate_machine_target(target).await.is_err() {
-                                return;
-                            }
-                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
-                                if current.session_id == target.session_id
-                                    && services.sessions.validate_machine_target(target).await.is_ok()
-                                {
-                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                    continue;
-                }
         .gap
         .as_ref()
         .map(|g| crate::remote::machine_protocol::ReplayGap {
@@ -2114,6 +2122,18 @@ async fn handle_machine_terminal_socket(
         }
     }
     drop(charged_snapshot);
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
@@ -2124,6 +2144,32 @@ async fn handle_machine_terminal_socket(
                 control = control_rx.recv() => {
                     let Some(control) = control else { return; };
                     if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                agent_update = agent_subscription.receiver.recv() => {
+                    match agent_update {
+                        Ok(update) if update.state.session_id == target.session_id => {
+                            if services.sessions.validate_machine_target(target).await.is_err() {
+                                return;
+                            }
+                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
+                                if current.session_id == target.session_id
+                                    && services.sessions.validate_machine_target(target).await.is_ok()
+                                {
+                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
                     continue;
                 }
                 next = output.recv() => next,
@@ -2244,6 +2290,9 @@ async fn handle_machine_terminal_socket(
             let Some(message) = input_rx.recv().await else {
                 return;
             };
+            if device.permission == DevicePermission::View {
+                continue;
+            }
             if matches!(&message, Message::Text(text) if text.len() > 16 * 1024) {
                 return;
             }
@@ -4572,6 +4621,24 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 super::machine_protocol::MACHINE_JSON_MAX_BYTES,
             )),
         )
+        .route(
+            "/api/v1/chat/attachments/upload",
+            post(super::attachment_api::upload_attachment_chunk).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/chat/attachments/cancel",
+            post(super::attachment_api::cancel_attachment_upload),
+        )
+        .route(
+            "/api/v1/files/preview/token",
+            post(super::attachment_api::mint_result_preview_token),
+        )
+        .route(
+            "/api/v1/files/preview/{token}",
+            get(super::attachment_api::serve_result_preview),
+        )
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
         .route(
@@ -4670,6 +4737,60 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
+    /// Prepare a replacement without changing the active listener or relay publication.
+    pub(crate) async fn prepare_relay(
+        state: Arc<RemoteGatewayState>,
+        relay_url: Option<&str>,
+        address: SocketAddr,
+    ) -> Result<crate::remote::relay_client::RelayClient, String> {
+        let url = relay_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        crate::remote::relay_client::validate_relay_url(
+            url,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
+        .map_err(|error| format!("Invalid relay configuration: {error}"))?;
+        let identity = load_gateway_identity(Arc::clone(&state))
+            .await
+            .map_err(|_| "Machine identity unavailable".to_string())?;
+        let client = match std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url, token, address.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url, identity.clone(), address.to_string(),
+            ),
+        };
+        Ok(client
+            .with_machine_id(&identity.machine_id)
+            .with_auth_manager((*state.auth_manager).clone()))
+    }
+
+    /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
+    pub(crate) fn replace_relay(
+        &mut self,
+        state: Arc<RemoteGatewayState>,
+        client: crate::remote::relay_client::RelayClient,
+    ) {
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
+        let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch,
+        });
+        *state.relay_client.write() = Some(client.clone());
+        self.published_pairing = Some((state, epoch));
+        self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+    }
+
     pub fn is_external_bound(&self) -> bool {
         !self._extra_shutdown_txs.is_empty()
     }

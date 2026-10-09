@@ -203,3 +203,8 @@ impl TerminalOutputHub {
         Some(result)
     }
 }
+
+#[cfg(test)]
+#[path = "machine_output_tests.rs"]
+mod tests;
+

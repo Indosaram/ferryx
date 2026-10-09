@@ -1,7 +1,10 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,8 +147,9 @@ pub fn read_conversation(
     limit: usize,
     before: Option<usize>,
 ) -> Result<(Vec<ConversationMessage>, usize), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    Ok(parse_conversation(BufReader::new(file), limit, before))
+    let (messages, malformed, _) =
+        read_conversation_with_generation(path, None, "default", limit, before)?;
+    Ok((messages, malformed))
 }
 
 /// Same filtering and windowing as [`read_conversation`], over bytes already in memory.
@@ -156,17 +160,201 @@ pub fn read_conversation_from_bytes(
     limit: usize,
     before: Option<usize>,
 ) -> (Vec<ConversationMessage>, usize) {
-    parse_conversation(std::io::Cursor::new(bytes), limit, before)
+    let (messages, malformed, _) =
+        read_conversation_bytes_with_generation(bytes, None, "default", limit, before);
+    (messages, malformed)
 }
 
-fn parse_conversation<R: BufRead>(
-    reader: R,
+/// Derives a stable authoritative conversation generation token.
+///
+/// The token is derived from the authoritative provider conversation ID and the conversation's
+/// initial genesis (session header timestamp and initial message identity).
+pub fn derive_conversation_generation(
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    session_header_timestamp: Option<&str>,
+    first_message: Option<&ConversationMessage>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let effective_id = provider_session_id.unwrap_or(session_id);
+    hasher.update(effective_id.as_bytes());
+    if let Some(ts) = session_header_timestamp {
+        hasher.update(b":hdr:");
+        hasher.update(ts.as_bytes());
+    }
+    if let Some(first) = first_message {
+        hasher.update(b":msg0:");
+        if let Some(id) = &first.id {
+            hasher.update(id.as_bytes());
+        }
+        hasher.update(first.role.as_bytes());
+        hasher.update(first.text.as_bytes());
+        if let Some(ts) = &first.timestamp {
+            hasher.update(ts.as_bytes());
+        }
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{effective_id}:{}", &digest[..16])
+}
+
+#[derive(Clone, Debug)]
+struct SessionIncarnationState {
+    provider_session_id: String,
+    prefix_hashes: Vec<[u8; 32]>,
+    incarnation: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConversationIncarnationTracker {
+    states: Arc<Mutex<HashMap<String, SessionIncarnationState>>>,
+}
+
+impl ConversationIncarnationTracker {
+    pub fn new() -> Self {
+        Self {
+            states: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Derives an authoritative conversation incarnation token for a session.
+    ///
+    /// Invariants:
+    /// 1. Independent of pagination: always computed over the full conversation's message list.
+    /// 2. Append alone preserves incarnation: if new messages extend the known prefix without
+    ///    modifying any existing message, incarnation number stays identical (no false resets).
+    /// 3. Same-first-row rewrite rotates: if message 0 is identical but any subsequent existing
+    ///    message is rewritten, the prefix hash mismatch triggers an incarnation increment.
+    /// 4. Tail truncation rotates: if the conversation length shrinks below the previous known
+    ///    count, incarnation increments.
+    /// 5. Head truncation rotates: if message 0 is removed, the entire hash chain shifts and
+    ///    incarnation increments.
+    /// 6. Replacement rotates: if provider session ID changes, incarnation resets/increments.
+    pub fn observe(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+        all_messages: &[ConversationMessage],
+    ) -> String {
+        use sha2::{Digest, Sha256};
+
+        let new_hashes: Vec<[u8; 32]> = all_messages
+            .iter()
+            .map(|m| {
+                let mut hasher = Sha256::new();
+                hasher.update(m.role.as_bytes());
+                hasher.update(b":");
+                hasher.update(m.text.as_bytes());
+                if let Some(id) = &m.id {
+                    hasher.update(b":id:");
+                    hasher.update(id.as_bytes());
+                }
+                if let Some(ts) = &m.timestamp {
+                    hasher.update(b":ts:");
+                    hasher.update(ts.as_bytes());
+                }
+                let result = hasher.finalize();
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&result);
+                out
+            })
+            .collect();
+
+        let mut lock = self.states.lock();
+        if let Some(state) = lock.get_mut(session_id) {
+            if state.provider_session_id != provider_session_id {
+                state.provider_session_id = provider_session_id.to_string();
+                state.prefix_hashes = new_hashes;
+                state.incarnation += 1;
+                return format!("{provider_session_id}:inc-{}", state.incarnation);
+            }
+
+            let prev_len = state.prefix_hashes.len();
+            let new_len = new_hashes.len();
+
+            let is_tail_truncation = new_len < prev_len;
+            let is_prefix_rewrite = if is_tail_truncation {
+                true
+            } else {
+                state
+                    .prefix_hashes
+                    .iter()
+                    .zip(new_hashes.iter())
+                    .any(|(prev_h, new_h)| prev_h != new_h)
+            };
+
+            if is_tail_truncation || is_prefix_rewrite {
+                state.incarnation += 1;
+                state.prefix_hashes = new_hashes;
+                return format!("{provider_session_id}:inc-{}", state.incarnation);
+            }
+
+            state.prefix_hashes = new_hashes;
+            return format!("{provider_session_id}:inc-{}", state.incarnation);
+        }
+
+        lock.insert(
+            session_id.to_string(),
+            SessionIncarnationState {
+                provider_session_id: provider_session_id.to_string(),
+                prefix_hashes: new_hashes,
+                incarnation: 1,
+            },
+        );
+        format!("{provider_session_id}:inc-1")
+    }
+}
+
+static GLOBAL_INCARNATION_TRACKER: OnceLock<ConversationIncarnationTracker> = OnceLock::new();
+
+pub fn global_incarnation_tracker() -> &'static ConversationIncarnationTracker {
+    GLOBAL_INCARNATION_TRACKER.get_or_init(ConversationIncarnationTracker::new)
+}
+
+pub fn read_conversation_with_generation(
+    path: &Path,
+    provider_session_id: Option<&str>,
+    session_id: &str,
     limit: usize,
     before: Option<usize>,
-) -> (Vec<ConversationMessage>, usize) {
+) -> Result<(Vec<ConversationMessage>, usize, String), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    Ok(parse_conversation_inner(
+        BufReader::new(file),
+        provider_session_id,
+        session_id,
+        limit,
+        before,
+    ))
+}
+
+pub fn read_conversation_bytes_with_generation(
+    bytes: &[u8],
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+) -> (Vec<ConversationMessage>, usize, String) {
+    parse_conversation_inner(
+        std::io::Cursor::new(bytes),
+        provider_session_id,
+        session_id,
+        limit,
+        before,
+    )
+}
+
+fn parse_conversation_inner<R: BufRead>(
+    reader: R,
+    provider_session_id: Option<&str>,
+    session_id: &str,
+    limit: usize,
+    before: Option<usize>,
+) -> (Vec<ConversationMessage>, usize, String) {
     let mut all_messages: Vec<ConversationMessage> = Vec::new();
     let mut malformed_lines = 0;
     let mut current_ordinal = 0;
+    let mut session_header_timestamp: Option<String> = None;
 
     for line_res in reader.lines() {
         let line = match line_res {
@@ -188,6 +376,13 @@ fn parse_conversation<R: BufRead>(
                 continue;
             }
         };
+
+        if record.record_type.as_deref() == Some("session") {
+            if session_header_timestamp.is_none() {
+                session_header_timestamp = record.timestamp.clone();
+            }
+            continue;
+        }
 
         if record.display == Some(false) {
             continue;
@@ -241,6 +436,17 @@ fn parse_conversation<R: BufRead>(
         current_ordinal += 1;
     }
 
+    let generation = if let Some(provider_id) = provider_session_id {
+        global_incarnation_tracker().observe(session_id, provider_id, &all_messages)
+    } else {
+        derive_conversation_generation(
+            provider_session_id,
+            session_id,
+            session_header_timestamp.as_deref(),
+            all_messages.first(),
+        )
+    };
+
     let filtered: Vec<ConversationMessage> = match before {
         Some(cursor) => all_messages
             .into_iter()
@@ -255,7 +461,7 @@ fn parse_conversation<R: BufRead>(
         filtered
     };
 
-    (result_messages, malformed_lines)
+    (result_messages, malformed_lines, generation)
 }
 
 /// Where a paired host keeps a session's transcript, resolved from the daemon's durable store.
@@ -328,6 +534,45 @@ pub fn remote_transcript_dir(home: &str, project_path: &str) -> Option<String> {
         "{home}/.omo/agent/sessions/{}",
         slug_for_cwd(project_path)
     ))
+}
+
+/// Resolves a local transcript strictly from the authoritative provider conversation ID.
+///
+/// Fails closed (returns `None`) if `provider_session_id` is missing, empty, or invalid.
+/// Never falls back to `latest_transcript_for_cwd` or timestamp recency (`ls -t`).
+pub fn exact_transcript_path_for_provider(
+    home: &Path,
+    provider_session_id: Option<&str>,
+) -> Option<PathBuf> {
+    let provider_id = provider_session_id?;
+    transcript_path_for_session(home, provider_id)
+}
+
+/// Constructs a POSIX shell command to read an exact remote transcript by provider conversation ID.
+///
+/// Fails closed (returns `None`) if `provider_session_id` is missing, empty, or invalid.
+/// Queries strictly for `*_{provider_id}.jsonl` or `{provider_id}.jsonl`. Never runs `ls -t`
+/// or substitutes a different session's file.
+pub fn exact_remote_transcript_command(
+    dir: &str,
+    provider_session_id: Option<&str>,
+    budget: usize,
+) -> Option<String> {
+    let provider_id = provider_session_id?;
+    if !is_valid_session_id(provider_id) {
+        return None;
+    }
+    let quoted_dir = crate::ssh::direct::quote_posix(dir);
+    let quoted_id = crate::ssh::direct::quote_posix(provider_id);
+    let script = format!(
+        "d={quoted_dir}; \
+         f=$(ls \"$d\"/*_{quoted_id}.jsonl \"$d\"/{quoted_id}.jsonl 2>/dev/null | head -n 1); \
+         if [ -n \"$f\" ]; then \
+           n=$(wc -c < \"$f\"); printf '%s\\n' \"$n\"; \
+           if [ \"$n\" -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
+         fi"
+    );
+    Some(format!("sh -c {}", crate::ssh::direct::quote_posix(&script)))
 }
 
 #[cfg(test)]
@@ -846,5 +1091,217 @@ mod tests {
         assert_eq!(messages[0].text, "checking\n→ bash");
         assert_eq!(messages[1].text, "ok");
         assert_eq!(messages[2].text, "← bash result");
+    }
+
+    #[test]
+    fn test_conversation_generation_stable_across_pagination() {
+        let transcript = concat!(
+            r#"{"type":"session","id":"sess-page-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"zero"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"one"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-3","message":{"role":"assistant","content":[{"type":"text","text":"three"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-4","message":{"role":"user","content":[{"type":"text","text":"four"}]}}"#,
+            "\n",
+        );
+
+        let (msgs_p1, _, gen_p1) = read_conversation_bytes_with_generation(
+            transcript.as_bytes(),
+            Some("sess-page-test"),
+            "ferryx-sess",
+            2,
+            None,
+        );
+        let (msgs_p2, _, gen_p2) = read_conversation_bytes_with_generation(
+            transcript.as_bytes(),
+            Some("sess-page-test"),
+            "ferryx-sess",
+            2,
+            Some(3),
+        );
+
+        assert_eq!(msgs_p1.len(), 2);
+        assert_eq!(msgs_p2.len(), 2);
+        assert_ne!(msgs_p1[0].ordinal, msgs_p2[0].ordinal);
+        assert_eq!(gen_p1, gen_p2, "pagination window must not change conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_stable_across_append() {
+        let initial = concat!(
+            r#"{"type":"session","id":"sess-append-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        );
+
+        let appended = concat!(
+            r#"{"type":"session","id":"sess-append-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"user","content":[{"type":"text","text":"how are you"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-3","message":{"role":"assistant","content":[{"type":"text","text":"doing well"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_initial) = read_conversation_bytes_with_generation(
+            initial.as_bytes(),
+            Some("sess-append-test"),
+            "ferryx-sess",
+            10,
+            None,
+        );
+        let (_, _, gen_appended) = read_conversation_bytes_with_generation(
+            appended.as_bytes(),
+            Some("sess-append-test"),
+            "ferryx-sess",
+            10,
+            None,
+        );
+
+        assert_eq!(gen_initial, gen_appended, "append alone must not rotate or reset conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_same_prefix_rewrite_rotates() {
+        let session_id = format!("sess-rewrite-{}", uuid::Uuid::new_v4());
+        let provider_id = "prov-rewrite-test";
+
+        let transcript_a = concat!(
+            r#"{"type":"session","id":"prov-rewrite-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"identical first prompt"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"original reply"}]}}"#,
+            "\n",
+        );
+
+        // Same-first-row rewrite: msg-0 is byte-for-byte identical, but msg-1 is rewritten
+        let transcript_b = concat!(
+            r#"{"type":"session","id":"prov-rewrite-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"identical first prompt"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"REWRITTEN reply"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_a) = read_conversation_bytes_with_generation(
+            transcript_a.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+        let (_, _, gen_b) = read_conversation_bytes_with_generation(
+            transcript_b.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+
+        assert_ne!(gen_a, gen_b, "same-first-row rewrite must rotate conversationGeneration");
+    }
+
+    #[test]
+    fn test_conversation_generation_truncation_rotates() {
+        let session_id = format!("sess-trunc-{}", uuid::Uuid::new_v4());
+        let provider_id = "prov-trunc-test";
+
+        let full = concat!(
+            r#"{"type":"session","id":"prov-trunc-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"first turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"second turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-2","message":{"role":"assistant","content":[{"type":"text","text":"third turn to truncate"}]}}"#,
+            "\n",
+        );
+
+        // Tail-truncated: msg-0 and msg-1 are identical, msg-2 deleted
+        let tail_truncated = concat!(
+            r#"{"type":"session","id":"prov-trunc-test","timestamp":"2026-10-03T10:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-0","message":{"role":"user","content":[{"type":"text","text":"first turn"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"second turn"}]}}"#,
+            "\n",
+        );
+
+        let (_, _, gen_full) = read_conversation_bytes_with_generation(
+            full.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+        let (_, _, gen_truncated) = read_conversation_bytes_with_generation(
+            tail_truncated.as_bytes(),
+            Some(provider_id),
+            &session_id,
+            10,
+            None,
+        );
+
+        assert_ne!(gen_full, gen_truncated, "tail truncation must rotate conversationGeneration");
+    }
+
+    #[test]
+    fn test_exact_provider_path_missing_provider_binding_fails_closed() {
+        let temp_dir = std::env::temp_dir().join(format!("test_prov_missing_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, None), None);
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, Some("")), None);
+        assert_eq!(exact_transcript_path_for_provider(&temp_dir, Some("../bad")), None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_exact_remote_command_missing_provider_binding_fails_closed() {
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", None, 65536), None);
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", Some(""), 65536), None);
+        assert_eq!(exact_remote_transcript_command("/home/indo/proj", Some("../invalid"), 65536), None);
+
+        let cmd = exact_remote_transcript_command("/home/indo/proj", Some("01a0d650-db7a"), 65536)
+            .expect("valid command generated");
+        assert!(cmd.contains("01a0d650-db7a"));
+        assert!(!cmd.contains("ls -t"), "command must never use ls -t recency fallback");
+    }
+
+    #[test]
+    fn test_wrong_session_or_host_fails_closed() {
+        let store = r#"{
+          "version": 3,
+          "remoteSessions": [
+            {
+              "descriptor": {
+                "backendSessionId": "correct-session-id",
+                "config": {
+                  "host": { "hostname": "100.91.254.71" },
+                  "environment": { "home": "/home/indo" },
+                  "projectPath": "/home/indo/project"
+                }
+              }
+            }
+          ]
+        }"#;
+
+        assert!(remote_target_from_store(store, "wrong-session-id").is_none());
+        assert!(remote_target_from_store(store, "correct-session-id").is_some());
     }
 }

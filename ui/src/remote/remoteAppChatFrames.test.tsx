@@ -744,4 +744,159 @@ describe("remoteAppChatFrames", () => {
     expect(toggle.textContent).toContain("Worked for 1m 30s");
     expect(toggle.textContent).not.toContain("Worked for 0s");
   });
+
+  it("rejects a late delayed response from an earlier fetch generation when session or epoch has advanced", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+
+    const twoTabState = {
+      activeContext: {
+        workspaceId: "ferryx",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        activeTabId: "tab-main",
+        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
+        terminalTabs: [
+          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
+          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
+        ],
+      },
+    };
+
+    const sessionAItems = [
+      { ordinal: 0, role: "user", text: "Stale prompt from Session A", id: "u0" },
+      { ordinal: 1, role: "assistant", text: "Stale reply from Session A", id: "a1" },
+    ];
+    const sessionBItems = [
+      { ordinal: 0, role: "user", text: "Fresh prompt from Session B", id: "u0" },
+      { ordinal: 1, role: "assistant", text: "Fresh reply from Session B", id: "a1" },
+    ];
+
+    let resolveFirstFetch!: (response: Response) => void;
+    const firstFetchPromise = new Promise<Response>((resolve) => {
+      resolveFirstFetch = resolve;
+    });
+
+    let mainCallCount = 0;
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/agent-history/sess-main")) {
+        mainCallCount += 1;
+        if (mainCallCount === 1) {
+          return firstFetchPromise;
+        }
+        return jsonResponse({ sessionId: "sess-main", items: sessionAItems, nextCursor: null, partial: false, warnings: [] });
+      }
+      if (url.includes("/api/v1/agent-history/sess-second")) {
+        return jsonResponse({ sessionId: "sess-second", items: sessionBItems, nextCursor: null, partial: false, warnings: [] });
+      }
+      return jsonResponse(twoTabState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+
+    try {
+      await act(async () => {
+        render(<RemoteApp />);
+      });
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+
+      await selectPaneFromWorktreeSheet(/second/i);
+
+      await waitFor(() => {
+        expect(screen.getByText("Fresh prompt from Session B")).toBeInTheDocument();
+        expect(screen.getByText("Fresh reply from Session B")).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveFirstFetch(
+          jsonResponse({
+            sessionId: "sess-main",
+            items: sessionAItems,
+            nextCursor: null,
+            partial: false,
+            warnings: [],
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByText("Stale prompt from Session A")).not.toBeInTheDocument();
+      expect(screen.queryByText("Stale reply from Session A")).not.toBeInTheDocument();
+      expect(screen.getByText("Fresh prompt from Session B")).toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("resets conversation messages and avoids stale ordinal mixing when same-session conversationGeneration rotates", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+
+    const gen1Data = {
+      sessionId: "sess-main",
+      conversationGeneration: "gen-first-conversation",
+      items: [
+        { ordinal: 0, role: "user", text: "Old conversation prompt", id: "u0" },
+        { ordinal: 1, role: "assistant", text: "Old conversation reply", id: "a1" },
+        { ordinal: 2, role: "user", text: "Old turn two", id: "u2" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    const gen2Data = {
+      sessionId: "sess-main",
+      conversationGeneration: "gen-second-conversation",
+      items: [
+        { ordinal: 0, role: "user", text: "New conversation after reset", id: "u0" },
+        { ordinal: 1, role: "assistant", text: "New fresh answer", id: "a1" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+
+    let historyCalls = 0;
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/agent-history/")) {
+        historyCalls += 1;
+        return jsonResponse(historyCalls === 1 ? gen1Data : gen2Data);
+      }
+      return jsonResponse(remoteState);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+
+    try {
+      await act(async () => {
+        render(<RemoteApp />);
+      });
+      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      await act(async () => {});
+
+      expect(historyCalls).toBe(1);
+      expect(screen.getByText("Old conversation prompt")).toBeInTheDocument();
+      expect(screen.getByText("Old conversation reply")).toBeInTheDocument();
+      expect(screen.getByText("Old turn two")).toBeInTheDocument();
+
+      // Explicit view-mode transition barrier to re-dispatch transcript poll without fake timers
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
+      });
+
+      expect(historyCalls).toBe(2);
+      expect(screen.getByText("New conversation after reset")).toBeInTheDocument();
+      expect(screen.getByText("New fresh answer")).toBeInTheDocument();
+      expect(screen.queryByText("Old conversation prompt")).not.toBeInTheDocument();
+      expect(screen.queryByText("Old conversation reply")).not.toBeInTheDocument();
+      expect(screen.queryByText("Old turn two")).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
 });
