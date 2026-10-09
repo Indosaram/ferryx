@@ -2062,6 +2062,53 @@ pub async fn cmd_native_terminal_copy_selection<R: Runtime>(
     Ok(text)
 }
 
+/// Writes arbitrary UI text (toast errors, file paths, debug info) to the system clipboard.
+///
+/// WebView clipboard APIs refuse writes while a native terminal child view holds first
+/// responder, so desktop copy actions go through the same native writer the terminal uses.
+#[tauri::command]
+pub async fn cmd_clipboard_write_text<R: Runtime>(
+    app: AppHandle<R>,
+    text: String,
+) -> Result<(), IpcError> {
+    if text.is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "Clipboard text must not be empty",
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    let written = {
+        let (sender, receiver) = oneshot::channel();
+        app.run_on_main_thread(move || {
+            let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+            let _ = sender.send(write_to_pasteboard(&pasteboard, &text));
+        })
+        .map_err(|error| {
+            IpcError::internal(format!("Could not dispatch native clipboard write: {error}"))
+        })?;
+        receiver.await.map_err(|_| {
+            IpcError::internal("Main thread stopped before native clipboard write completed")
+        })?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let written = {
+        let _ = app;
+        tokio::task::spawn_blocking(move || write_native_clipboard(&text))
+            .await
+            .map_err(|err| IpcError::internal(format!("Clipboard write task failed: {err}")))?
+    };
+
+    if written {
+        Ok(())
+    } else {
+        Err(IpcError::internal(
+            "No system clipboard writer accepted the text",
+        ))
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_paste<R: Runtime>(
     app: AppHandle<R>,
