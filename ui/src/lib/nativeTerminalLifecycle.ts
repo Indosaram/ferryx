@@ -303,7 +303,7 @@ export type NativeTerminalPresentationReceipt = {
   readonly paneIdentity: string;
   readonly backendSessionId: string;
   readonly bindingKey: string | null;
-  readonly attemptGeneration: number;
+  readonly attemptGeneration?: number | null;
 };
 
 /**
@@ -354,7 +354,7 @@ function presentationMatches(
   ) return false;
   if (
     subscription.attemptGeneration !== undefined &&
-    subscription.attemptGeneration !== receipt.attemptGeneration
+    subscription.attemptGeneration !== (receipt.attemptGeneration ?? null)
   ) return false;
   return true;
 }
@@ -422,6 +422,14 @@ export function emitNativeTerminalPresentation(
     bindingKey: receipt.bindingKey,
     attemptGeneration: receipt.attemptGeneration,
     delivered,
+  });
+  switchDebug("terminal.surface.presentation.receipt", {
+    frontendSessionId: receipt.frontendSessionId,
+    paneIdentity: receipt.paneIdentity,
+    backendSessionId: receipt.backendSessionId,
+    bindingKey: receipt.bindingKey,
+    attemptGeneration: receipt.attemptGeneration,
+    presented: true,
   });
   return delivered;
 }

@@ -851,6 +851,146 @@ fn install_pty_resize_dispatcher(
     });
 }
 
+/// Task 3 (local-split-qa): private QA barrier name for the attach handshake stage.
+#[cfg(feature = "local-split-qa")]
+pub const ATTACH_HANDSHAKE_BARRIER: &str = "attach-handshake";
+
+#[cfg(feature = "local-split-qa")]
+pub(crate) async fn hold_attach_handshake_barrier_qa(
+    channel: &std::sync::Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+) -> Option<crate::ipc::qa_barrier::ReleaseOutcome> {
+    let spec = channel.spec(ATTACH_HANDSHAKE_BARRIER)?;
+
+    // Target equality check: absent target must fail armed binding explicitly,
+    // never matching all panes or silently being ignored.
+    let target = match spec.target_backend_session_id.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            let channel_for_err = std::sync::Arc::clone(channel);
+            let op_id = spec.operation_id.clone();
+            let session_id_owned = session_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                channel_for_err.append_receipt(
+                    ATTACH_HANDSHAKE_BARRIER,
+                    &op_id,
+                    serde_json::json!({
+                        "sessionId": session_id_owned,
+                        "backendSessionId": session_id_owned,
+                        "stage": "attach_handshake_binding_failed",
+                        "status": "failed",
+                        "error": "BINDING_FAILURE: missing required targetBackendSessionId on armed barrier",
+                        "actionable": false,
+                        "producerComponent": "ipc-native-terminal-attach",
+                    }),
+                );
+            });
+            return None;
+        }
+    };
+    if target != session_id {
+        return None;
+    }
+
+    if !channel.try_claim(ATTACH_HANDSHAKE_BARRIER, session_id, &spec.operation_id) {
+        return None;
+    }
+
+    let start = tokio::time::Instant::now();
+    let channel_for_held = std::sync::Arc::clone(channel);
+    let spec_for_held = spec.clone();
+    let session_id_owned = session_id.to_string();
+    let held_res = tokio::task::spawn_blocking(move || {
+        channel_for_held.write_held(
+            &spec_for_held,
+            &session_id_owned,
+            "attach_handshake_start",
+            serde_json::json!({
+                "sessionId": session_id_owned,
+                "backendSessionId": session_id_owned,
+                "stage": "attach_handshake_start",
+                "producerComponent": "ipc-native-terminal-attach",
+            }),
+        );
+    })
+    .await;
+    if let Err(e) = held_res {
+        tracing::error!("Error writing attach_handshake held event: {e}");
+    }
+
+    let outcome = channel.wait_for_release(&spec).await;
+    channel.release_claim(ATTACH_HANDSHAKE_BARRIER, session_id, &spec.operation_id);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    if outcome == crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded {
+        let channel_for_receipt = std::sync::Arc::clone(channel);
+        let spec_for_receipt = spec.clone();
+        let session_id_receipt = session_id.to_string();
+        let receipt_res = tokio::task::spawn_blocking(move || {
+            channel_for_receipt.append_receipt(
+                ATTACH_HANDSHAKE_BARRIER,
+                &spec_for_receipt.operation_id,
+                serde_json::json!({
+                    "sessionId": session_id_receipt,
+                    "backendSessionId": session_id_receipt,
+                    "stage": "attach_handshake_stalled",
+                    "actionable": true,
+                    "failureDeliveredAtMs": elapsed_ms,
+                    "retryMustReuseId": true,
+                    "releaseOutcome": outcome.as_str(),
+                    "error": "Terminal attachment timed out at attach-handshake QA barrier.",
+                    "producerComponent": "ipc-native-terminal-attach",
+                }),
+            );
+        })
+        .await;
+        if let Err(e) = receipt_res {
+            tracing::error!("Error writing attach_handshake timeout receipt: {e}");
+        }
+    }
+    Some(outcome)
+}
+
+#[cfg(feature = "local-split-qa")]
+pub(crate) async fn settle_attach_handshake_barrier_qa(
+    channel: &std::sync::Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    outcome: Option<crate::ipc::qa_barrier::ReleaseOutcome>,
+    success: bool,
+    elapsed_ms: u64,
+    error: Option<&str>,
+) {
+    let Some(spec) = channel.spec(ATTACH_HANDSHAKE_BARRIER) else {
+        return;
+    };
+    if outcome == Some(crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded) {
+        return;
+    }
+    let channel = std::sync::Arc::clone(channel);
+    let session_id = session_id.to_string();
+    let error_owned = error.map(str::to_string);
+    let res = tokio::task::spawn_blocking(move || {
+        channel.append_receipt(
+            ATTACH_HANDSHAKE_BARRIER,
+            &spec.operation_id,
+            serde_json::json!({
+                "sessionId": session_id,
+                "backendSessionId": session_id,
+                "stage": "attach_handshake_settled",
+                "success": success,
+                "releaseOutcome": outcome.map(|o| o.as_str()),
+                "durationMs": elapsed_ms,
+                "error": error_owned,
+                "producerComponent": "ipc-native-terminal-attach",
+            }),
+        );
+    })
+    .await;
+    if let Err(e) = res {
+        tracing::error!("Error writing attach_handshake settled receipt: {e}");
+    }
+}
+
 /// Optional replay cursor (audit M6): when the caller knows the engine already holds
 /// state through this sequence, attach replays only the tail instead of the full ring.
 #[tauri::command]
@@ -906,14 +1046,57 @@ async fn native_terminal_attach<R: Runtime>(
         false => {}
     }
 
+    // Task 3 Unit 3-B: gate BEFORE begin_replay_request so that barrier timeout
+    // does not abort existing stream tasks or fence resident pumps.
+    #[cfg(feature = "local-split-qa")]
+    let attach_start = tokio::time::Instant::now();
+    #[cfg(feature = "local-split-qa")]
+    let qa_attach_outcome = match crate::ipc::qa_barrier::active_channel() {
+        Some(channel) => {
+            let outcome = hold_attach_handshake_barrier_qa(&channel, &session_id).await;
+            if outcome == Some(crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded) {
+                let elapsed_ms = attach_start.elapsed().as_millis() as u64;
+                return Err(IpcError::new(
+                    IpcErrorCode::Timeout,
+                    "Terminal attachment timed out at attach-handshake QA barrier.",
+                )
+                .with_details(serde_json::json!({
+                    "sessionId": session_id,
+                    "phase": "attach",
+                    "barrier": ATTACH_HANDSHAKE_BARRIER,
+                    "actionable": true,
+                    "failureDeliveredAtMs": elapsed_ms,
+                    "retryMustReuseId": true,
+                })));
+            }
+            outcome
+        }
+        None => None,
+    };
+
     // Fence the old pump and capture the replay cursor in one transaction BEFORE awaiting the
     // daemon. Reading the cursor first and awaiting afterwards lets the old pump keep applying
     // output across the await, so the response would be a delta against a cursor the grid has
     // already passed — which classifies as an overlap and destroys resident scrollback.
     let token = state.begin_replay_request(&session_id);
     let after_seq = replay_request_cursor(token.map(|token| token.last_sequence), after_sequence);
+
     let mut attachment = match daemon_client.attach(&session_id, after_seq).await {
-        Ok(attachment) => attachment,
+        Ok(attachment) => {
+            #[cfg(feature = "local-split-qa")]
+            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                settle_attach_handshake_barrier_qa(
+                    &channel,
+                    &session_id,
+                    qa_attach_outcome,
+                    true,
+                    attach_start.elapsed().as_millis() as u64,
+                    None,
+                )
+                .await;
+            }
+            attachment
+        }
         // The fence already aborted the old stream, so a failed request must not leave the pane
         // stranded: fall back to a full replay, which needs no cursor to be correct.
         Err(err) if after_seq.is_some() => {
@@ -922,9 +1105,54 @@ async fn native_terminal_attach<R: Runtime>(
                 %err,
                 "tail attach failed after fencing the resident stream; retrying with full history"
             );
-            daemon_client.attach(&session_id, None).await?
+            match daemon_client.attach(&session_id, None).await {
+                Ok(full_attachment) => {
+                    #[cfg(feature = "local-split-qa")]
+                    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                        settle_attach_handshake_barrier_qa(
+                            &channel,
+                            &session_id,
+                            qa_attach_outcome,
+                            true,
+                            attach_start.elapsed().as_millis() as u64,
+                            None,
+                        )
+                        .await;
+                    }
+                    full_attachment
+                }
+                Err(retry_err) => {
+                    #[cfg(feature = "local-split-qa")]
+                    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                        settle_attach_handshake_barrier_qa(
+                            &channel,
+                            &session_id,
+                            qa_attach_outcome,
+                            false,
+                            attach_start.elapsed().as_millis() as u64,
+                            Some(&retry_err.to_string()),
+                        )
+                        .await;
+                    }
+                    return Err(retry_err);
+                }
+            }
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            #[cfg(feature = "local-split-qa")]
+            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                settle_attach_handshake_barrier_qa(
+                    &channel,
+                    &session_id,
+                    qa_attach_outcome,
+                    false,
+                    attach_start.elapsed().as_millis() as u64,
+                    Some(&err.to_string()),
+                )
+                .await;
+            }
+            return Err(err);
+        }
     };
     // A restarted daemon numbers sequences from scratch, so a cursor minted under the previous
     // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
@@ -1493,6 +1721,108 @@ where
     Ok(())
 }
 
+pub async fn send_native_terminal_input_with_stage_logging<R: Runtime, F, Fut>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    input: &NativeTerminalInput,
+    generation: Option<u64>,
+    request_id: Option<String>,
+    write_op: F,
+) -> Result<(), IpcError>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let start_instant = std::time::Instant::now();
+    let started_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64() * 1000.0);
+    let op_id = request_id.clone();
+    crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+        "event": "terminal.surface.input.stage.backend_write_start",
+        "details": {
+            "operationId": op_id,
+            "sessionId": session_id,
+            "generation": generation,
+            "startedAt": started_at_unix_ms,
+        }
+    }));
+    // Task 3 (local-split-qa): private QA barrier hook on the REAL write
+    // stage. The channel exists only when the pane-liveness runner installed
+    // a task-owned barrier dir through the inherited env; default builds and
+    // normal runs never reach this code.
+    #[cfg(feature = "local-split-qa")]
+    let qa_write_release_outcome = match crate::ipc::qa_barrier::active_channel() {
+        Some(channel) => {
+            crate::ipc::qa_barrier::hold_backend_write_barrier(
+                &channel,
+                state,
+                session_id,
+                request_id.as_deref(),
+            )
+            .await
+        }
+        None => None,
+    };
+    let write_result = send_native_terminal_input_with_writer(
+        app,
+        state,
+        session_id,
+        input,
+        write_op,
+    )
+    .await;
+    let duration_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+    match &write_result {
+        Ok(()) => {
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": true,
+                    "errorCode": None::<String>,
+                }
+            }));
+        }
+        Err(err) => {
+            let code_str = serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", err.code));
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": false,
+                    "errorCode": Some(crate::ipc::debug::normalize_error_code(&code_str)),
+                }
+            }));
+        }
+    }
+    // Task 3 (local-split-qa): settle with a FRESH real collector snapshot
+    // plus actual stage-progress evidence. The verdict is never forced - an
+    // Unknown recovery reports evidenceMissing with the missing-field list.
+    #[cfg(feature = "local-split-qa")]
+    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+        crate::ipc::qa_barrier::settle_backend_write_barrier(
+            &channel,
+            state,
+            session_id,
+            request_id.as_deref(),
+            qa_write_release_outcome,
+            write_result.is_ok(),
+            duration_ms,
+        );
+    }
+    write_result
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_send_input<R: Runtime>(
     app: AppHandle<R>,
@@ -1501,13 +1831,16 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
     generation: Option<u64>,
+    request_id: Option<String>,
 ) -> Result<(), IpcError> {
     let write_session_id = session_id.clone();
-    send_native_terminal_input_with_writer(
+    send_native_terminal_input_with_stage_logging(
         &app,
         state.inner(),
         &session_id,
         &input,
+        generation,
+        request_id,
         |bytes| async move {
             daemon_client
                 .write_terminal_at_generation(&write_session_id, generation, bytes)
@@ -1515,6 +1848,14 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
         },
     )
     .await
+}
+
+#[tauri::command]
+pub fn cmd_native_terminal_pane_liveness(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<Option<crate::ipc::debug::PaneLivenessSnapshot>, IpcError> {
+    Ok(state.session_liveness_observation(&session_id))
 }
 
 /// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
@@ -2375,6 +2716,95 @@ mod tests {
                 "{name} must accept captured generation"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_diagnostics_prearmed_producer_write_barrier() {
+        let app = tauri::test::mock_builder()
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+
+        // Attach an active session to surface host state so encode_attached_input succeeds
+        // and establishes a real blocked producer on the write barrier.
+        let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending());
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                "session-test-barrier",
+                crate::daemon::DaemonAttachment {
+                    session_id: "session-test-barrier".into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: bytes::Bytes::new(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task,
+                },
+                Some(app.handle().clone()),
+                None,
+            )
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let input = NativeTerminalInput::Text { text: "test input".into() };
+
+        let recorded_entries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_entries = std::sync::Arc::clone(&recorded_entries);
+
+        let _sink_guard = crate::ipc::debug::set_scoped_sink_for_operation("req-barrier-1", move |entry| {
+            if entry.event.starts_with("terminal.surface.input.stage.") {
+                sink_entries.lock().unwrap().push(entry.clone());
+            }
+        });
+
+        let write_fut = send_native_terminal_input_with_stage_logging(
+            &app.handle(),
+            &state,
+            "session-test-barrier",
+            &input,
+            Some(1),
+            Some("req-barrier-1".into()),
+            |_bytes| async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(())
+            },
+        );
+
+        tokio::pin!(write_fut);
+
+        tokio::select! {
+            _ = &mut write_fut => panic!("write_fut completed before release"),
+            res = started_rx => {
+                assert!(res.is_ok(), "writer entered write_op and signaled barrier");
+                let entries = recorded_entries.lock().unwrap();
+                assert_eq!(entries.len(), 1, "backend_write_start must be emitted before write_op");
+                assert_eq!(entries[0].event, "terminal.surface.input.stage.backend_write_start");
+                assert_eq!(entries[0].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+                assert_eq!(entries[0].details.get("sessionId").and_then(|v| v.as_str()), Some("session-test-barrier"));
+                drop(entries);
+                let _ = release_tx.send(());
+            }
+        }
+
+        let result = write_fut.await;
+        assert!(result.is_ok(), "production write pipeline settled successfully");
+
+        let entries = recorded_entries.lock().unwrap();
+        assert_eq!(entries.len(), 2, "both backend_write_start and backend_write must be emitted");
+        assert_eq!(entries[1].event, "terminal.surface.input.stage.backend_write");
+        assert_eq!(entries[1].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+        assert_eq!(entries[1].details.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        state.teardown();
     }
 
     #[tokio::test]
@@ -3269,5 +3699,566 @@ mod tests {
         // inputWritten: true, which forced every caller to distinguish "the key was lost" from
         // "only the IME anchor was lost" -- and made the next keystroke wait for the rendezvous.
         result.expect("a written keystroke must succeed even when no receipt can be collected");
+    }
+
+    // Task 3 (local-split-qa): the private barrier channel drives the REAL
+    // write-stage producer through the production pipeline, without windows.
+    #[cfg(feature = "local-split-qa")]
+    mod qa_barrier_writer_tests {
+        use super::*;
+        use crate::ipc::qa_barrier::{
+            active_channel, deactivate, install, QaBarrierChannel, PRODUCER_ID, WRITE_BARRIER,
+        };
+        use serde_json::Value;
+
+        const RUN_ID: &str = "qa-run-writer";
+        const OPERATION_ID: &str = "qa-op-writer";
+
+        struct ChannelGuard;
+        impl Drop for ChannelGuard {
+            fn drop(&mut self) {
+                deactivate();
+            }
+        }
+
+        fn arm_backend_write(dir: &std::path::Path) {
+            std::fs::write(
+                dir.join(format!("{WRITE_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": WRITE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 5_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn release_backend_write(dir: &std::path::Path) {
+            std::fs::write(
+                dir.join(format!("{WRITE_BARRIER}.release.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": WRITE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "releasedAt": "2026-10-03T00:00:01.000Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn real_write_stage_holds_and_recovers_through_private_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            // The runner arms BEFORE launch: startup scan must ack it.
+            arm_backend_write(&dir);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            let (acked, rejected) = channel.scan_and_ack_arms();
+            assert_eq!(acked, vec![WRITE_BARRIER.to_string()]);
+            assert!(rejected.is_empty());
+
+            // Prearm exact event subscribers BEFORE driving the write pipeline
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-writer",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-writer".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            let write_fut = send_native_terminal_input_with_stage_logging(
+                &app.handle(),
+                &state,
+                "session-qa-writer",
+                &input,
+                Some(1),
+                Some(OPERATION_ID.into()),
+                |_bytes| async { Ok(()) },
+            );
+            tokio::pin!(write_fut);
+
+            // Await prearmed exact held event from the REAL parked producer
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, WRITE_BARRIER).await;
+            let held = held_event.payload;
+            assert_eq!(held["runId"], serde_json::json!(RUN_ID));
+            assert_eq!(held["operationId"], serde_json::json!(OPERATION_ID));
+            assert_eq!(held["producer"], serde_json::json!(PRODUCER_ID));
+            assert!(held["producerPid"].as_u64().is_some());
+            assert_eq!(held["sessionId"], serde_json::json!("session-qa-writer"));
+            assert_eq!(held["classifierVerdict"], serde_json::json!("BlockedInIpcWrite"));
+            assert!(
+                held["writePendingMs"].as_u64().unwrap() > 250,
+                "held verdict must rest on measured pending age past the classifier threshold"
+            );
+            assert!(dir.join(format!("{WRITE_BARRIER}.held.json")).exists());
+
+            // Await prearmed exact receipt event (line 1: held)
+            let held_receipt = QaBarrierChannel::await_receipt_event(&mut receipt_rx, WRITE_BARRIER, 1).await;
+            assert_eq!(held_receipt["classifierVerdict"], serde_json::json!("BlockedInIpcWrite"));
+            assert_eq!(held_receipt["operationId"], serde_json::json!(OPERATION_ID));
+            assert!(held_receipt["snapshot"]["writePendingMs"].as_u64().unwrap() > 250);
+
+            // The write stays parked until the correlated release.
+            tokio::select! {
+                _ = &mut write_fut => panic!("write settled before release"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            release_backend_write(&dir);
+            write_fut.await.expect("production write pipeline settled");
+
+            // Await prearmed exact receipt event (line 2: settled)
+            // Recovery receipt: fresh truthful classification plus actual
+            // stage-progress evidence; Idle is never forced.
+            let settled = QaBarrierChannel::await_receipt_event(&mut receipt_rx, WRITE_BARRIER, 2).await;
+            assert_eq!(settled["stage"], serde_json::json!("backend_write_settled"));
+            assert_eq!(
+                settled["stageProgress"]["backendWriteCompleted"],
+                serde_json::json!(true)
+            );
+            assert_eq!(settled["stageProgress"]["success"], serde_json::json!(true));
+            assert_eq!(
+                settled["stageProgress"]["releaseOutcome"],
+                serde_json::json!("released")
+            );
+            let verdict = settled["classifierVerdict"].as_str().unwrap();
+            match verdict {
+                "Idle" => assert_eq!(settled["evidenceMissing"], serde_json::json!(false)),
+                "Unknown" => {
+                    assert_eq!(settled["evidenceMissing"], serde_json::json!(true));
+                    assert!(
+                        !settled["evidenceMissingFields"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                other => panic!("unexpected recovery verdict {other}"),
+            }
+
+            state.teardown();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn wrong_operation_request_id_never_holds_the_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            arm_backend_write(&dir);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-wrong-op",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-wrong-op".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            // A request id that is NOT the runner's operation nonce must not
+            // hold the barrier or fabricate any emission.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                send_native_terminal_input_with_stage_logging(
+                    &app.handle(),
+                    &state,
+                    "session-qa-wrong-op",
+                    &input,
+                    Some(1),
+                    Some("req-unrelated".into()),
+                    |_bytes| async { Ok(()) },
+                ),
+            )
+            .await
+            .expect("unrelated write must not park")
+            .expect("unrelated write must succeed");
+            assert!(!dir.join(format!("{WRITE_BARRIER}.held.json")).exists());
+            assert!(!dir.join(format!("{WRITE_BARRIER}.receipt.jsonl")).exists());
+            state.teardown();
+        }
+
+        #[tokio::test]
+        async fn no_channel_installed_write_pipeline_is_unchanged() {
+            deactivate();
+            let root = tempfile::tempdir().unwrap();
+            let untouched = root.path().join("would-be-barriers");
+            std::fs::create_dir_all(&untouched).unwrap();
+
+            let app = tauri::test::mock_builder()
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending());
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    "session-qa-no-channel",
+                    crate::daemon::DaemonAttachment {
+                        session_id: "session-qa-no-channel".into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+            let input = NativeTerminalInput::Text { text: "qa probe".into() };
+            send_native_terminal_input_with_stage_logging(
+                &app.handle(),
+                &state,
+                "session-qa-no-channel",
+                &input,
+                Some(1),
+                Some(OPERATION_ID.into()),
+                |_bytes| async { Ok(()) },
+            )
+            .await
+            .expect("write pipeline without the QA channel must behave as today");
+            assert!(
+                std::fs::read_dir(&untouched).unwrap().next().is_none(),
+                "no QA control/receipt file may be written without the channel"
+            );
+            state.teardown();
+        }
+    }
+
+    // Task 3 Unit 3-B (local-split-qa): feature-gated attach-handshake hold and release
+    // at the production attach boundary with actionable failure and authoritative identity.
+    #[cfg(feature = "local-split-qa")]
+    mod qa_barrier_attach_tests {
+        use super::*;
+        use crate::ipc::qa_barrier::{
+            active_channel, deactivate, install, QaBarrierChannel,
+        };
+
+        const RUN_ID: &str = "qa-run-attach";
+        const OPERATION_ID: &str = "qa-op-attach";
+
+        struct ChannelGuard;
+        impl Drop for ChannelGuard {
+            fn drop(&mut self) {
+                deactivate();
+            }
+        }
+
+        fn arm_attach_handshake(dir: &std::path::Path, deadline_ms: u64) {
+            std::fs::write(
+                dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": ATTACH_HANDSHAKE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": deadline_ms,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn release_attach_handshake(dir: &std::path::Path) {
+            std::fs::write(
+                dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.release.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": ATTACH_HANDSHAKE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "releasedAt": "2026-10-03T00:00:01.000Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn attach_handshake_holds_and_releases_with_prearmed_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            arm_attach_handshake(&dir, 5_000);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            let (acked, rejected) = channel.scan_and_ack_arms();
+            assert_eq!(acked, vec![ATTACH_HANDSHAKE_BARRIER.to_string()]);
+            assert!(rejected.is_empty());
+
+            let mut held_rx = channel.subscribe_held();
+            let session_id = "session-qa-attach-test";
+
+            let hold_fut = hold_attach_handshake_barrier_qa(&channel, session_id);
+            tokio::pin!(hold_fut);
+
+            // Await held event
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, ATTACH_HANDSHAKE_BARRIER).await;
+            let held = held_event.payload;
+            assert_eq!(held["runId"], serde_json::json!(RUN_ID));
+            assert_eq!(held["operationId"], serde_json::json!(OPERATION_ID));
+            assert_eq!(held["sessionId"], serde_json::json!(session_id));
+            assert_eq!(held["backendSessionId"], serde_json::json!(session_id));
+            assert_eq!(held["stage"], serde_json::json!("attach_handshake_start"));
+            assert!(dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.held.json")).exists());
+
+            // Release barrier
+            release_attach_handshake(&dir);
+            let outcome = hold_fut.await;
+            assert_eq!(outcome, Some(crate::ipc::qa_barrier::ReleaseOutcome::Released));
+
+            let mut receipt_rx = channel.subscribe_receipts();
+            settle_attach_handshake_barrier_qa(&channel, session_id, outcome, true, 42, None);
+            let settled = QaBarrierChannel::await_receipt_event(&mut receipt_rx, ATTACH_HANDSHAKE_BARRIER, 1).await;
+            assert_eq!(settled["sessionId"], serde_json::json!(session_id));
+            assert_eq!(settled["backendSessionId"], serde_json::json!(session_id));
+            assert_eq!(settled["stage"], serde_json::json!("attach_handshake_settled"));
+            assert_eq!(settled["success"], serde_json::json!(true));
+            assert_eq!(settled["releaseOutcome"], serde_json::json!("released"));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn attach_handshake_times_out_on_unreleased_barrier_with_actionable_failure() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            arm_attach_handshake(&dir, 1_000);
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+            let session_id = "session-qa-attach-timeout";
+
+            let hold_fut = hold_attach_handshake_barrier_qa(&channel, session_id);
+            tokio::pin!(hold_fut);
+
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, ATTACH_HANDSHAKE_BARRIER).await;
+            assert_eq!(held_event.payload["backendSessionId"], serde_json::json!(session_id));
+
+            // Advance time past deadline without releasing
+            let outcome = hold_fut.await;
+            assert_eq!(outcome, Some(crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded));
+
+            // Receipt 1 must be actionable failure receipt written on deadline exceeded
+            let receipt = QaBarrierChannel::await_receipt_event(&mut receipt_rx, ATTACH_HANDSHAKE_BARRIER, 1).await;
+            assert_eq!(receipt["backendSessionId"], serde_json::json!(session_id));
+            assert_eq!(receipt["actionable"], serde_json::json!(true));
+            assert_eq!(receipt["retryMustReuseId"], serde_json::json!(true));
+            assert_eq!(receipt["releaseOutcome"], serde_json::json!("deadline-exceeded"));
+            assert!(receipt["failureDeliveredAtMs"].as_u64().is_some());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn attach_handshake_timeout_leaves_prior_live_session_tasks_intact() {
+            let root = tempfile::tempdir().unwrap();
+            let socket_path = root.path().join("mock-daemon-client");
+            #[cfg(unix)]
+            let _listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+            #[cfg(not(unix))]
+            let _listener = {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                std::fs::write(&socket_path, listener.local_addr().unwrap().port().to_string()).unwrap();
+                listener
+            };
+
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            let session_id = "session-qa-attach-live-check";
+
+            std::fs::write(
+                dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": ATTACH_HANDSHAKE_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 500,
+                    "targetBackendSessionId": session_id,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let app = tauri::test::mock_builder()
+                .manage(Arc::new(DaemonClient::new_with_socket(socket_path)))
+                .manage(NativeTerminalSurfaceHostState::default())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+            let stream_task = tokio::spawn(std::future::pending::<()>());
+            let stream_abort_handle = stream_task.abort_handle();
+
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    session_id,
+                    crate::daemon::DaemonAttachment {
+                        session_id: session_id.into(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: bytes::Bytes::new(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        remote_generation: None,
+                        messages,
+                        stream_task,
+                    },
+                    Some(app.handle().clone()),
+                    None,
+                )
+                .unwrap();
+
+            // Set surface_attached to false so reattach_existing_session_with_bounds returns false
+            // and forces cmd_native_terminal_attach through the full attachment handshake path
+            {
+                let mut sessions = state.sessions.lock();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    session.surface_attached = false;
+                }
+            }
+
+            assert!(state.has_session_host(session_id));
+            assert!(!stream_abort_handle.is_finished());
+
+            // EXACT PRODUCTION TAURI COMMAND CALL:
+            // Prearm held subscriber then spawn command on runtime so it actually
+            // runs and registers its deadline timer BEFORE advancing virtual time.
+            let mut held_rx = channel.subscribe_held();
+            let app_handle = app.handle().clone();
+            let daemon_client_state = app.state::<Arc<DaemonClient>>();
+            let host_state = app.state::<NativeTerminalSurfaceHostState>();
+            let session_id_owned = session_id.to_string();
+
+            let attach_handle = tokio::spawn(async move {
+                cmd_native_terminal_attach(
+                    app_handle,
+                    daemon_client_state,
+                    host_state,
+                    session_id_owned,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            });
+
+            // Await actual held signal to ensure the command has entered hold_attach_handshake_barrier_qa
+            // and is genuinely parked waiting on release before time advances.
+            let held_event =
+                QaBarrierChannel::await_held_event(&mut held_rx, ATTACH_HANDSHAKE_BARRIER).await;
+            assert_eq!(
+                held_event.payload["backendSessionId"],
+                serde_json::json!(session_id)
+            );
+
+            // Advance clock past the 500ms barrier deadline
+            tokio::time::advance(std::time::Duration::from_millis(600)).await;
+
+            let result = attach_handle.await.expect("attach command join failed");
+            assert!(
+                result.is_err(),
+                "attach command must fail with timeout on barrier deadline exceeded"
+            );
+            let err = result.unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::Timeout);
+
+            // Assert established handles remain intact and un-aborted!
+            assert!(
+                !stream_abort_handle.is_finished(),
+                "stream task must remain live after attach timeout"
+            );
+            assert!(
+                state.has_session_host(session_id),
+                "surface host session must remain active"
+            );
+
+            state.teardown();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn attach_proceeds_unheld_when_barrier_is_unarmed() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let outcome = hold_attach_handshake_barrier_qa(&channel, "session-unarmed").await;
+            assert_eq!(outcome, None, "unarmed barrier must immediately return None without hold");
+            assert!(!dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.held.json")).exists());
+            assert!(!dir.join(format!("{ATTACH_HANDSHAKE_BARRIER}.receipt.jsonl")).exists());
+        }
     }
 }

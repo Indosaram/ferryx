@@ -2383,6 +2383,18 @@ impl DaemonServer {
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
 
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        {
+            let role = if handover_from.is_some() {
+                crate::daemon::handover::qa_control::DaemonRole::Successor
+            } else {
+                crate::daemon::handover::qa_control::DaemonRole::Predecessor
+            };
+            if let Some(control) = crate::daemon::handover::qa_control::init_daemon_qa_barrier_channel(role) {
+                self.handover_manager.set_qa_control(control);
+            }
+        }
+
         if let Some(ref legacy_path) = handover_from {
             tracing::info!(
                 "Starting daemon with handover from {}",
@@ -2546,6 +2558,32 @@ impl DaemonServer {
                         // session it offered but did not deliver dies with the PTY master fd it
                         // still owned. Aborting leaves the predecessor serving all of them instead.
                         return Err(reason);
+                    }
+
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    {
+                        let first_session = exports.first().map(|e| e.session_id.clone()).unwrap_or_default();
+                        let accepted_count = accepted;
+                        let exported_ids: Vec<String> = exports.iter().map(|e| e.session_id.clone()).collect();
+                        if let Some(ctrl) = self.handover_manager.qa_control() {
+                            ctrl.maybe_hold_barrier(
+                                crate::daemon::handover::qa_control::SUCCESSOR_ADOPT_BARRIER,
+                                &first_session,
+                                "successor-adopt",
+                                serde_json::json!({
+                                    "stage": "successor-adopt",
+                                    "acceptedSessions": accepted_count,
+                                    "sessions": exported_ids,
+                                }),
+                                |outcome| {
+                                    serde_json::json!({
+                                        "stage": "successor-adopt",
+                                        "releaseOutcome": outcome.as_str(),
+                                        "acceptedSessions": accepted_count,
+                                    })
+                                },
+                            ).await;
+                        }
                     }
 
                     for export in exports {
@@ -3734,6 +3772,33 @@ impl DaemonServer {
                                 Ok((stream, _creds)) => {
                                     let sessions = self.terminal_service.pty_manager().list_sessions();
                                     let requested = sessions.len();
+
+                                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                    {
+                                        let first_session = sessions.first().cloned().unwrap_or_default();
+                                        let session_count = requested;
+                                        let session_list = sessions.clone();
+                                        if let Some(ctrl) = self.handover_manager.qa_control() {
+                                            ctrl.maybe_hold_barrier(
+                                                crate::daemon::handover::qa_control::PREDECESSOR_EXPORT_BARRIER,
+                                                &first_session,
+                                                "predecessor-export",
+                                                serde_json::json!({
+                                                    "stage": "predecessor-export",
+                                                    "requestedSessions": session_count,
+                                                    "sessions": session_list,
+                                                }),
+                                                |outcome| {
+                                                    serde_json::json!({
+                                                        "stage": "predecessor-export",
+                                                        "releaseOutcome": outcome.as_str(),
+                                                        "requestedSessions": session_count,
+                                                    })
+                                                },
+                                            ).await;
+                                        }
+                                    }
+
                                     let mut count = 0;
                                     let mut failures: Vec<String> = Vec::new();
                                     let transfer_id = uuid::Uuid::new_v4().to_string();
@@ -3804,6 +3869,28 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::CommitHandover { .. }) => {
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    {
+                        let status_str = format!("{:?}", self.handover_manager.status());
+                        if let Some(ctrl) = self.handover_manager.qa_control() {
+                            ctrl.maybe_hold_barrier(
+                                crate::daemon::handover::qa_control::COMMIT_BARRIER,
+                                "",
+                                "commit-handover",
+                                serde_json::json!({
+                                    "stage": "commit",
+                                    "predecessorStatus": status_str,
+                                }),
+                                |outcome| {
+                                    serde_json::json!({
+                                        "stage": "commit",
+                                        "releaseOutcome": outcome.as_str(),
+                                    })
+                                },
+                            ).await;
+                        }
+                    }
+
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
                     match crate::ipc::run_blocking(move || {
@@ -3814,7 +3901,36 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
-                    match self.handover_manager.abort_handover() {
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    let qa_abort_hold = {
+                        let ctrl = self.handover_manager.qa_control();
+                        if let Some(ref c) = ctrl {
+                            if c.is_armed(crate::daemon::handover::qa_control::ABORT_BARRIER) {
+                                let spec = c.channel().spec(crate::daemon::handover::qa_control::ABORT_BARRIER);
+                                if let Some(s) = spec {
+                                    c.channel().write_held(
+                                        &s,
+                                        "",
+                                        "abort-handover",
+                                        serde_json::json!({
+                                            "stage": "abort",
+                                            "predecessorStatus": format!("{:?}", self.handover_manager.status()),
+                                        }),
+                                    );
+                                    let outcome = c.channel().wait_for_release(&s).await;
+                                    Some((c.clone(), s, outcome))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    let abort_outcome = match self.handover_manager.abort_handover() {
                         Ok(()) => {
                             let resumed = self
                                 .terminal_service
@@ -3824,8 +3940,28 @@ impl DaemonServer {
                                 resumed_count = resumed,
                                 "Predecessor resumed serving {resumed} exported session(s) after AbortHandover"
                             );
-                            DaemonResponse::AbortHandoverOk
+                            Ok(resumed)
                         }
+                        Err(e) => Err(e),
+                    };
+
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    if let Some((ctrl, s, outcome)) = qa_abort_hold {
+                        ctrl.channel().append_receipt(
+                            crate::daemon::handover::qa_control::ABORT_BARRIER,
+                            &s.operation_id,
+                            serde_json::json!({
+                                "stage": "abort",
+                                "releaseOutcome": outcome.as_str(),
+                                "abortSuccess": abort_outcome.is_ok(),
+                                "resumedSessions": abort_outcome.as_ref().ok().copied().unwrap_or(0),
+                                "error": abort_outcome.as_ref().err().cloned(),
+                            }),
+                        );
+                    }
+
+                    match abort_outcome {
+                        Ok(_) => DaemonResponse::AbortHandoverOk,
                         Err(e) => daemon_error(e),
                     }
                 }

@@ -37,7 +37,7 @@ import type {
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
-import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
+import { formatPaneDebugInfoAsync } from "../lib/paneDebugInfo";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { createFileTabMenuHandlers } from "../lib/fileTabPaths";
 import { getFilePreview } from "../lib/filePreviewTabRegistry";
@@ -1266,10 +1266,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
-                const debugInfo = formatPaneDebugInfo(leafId, session);
-                void copyTextToClipboard(debugInfo).then((ok) => {
-                  if (!ok) console.warn("Could not copy pane debug info to clipboard");
-                });
+                void formatPaneDebugInfoAsync(leafId, session)
+                  .then((debugInfo) => {
+                    void copyTextToClipboard(debugInfo).then((ok) => {
+                      if (!ok) console.warn("Could not copy pane debug info to clipboard");
+                    });
+                  })
+                  .catch((err) => {
+                    console.warn("Could not format pane debug info for clipboard", err);
+                  });
               }}
             >
               <Copy className="size-3" />

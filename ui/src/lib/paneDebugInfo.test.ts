@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatPaneDebugInfo } from "./paneDebugInfo";
+import { formatPaneDebugInfo, formatPaneDebugInfoAsync } from "./paneDebugInfo";
 import type { TerminalSession } from "./types";
 
 describe("formatPaneDebugInfo", () => {
@@ -19,7 +19,9 @@ describe("formatPaneDebugInfo", () => {
     const text = formatPaneDebugInfo("leaf-a", session);
 
     expect(text).not.toContain("\n");
-    expect(JSON.parse(text)).toMatchObject({
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("liveness");
+    expect(parsed).toMatchObject({
       leafId: "leaf-a",
       sessionId: "session-a",
       backendSessionId: "backend-a",
@@ -37,4 +39,31 @@ describe("formatPaneDebugInfo", () => {
     expect(parsed).toHaveProperty("backendSessionId", null);
     expect(parsed).toHaveProperty("sessionId", null);
   });
+  it("formats pane debug info asynchronously awaiting native observation", async () => {
+    const session = {
+      id: "session-async",
+      backendSessionId: "backend-async",
+      daemonEpoch: "epoch-3",
+      workspaceId: "ws-async",
+      cwd: "/repo/async",
+      lifecycle: "working",
+      remoteGeneration: 1,
+      remoteConnectionState: "connected",
+      agentType: null,
+      agentSessionId: null,
+      title: "async-term",
+      history: [],
+    } as unknown as TerminalSession;
+
+    const text = await formatPaneDebugInfoAsync("leaf-async", session);
+    const parsed = JSON.parse(text);
+    expect(parsed).toHaveProperty("liveness");
+    expect(parsed).toMatchObject({
+      leafId: "leaf-async",
+      sessionId: "session-async",
+      backendSessionId: "backend-async",
+      daemonEpoch: "epoch-3",
+    });
+  });
+
 });

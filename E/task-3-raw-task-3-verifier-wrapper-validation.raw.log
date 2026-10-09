@@ -1,0 +1,15 @@
+=== TEST 1: cmd.exe /d /c exit 7 (Direct Invocation) ===
+TEST_1_CAPTURED_EXIT: 7
+=== TEST 2: cmd.exe /d /c exit 0 (Direct Invocation) ===
+TEST_2_CAPTURED_EXIT: 0
+=== TEST 3: Start-Process exit 7 ===
+TEST_3_CAPTURED_EXIT: 7
+=== TEST 4: Start-Process exit 0 ===
+TEST_4_CAPTURED_EXIT: 0
+=== TEST 5: Native Redirection > log 2>&1 exit 7 ===
+TEST_5_CAPTURED_EXIT: 7
+TEST_5_LOG_CONTENT:
+STDOUT_MARKER_TEST5 
+=== TEST 6: Cargo Executable Native Exit Code 101 ===
+CARGO_EXE_PATH: C:\Users\sook\.cargo\bin\cargo.exe
+CARGO_CHECK_FAIL_EXIT: 101

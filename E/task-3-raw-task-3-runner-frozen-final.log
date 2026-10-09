@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "scenario": "diagnostic-classifier",
+  "mode": "headless",
+  "invocation": {
+    "argv": [
+      "C:\\Users\\sook\\.bun\\bin\\bun.exe",
+      "C:\\Users\\sook\\task3-product-gate-01a100ad\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "diagnostic-classifier",
+      "--binary",
+      "C:\\Users\\sook\\task3-product-gate-01a100ad\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\task3-product-gate-01a100ad\\qa-evidence-frozen-final",
+      "--isolation-root",
+      "C:\\Users\\sook\\task3-product-gate-01a100ad\\qa-isolation-frozen-final",
+      "--headless"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\task3-product-gate-01a100ad\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "051d3c5db61a01bead6150faf7cf6ef7231af2b603e064c1ce2848df311dc732"
+  },
+  "sourceDigest": "4f120b0a7660ef2a83e143e129cbaa2edfc436c6999a5eaadfead09cc8b838d6",
+  "runId": "qa-run-511bdbc6-6edc-4e98-a08e-d64217ffb534",
+  "operationId": "qa-op-a1e616e9-81a9-4964-9924-5078f89e5f01",
+  "verdict": "BLOCKED",
+  "nativeEvidence": "deferred-to-task-10",
+  "error": {
+    "code": "BARRIER_ACK_TIMEOUT",
+    "message": "BARRIER_ACK_TIMEOUT: product did not settle barrier presentation receipt[0] within 2000ms"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": [
+    {
+      "name": "backend-write",
+      "armedAt": "2026-10-03T09:07:29.465Z",
+      "heldAt": "2026-10-03T09:07:29.859Z",
+      "releasedAt": "2026-10-03T09:07:29.859Z",
+      "receiptCount": 2,
+      "plan": "diagnostic-classifier"
+    },
+    {
+      "name": "presentation",
+      "armedAt": "2026-10-03T09:07:29.466Z",
+      "heldAt": "2026-10-03T09:07:29.888Z",
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "diagnostic-classifier"
+    }
+  ]
+}
+

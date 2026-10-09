@@ -41,6 +41,11 @@ pub async fn cmd_native_terminal_send_input() -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub fn cmd_native_terminal_pane_liveness() -> Result<Option<crate::ipc::debug::PaneLivenessSnapshot>, IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_scroll() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }

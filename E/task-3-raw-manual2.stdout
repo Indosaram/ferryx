@@ -1,0 +1,17 @@
+{
+  "mode": "headless",
+  "nativeEvidence": "deferred-to-task-10",
+  "presentationEvidence": "coordinator-consumed",
+  "presentationStage": {
+    "producer": "surface-host-render-coordinator",
+    "releaseOutcome": "deadline-exceeded",
+    "sessionId": "qa-headless-presentation"
+  },
+  "runId": "manual-diagnostic-20261003-2",
+  "scenario": "diagnostic-classifier",
+  "verdict": "DEFERRED-NATIVE",
+  "writeStage": {
+    "producer": "ipc-native-terminal",
+    "sessionId": "qa-headless-write"
+  }
+}

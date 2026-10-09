@@ -3948,6 +3948,10 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
                                 },
                             })
                             .unwrap()
@@ -4263,6 +4267,10 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
                                 },
                             })
                             .unwrap()

@@ -613,6 +613,46 @@ impl NativeTerminalSurfaceHostState {
     }
 }
 
+#[cfg(feature = "local-split-qa")]
+fn emit_native_presentation_receipt_qa(
+    channel: &std::sync::Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    session_id: &str,
+    frame_generation: u64,
+    frame_epoch: u64,
+    receipt: &NativeTerminalSurfaceReceipt,
+) {
+    let operation_id = channel
+        .spec(crate::ipc::qa_barrier::PRESENTATION_BARRIER)
+        .map(|s| s.operation_id)
+        .or_else(|| channel.operation_id())
+        .unwrap_or_else(|| format!("op-pres-{}", frame_generation));
+
+    channel.schedule_cancellation_receipt(
+        crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+        &operation_id,
+        serde_json::json!({
+            "sessionId": session_id,
+            "backendSessionId": session_id,
+            "stage": "native_presentation_settled",
+            "attemptGeneration": frame_generation,
+            "frameEpoch": frame_epoch,
+            "frameSubmitted": true,
+            "presented": receipt.presented,
+            "cols": receipt.cols,
+            "rows": receipt.rows,
+            "rebuiltRows": receipt.rebuilt_rows,
+            "reusedRows": receipt.reused_rows,
+            "cursorCol": receipt.cursor_col,
+            "cursorRow": receipt.cursor_row,
+            "cellWidthPx": receipt.cell_width_px,
+            "cellHeightPx": receipt.cell_height_px,
+            "effectiveScaleFactor": receipt.effective_scale_factor,
+            "presentationEvidence": "native-presented",
+            "producerComponent": "surface-host-gpu-render",
+        }),
+    );
+}
+
 fn dispatch_scheduled_render<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
@@ -626,6 +666,154 @@ fn dispatch_scheduled_render<R: Runtime>(
 }
 
 fn dispatch_owned_render<R: Runtime>(
+    window: Window<R>,
+    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    slot: Arc<SnapshotSlot>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
+    dispatch_owner: u64,
+) {
+    #[cfg(feature = "local-split-qa")]
+    if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+        if let Some(spec) = channel.spec(crate::ipc::qa_barrier::PRESENTATION_BARRIER) {
+            // Target equality check: absent target must fail armed binding explicitly,
+            // never matching all panes or silently being ignored.
+            let target = match spec.target_backend_session_id.as_deref() {
+                Some(target) if !target.is_empty() => target,
+                _ => {
+                    channel.schedule_cancellation_receipt(
+                        crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                        &spec.operation_id,
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "backendSessionId": session_id,
+                            "stage": "presentation_binding_failed",
+                            "status": "failed",
+                            "error": "BINDING_FAILURE: missing required targetBackendSessionId on armed barrier",
+                            "actionable": false,
+                            "producerComponent": "surface-host-render-coordinator",
+                        }),
+                    );
+                    return;
+                }
+            };
+            if target != session_id {
+                // Explicit target does not match this session; bypass without claiming.
+                return;
+            }
+
+            // Channel-owned claim state: returns false if already claimed by active operation.
+            if !channel.try_claim(crate::ipc::qa_barrier::PRESENTATION_BARRIER, &session_id, &spec.operation_id) {
+                return;
+            }
+
+            let window_clone = window.clone();
+            let hosts_clone = Arc::clone(&hosts);
+            let slot_clone = Arc::clone(&slot);
+            let session_id_clone = session_id.clone();
+            let coordinator_clone = Arc::clone(&coordinator);
+            let gpu_worker_clone = Arc::clone(&gpu_worker);
+            let channel_clone = Arc::clone(&channel);
+
+            tauri::async_runtime::spawn(async move {
+                let channel_held = Arc::clone(&channel_clone);
+                let spec_held = spec.clone();
+                let session_held = session_id_clone.clone();
+                let held_res = tokio::task::spawn_blocking(move || {
+                    channel_held.write_held(
+                        &spec_held,
+                        &session_held,
+                        "presentation_frame_pending",
+                        serde_json::json!({
+                            "sessionId": session_held,
+                            "stage": "presentation_frame_pending",
+                            "classifierVerdict": "BlockedInPresentation",
+                            "hasUnpresentedFrames": true,
+                            "producerComponent": "surface-host-render-coordinator",
+                        }),
+                    );
+                    channel_held.append_receipt(
+                        crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                        &spec_held.operation_id,
+                        serde_json::json!({
+                            "sessionId": session_held,
+                            "stage": "presentation_frame_pending",
+                            "classifierVerdict": "BlockedInPresentation",
+                            "hasUnpresentedFrames": true,
+                            "producerComponent": "surface-host-render-coordinator",
+                            "snapshot": {
+                                "hasUnpresentedFrames": true,
+                            },
+                        }),
+                    );
+                })
+                .await;
+                if let Err(e) = held_res {
+                    tracing::error!("Error writing presentation held receipt: {e}");
+                }
+
+                let outcome = channel_clone.wait_for_release(&spec).await;
+                channel_clone.release_claim(
+                    crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                    &session_id_clone,
+                    &spec.operation_id,
+                );
+
+                match outcome {
+                    crate::ipc::qa_barrier::ReleaseOutcome::Released => {
+                        dispatch_owned_render_inner(
+                            window_clone,
+                            hosts_clone,
+                            slot_clone,
+                            session_id_clone,
+                            coordinator_clone,
+                            gpu_worker_clone,
+                            dispatch_owner,
+                        );
+                    }
+                    crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded => {
+                        coordinator_clone.consume_render();
+                        let channel_deadline = Arc::clone(&channel_clone);
+                        let session_deadline = session_id_clone.clone();
+                        let op_id_deadline = spec.operation_id.clone();
+                        let dead_res = tokio::task::spawn_blocking(move || {
+                            channel_deadline.append_receipt(
+                                crate::ipc::qa_barrier::PRESENTATION_BARRIER,
+                                &op_id_deadline,
+                                serde_json::json!({
+                                    "sessionId": session_deadline,
+                                    "stage": "presentation_frame_settled",
+                                    "classifierVerdict": "BlockedInPresentation",
+                                    "releaseOutcome": "deadline-exceeded",
+                                    "frameConsumed": false,
+                                    "producerComponent": "surface-host-render-coordinator",
+                                }),
+                            );
+                        })
+                        .await;
+                        if let Err(e) = dead_res {
+                            tracing::error!("Error writing presentation deadline receipt: {e}");
+                        }
+                    }
+                }
+            });
+            return;
+        }
+    }
+
+    dispatch_owned_render_inner(
+        window,
+        hosts,
+        slot,
+        session_id,
+        coordinator,
+        gpu_worker,
+        dispatch_owner,
+    );
+}
+
+fn dispatch_owned_render_inner<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
     slot: Arc<SnapshotSlot>,
@@ -793,6 +981,17 @@ fn dispatch_owned_render<R: Runtime>(
                                 frame_epoch,
                                 receipt,
                             );
+
+                            #[cfg(feature = "local-split-qa")]
+                            if let Some(channel) = crate::ipc::qa_barrier::active_channel() {
+                                emit_native_presentation_receipt_qa(
+                                    &channel,
+                                    &completion_session_id,
+                                    frame_generation,
+                                    frame_epoch,
+                                    &receipt,
+                                );
+                            }
                         }
 
                         if completion_coordinator.finish_owned_render(owner, retry) {
@@ -2463,6 +2662,17 @@ impl NativeTerminalSurfaceHostState {
                                 }
                                 sess.last_sequence = Some(sequence);
                                 sess.publish_frame();
+                                crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                                    "event": "terminal.render.vt_consumed",
+                                    "details": {
+                                        "sessionId": session_id_owned,
+                                        "consumedSequence": sequence,
+                                        "renderedAt": std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .ok()
+                                            .map(|d| d.as_secs_f64() * 1000.0),
+                                    }
+                                }));
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, false),
@@ -3138,6 +3348,196 @@ impl NativeTerminalSurfaceHostState {
             .lock()
             .get(session_id)
             .and_then(|session| session.last_sequence)
+    }
+
+    /// Task 3 (local-split-qa): producer component identity for the private
+    /// presentation barrier receipts emitted by
+    /// [`NativeTerminalSurfaceHostState::hold_presentation_barrier_qa`].
+    #[cfg(feature = "local-split-qa")]
+    pub const PRESENTATION_PRODUCER_ID: &str = "surface-host-render-coordinator";
+
+    #[cfg(any(test, feature = "local-split-qa"))]
+    pub fn attach_test_session_for_liveness(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        last_sequence: Option<u64>,
+    ) -> Result<Arc<RenderScheduleCoordinator>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut terminal = NativeTerminal::new(80, 24)?;
+        let _ = terminal.set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
+        let (update_sender, _) = tokio::sync::watch::channel(());
+        let (detach_sender, _) = tokio::sync::watch::channel(());
+        let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
+        let session = NativeTerminalSession {
+            terminal,
+            focused: false,
+            preedit: None,
+            layout: None,
+            logical_bounds: None,
+            cell_metrics: None,
+            stream_task: None,
+            pump_task: None,
+            pty_write_task: None,
+            is_remote: false,
+            remote_generation: None,
+            last_sequence,
+            daemon_epoch: epoch,
+            pump_generation: 1,
+            update_sender,
+            detach_sender,
+            render_coordinator: Arc::clone(&render_coordinator),
+            last_agent_activity: None,
+            last_provider_session: None,
+            last_agent_detect_at: None,
+            agent_detect_pending: false,
+            last_scrollbar: None,
+            scrollbar_overlay: ScrollbarOverlayState::default(),
+            attention_frame: false,
+            agent_reports_own_state: false,
+            bracketed_paste_seen: false,
+            surface_attached: true,
+            output_stream_ended: false,
+            snapshot_slot: Arc::new(SnapshotSlot::new()),
+        };
+        self.sessions.lock().insert(session_id.to_string(), session);
+        Ok(render_coordinator)
+    }
+
+    pub fn session_liveness_observation(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::ipc::debug::PaneLivenessSnapshot> {
+        let sessions = self.sessions.lock();
+        let session = sessions.get(session_id)?;
+        Some(crate::ipc::debug::PaneLivenessSnapshot {
+            telemetry_available: true,
+            session_id: Some(session_id.to_string()),
+            vt_session_id: Some(session_id.to_string()),
+            vt_epoch: Some(session.daemon_epoch.to_string()),
+            vt_consumed_sequence: session.last_sequence,
+            has_unpresented_frames: Some(session.render_coordinator.is_render_pending()),
+            ..Default::default()
+        })
+    }
+
+    /// Task 3 (local-split-qa): hold the REAL presentation coordinator
+    /// producer on the private QA barrier. A frame is genuinely scheduled and
+    /// pending (`has_unpresented_frames` from the real collector), so the
+    /// held classification `BlockedInPresentation` is measured producer-level
+    /// evidence - coordinator pending state, NOT OS/GPU presentation (that
+    /// proof stays native, deferred to task 10). After the correlated
+    /// release, the SAME owned frame is rendered through the coordinator's
+    /// ownership-fenced begin/finish path and a fresh snapshot settles the
+    /// barrier with stage-progress evidence.
+    #[cfg(feature = "local-split-qa")]
+    pub async fn hold_presentation_barrier_qa(
+        &self,
+        coordinator: &RenderScheduleCoordinator,
+        session_id: &str,
+        channel: &crate::ipc::qa_barrier::QaBarrierChannel,
+    ) -> Option<crate::ipc::qa_barrier::ReleaseOutcome> {
+        use crate::ipc::debug::{classify_pane_liveness, PaneLivenessVerdict};
+        use crate::ipc::qa_barrier::{
+            verdict_str, PRESENTATION_BARRIER, PRODUCER_ID as CHANNEL_PRODUCER,
+        };
+
+        let spec = channel.spec(PRESENTATION_BARRIER)?;
+        assert!(
+            coordinator.schedule_render(),
+            "QA presentation barrier requires a fresh pending frame"
+        );
+        let held_snapshot = self
+            .session_liveness_observation(session_id)
+            .unwrap_or_default();
+        let held_verdict = classify_pane_liveness(&held_snapshot);
+        channel.write_held(
+            &spec,
+            session_id,
+            "presentation_frame_pending",
+            serde_json::json!({
+                "classifierVerdict": verdict_str(held_verdict),
+                "coordinatorEvidence": "coordinator-pending",
+                "presentationEvidence": "coordinator-pending",
+                "hasUnpresentedFrames": true,
+                "producerComponent": Self::PRESENTATION_PRODUCER_ID,
+            }),
+        );
+        channel.append_receipt(
+            PRESENTATION_BARRIER,
+            &spec.operation_id,
+            serde_json::json!({
+                "sessionId": session_id,
+                "stage": "presentation_frame_pending",
+                "classifierVerdict": verdict_str(held_verdict),
+                "coordinatorEvidence": "coordinator-pending",
+                "presentationEvidence": "coordinator-pending",
+                "hasUnpresentedFrames": true,
+                "producerComponent": Self::PRESENTATION_PRODUCER_ID,
+                "snapshot": {
+                    "hasUnpresentedFrames": true,
+                },
+            }),
+        );
+        let outcome = channel.wait_for_release(&spec).await;
+        match outcome {
+            crate::ipc::qa_barrier::ReleaseOutcome::Released => {
+                // Consume the SAME scheduled frame through the real
+                // ownership-fenced completion path.
+                let owner = coordinator.begin_owned_render();
+                let followed_up = coordinator.finish_owned_render(owner.unwrap_or(0), false);
+                debug_assert!(
+                    !followed_up,
+                    "QA presentation fixture must not mint a follow-up frame"
+                );
+            }
+            crate::ipc::qa_barrier::ReleaseOutcome::DeadlineExceeded => {
+                // Bounded cancellation: cancel pending render work, never
+                // park the coordinator.
+                coordinator.consume_render();
+            }
+        }
+        let fresh_snapshot = self
+            .session_liveness_observation(session_id)
+            .unwrap_or_default();
+        let verdict = classify_pane_liveness(&fresh_snapshot);
+        let render_pending_after = fresh_snapshot.has_unpresented_frames == Some(true);
+        let missing = [
+            ("daemonEpoch", fresh_snapshot.daemon_epoch.is_none()),
+            ("readerPaused", fresh_snapshot.reader_paused.is_none()),
+            ("kernelStopped", fresh_snapshot.kernel_stopped.is_none()),
+            ("suspended", fresh_snapshot.suspended.is_none()),
+            (
+                "presentationReceiptReceived",
+                fresh_snapshot.presentation_receipt_received.is_none(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, missing)| missing.then_some(field))
+        .collect::<Vec<_>>();
+        channel.append_receipt(
+            PRESENTATION_BARRIER,
+            &spec.operation_id,
+            serde_json::json!({
+                "sessionId": session_id,
+                "stage": "presentation_frame_settled",
+                "classifierVerdict": verdict_str(verdict),
+                "evidenceMissing": verdict == PaneLivenessVerdict::Unknown,
+                "evidenceMissingFields": missing,
+                "stageProgress": {
+                    "frameConsumed": !render_pending_after,
+                    "renderPendingAfter": render_pending_after,
+                    "releaseOutcome": outcome.as_str(),
+                },
+                "snapshot": serde_json::to_value(&fresh_snapshot)
+                    .unwrap_or(serde_json::Value::Null),
+                "coordinatorEvidence": "coordinator-consumed",
+                "presentationEvidence": "coordinator-consumed",
+                "producerComponent": Self::PRESENTATION_PRODUCER_ID,
+                "channelProducer": CHANNEL_PRODUCER,
+            }),
+        );
+        Some(outcome)
     }
 
     /// Resident replay cursor as `(daemon_epoch, last_sequence)`. The epoch travels with the
@@ -8533,5 +8933,338 @@ mod tests {
         }
 
         state.teardown();
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::ipc::debug::{classify_pane_liveness, PaneLivenessVerdict};
+
+    // Task 3 (local-split-qa): the private barrier channel drives the REAL
+    // presentation coordinator producer without any window.
+    #[cfg(feature = "local-split-qa")]
+    mod qa_barrier_presentation_tests {
+        use super::*;
+        use crate::ipc::qa_barrier::{
+            active_channel, deactivate, install, QaBarrierChannel, PRODUCER_ID,
+            PRESENTATION_BARRIER,
+        };
+        use serde_json::Value;
+
+        const RUN_ID: &str = "qa-run-presentation";
+        const OPERATION_ID: &str = "qa-op-presentation";
+
+        struct ChannelGuard;
+        impl Drop for ChannelGuard {
+            fn drop(&mut self) {
+                deactivate();
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn real_coordinator_frame_holds_and_recovers_through_private_barrier() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{PRESENTATION_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": PRESENTATION_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 5_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            let (acked, rejected) = channel.scan_and_ack_arms();
+            assert_eq!(acked, vec![PRESENTATION_BARRIER.to_string()]);
+            assert!(rejected.is_empty());
+
+            // Prearm exact event subscribers BEFORE driving the presentation hold
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+
+            let state = NativeTerminalSurfaceHostState::default();
+            let session_id = "session-qa-presentation";
+            let coordinator = state
+                .attach_test_session_for_liveness(session_id, 1, Some(42))
+                .expect("attach test session");
+
+            let hold_fut =
+                state.hold_presentation_barrier_qa(&coordinator, session_id, &channel);
+            tokio::pin!(hold_fut);
+
+            // Await prearmed exact held event
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, PRESENTATION_BARRIER).await;
+            let held = held_event.payload;
+            assert_eq!(held["runId"], serde_json::json!(RUN_ID));
+            assert_eq!(held["operationId"], serde_json::json!(OPERATION_ID));
+            assert_eq!(held["producer"], serde_json::json!(PRODUCER_ID));
+            assert!(held["producerPid"].as_u64().is_some());
+            assert_eq!(held["sessionId"], serde_json::json!(session_id));
+            assert_eq!(
+                held["classifierVerdict"],
+                serde_json::json!("BlockedInPresentation")
+            );
+            assert_eq!(
+                held["presentationEvidence"],
+                serde_json::json!("coordinator-pending")
+            );
+            assert_eq!(
+                held["coordinatorEvidence"],
+                serde_json::json!("coordinator-pending")
+            );
+            assert!(dir.join(format!("{PRESENTATION_BARRIER}.held.json")).exists());
+
+            // Await prearmed exact receipt event (line 1: held)
+            let held_receipt = QaBarrierChannel::await_receipt_event(&mut receipt_rx, PRESENTATION_BARRIER, 1).await;
+            assert_eq!(
+                held_receipt["classifierVerdict"],
+                serde_json::json!("BlockedInPresentation")
+            );
+            assert_eq!(
+                held_receipt["snapshot"]["hasUnpresentedFrames"],
+                serde_json::json!(true)
+            );
+
+            // The frame stays pending (and the producer parked) until the
+            // correlated release arrives.
+            tokio::select! {
+                _ = &mut hold_fut => panic!("presentation hold settled before release"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+
+            std::fs::write(
+                dir.join(format!("{PRESENTATION_BARRIER}.release.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": PRESENTATION_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "releasedAt": "2026-10-03T00:00:01.000Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                hold_fut.await.map(crate::ipc::qa_barrier::ReleaseOutcome::as_str),
+                Some("released")
+            );
+            assert!(
+                !coordinator.is_render_pending(),
+                "the SAME owned frame must be consumed after release"
+            );
+
+            // Await prearmed exact receipt event (line 2: settled)
+            let settled = QaBarrierChannel::await_receipt_event(&mut receipt_rx, PRESENTATION_BARRIER, 2).await;
+            assert_eq!(
+                settled["stageProgress"]["frameConsumed"],
+                serde_json::json!(true)
+            );
+            assert_eq!(
+                settled["stageProgress"]["renderPendingAfter"],
+                serde_json::json!(false)
+            );
+            let verdict = settled["classifierVerdict"].as_str().unwrap();
+            match verdict {
+                "Idle" => assert_eq!(settled["evidenceMissing"], serde_json::json!(false)),
+                "Unknown" => assert_eq!(settled["evidenceMissing"], serde_json::json!(true)),
+                other => panic!("unexpected recovery verdict {other}"),
+            }
+            assert_eq!(
+                settled["presentationEvidence"],
+                serde_json::json!("coordinator-consumed")
+            );
+            assert_eq!(
+                settled["coordinatorEvidence"],
+                serde_json::json!("coordinator-consumed")
+            );
+
+            state.teardown();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn presentation_barrier_claim_isolates_concurrent_panes() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            let session_a = "session-qa-pane-a".to_string();
+            let session_b = "session-qa-pane-b".to_string();
+
+            std::fs::write(
+                dir.join(format!("{PRESENTATION_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": PRESENTATION_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 5_000,
+                    "targetBackendSessionId": session_a,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let spec = channel.spec(PRESENTATION_BARRIER).unwrap();
+
+            // 1. Channel-owned claim by session A
+            let claimed_a = channel.try_claim(PRESENTATION_BARRIER, &session_a, &spec.operation_id);
+            assert!(claimed_a, "session A must claim presentation barrier");
+
+            // 2. Channel-owned claim by session B with same operation_id
+            // Because claim key is barrier:session:op, session B is isolated!
+            let has_a_claim = channel.has_claim(PRESENTATION_BARRIER, &session_a, &spec.operation_id);
+            assert!(has_a_claim);
+            let has_b_claim = channel.has_claim(PRESENTATION_BARRIER, &session_b, &spec.operation_id);
+            assert!(!has_b_claim, "session B must not have claim when only A claimed");
+
+            // 3. Release session A claim
+            let released_a = channel.release_claim(PRESENTATION_BARRIER, &session_a, &spec.operation_id);
+            assert!(released_a, "session A claim must be released");
+            assert!(!channel.has_claim(PRESENTATION_BARRIER, &session_a, &spec.operation_id));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn native_presentation_receipt_emitted_on_presented_frame() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let mut receipt_rx = channel.subscribe_receipts();
+            let session_id = "session-qa-native-pres";
+            let receipt = NativeTerminalSurfaceReceipt {
+                presented: true,
+                render_deferred: false,
+                render_suspended: false,
+                cols: 80,
+                rows: 24,
+                rebuilt_rows: 24,
+                reused_rows: 0,
+                cursor_col: 0,
+                cursor_row: 0,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                effective_scale_factor: Some(2.0),
+            };
+
+            emit_native_presentation_receipt_qa(&channel, session_id, 1, 1, &receipt);
+
+            let event = QaBarrierChannel::await_receipt_event(&mut receipt_rx, PRESENTATION_BARRIER, 1).await;
+            assert_eq!(event["sessionId"], serde_json::json!(session_id));
+            assert_eq!(event["backendSessionId"], serde_json::json!(session_id));
+            assert_eq!(event["stage"], serde_json::json!("native_presentation_settled"));
+            assert_eq!(event["presented"], serde_json::json!(true));
+            assert_eq!(event["frameSubmitted"], serde_json::json!(true));
+            assert_eq!(event["cols"], serde_json::json!(80));
+            assert_eq!(event["rows"], serde_json::json!(24));
+            assert_eq!(event["presentationEvidence"], serde_json::json!("native-presented"));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn presentation_hold_deadline_cancels_pending_frame_bounded() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{PRESENTATION_BARRIER}.arm.json")),
+                serde_json::to_string(&serde_json::json!({
+                    "name": PRESENTATION_BARRIER,
+                    "runId": RUN_ID,
+                    "operationId": OPERATION_ID,
+                    "deadlineMs": 1_000,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            install(QaBarrierChannel::new(dir.clone(), RUN_ID.to_string()));
+            let channel = active_channel().expect("channel installed");
+            let _guard = ChannelGuard;
+            channel.scan_and_ack_arms();
+
+            let state = NativeTerminalSurfaceHostState::default();
+            let session_id = "session-qa-presentation-cancel";
+            let coordinator = state
+                .attach_test_session_for_liveness(session_id, 1, Some(42))
+                .expect("attach test session");
+
+            let started = tokio::time::Instant::now();
+            let outcome = state
+                .hold_presentation_barrier_qa(&coordinator, session_id, &channel)
+                .await;
+            assert_eq!(
+                outcome.map(crate::ipc::qa_barrier::ReleaseOutcome::as_str),
+                Some("deadline-exceeded")
+            );
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(1_000),
+                "deadline must bound the hold"
+            );
+            assert!(
+                !coordinator.is_render_pending(),
+                "cancellation must cancel the pending frame, not park the coordinator"
+            );
+            state.teardown();
+        }
+    }
+
+    #[test]
+    fn pane_liveness_diagnostics_prearmed_held_presentation_barrier() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-live-presentation-session";
+
+        let coordinator = state
+            .attach_test_session_for_liveness(session_id, 1, Some(42))
+            .expect("attach test session");
+
+        // 1. Prearm presentation dependency: schedule a pending frame
+        assert!(coordinator.schedule_render(), "schedule render must succeed");
+        assert!(coordinator.is_render_pending(), "coordinator frame must be pending");
+
+        // 2. Observe real surface-owner production state via session_liveness_observation
+        let held_obs = state
+            .session_liveness_observation(session_id)
+            .expect("observation must exist");
+        assert_eq!(held_obs.session_id.as_deref(), Some(session_id));
+        assert_eq!(held_obs.vt_epoch.as_deref(), Some("1"));
+        assert_eq!(held_obs.vt_consumed_sequence, Some(42));
+        assert_eq!(held_obs.has_unpresented_frames, Some(true));
+
+        // 3. Classify: must yield BlockedInPresentation while held
+        assert_eq!(
+            classify_pane_liveness(&held_obs),
+            PaneLivenessVerdict::BlockedInPresentation
+        );
+
+        // 4. Release controllable presentation dependency: consume/finish the render
+        let owner = coordinator.begin_owned_render().expect("begin render");
+        coordinator.finish_owned_render(owner, false);
+        assert!(!coordinator.is_render_pending(), "frame must be rendered");
+
+        // 5. Observe released state via session_liveness_observation
+        let released_obs = state
+            .session_liveness_observation(session_id)
+            .expect("observation must exist");
+        assert_eq!(released_obs.has_unpresented_frames, Some(false));
+
+        // 6. Complete negative confirmations to assert IDLE after release
+        let mut idle_candidate = released_obs;
+        idle_candidate.reader_paused = Some(false);
+        idle_candidate.kernel_stopped = Some(false);
+        idle_candidate.suspended = Some(false);
+        assert_eq!(
+            classify_pane_liveness(&idle_candidate),
+            PaneLivenessVerdict::Idle
+        );
     }
 }
