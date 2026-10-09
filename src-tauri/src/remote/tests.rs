@@ -3939,6 +3939,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                         }
                         DaemonRequest::DescribeSession { session_id } => {
                             let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                daemon_epoch: None,
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-ws".into()),
@@ -4262,6 +4263,7 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                         }
                         DaemonRequest::DescribeSession { session_id } => {
                             let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                daemon_epoch: None,
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-handover-ws".into()),

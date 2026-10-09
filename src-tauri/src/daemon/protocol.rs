@@ -834,6 +834,9 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     DescribeSessionOk {
         session: DaemonSessionDetails,
+        /// Decimal owner epoch from the same description, never the gateway handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_epoch: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     ManualSshOk {
@@ -1683,6 +1686,7 @@ mod tests {
         assert!(desc_json.contains(r#""sessionId":"session-99""#));
 
         let desc_resp = DaemonResponse::DescribeSessionOk {
+            daemon_epoch: None,
             session: DaemonSessionDetails {
                 session_id: "session-99".to_string(),
                 workspace_id: Some("default".to_string()),
@@ -1716,7 +1720,8 @@ mod tests {
         )
         .expect("legacy describe response must decode");
         match decoded {
-            DaemonResponse::DescribeSessionOk { session } => {
+            DaemonResponse::DescribeSessionOk { session, daemon_epoch } => {
+                assert_eq!(daemon_epoch, None);
                 assert_eq!(session.last_output_age_ms, None);
             }
             other => panic!("unexpected variant: {other:?}"),

@@ -524,6 +524,10 @@ pub struct TerminalSessionSummary {
     pub worktree_path: Option<PathBuf>,
     #[serde(default)]
     pub running: bool,
+    #[serde(default)]
+    pub daemon_epoch: Option<String>,
+    #[serde(default)]
+    pub incarnation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5524,11 +5528,13 @@ pub async fn cmd_terminal_list(
     let session_ids = daemon_client.list_sessions().await?;
     let mut summaries = Vec::new();
     for session_id in session_ids {
-        if let Ok(details) = daemon_client.describe_session(&session_id).await {
+        if let Ok((details, daemon_epoch)) = daemon_client.describe_session_identity(&session_id).await {
             summaries.push(TerminalSessionSummary {
                 session_id,
                 worktree_path: details.cwd.map(PathBuf::from),
                 running: details.running,
+                daemon_epoch,
+                incarnation: details.incarnation,
             });
         }
     }
@@ -5608,6 +5614,63 @@ mod tests {
         assert!(split_stage_deadline(0, 9000).is_err());
         assert_eq!(crate::daemon::protocol::clip_stage_budget(1000, 9000), 1000);
         assert_eq!(crate::daemon::protocol::clip_stage_budget(9000, 3000), 3000);
+    }
+
+    #[tokio::test]
+    async fn owner_identity_terminal_list_preserves_owner_and_unknown_legacy() {
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DaemonSessionDetails, DAEMON_PROTOCOL_VERSION};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owner-list");
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(not(unix))]
+        let listener = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            listener
+        };
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            for step in 0..4 {
+                let request: DaemonRequest = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let mut details = DaemonSessionDetails::new("owned".into(), None, None, None,
+                    80, 24, true, None, None, None, false);
+                details.incarnation = Some("owner-incarnation".into());
+                let response = match (step, request) {
+                    (0, DaemonRequest::Handshake { .. }) => DaemonResponse::HandshakeOk {
+                        version: DAEMON_PROTOCOL_VERSION, pid: std::process::id(), epoch: 41,
+                        binary_path: None, binary_mtime_ms: None, daemon_version: None,
+                        capabilities: Vec::new(), admission_time_unix_ms: None,
+                    },
+                    (1, DaemonRequest::ListSessions) => DaemonResponse::ListSessionsOk {
+                        epoch: 41, sessions: vec!["owned".into(), "legacy".into()],
+                    },
+                    (2, DaemonRequest::DescribeSession { session_id }) if session_id == "owned" =>
+                        DaemonResponse::DescribeSessionOk { session: details,
+                            daemon_epoch: Some("9007199254740993".into()) },
+                    (3, DaemonRequest::DescribeSession { session_id }) if session_id == "legacy" => {
+                        details.session_id = session_id;
+                        details.incarnation = Some("legacy-incarnation".into());
+                        DaemonResponse::DescribeSessionOk { session: details, daemon_epoch: None }
+                    }
+                    other => panic!("unexpected exchange: {other:?}"),
+                };
+                write.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+            }
+        });
+        let app = tauri::test::mock_builder().manage(Arc::new(DaemonClient::new_with_socket(path)))
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let summaries = tokio::time::timeout(Duration::from_secs(10),
+            cmd_terminal_list(app.state::<Arc<DaemonClient>>())).await.unwrap().unwrap();
+        assert_eq!(summaries[0].daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert_eq!(summaries[0].incarnation.as_deref(), Some("owner-incarnation"));
+        assert_eq!(summaries[1].daemon_epoch, None);
+        assert_eq!(summaries[1].incarnation.as_deref(), Some("legacy-incarnation"));
+        assert_eq!(serde_json::to_value(&summaries).unwrap()[0]["daemonEpoch"], "9007199254740993");
+        peer.await.unwrap();
     }
 
     #[tokio::test]

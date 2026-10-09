@@ -2342,6 +2342,34 @@ impl DaemonServer {
         &self.session_service
     }
 
+    async fn describe_session_identity(&self, session_id: &str) -> DaemonResponse {
+        if self.session_router.is_local_session(session_id) {
+            match self.handle_describe_session(session_id) {
+                DaemonResponse::DescribeSessionOk { mut session, .. } => {
+                    if let Some(pid) = self.terminal_service.get_session(session_id).and_then(|s| s.pid()) {
+                        session.cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
+                            Ok(crate::ipc::terminal::process_cwd(pid))
+                        }).await.ok().flatten().map(|path| path.to_string_lossy().into_owned());
+                    }
+                    DaemonResponse::DescribeSessionOk {
+                        session,
+                        daemon_epoch: Some(self.epoch.to_string()),
+                    }
+                }
+                other => other,
+            }
+        } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(session_id) {
+            match peer.describe_session_identity(session_id).await {
+                Ok((session, daemon_epoch)) => DaemonResponse::DescribeSessionOk {
+                    session, daemon_epoch,
+                },
+                Err(message) => daemon_error(message),
+            }
+        } else {
+            daemon_session_not_found(session_id, "daemon_describe")
+        }
+    }
+
     /// The loopback TCP endpoint (`port`, bearer `token`) the agent-state ingress bound, or
     /// `None` while it has not bound. Unix exposes the socket path through
     /// [`agent_state_socket_path`] instead.
@@ -2782,7 +2810,7 @@ impl DaemonServer {
                     let response = legacy_peer.send_request(&DaemonRequest::DescribeSession {
                         session_id: session_id.clone(),
                     }).await?;
-                    if let DaemonResponse::DescribeSessionOk { session } = response {
+                    if let DaemonResponse::DescribeSessionOk { session, .. } = response {
                         expected_owners.insert(session_id.clone(), session);
                     }
                 }
@@ -3558,7 +3586,7 @@ impl DaemonServer {
                         .await;
                     match res {
                         Ok(session_id) => match self.handle_describe_session(&session_id) {
-                            DaemonResponse::DescribeSessionOk { session } => {
+                            DaemonResponse::DescribeSessionOk { session, .. } => {
                                 DaemonResponse::SpawnOk {
                                     session_id,
                                     epoch: self.epoch,
@@ -3639,25 +3667,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
-                    if self.session_router.is_local_session(&session_id) {
-                        let mut response = self.handle_describe_session(&session_id);
-                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
-                            let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
-                                Ok(crate::ipc::terminal::process_cwd(pid))
-                            }).await;
-                            if let DaemonResponse::DescribeSessionOk { session } = &mut response {
-                                session.cwd = cwd.ok().flatten().map(|path| path.to_string_lossy().into_owned());
-                            }
-                        }
-                        response
-                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
-                        match peer.describe_session(&session_id).await {
-                            Ok(session) => DaemonResponse::DescribeSessionOk { session },
-                            Err(message) => daemon_error(message),
-                        }
-                    } else {
-                        daemon_session_not_found(&session_id, "daemon_describe")
-                    }
+                    self.describe_session_identity(&session_id).await
                 }
                 Ok(DaemonRequest::DiscoverAgentSession {
                     session_id,
@@ -6390,7 +6400,7 @@ mod tests {
         let session_id = ok_res.unwrap();
         let desc_resp = server.handle_describe_session(&session_id);
         match desc_resp {
-            DaemonResponse::DescribeSessionOk { session } => {
+            DaemonResponse::DescribeSessionOk { session, .. } => {
                 assert_eq!(session.session_id, session_id);
                 assert!(session.cwd.is_some());
                 assert!(session.running);
@@ -7218,6 +7228,49 @@ mod tests {
 
         drop(write_half);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn owner_identity_local_and_draining_route_keep_distinct_epochs() {
+        let mut owner = DaemonServer::new();
+        owner.epoch = 9_007_199_254_740_993;
+        let owner = Arc::new(owner);
+        let repo = init_test_git_repo();
+        owner.handle_register_workspace("default", repo.path().to_str().unwrap()).unwrap();
+        let session_id = owner.handle_spawn("owner-identity", "default", None, None,
+            80, 24, None, None).await.unwrap();
+        let local = owner.describe_session_identity(&session_id).await;
+        let DaemonResponse::DescribeSessionOk { session: local_details, daemon_epoch } = local else {
+            panic!("unexpected local description: {local:?}");
+        };
+        assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert!(local_details.incarnation.is_some());
+
+        let root = tempfile::Builder::new().prefix("fx-owner").tempdir_in("/tmp").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.path().join("owner.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let serving_owner = Arc::clone(&owner);
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serving_owner.handle_client(stream).await;
+        });
+        let mut gateway = DaemonServer::new();
+        gateway.epoch = 41;
+        gateway.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec![session_id.clone()],
+        )));
+        let routed = tokio::time::timeout(Duration::from_secs(10),
+            gateway.describe_session_identity(&session_id)).await.unwrap();
+        let DaemonResponse::DescribeSessionOk { session, daemon_epoch } = routed else {
+            panic!("unexpected routed description: {routed:?}");
+        };
+        assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert_ne!(daemon_epoch, Some(gateway.epoch.to_string()));
+        assert_eq!(session.incarnation, local_details.incarnation);
+        tokio::time::timeout(Duration::from_secs(10), serving).await.unwrap().unwrap();
+        owner.handle_close(&session_id).await.unwrap();
     }
 
     #[tokio::test]

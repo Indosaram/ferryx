@@ -480,7 +480,7 @@ pub fn describe_incarnation(
     session_id: &str,
 ) -> Option<String> {
     match server.session_service.handle_describe_session(session_id) {
-        crate::daemon::protocol::DaemonResponse::DescribeSessionOk { session } => {
+        crate::daemon::protocol::DaemonResponse::DescribeSessionOk { session, .. } => {
             session.incarnation
         }
         _ => None,

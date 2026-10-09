@@ -211,11 +211,26 @@ impl LegacyPeer {
             })
             .await?
         {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!(
                 "Unexpected response for DescribeSession: {other:?}"
             )),
+        }
+    }
+
+    pub async fn describe_session_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<(DaemonSessionDetails, Option<String>), String> {
+        match self.send_request(&DaemonRequest::DescribeSession {
+            session_id: session_id.into(),
+        }).await? {
+            DaemonResponse::DescribeSessionOk { session, daemon_epoch } => {
+                Ok((session, daemon_epoch))
+            }
+            DaemonResponse::Error { message, .. } => Err(message),
+            other => Err(format!("Unexpected identity description response: {other:?}")),
         }
     }
 

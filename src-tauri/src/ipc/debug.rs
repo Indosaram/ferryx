@@ -832,7 +832,7 @@ mod pane_liveness_diagnostics_tests {
         let decoded_legacy: DaemonResponse =
             serde_json::from_str(legacy_wire).expect("decode legacy DaemonResponse envelope");
         match decoded_legacy {
-            DaemonResponse::DescribeSessionOk { session } => {
+            DaemonResponse::DescribeSessionOk { session, .. } => {
                 assert_eq!(session.session_id, "legacy-session-1");
                 assert_eq!(session.running, true);
                 assert_eq!(session.suspended, false);
@@ -860,7 +860,7 @@ mod pane_liveness_diagnostics_tests {
         let decoded_new: DaemonResponse =
             serde_json::from_str(new_wire).expect("decode new DaemonResponse envelope with diagnostics");
         match decoded_new {
-            DaemonResponse::DescribeSessionOk { session } => {
+            DaemonResponse::DescribeSessionOk { session, .. } => {
                 assert_eq!(session.session_id, "new-session-1");
                 assert_eq!(session.reader_paused, Some(true));
                 assert_eq!(session.kernel_stopped, Some(false));
@@ -883,7 +883,7 @@ mod pane_liveness_diagnostics_tests {
             None,
             false,
         );
-        let resp = DaemonResponse::DescribeSessionOk { session: details };
+        let resp = DaemonResponse::DescribeSessionOk { session: details, daemon_epoch: None };
         let serialized_wire = serde_json::to_string(&resp).expect("serialize DaemonResponse envelope");
         assert!(!serialized_wire.contains("readerPaused"));
         assert!(!serialized_wire.contains("kernelStopped"));

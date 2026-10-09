@@ -540,7 +540,7 @@ async fn exercise_child(root: &Path) {
         })
         .await
         .expect("remote command produced exact root through real SSH PTY");
-        let DaemonResponse::DescribeSessionOk { session } = daemon.handle_describe_session(&id)
+        let DaemonResponse::DescribeSessionOk { session, .. } = daemon.handle_describe_session(&id)
         else {
             panic!("session details")
         };
@@ -601,6 +601,7 @@ async fn exercise_child(root: &Path) {
     .expect("remote command produced exact worktree root through real SSH PTY");
     let DaemonResponse::DescribeSessionOk {
         session: wt_session,
+        ..
     } = daemon.handle_describe_session(&wt_session_id)
     else {
         panic!("session details")
