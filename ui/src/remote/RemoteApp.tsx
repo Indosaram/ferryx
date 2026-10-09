@@ -24,7 +24,16 @@ import {
   type RemoteContextOption,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
-import { fetchAgentConversation, ConversationFetchError, mapAgentConversation, formatWorkedDuration, capRetainedMessages } from "./agentConversation";
+import {
+  fetchAgentConversation,
+  ConversationFetchError,
+  mapAgentConversation,
+  formatWorkedDuration,
+  capRetainedMessages,
+  isTranscriptResponseCurrent,
+  hasConversationReset,
+  type TranscriptTargetIdentity,
+} from "./agentConversation";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatAttachment as ComposerAttachment } from "./chat/MobileChatComposer";
 import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
@@ -408,6 +417,9 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [revokeChatAttachmentUrls]);
   const lastConversationSessionRef = useRef<string | null>(null);
+  const lastConversationGenerationRef = useRef<string | null | undefined>(undefined);
+  const lastConversationEpochRef = useRef<string | null>(null);
+  const transcriptFetchGenerationRef = useRef(0);
   const retentionTruncatedRef = useRef(false);
   const [chatIsRunning, setChatIsRunning] = useState(false);
   const [chatWarnings, setChatWarnings] = useState<readonly string[]>([]);
@@ -1328,6 +1340,10 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [effectiveSessionId, token, activeTunnelConnection, transportBaseUrl, viewMode, finalizeAssistantTurnDuration]);
 
+  const currentConversationEpoch = (effectiveSessionId
+    ? (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId))
+    : null) ?? null;
+
   useEffect(() => {
     if (viewMode !== "chat" || !effectiveSessionId || !token) return;
 
@@ -1335,8 +1351,14 @@ export const RemoteHostConnection: React.FC<{
     let fetching = false;
     const controller = new AbortController();
 
-    if (lastConversationSessionRef.current !== effectiveSessionId) {
+    const targetChanged =
+      lastConversationSessionRef.current !== effectiveSessionId ||
+      lastConversationEpochRef.current !== currentConversationEpoch;
+
+    if (targetChanged) {
       lastConversationSessionRef.current = effectiveSessionId;
+      lastConversationEpochRef.current = currentConversationEpoch;
+      lastConversationGenerationRef.current = undefined;
       retentionTruncatedRef.current = false;
       revokeChatAttachmentUrls();
       setChatMessages([]);
@@ -1350,15 +1372,56 @@ export const RemoteHostConnection: React.FC<{
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
+
+      const fetchGeneration = ++transcriptFetchGenerationRef.current;
+      const targetIdentity: TranscriptTargetIdentity = {
+        sessionId: effectiveSessionId,
+        targetEpoch: currentConversationEpoch,
+        generation: fetchGeneration,
+      };
+      const fetchBaseUrl = transportBaseUrl;
+
       try {
         const page = await fetchAgentConversation({
-          baseUrl: transportBaseUrl,
+          baseUrl: fetchBaseUrl,
           sessionId: effectiveSessionId,
           token,
           limit: 200,
           signal: controller.signal,
         });
-        if (cancelled) return;
+
+        const liveEpoch = (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)) ?? null;
+        const isCurrent = isTranscriptResponseCurrent(
+          targetIdentity,
+          {
+            sessionId: effectiveSessionId,
+            targetEpoch: liveEpoch,
+            generation: transcriptFetchGenerationRef.current,
+          },
+          page,
+        );
+
+        if (!isCurrent || cancelled || transportBaseUrl !== fetchBaseUrl) {
+          return;
+        }
+
+        const resetOccurred = hasConversationReset(
+          lastConversationGenerationRef.current,
+          page.conversationGeneration,
+        );
+
+        if (page.conversationGeneration !== undefined) {
+          lastConversationGenerationRef.current = page.conversationGeneration;
+        }
+
+        if (resetOccurred) {
+          revokeChatAttachmentUrls();
+          retentionTruncatedRef.current = false;
+          setChatWarnings([]);
+          assistantTurnStartedAtRef.current = null;
+          turnDurationsRef.current.clear();
+        }
+
         const retentionWarning = "Older messages are hidden to keep the phone view responsive.";
         setChatWarnings(
           retentionTruncatedRef.current && !page.warnings.includes(retentionWarning)
@@ -1366,18 +1429,19 @@ export const RemoteHostConnection: React.FC<{
             : [...page.warnings],
         );
         setChatMessages((prev) => {
+          const baseMessages = resetOccurred ? [] : prev;
           const mapped = mapAgentConversation(page.items, {
             activeTurnStartedAt: assistantTurnStartedAtRef.current,
-            previousMessages: prev,
+            previousMessages: baseMessages,
             turnDurationsMap: turnDurationsRef.current,
           });
           const optimisticText = new Set(
-            prev
+            baseMessages
               .filter((message) => message.role === "user" && /^user-\d{13}$/.test(message.id))
               .map((message) => message.content),
           );
           const coveredOrdinals = new Set(page.items.map((item) => item.ordinal));
-          const kept = prev.filter((message) => {
+          const kept = baseMessages.filter((message) => {
             const match = /^(?:user|assistant)-(\d+)$/.exec(message.id);
             return match === null || !coveredOrdinals.has(Number(match[1]));
           });
@@ -1395,25 +1459,40 @@ export const RemoteHostConnection: React.FC<{
           if (truncated) {
             retentionTruncatedRef.current = true;
             const hiddenWarning = "Older messages are hidden to keep the phone view responsive.";
-            setChatWarnings((prev) =>
-              prev.includes(hiddenWarning) ? prev : [...prev, hiddenWarning],
+            setChatWarnings((p) =>
+              p.includes(hiddenWarning) ? p : [...p, hiddenWarning],
             );
           }
           return capped;
         });
       } catch (error) {
         if (cancelled) return;
+        const liveEpoch = (sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)) ?? null;
+        if (
+          !isTranscriptResponseCurrent(
+            targetIdentity,
+            {
+              sessionId: effectiveSessionId,
+              targetEpoch: liveEpoch,
+              generation: transcriptFetchGenerationRef.current,
+            },
+          ) ||
+          transportBaseUrl !== fetchBaseUrl
+        ) {
+          return;
+        }
+
         if (error instanceof ConversationFetchError && error.code === "TRANSCRIPT_NOT_FOUND") {
           revokeChatAttachmentUrls();
           retentionTruncatedRef.current = false;
-          setChatWarnings((prev) =>
-            prev.filter((warning) => warning !== "Older messages are hidden to keep the phone view responsive."),
+          setChatWarnings((p) =>
+            p.filter((warning) => warning !== "Older messages are hidden to keep the phone view responsive."),
           );
           setChatMessages([]);
         } else {
           const pollFailedWarning = "Transcript refresh failed; showing the last known state.";
-          setChatWarnings((prev) =>
-            prev.includes(pollFailedWarning) ? prev : [...prev, pollFailedWarning],
+          setChatWarnings((p) =>
+            p.includes(pollFailedWarning) ? p : [...p, pollFailedWarning],
           );
         }
       } finally {
@@ -1428,10 +1507,11 @@ export const RemoteHostConnection: React.FC<{
 
     return () => {
       cancelled = true;
+      transcriptFetchGenerationRef.current += 1;
       controller.abort();
       clearInterval(timer);
     };
-  }, [viewMode, effectiveSessionId, token, transportBaseUrl]);
+  }, [viewMode, effectiveSessionId, token, transportBaseUrl, currentConversationEpoch]);
 
   /* Declared above the auth early return so the hook count is identical on the
      login screen and after pairing; a hook below the guard changes the order. */

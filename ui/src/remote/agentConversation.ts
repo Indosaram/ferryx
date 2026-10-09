@@ -447,6 +447,7 @@ export interface ConversationPage {
   nextCursor: number | null;
   partial: boolean;
   warnings: string[];
+  conversationGeneration?: string | null;
 }
 
 export class ConversationFetchError extends Error {
@@ -522,13 +523,56 @@ function toPage(body: unknown): ConversationPage {
   if (!Array.isArray(body.warnings) || !body.warnings.every((warning) => typeof warning === "string")) {
     throw new ConversationFetchError("MALFORMED_RESPONSE", "Agent history response warnings is not a string array");
   }
+  let conversationGeneration: string | null | undefined;
+  if ("conversationGeneration" in body) {
+    if (body.conversationGeneration !== null && typeof body.conversationGeneration !== "string") {
+      throw new ConversationFetchError(
+        "MALFORMED_RESPONSE",
+        "Agent history response conversationGeneration is not a string or null",
+      );
+    }
+    conversationGeneration = body.conversationGeneration as string | null;
+  }
   return {
     sessionId: body.sessionId,
     items: body.items.map(toMessage),
     nextCursor: body.nextCursor,
     partial: body.partial,
     warnings: body.warnings,
+    ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
   };
+}
+
+export interface TranscriptTargetIdentity {
+  sessionId: string;
+  targetEpoch: string | null;
+  generation: number;
+}
+
+export function isTranscriptResponseCurrent(
+  expected: TranscriptTargetIdentity,
+  current: {
+    sessionId: string;
+    targetEpoch: string | null;
+    generation: number;
+  },
+  page?: { sessionId: string },
+): boolean {
+  if (expected.generation !== current.generation) return false;
+  if (expected.sessionId !== current.sessionId) return false;
+  if (expected.targetEpoch !== current.targetEpoch) return false;
+  if (page && page.sessionId !== expected.sessionId) return false;
+  return true;
+}
+
+export function hasConversationReset(
+  lastGeneration: string | null | undefined,
+  nextGeneration: string | null | undefined,
+): boolean {
+  if (lastGeneration !== undefined && nextGeneration !== undefined) {
+    return lastGeneration !== nextGeneration;
+  }
+  return false;
 }
 
 export async function fetchAgentConversation(args: {

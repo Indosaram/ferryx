@@ -4,6 +4,7 @@ pub mod attach_router;
 pub mod attach_client;
 pub mod attach_crypto;
 pub mod attach_identity;
+pub mod attachment_api;
 pub mod auth;
 pub mod backend;
 pub mod browser_admission;

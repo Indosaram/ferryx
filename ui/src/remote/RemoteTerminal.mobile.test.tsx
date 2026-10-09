@@ -383,4 +383,141 @@ describe("mobile terminal input lifecycle", () => {
     expect(grid().className).toContain("overflow-y-hidden");
     expect(grid().style.touchAction).toBe("pan-x");
   });
+
+  describe("direct / line input mode", () => {
+    const lineInput = () => screen.queryByTestId("remote-terminal-line-input");
+    const modeToggle = () => screen.queryByTestId("remote-terminal-input-mode-toggle");
+    const decodeSends = () =>
+      Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+
+    /**
+     * Switch modes the way a user does: press first (arming the guard that keeps a
+     * mode switch from flushing the editor into the PTY), optionally deliver an
+     * in-flight blur, then click. A sinkBlur argument exercises exactly that guard.
+     */
+    const switchMode = (sinkBlur?: HTMLTextAreaElement) => {
+      const button = modeToggle();
+      expect(button).not.toBeNull();
+      fireEvent.mouseDown(button!);
+      if (sinkBlur) fireEvent.blur(sinkBlur);
+      fireEvent.click(button!);
+    };
+
+    it("defaults to direct, exposes the mode switch, and focuses the line editor only after an explicit toggle", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      expect(modeToggle()?.dataset.mode).toBe("direct");
+      expect(lineInput()).toBeNull();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      switchMode();
+      expect(modeToggle()?.dataset.mode).toBe("line");
+      expect(lineInput()).not.toBeNull();
+      // The toggle is an explicit tap: it may summon the editor (and thus the keyboard).
+      expect(document.activeElement).toBe(lineInput());
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+    });
+
+    it("keeps the line draft out of the PTY until Enter, then writes it exactly once with a trailing CR", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+
+      fireEvent.change(line, { target: { value: "모바일" } });
+      expect(line).toHaveValue("모바일");
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["모바일\r"]);
+      expect(lineInput()).toHaveValue("");
+
+      // An empty line's Enter is a plain Return: one bare CR, never a duplicate of the last line.
+      fireEvent.keyDown(lineInput()!, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["모바일\r", "\r"]);
+    });
+
+    it("never submits the line while IME composition is active and never dispatches on compositionEnd", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+
+      fireEvent.change(line, { target: { value: "안녕" } });
+      fireEvent.compositionStart(line);
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 229 });
+      fireEvent.compositionEnd(line, { data: "안녕" });
+      // Composition end alone commits nothing: only Enter dispatches the line.
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      // A native isComposing Enter (IME candidate confirm) is equally inert.
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13, isComposing: true });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(line, { key: "Enter", keyCode: 13 });
+      expect(decodeSends()).toEqual(["안녕\r"]);
+    });
+
+    it("never dispatches either mode's pending text across a mode switch (draft isolation)", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "한글" }, inputType: "insertText" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+
+      // Switch with an in-flight blur: the guard must swallow it instead of flushing.
+      switchMode(input);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+      expect(lineInput()).toHaveValue("");
+
+      const line = lineInput()!;
+      fireEvent.change(line, { target: { value: "모바일" } });
+      fireEvent.blur(line);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      // Round trip: both drafts survive back and forth with zero dispatch.
+      switchMode();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      switchMode();
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(lineInput()).toHaveValue("모바일");
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+    });
+
+    it("still flushes the direct pending tail on a blur outside a mode switch", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      const input = sink();
+      fireEvent.input(input, { target: { value: "한글" }, inputType: "insertText" });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      // One full round trip arms and then releases the guard: the next plain blur behaves as ever.
+      switchMode();
+      switchMode();
+      fireEvent.blur(input);
+      expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("한글"));
+      expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    });
+
+    it("summons the line editor from an explicit grid tap in line mode without dispatching", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      const line = lineInput()!;
+      // Start away from the field so the tap is what summons it.
+      line.blur();
+      expect(document.activeElement).not.toBe(line);
+      pointerDown("touch");
+      fireEvent.touchStart(grid(), { touches: touch(10) });
+      fireEvent.touchEnd(grid(), { touches: [], changedTouches: touch(14) });
+      expect(document.activeElement).toBe(line);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+    });
+
+    it("clears the line draft on a session change without dispatching it", () => {
+      const view = render(<RemoteTerminal sessionId="a" token="token-a" />);
+      switchMode();
+      fireEvent.change(lineInput()!, { target: { value: "모바일" } });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+
+      view.rerender(<RemoteTerminal sessionId="session-456" token="token-a" />);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(lineInput()).toHaveValue("");
+    });
+  });
 });
