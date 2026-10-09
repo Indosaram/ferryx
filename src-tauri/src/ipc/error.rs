@@ -112,6 +112,8 @@ pub enum IpcErrorCode {
     InvalidBaseRef,
     InvalidWorktree,
     WorkspaceIdMismatch,
+    #[serde(rename = "GITHUB_ISSUE_REPOSITORY_MISMATCH")]
+    GitHubIssueRepositoryMismatch,
     OutputLimitExceeded,
     RequestConflict,
     StaleRevision,
@@ -169,6 +171,7 @@ impl IpcErrorCode {
             "INVALID_BASE_REF" => Self::InvalidBaseRef,
             "INVALID_WORKTREE" => Self::InvalidWorktree,
             "WORKSPACE_ID_MISMATCH" => Self::WorkspaceIdMismatch,
+            "GITHUB_ISSUE_REPOSITORY_MISMATCH" => Self::GitHubIssueRepositoryMismatch,
             "WORKTREE_NOT_FOUND" => Self::WorktreeNotFound,
             "WORKTREE_BUSY" => Self::WorktreeBusy,
             "WORKTREE_EXISTS" | "WORKTREE_ALREADY_EXISTS" => Self::WorktreeAlreadyExists,

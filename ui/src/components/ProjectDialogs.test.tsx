@@ -7,6 +7,7 @@ const native = vi.hoisted(() => ({
   registerProject: vi.fn(),
   listProjectBranches: vi.fn(),
   createWorktree: vi.fn(),
+  previewGitHubIssue: vi.fn(),
 }));
 
 const dialog = vi.hoisted(() => ({
@@ -58,7 +59,7 @@ import {
   RemoveProjectDialog,
   deriveWorkspaceId,
 } from "./ProjectDialogs";
-import type { RegisteredProject } from "../lib/tauri";
+import type { GitHubIssuePreview, RegisteredProject } from "../lib/tauri";
 import type { SshHost } from "../lib/sshHosts";
 import type { RemoteDirectoryListing } from "../lib/remoteDirectories";
 
@@ -107,6 +108,7 @@ beforeEach(() => {
   native.registerProject.mockReset();
   native.listProjectBranches.mockReset();
   native.createWorktree.mockReset();
+  native.previewGitHubIssue.mockReset();
   dialog.open.mockReset();
   remote.registerRemoteProject.mockReset();
   ssh.useSshHosts.mockReset();
@@ -1233,6 +1235,326 @@ describe("AddWorktreeDialog flow", () => {
       }),
     );
     expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AddWorktreeDialog GitHub issue intake", () => {
+  const issueProject: RegisteredProject = {
+    workspaceId: "orca-lite",
+    repoRoot: "/repo/orca-lite",
+    gitRoot: "/repo/orca-lite",
+  };
+
+  const preview: GitHubIssuePreview = {
+    number: 12,
+    title: "Parser drops trailing tokens",
+    url: "https://github.com/acme/widgets/issues/12",
+    body: "<img src=x onerror=alert(1)>\nSteps to reproduce",
+    bodyTruncated: false,
+    repository: "acme/widgets",
+    suggestedSlug: "issue-12-parser-drops-trailing",
+  };
+
+  function setClipboard(writeText: ((text: string) => Promise<void>) | null) {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: writeText ? { writeText } : undefined,
+    });
+  }
+
+  function setExecCommand(execCommand: (() => boolean) | null) {
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand ?? undefined,
+    });
+  }
+
+  async function renderWithLoadedIssue(options: {
+    onCreated?: (worktree: unknown) => void | Promise<void>;
+    onClose?: () => void;
+  } = {}) {
+    native.listProjectBranches.mockResolvedValue([
+      { name: "develop", isCurrent: false },
+      { name: "main", isCurrent: true },
+    ]);
+    render(
+      <AddWorktreeDialog
+        project={issueProject}
+        onClose={options.onClose ?? vi.fn()}
+        onCreated={options.onCreated ?? vi.fn()}
+      />,
+    );
+    await act(async () => {});
+    fireEvent.change(screen.getByLabelText("GitHub issue"), { target: { value: "12" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Load issue" }));
+    });
+  }
+
+  afterEach(() => {
+    setClipboard(null);
+    setExecCommand(null);
+  });
+
+  it("previews the issue as inert text and proposes an editable slug", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+
+    await renderWithLoadedIssue();
+
+    expect(native.previewGitHubIssue).toHaveBeenCalledWith({
+      workspaceId: "orca-lite",
+      issueRef: "12",
+    });
+    expect(screen.getByLabelText("Issue preview")).toBeInTheDocument();
+    expect(screen.getByText("Parser drops trailing tokens")).toBeInTheDocument();
+    expect(screen.getByText("https://github.com/acme/widgets/issues/12")).toBeInTheDocument();
+    expect(screen.getByText(/onerror=alert\(1\)/)).toBeInTheDocument();
+    // Inert preview: the URL is text, never a link, and markup stays literal.
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByLabelText("Worktree slug")).toHaveValue(preview.suggestedSlug);
+    expect(screen.getByRole("button", { name: "Create Worktree from Issue #12" })).toBeInTheDocument();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("loads the issue on Enter without submitting an existing worktree slug", async () => {
+    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    render(<AddWorktreeDialog project={issueProject} onClose={onClose} onCreated={onCreated} />);
+    await act(async () => {});
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "existing-slug" } });
+    const input = screen.getByLabelText("GitHub issue");
+    fireEvent.change(input, { target: { value: "12" } });
+    const form = screen.getByRole("form", { name: "Add Worktree" });
+    const onSubmit = vi.fn();
+    form.addEventListener("submit", onSubmit);
+
+    let defaultAllowed = true;
+    await act(async () => {
+      defaultAllowed = fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+      // JSDOM does not perform implicit form submission for keyboard events.
+      // Model the browser default only if the input did not prevent it.
+      if (defaultAllowed) fireEvent.submit(form);
+    });
+
+    expect(defaultAllowed).toBe(false);
+    expect(native.previewGitHubIssue).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "orca-lite",
+      issueRef: "12",
+    });
+    expect(screen.getByLabelText("Issue preview")).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("creates the worktree from the edited slug on the retained base branch", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    native.createWorktree.mockResolvedValue({ path: "/repo/.orca-worktrees/wt-custom" });
+
+    await renderWithLoadedIssue();
+
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "custom-slug" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base branch" }), { target: { value: "develop" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree from Issue #12" }));
+    });
+
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "orca-lite",
+      worktree: { wsId: "orca-lite", slug: "custom-slug" },
+      baseRef: "develop",
+    });
+  });
+
+  it("cancels without creating a worktree after a preview", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const onClose = vi.fn();
+
+    await renderWithLoadedIssue({ onClose });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("submits once when the confirm button is clicked twice", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const createDef = deferred<unknown>();
+    native.createWorktree.mockReturnValue(createDef.promise);
+    const onCreated = vi.fn();
+
+    await renderWithLoadedIssue({ onCreated });
+    const confirm = screen.getByRole("button", { name: "Create Worktree from Issue #12" });
+    await act(async () => {
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+
+    expect(native.createWorktree).toHaveBeenCalledOnce();
+    await act(async () => {
+      createDef.resolve({ path: "/repo/.orca-worktrees/wt-issue-12" });
+    });
+    expect(onCreated).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the dialog open and reports a structured creation failure", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    native.createWorktree.mockRejectedValue({
+      code: "WORKTREE_ALREADY_EXISTS",
+      message: "That worktree already exists.",
+    });
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+
+    await renderWithLoadedIssue({ onCreated, onClose });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree from Issue #12" }));
+    });
+
+    expect(screen.getByText("That worktree already exists.")).toBeInTheDocument();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Create Worktree from Issue #12" })).not.toBeDisabled();
+  });
+
+  it("hands the created worktree to the existing onCreated flow and closes", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const worktree = {
+      workspaceId: "orca-lite",
+      path: "/repo/.orca-worktrees/wt-issue-12",
+      head: "abc1234",
+      branch: "refs/heads/orca/orca-lite/issue-12-parser-drops-trailing",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    native.createWorktree.mockResolvedValue(worktree);
+    const onCreated = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    await renderWithLoadedIssue({ onCreated, onClose });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree from Issue #12" }));
+    });
+
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "orca-lite",
+      worktree: { wsId: "orca-lite", slug: preview.suggestedSlug },
+      baseRef: "main",
+    });
+    expect(onCreated).toHaveBeenCalledWith(worktree);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("copies the issue context only when the user asks for it", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard(writeText);
+
+    await renderWithLoadedIssue();
+    expect(writeText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy issue context" }));
+    });
+
+    expect(writeText).toHaveBeenCalledOnce();
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).toContain("Issue #12: Parser drops trailing tokens");
+    expect(copied).toContain("https://github.com/acme/widgets/issues/12");
+    expect(copied).toContain("Steps to reproduce");
+    expect(screen.getByText(/Paste it into the new pane/)).toBeInTheDocument();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("reports a clipboard failure instead of dropping the copy action", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    const execCommand = vi.fn().mockReturnValue(false);
+    setClipboard(writeText);
+    setExecCommand(execCommand);
+
+    await renderWithLoadedIssue();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy issue context" }));
+    });
+
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(screen.getByText(/Could not copy the issue context/)).toBeInTheDocument();
+    expect(screen.queryByText(/Paste it into the new pane/)).toBeNull();
+    expect(screen.getByLabelText("Issue preview")).toBeInTheDocument();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a structured intake failure and leaves the create flow alone", async () => {
+    native.previewGitHubIssue.mockRejectedValue({
+      code: "CLI_EXECUTABLE_NOT_FOUND",
+      message: "The GitHub CLI (gh) was not found. Install it and run `gh auth login`.",
+    });
+
+    await renderWithLoadedIssue();
+
+    expect(screen.getByText(/The GitHub CLI \(gh\) was not found/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Issue preview")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Copy issue context/ })).toBeNull();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("drops a stale preview when the reference is edited", async () => {
+    native.previewGitHubIssue.mockResolvedValue(preview);
+
+    await renderWithLoadedIssue();
+    expect(screen.getByLabelText("Issue preview")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("GitHub issue"), { target: { value: "13" } });
+
+    expect(screen.queryByLabelText("Issue preview")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create Worktree" })).toBeInTheDocument();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("ignores a preview that resolves after the reference was edited", async () => {
+    const inFlight = deferred<GitHubIssuePreview>();
+    native.previewGitHubIssue.mockReturnValueOnce(inFlight.promise);
+
+    await renderWithLoadedIssue();
+    expect(native.previewGitHubIssue).toHaveBeenCalledOnce();
+
+    fireEvent.change(screen.getByLabelText("GitHub issue"), { target: { value: "13" } });
+    await act(async () => {
+      inFlight.resolve(preview);
+    });
+
+    // The late answer belongs to issue 12, which the field no longer names.
+    expect(screen.queryByLabelText("Issue preview")).toBeNull();
+    expect(screen.getByLabelText("Worktree slug")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Load issue" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Create Worktree" })).toBeInTheDocument();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("does not offer issue intake for a remote project", async () => {
+    ssh.useSshHosts.mockReturnValue({ hosts: [mockHost1] });
+
+    render(
+      <AddWorktreeDialog
+        project={{
+          workspaceId: "ssh:opaque-hash",
+          repoRoot: "/srv/repo",
+          gitRoot: "/srv/repo",
+          target: { kind: "ssh", hostId: "host-1" },
+        }}
+        onClose={vi.fn()}
+        onCreated={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByLabelText("GitHub issue")).toBeNull();
+    expect(native.previewGitHubIssue).not.toHaveBeenCalled();
   });
 });
 

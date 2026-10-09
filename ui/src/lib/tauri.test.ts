@@ -23,6 +23,7 @@ import {
   getTerminalPreferences,
   getWorktreeStatus,
   listProjectBranches,
+  previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
@@ -315,6 +316,25 @@ describe("Tauri IPC wrapper contract", () => {
     await listWorktrees("workspace-main");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_list", { workspaceId: "workspace-main" });
+  });
+
+  it("previews a GitHub issue through a registered workspace identity", async () => {
+    const issue = {
+      number: 12,
+      title: "Parser drops trailing tokens",
+      url: "https://github.com/acme/widgets/issues/12",
+      body: "Steps to reproduce",
+      bodyTruncated: false,
+      repository: "acme/widgets",
+      suggestedSlug: "issue-12-parser-drops-trailing",
+    };
+    core.invoke.mockResolvedValue(issue);
+
+    await expect(previewGitHubIssue({ workspaceId: "workspace-main", issueRef: "#12" })).resolves.toEqual(issue);
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_github_issue_preview", {
+      request: { workspaceId: "workspace-main", issueRef: "#12" },
+    });
   });
 
   it("wraps worktree status, preview, safe delete, and destructive delete commands", async () => {
