@@ -26,3 +26,6 @@ Thumbs.db
 
 # Git worktrees
 .orca-worktrees/
+
+# Video production belongs in the separate private repository.
+/videos/
