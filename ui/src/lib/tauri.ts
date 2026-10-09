@@ -556,7 +556,7 @@ export async function attachTerminal(
   const req: AttachTerminalRequest =
     typeof requestOrSessionId === "string"
       ? { sessionId: requestOrSessionId, afterSequence: afterSequence ?? null }
-      : { sessionId: requestOrSessionId.sessionId, afterSequence: requestOrSessionId.afterSequence ?? null };
+      : { sessionId: requestOrSessionId.sessionId, afterSequence: requestOrSessionId.afterSequence ?? null, attachTuple: requestOrSessionId.attachTuple ?? null };
 
   if (!isTauri()) {
     return {
@@ -575,6 +575,8 @@ export async function attachTerminal(
   if (splitAttempt) {
     payload.splitAttempt = splitAttempt;
     if (splitAttempt.attachTuple) payload.attachTuple = splitAttempt.attachTuple;
+  } else if (req.attachTuple) {
+    payload.attachTuple = req.attachTuple;
   }
   return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", payload);
 }

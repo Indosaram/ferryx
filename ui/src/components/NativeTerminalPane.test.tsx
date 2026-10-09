@@ -5916,6 +5916,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
             cols: 80,
             rows: 24,
             running: true,
+            incarnation: "incarnation-new",
           },
         },
         coldSession,
@@ -5924,9 +5925,20 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       ensureStarted.mockRestore();
     }
 
+    // `cmd_terminal_attach` refuses a tuple-less attach with UNSUPPORTED_CAPABILITY for a backend the
+    // native host has not bound yet, so the rebind must carry the new backend's seven-field binding.
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_terminal_attach", {
       sessionId: "backend-resumed-1",
       afterSequence: null,
+      attachTuple: {
+        backendSessionId: "backend-resumed-1",
+        incarnation: "incarnation-new",
+        daemonEpoch: "epoch-new",
+        frontendSessionId: coldSession.id,
+        paneIdentity: coldSession.id,
+        bindingKey: "backend-resumed-1:epoch-new:0:",
+        attemptGeneration: 1,
+      },
     });
   });
 

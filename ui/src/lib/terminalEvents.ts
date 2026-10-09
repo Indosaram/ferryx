@@ -405,12 +405,28 @@ export function ensureTerminalEvents() {
  * never be used as an incremental replay cursor. This callback matches `reconnectAgentSession`'s
  * attach dependency and deliberately attaches from the beginning after clearing any decoder or
  * backlog state left under a daemon-reused backend id.
+ *
+ * `cmd_terminal_attach` refuses an attach without the seven-field pane binding, and a freshly
+ * spawned backend has no native binding yet, so the binding is built here from the spawn result
+ * and the pane that will own it, with the incarnation the daemon reported for the new backend.
  */
 export async function attachNativeTerminalRebind(
   result: SpawnTerminalResult,
-  _localSession: TerminalSession,
+  localSession: TerminalSession,
 ): Promise<void> {
   terminalEventBus.clearSession(result.sessionId);
   await terminalEventBus.ensureStarted();
-  await attachTerminal({ sessionId: result.sessionId, afterSequence: null });
+  await attachTerminal({
+    sessionId: result.sessionId,
+    afterSequence: null,
+    attachTuple: {
+      backendSessionId: result.sessionId,
+      incarnation: result.session.incarnation ?? null,
+      daemonEpoch: result.daemonEpoch,
+      frontendSessionId: localSession.id,
+      paneIdentity: localSession.id,
+      bindingKey: `${result.sessionId}:${result.daemonEpoch}:${localSession.remoteGeneration ?? 0}:${localSession.remoteConnectionState ?? ""}`,
+      attemptGeneration: (localSession.attachTuple?.attemptGeneration ?? 0) + 1,
+    },
+  });
 }
