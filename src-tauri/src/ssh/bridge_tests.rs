@@ -2,7 +2,7 @@ use super::*;
 use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
 use crate::ssh::{SshAuthMethod, SshHost, SshHostSource};
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tempfile::TempDir;
 
@@ -34,6 +34,7 @@ fn helper_binary_path() -> PathBuf {
     debug_path
 }
 
+#[cfg(not(unix))]
 fn sample_host(id: &str) -> SshHost {
     SshHost {
         id: id.to_string(),
@@ -60,6 +61,7 @@ fn sample_env() -> RemoteEnvironment {
     }
 }
 
+#[cfg(not(unix))]
 fn loopback_ssh_available() -> bool {
     std::process::Command::new("ssh")
         .args([
@@ -754,17 +756,256 @@ async fn ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping() {
     client.close().await.expect("close client");
 }
 
+/// Marker for the child half of the live loopback SSH test, whose PATH leads with the fixture's
+/// `ssh` wrapper.
+#[cfg(unix)]
+const LOOPBACK_SSH_FIXTURE: &str = "FERRYX_LOOPBACK_SSH_FIXTURE";
+
+/// Loopback `sshd` probing: macOS ships it at `/usr/sbin/sshd`, Linux distributions use
+/// `/usr/sbin`, `/usr/local/sbin`, or `/sbin`, so probe the known locations and fall back to
+/// PATH resolution.
+#[cfg(unix)]
+fn sshd_binary() -> PathBuf {
+    let candidates = ["/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd"];
+    for candidate in candidates {
+        let candidate = PathBuf::from(candidate);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("sshd");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(candidates[0])
+}
+
+/// Private loopback OpenSSH server for the live bridge test.
+///
+/// The test binary re-executes itself with this fixture's `ssh` wrapper first on PATH, so the
+/// live connection runs against a server the test owns instead of an SSH server that happens to
+/// be installed and configured on the machine. `sshd -i` serves each accepted connection in
+/// inetd mode, which needs no privilege separation and no root.
+#[cfg(unix)]
+struct LoopbackSshd {
+    root: PathBuf,
+    _dir: TempDir,
+    server: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl LoopbackSshd {
+    async fn start() -> Self {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("fx-live-ssh")
+            .tempdir_in("/tmp")
+            .expect("create sshd fixture directory");
+        for name in ["host_key", "user_key"] {
+            let output = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(dir.path().join(name))
+                .output()
+                .expect("run ssh-keygen for the sshd fixture");
+            assert!(
+                output.status.success(),
+                "ssh-keygen {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let config = dir.path().join("sshd_config");
+        std::fs::write(
+            &config,
+            format!(
+                "HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\n",
+                dir.path().join("host_key").display(),
+                dir.path().join("user_key.pub").display(),
+            ),
+        )
+        .expect("write sshd fixture config");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the loopback sshd fixture");
+        let port = listener.local_addr().expect("fixture address").port();
+        let host_key =
+            std::fs::read_to_string(dir.path().join("host_key.pub")).expect("read fixture host key");
+        let known_hosts = dir.path().join("known_hosts");
+        std::fs::write(&known_hosts, format!("[127.0.0.1]:{port} {host_key}"))
+            .expect("write fixture known_hosts");
+        let wrapper = dir.path().join("ssh");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o UserKnownHostsFile={} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes -o UpdateHostKeys=no \"$@\"\n",
+                crate::ssh::direct::quote_posix(
+                    known_hosts.to_str().expect("UTF-8 known_hosts path")
+                )
+            ),
+        )
+        .expect("write the isolated SSH launcher");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+            .expect("make the SSH launcher executable");
+        std::fs::write(dir.path().join("port"), port.to_string()).expect("record fixture port");
+
+        let sshd = sshd_binary();
+        assert!(
+            sshd.is_file(),
+            "Explicit test prerequisite: install an OpenSSH server ({} missing)",
+            sshd.display()
+        );
+        let log = dir.path().join("sshd.log");
+        let server = tokio::spawn(async move {
+            let mut children = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break };
+                        let stream = stream.into_std().expect("loopback stream");
+                        stream.set_nonblocking(false).expect("blocking loopback stream");
+                        let input = Stdio::from(OwnedFd::from(stream.try_clone().expect("clone stream")));
+                        let output = Stdio::from(OwnedFd::from(stream));
+                        let log = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log)
+                            .expect("open sshd fixture log");
+                        let mut child = tokio::process::Command::new(&sshd)
+                            .args(["-i", "-e", "-f"])
+                            .arg(&config)
+                            .stdin(input)
+                            .stdout(output)
+                            .stderr(log)
+                            .kill_on_drop(true)
+                            .spawn()
+                            .expect("spawn sshd -i");
+                        children.spawn(async move {
+                            let _ = child.wait().await;
+                        });
+                    }
+                    Some(_) = children.join_next(), if !children.is_empty() => {}
+                }
+            }
+        });
+        Self {
+            root: dir.path().to_path_buf(),
+            _dir: dir,
+            server,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LoopbackSshd {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 #[tokio::test]
 async fn ssh_bridge_live_loopback_openssh_connection() {
-    assert!(
-        loopback_ssh_available(),
-        "Loopback SSH must be available for live OpenSSH bridge test"
-    );
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os(LOOPBACK_SSH_FIXTURE) {
+        exercise_live_loopback_bridge(Path::new(&root)).await;
+        return;
+    }
 
+    #[cfg(unix)]
+    {
+        let sshd = LoopbackSshd::start().await;
+        let path = std::env::var_os("PATH").expect("PATH is set");
+        let mut paths = vec![sshd.root.clone()];
+        paths.extend(std::env::split_paths(&path));
+        let output = tokio::time::timeout(
+            Duration::from_secs(120),
+            tokio::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .args([
+                    "--exact",
+                    "ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection",
+                    "--nocapture",
+                ])
+                .env(LOOPBACK_SSH_FIXTURE, &sshd.root)
+                // The bridge supervises its transport by re-entering this test binary's ignored
+                // supervisor entry; without the marker `Owner::prepare` refuses to supervise, and
+                // a libtest process never dispatches `run_supervisor_mode` from a main of its own.
+                .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
+                .env("PATH", std::env::join_paths(paths).expect("join PATH"))
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("bounded child test")
+        .expect("run child test");
+        let sshd_log = std::fs::read_to_string(sshd.root.join("sshd.log")).unwrap_or_default();
+        assert!(
+            output.status.success(),
+            "child stdout:\n{}\nchild stderr:\n{}\nsshd:\n{sshd_log}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    #[cfg(not(unix))]
+    {
+        assert!(
+            loopback_ssh_available(),
+            "Loopback SSH must be available for live OpenSSH bridge test"
+        );
+        exercise_live_loopback_bridge(Path::new("")).await;
+    }
+}
+
+/// The host the live bridge test connects to: the private loopback sshd on Unix, the machine's
+/// own loopback SSH elsewhere.
+fn live_loopback_host(fixture: &TestFixture, root: &Path) -> SshHost {
+    #[cfg(unix)]
+    {
+        let port: u16 = std::fs::read_to_string(root.join("port"))
+            .expect("fixture sshd port")
+            .trim()
+            .parse()
+            .expect("fixture sshd port");
+        let user = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .expect("run id -un");
+        assert!(user.status.success(), "id -un must report the fixture user");
+        SshHost {
+            id: fixture.host_id.clone(),
+            label: "test-host".to_string(),
+            hostname: "127.0.0.1".to_string(),
+            username: Some(
+                String::from_utf8(user.stdout)
+                    .expect("user name")
+                    .trim()
+                    .to_string(),
+            ),
+            port: Some(port),
+            identity_file: Some(root.join("user_key").to_string_lossy().into_owned()),
+            jump_host: None,
+            source: SshHostSource::Manual,
+            auth_method: SshAuthMethod::Key,
+            disabled: None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        sample_host(&fixture.host_id)
+    }
+}
+
+/// The child half of the live loopback SSH test: connects the bridge client over real OpenSSH.
+async fn exercise_live_loopback_bridge(root: &Path) {
     // Use owned daemon fixture; ensure_started preserves the already-live owned daemon,
     // avoiding detached process spawning or unowned daemon lifetimes.
     let fixture = TestFixture::new("live-loopback");
-    let host = sample_host(&fixture.host_id);
+    let host = live_loopback_host(&fixture, root);
     let env = sample_env();
     let location = HelperLocation {
         executable: fixture.helper_bin.to_str().unwrap().to_string(),
@@ -1387,17 +1628,48 @@ fn child_still_running(pid: u32) -> bool {
 }
 
 /// Event barrier: bounded wait for the duplicated child-stdout pipe to reach EOF.
+///
+/// The duplicate shares the pipe's open file description with the descriptor tokio made
+/// non-blocking for the child, so a read returns `WouldBlock` until the writer is gone and a
+/// single read samples a race instead of waiting for the event. `poll` reports the hang-up
+/// transition itself, and the descriptor is closed on the way out.
 #[cfg(unix)]
 async fn wait_for_fd_eof(fd: std::os::unix::io::RawFd, timeout_dur: Duration) -> bool {
-    use std::os::unix::io::FromRawFd;
-    use tokio::io::AsyncReadExt;
-    let std_file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut file = tokio::fs::File::from_std(std_file);
-    let mut buf = [0u8; 1];
-    matches!(
-        tokio::time::timeout(timeout_dur, file.read(&mut buf)).await,
-        Ok(Ok(0))
-    )
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+    let reached = loop {
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+        if ready > 0 {
+            let mut byte = [0u8; 1];
+            let read = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+            if read == 0 {
+                break true;
+            }
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::WouldBlock
+                    && error.kind() != std::io::ErrorKind::Interrupted
+                {
+                    break false;
+                }
+            }
+        } else if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                break false;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    unsafe { libc::close(fd) };
+    reached
 }
 
 /// Bounded observational wait for a test child's reaping.
@@ -1866,12 +2138,34 @@ async fn ssh_bridge_supervised_release_keeps_transport_for_this_process() {
     );
 }
 
+/// The `true` binary: macOS keeps it in `/usr/bin`, Linux distributions in `/bin`, so probe the
+/// known locations before falling back to PATH resolution.
+#[cfg(unix)]
+fn true_binary() -> PathBuf {
+    let candidates = ["/usr/bin/true", "/bin/true"];
+    for candidate in candidates {
+        let candidate = PathBuf::from(candidate);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("true");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(candidates[0])
+}
+
 /// A failed supervisor handshake must close the lease and leave nothing running.
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bridge_supervision_attach_failure_leaves_no_supervisor() {
     let mut command = blocked_transport_command();
-    let owner = prepare_test_owner(&mut command, Some(std::path::Path::new("/bin/true")));
+    let owner = prepare_test_owner(&mut command, Some(true_binary().as_path()));
     let mut child = command.spawn().expect("spawn supervisor");
     let supervisor_pid = child.id().expect("supervisor pid");
 

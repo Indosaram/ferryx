@@ -28,7 +28,15 @@ async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHa
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("test_daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
-    let server = Arc::new(DaemonServer::new());
+    // Integration tests are compiled without `cfg(test)`, so `DaemonServer::new()` would fall
+    // back to the machine's canonical identity directory. Every test in this file registers the
+    // same workspace id against a different temporary repository, and a shared catalog rejects
+    // the second registration with "Workspace already registered". Explicit paths give each test
+    // its own catalog and remote-session store.
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config.json")),
+        Some(dir.path().join("auth.json")),
+    ));
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
         loop {
@@ -187,7 +195,13 @@ async fn swapped_checked_out_branches_cannot_delete_a_stale_identity_slot() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -260,7 +274,13 @@ async fn worktree_status_emits_dirty_changed_on_clean_to_dirty_transition() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -333,7 +353,13 @@ async fn worktree_status_emits_dirty_changed_on_dirty_to_clean_transition() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -404,7 +430,13 @@ async fn worktree_status_does_not_emit_when_dirty_state_is_unchanged() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -473,7 +505,13 @@ async fn dirty_delete_returns_structured_error_code() {
         .register("workspace-a", repo.path())
         .expect("register workspace");
 
+    let (_daemon_dir, daemon_client, _server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");

@@ -96,6 +96,10 @@ pub(super) async fn run(config_path: &Path) {
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env(CONFIG_ENV, config_path)
                 .env(CHILD_ENV, "1")
+                // The child owns the daemon whose SSH transport is supervised by re-entering
+                // this test binary's ignored supervisor entry; the marker is what allows the
+                // bridge to supervise at all inside a libtest process.
+                .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
                 .env("PATH", std::env::join_paths(paths).unwrap())
                 .kill_on_drop(true)
                 .output(),
