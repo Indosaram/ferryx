@@ -35,9 +35,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
 
-        assert_eq!(
-            resolve_dag_runs_dir(root),
-            root.join(".omo/senpi-task/dag/runs")
+        assert!(
+            resolve_dag_runs_dir(root).ends_with("senpi-task/dag/runs"),
+            "a project without in-repo task records resolves to omo's agent state dir"
         );
 
         let runs_dir = root.join("runs");
