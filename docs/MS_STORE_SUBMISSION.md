@@ -2,12 +2,18 @@
 
 This guide describes how to prepare, build, and submit Ferryx as an MSIX package to the **Microsoft Store** via **Microsoft Partner Center**.
 
+For updates to the existing Ferryx product (`9NLHQL5JNLM4`), first follow
+[resubmission verification and recovery](releases/MS_STORE_RESUBMISSION_RECOVERY.md).
+Do not infer a first-ever submission from a CLI error or delete a draft before
+checking its history and backing up its metadata. Package upload is not proof of
+certification submission.
+
 ---
 
 ## 1. Prerequisites
 
 1. **Microsoft Partner Center Account**: Register a developer account at [partner.microsoft.com](https://partner.microsoft.com/dashboard).
-2. **Windows SDK**: Windows 10/11 SDK containing `MakeAppx.exe`, `SignTool.exe`, and `MakePri.exe` (installed automatically on GitHub Actions `windows-latest` runners).
+2. **Windows SDK**: Windows 10/11 SDK containing `MakeAppx.exe`, `SignTool.exe`, and `MakePri.exe` on the local Windows build host.
 3. **App Name Reservation**: In Partner Center, go to **Apps and games** -> **New product** -> **MSIX or PWA app** and reserve the product name `Ferryx`.
 
 ---
@@ -35,10 +41,10 @@ Configured in `src-tauri/windows/msix/AppxManifest.xml` and `scripts/build-msix.
 
 ## 3. Building the MSIX Package
 
-### Automated via GitHub Actions
-When a release is triggered (by pushing a tag `v*` or dispatching the `release.yml` workflow), GitHub Actions automatically compiles and packages the MSIX installer and attaches it to the release artifacts as:
+### Local release assembly
+GitHub Actions does not build or publish releases. Use the [local release runbook](releases/LOCAL_RELEASE_RUNBOOK.md) to build and assemble the Windows Store-ingestion package. Its stable release alias is:
 ```text
-Ferryx_<version>_x64.msix
+Ferryx_x64.msix
 ```
 
 ### Local Packaging (PowerShell on Windows)
@@ -49,7 +55,7 @@ bun run --cwd ui build
 cargo build --release --manifest-path src-tauri/Cargo.toml
 
 # 2. Package into MSIX
-powershell -ExecutionPolicy Bypass -File scripts/build-msix.ps1 -Version "0.1.0" -OutputDir "dist/msix"
+powershell -ExecutionPolicy Bypass -File scripts/build-msix.ps1 -ExePath "src-tauri/target/release/ferryx.exe" -Version "<release-version>" -OutputDir "dist/msix" -SkipSigning
 ```
 
 ---
@@ -59,12 +65,12 @@ powershell -ExecutionPolicy Bypass -File scripts/build-msix.ps1 -Version "0.1.0"
 1. Navigate to **Microsoft Partner Center** -> **Apps and games** -> **Ferryx**.
 2. Click **Start your submission** (or update an existing submission).
 3. **Packages Step**:
-   - Drag and drop `Ferryx_<version>_x64.msix` into the package upload area.
+   - Drag and drop the assembled `Ferryx_x64.msix` into the package upload area.
    - The Partner Center validator will verify the `AppxManifest.xml`, architecture (`x64`), capabilities (`runFullTrust`), and assets.
 4. **App Properties**:
    - Category: `Developer Tools` -> `Development Utilities` / `Productivity`
-   - Privacy Policy URL: `https://indosaram.github.io/ferryx/privacy/`
-   - Website URL: `https://indosaram.github.io/ferryx/`
+   - Privacy Policy URL: `https://ferryx.dev/privacy/`
+   - Website URL: `https://ferryx.dev/`
 5. **Age Ratings**:
    - Complete the IARC rating questionnaire (General developer/terminal application).
 6. **Store Listings**:

@@ -451,4 +451,64 @@ describe("WorktreeDiskDialog", () => {
     expect(survivors.some((name) => name?.includes("main"))).toBe(true);
     expect(survivors.some((name) => name?.includes("feature-a"))).toBe(true);
   });
+
+  it("treats external worktrees as deletable cleanup candidates when path differs from repoRoot", async () => {
+    const externalWorktree: Worktree = {
+      path: "/repo/external-branch-wt",
+      head: "ext999",
+      branch: "refs/heads/feature/some-feature", // not an orca/... branch!
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: "prunable branch",
+    };
+
+    const externalRow: WorktreeDiskRow = {
+      worktree: externalWorktree,
+      sizeBytes: 100 * 1024 * 1024,
+      lastCommitAt: nowSeconds - 86400 * 20,
+      isDirty: false,
+      dirtyFiles: [],
+      error: null,
+    };
+
+    const snapshotWithExternal: DiskScanSnapshot = {
+      workspaceId: "ws-1",
+      scanId: "scan-ext",
+      status: "completed",
+      progress: {
+        completedWorktrees: 2,
+        totalWorktrees: 2,
+        currentPath: null,
+        scannedBytes: 200 * 1024 * 1024,
+        scannedFiles: 100,
+        scannedEntries: 120,
+      },
+      rows: [sampleRows[0], externalRow],
+      error: null,
+    };
+
+    const { services } = createMockServices({
+      startScan: vi.fn(async () => snapshotWithExternal),
+    });
+
+    const view = await renderSettled(
+      <WorktreeDiskDialog
+        workspaceId="ws-1"
+        projectName="Test Project"
+        repoRoot="/repo/main"
+        onClose={vi.fn()}
+        services={services}
+      />,
+    );
+
+    // /repo/main is the primary root
+    const mainDeleteBtn = view.getByTestId("delete-btn-main") as HTMLButtonElement;
+    expect(mainDeleteBtn.disabled).toBe(true);
+
+    // /repo/external-branch-wt is NOT primary root, even though its branch is not orca/...
+    const extDeleteBtn = view.getByTestId("delete-btn-external-branch-wt") as HTMLButtonElement;
+    expect(extDeleteBtn.disabled).toBe(false);
+    expect(view.getByTestId("candidate-badge-external-branch-wt")).toBeTruthy();
+  });
 });

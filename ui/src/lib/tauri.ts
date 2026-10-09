@@ -16,7 +16,11 @@ export type {
   NativeTerminalAgentStatePayload,
   NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
   TerminalReplayGap,
@@ -41,7 +45,11 @@ import type {
   NativeTerminalScrollbarPayload,
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
@@ -470,7 +478,23 @@ function reportUnserializableSpawnRequest(request: SpawnTerminalRequest): void {
   }
 }
 
-export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
+/**
+ * Frozen per-attempt create inputs for the reliable local split path. Absent in
+ * legacy mode: these are Tauri command keys and an older IPC handler may simply
+ * ignore extra arguments, so safety comes from the coordinator requiring a
+ * successful capability-gated prepare before Create — never from relying on a
+ * legacy handler to reject the extra keys.
+ */
+export type LocalSplitCreateOptions = {
+  createOnly?: boolean;
+  preparedLocalSplit?: PreparedLocalSplit | null;
+  remainingMs?: number;
+};
+
+export async function spawnTerminalDetailed(
+  request: SpawnTerminalRequest,
+  options?: LocalSplitCreateOptions,
+): Promise<SpawnTerminalResult> {
   if (!isTauri()) {
     throw {
       code: "INTERNAL_ERROR",
@@ -479,9 +503,24 @@ export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Prom
     } satisfies StructuredIpcError;
   }
   reportUnserializableSpawnRequest(request);
-  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
-    request: sanitizeSpawnRequest(request),
-  });
+  const payload: Record<string, unknown> = { request: sanitizeSpawnRequest(request) };
+  if (options) {
+    if (options.createOnly !== undefined) payload.createOnly = options.createOnly;
+    if (options.preparedLocalSplit) payload.preparedLocalSplit = options.preparedLocalSplit;
+    if (options.remainingMs !== undefined) payload.remainingMs = options.remainingMs;
+  }
+  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", payload);
+}
+
+/**
+ * Typed wrapper for `cmd_terminal_spawn_operation` (prepare/status/cancel with
+ * authoritative operation results). Prepare resolves before Create is sent so
+ * frozen inputs can be persisted first.
+ */
+export async function spawnTerminalSplitOperation(
+  request: SplitOperationRequest,
+): Promise<SplitOperationResponse> {
+  return invokeCommand<SplitOperationResponse>("cmd_terminal_spawn_operation", { request });
 }
 
 export type SpawnTerminalBatchEntry = {
@@ -514,6 +553,7 @@ export async function spawnTerminal(request: SpawnTerminalRequest): Promise<stri
 export async function attachTerminal(
   requestOrSessionId: string | AttachTerminalRequest,
   afterSequence?: string | null,
+  splitAttempt?: SplitAttachAttempt | null,
 ): Promise<AttachTerminalResponse> {
   const req: AttachTerminalRequest =
     typeof requestOrSessionId === "string"
@@ -530,10 +570,14 @@ export async function attachTerminal(
       gap: null,
     };
   }
-  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", {
+  const payload: Record<string, unknown> = {
     sessionId: req.sessionId,
     afterSequence: req.afterSequence ?? null,
-  });
+  };
+  // The split identity token rides only the coordinator's post-bind attach;
+  // legacy callers keep the exact pre-split payload.
+  if (splitAttempt) payload.splitAttempt = splitAttempt;
+  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", payload);
 }
 
 export async function getTerminalHistorySnapshot(sessionId: string): Promise<string> {
@@ -1256,6 +1300,32 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
   return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
 }
 
+export type AccountEnrollmentStatus = {
+  enrolled: boolean;
+  accountOrigin: string | null;
+  enrolledAt: number | null;
+};
+
+export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    return { enrolled: false, accountOrigin: null, enrolledAt: null };
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
+}
+
+export async function enrollThisMachine(
+  origin: string,
+  enrollmentCode: string,
+): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    throw new Error("Linking this computer is available only in the desktop app");
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
+    origin,
+    enrollmentCode,
+  });
+}
+
 export type DagRunUpdatedEvent = {
   projectPath: string;
   generation?: number;
@@ -1289,32 +1359,6 @@ export async function listenDagWatchStatus(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<DagWatchStatusEvent>("dag-watch-status", (event) => handler(event.payload));
-}
-
-export type AccountEnrollmentStatus = {
-  enrolled: boolean;
-  accountOrigin: string | null;
-  enrolledAt: number | null;
-};
-
-export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    return { enrolled: false, accountOrigin: null, enrolledAt: null };
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
-}
-
-export async function enrollThisMachine(
-  origin: string,
-  enrollmentCode: string,
-): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    throw new Error("Linking this computer is available only in the desktop app");
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
-    origin,
-    enrollmentCode,
-  });
 }
 
 export type DagWatchProjectResult = {

@@ -46,8 +46,13 @@ supply a `Mailer` behind whatever provider you choose. When delivery fails, the 
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| `GET` | `/api/account/v1/public-key` | Returns the account service public key. |
+| `GET` | `/api/account/v1/health` | Service health probe. |
 | `POST` | `/api/account/v1/login/request` | `{"email": "..."}`. Always `202` when the mail went out, whether or not the address exists. |
 | `POST` | `/api/account/v1/login/consume` | `{"code": "..."}`. Creates the account on first success, returns an opaque session bearer in the body only. |
+| `POST` | `/api/account/v1/device/request` | Starts email-based headless device authorization. |
+| `POST` | `/api/account/v1/device/poll` | Polls an issued device authorization until approved. |
+| `GET` | `/api/account/v1/device/approve` | Approves a pending device authorization through the email link. |
 | `POST` | `/api/account/v1/logout` | Bearer-authenticated. Revokes that session. |
 | `POST` | `/api/account/v1/enrollment-codes` | Bearer-authenticated. Issues a single-use enrollment code bound to the account and origin, 10 minutes. |
 | `GET` | `/api/account/v1/machines` | Bearer-authenticated. Lists the machines owned by that account. |
@@ -60,11 +65,19 @@ private keys never reach it.
 
 ## Enrolling a machine
 
-Sign in on a machine you already use, issue a code, then run this on the machine that should join. It
-works on a headless Linux or Windows host and needs no inbound SSH and no running GUI:
+On the machine that should join, run the device authorization flow with the account service
+origin configured. It sends an email link and waits for approval without inbound SSH or a GUI:
 
 ```bash
-ferryx-cli account enroll --code <code> [--origin https://account.example]
+ferryx-cli account login --email you@example.com --origin https://account.example
+```
+
+`--origin` can be omitted if `FERRYX_ACCOUNT_ORIGIN` or the saved account origin is set.
+For an account session that has already issued a one-time enrollment code, the explicit
+code path also remains available:
+
+```bash
+ferryx-cli account enroll --code <code> --origin https://account.example
 ```
 
 The command signs the challenge with the daemon identity already present in the canonical remote

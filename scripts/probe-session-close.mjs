@@ -1,8 +1,26 @@
 // Close a live backend session via the daemon UDS protocol (v4).
 import net from "node:net";
+import path from "node:path";
 import readline from "node:readline";
 
-const SOCKET_PATH = `/tmp/rorca-${process.getuid()}/daemon.sock`;
+// Resolves the live daemon endpoint the way src-tauri/src/daemon/server.rs::get_runtime_dir does:
+// FERRYX_RUNTIME_DIR wins, then /tmp/rorca-<uid>{-dev} on unix or %LOCALAPPDATA%\Ferryx\runtime{,-dev}
+// on Windows. Fails with a clear message instead of a TypeError where neither applies.
+function daemonSocketPath(dev = false) {
+  const override = process.env.FERRYX_RUNTIME_DIR;
+  if (override) return path.join(override, process.platform === "win32" ? "daemon.port" : "daemon.sock");
+  if (process.platform === "win32") {
+    const base = process.env.LOCALAPPDATA || process.env.TEMP || "C:\\ProgramData";
+    return path.join(base, "Ferryx", dev ? "runtime-dev" : "runtime", "daemon.port");
+  }
+  if (typeof process.getuid !== "function") {
+    console.error(`Cannot resolve the Ferryx daemon runtime dir on ${process.platform}: expected /tmp/rorca-<uid> on unix or %LOCALAPPDATA%\\Ferryx\\runtime on Windows; set FERRYX_RUNTIME_DIR to override.`);
+    process.exit(2);
+  }
+  return path.join("/tmp", `rorca-${process.getuid()}${dev ? "-dev" : ""}`, "daemon.sock");
+}
+
+const SOCKET_PATH = daemonSocketPath();
 const sessionId = process.argv[2];
 
 const socket = net.createConnection({ path: SOCKET_PATH });

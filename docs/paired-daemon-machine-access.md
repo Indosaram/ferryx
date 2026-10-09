@@ -1,5 +1,13 @@
 # Paired daemon machine access (opt-in, incomplete)
 
+> **Historical implementation packet (2026-09-28):** This records a pre-account
+> pairing workflow, not current setup instructions. `ferryx-cli pair generate` now
+> returns `ACCOUNT_LOGIN_REQUIRED`; use `ferryx-cli account login --email <address>`
+> with `--origin <account-origin>` or `FERRYX_ACCOUNT_ORIGIN` for headless enrollment.
+> See [account service](account-service.md)
+> for the current flow. Capability and UI assertions below describe the original
+> packet and must be rechecked against current source before use.
+
 Machine access is not phone mirroring. A machine control grant permits browsing raw filesystem paths and executing programs as the daemon's OS user. Only pair machines and desktops you control. Mirror grants retain active-desktop-session restrictions and path redaction.
 
 ## Current availability
@@ -19,14 +27,16 @@ export FERRYX_RELAY_URL=https://your-relay.example
 ferryx-cli --daemon
 ```
 
-Leave that fixture daemon running. In a second shell under the same fixture account and environment:
+Leave that fixture daemon running. In a second shell under the same fixture account,
+enroll through the account service instead of using the retired PIN command:
 
 ```sh
-export FERRYX_RELAY_URL=https://your-relay.example
-ferryx-cli pair generate --access machine
+ferryx-cli account login --email you@example.com --origin https://your-account-service.example
 ```
 
-The running daemon owns the relay identity and issues the PIN. Do not launch a second standalone pairing server. An old daemon that refuses machine pairing must be upgraded in the fixture; do not substitute a mirror PIN. The PIN is short-lived; machine PINs stay valid for ten minutes (single-use), mirror PINs for one minute. Do not store it in evidence or logs. Permanent bearer credentials must never appear in URLs or renderer logs.
+The running daemon owns the relay identity. Do not launch a second standalone pairing server.
+The PIN-based desktop steps below are historical, not a current enrollment procedure. Permanent
+bearer credentials must never appear in URLs or renderer logs.
 
 In the macOS native desktop, open Settings > Remote Access > Paired machines. The pairing form asks for the PIN only: the built-in relay (`https://relay.checka.cc`) and a default machine label are applied automatically; enter a custom relay origin or label only through the collapsed Advanced controls. Choose Pair machine. The separate QR-code section is for phone mirrors, not machine authorization. Refresh machines and Check capabilities. Resolve the displayed version/scope error rather than selecting a Local/SSH fallback.
 

@@ -7,6 +7,7 @@ export type SectionId =
   | "browser"
   | "notifications"
   | "remote"
+  | "plan"
   | "permissions"
   | "ssh";
 

@@ -359,6 +359,8 @@ async fn followthrough_delete_publication_blocks_spawn() {
                 rows: 24,
                 shell: None,
                 startup: None,
+                local_split: None,
+                session_id: None,
             },
         )
         .await
@@ -595,6 +597,8 @@ async fn typed_owner_repair_private_uds_and_native_adapter() {
                         rows: 24,
                         shell: None,
                         startup: None,
+                        local_split: None,
+                        session_id: None,
                     })
                     .await
                     .unwrap();

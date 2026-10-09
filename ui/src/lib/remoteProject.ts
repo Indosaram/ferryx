@@ -191,6 +191,7 @@ export function quoteRemotePath(path: string, platform: "posix" | "windows" | st
 }
 
 export interface RemoteWorktree {
+  /** Absolute worktree path returned by cmd_ssh_create_remote_worktree (RemoteWorktree DTO). */
   path: string;
   head: string | null;
   branch: string | null;

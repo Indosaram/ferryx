@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAgentReconnectInflightForTests, reconnectAgentSession } from "./agentReconnect";
 import type { TerminalSession } from "./types";
 
@@ -162,5 +162,102 @@ describe("reconnectAgentSession", () => {
     await expect(reconnect).rejects.toMatchObject({ code: "AGENT_RESUME_INVALID" });
     expect(close).toHaveBeenCalledWith("backend-new");
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
+  });
+});
+
+describe("reconnectAgentSession deadline", () => {
+  const deadlineMs = 1_000;
+  const never = <T,>() => new Promise<T>(() => undefined);
+
+  beforeEach(() => {
+    clearAgentReconnectInflightForTests();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function deps(overrides: Partial<Parameters<typeof reconnectAgentSession>[1]>) {
+    const session = coldSession();
+    return {
+      session,
+      dependencies: {
+        getSessions: () => ({ [session.id]: session }),
+        dispatch: vi.fn(),
+        spawn: vi.fn(async () => result()),
+        attach: vi.fn(async () => undefined),
+        persist: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        deadlineMs,
+        ...overrides,
+      },
+    };
+  }
+
+  it("fails a hung spawn at the deadline and lets a retry start a new attempt", async () => {
+    const spawn = vi.fn(() => never<ReturnType<typeof result>>());
+    const { session, dependencies } = deps({ spawn });
+    const first = reconnectAgentSession(session.id, dependencies);
+    const assertion = expect(first).rejects.toMatchObject({ code: "SPAWN_ATTEMPT_TIMEOUT", details: { stage: "spawn", delivery: "ambiguous" } });
+    await vi.advanceTimersByTimeAsync(deadlineMs);
+    await assertion;
+    expect(dependencies.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+      lifecycle: "failed", error: expect.objectContaining({ code: "SPAWN_ATTEMPT_TIMEOUT", details: expect.objectContaining({ stage: "spawn" }) }),
+    }));
+    expect(dependencies.close).not.toHaveBeenCalled();
+
+    const second = reconnectAgentSession(session.id, dependencies);
+    expect(second).not.toBe(first);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const secondAssertion = expect(second).rejects.toMatchObject({ code: "SPAWN_ATTEMPT_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(deadlineMs);
+    await secondAssertion;
+  });
+
+  it("fails a hung attach at the deadline and closes the spawned backend", async () => {
+    const { session, dependencies } = deps({ attach: vi.fn(() => never<void>()) });
+    const attempt = reconnectAgentSession(session.id, dependencies);
+    const assertion = expect(attempt).rejects.toMatchObject({ code: "SPAWN_ATTEMPT_TIMEOUT", details: { stage: "attach", delivery: "confirmed" } });
+    await vi.advanceTimersByTimeAsync(deadlineMs);
+    await assertion;
+    expect(dependencies.close).toHaveBeenCalledWith("backend-new");
+    expect(dependencies.persist).not.toHaveBeenCalled();
+    expect(dependencies.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ lifecycle: "failed" }));
+  });
+
+  it("fails a hung persist at the deadline without rebinding", async () => {
+    const { session, dependencies } = deps({ persist: vi.fn(() => never<void>()) });
+    const attempt = reconnectAgentSession(session.id, dependencies);
+    const assertion = expect(attempt).rejects.toMatchObject({ code: "SPAWN_ATTEMPT_TIMEOUT", details: { stage: "persist" } });
+    await vi.advanceTimersByTimeAsync(deadlineMs);
+    await assertion;
+    expect(dependencies.close).toHaveBeenCalledWith("backend-new");
+    expect(dependencies.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
+    expect(dependencies.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ lifecycle: "failed" }));
+  });
+
+  it("closes a spawn that resolves after the deadline and never rebinds it", async () => {
+    let resolveSpawn!: (value: ReturnType<typeof result>) => void;
+    const spawn = vi.fn(() => new Promise<ReturnType<typeof result>>((done) => { resolveSpawn = done; }));
+    const { session, dependencies } = deps({ spawn });
+    const attempt = reconnectAgentSession(session.id, dependencies);
+    const assertion = expect(attempt).rejects.toMatchObject({ code: "SPAWN_ATTEMPT_TIMEOUT", details: { stage: "spawn" } });
+    await vi.advanceTimersByTimeAsync(deadlineMs);
+    await assertion;
+    expect(dependencies.close).not.toHaveBeenCalled();
+
+    resolveSpawn({ ...result(), sessionId: "backend-late" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dependencies.close).toHaveBeenCalledWith("backend-late");
+    expect(dependencies.attach).not.toHaveBeenCalled();
+    expect(dependencies.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
+  });
+
+  it("completes within the deadline without firing the timeout", async () => {
+    const { session, dependencies } = deps({});
+    await expect(reconnectAgentSession(session.id, dependencies)).resolves.toMatchObject({ sessionId: "backend-new" });
+    await vi.advanceTimersByTimeAsync(deadlineMs * 2);
+    expect(dependencies.close).not.toHaveBeenCalled();
+    expect(dependencies.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
   });
 });

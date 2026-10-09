@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900">
+  <defs>
+    <!-- Background subtle radial focus -->
+    <radialGradient id="bgGlow" cx="72%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#134e48" stop-opacity="0.25"/>
+      <stop offset="60%" stop-color="#0d2b29" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#0b0b0d" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Teal Glow for focal element -->
+    <filter id="tealGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Clean Arrowhead marker -->
+    <marker id="arrowHead" markerWidth="16" markerHeight="16" refX="11" refY="8" orient="auto">
+      <path d="M 1 2 L 13 8 L 1 14 Z" fill="#2dd4bf"/>
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="#0b0b0d"/>
+  <rect width="1600" height="900" fill="url(#bgGlow)"/>
+
+  <!-- Connecting Flow Arrow (1 arrow) -->
+  <line x1="615" y1="450" x2="945" y2="450" stroke="#2dd4bf" stroke-width="4.5" stroke-linecap="round" marker-end="url(#arrowHead)"/>
+
+  <!-- Box 1 (Left / Dimmed Input Element) -->
+  <rect x="180" y="355" width="410" height="190" rx="16" fill="#121316" stroke="#27272a" stroke-width="2"/>
+  <text x="385" y="463" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="40" font-weight="500" fill="#94a3b8" text-anchor="middle">Prompt Variants</text>
+
+  <!-- Box 2 (Right / Bold Highlighted Focal Element) -->
+  <rect x="980" y="355" width="440" height="190" rx="16" fill="#0c1e1e" stroke="#2dd4bf" stroke-width="3" filter="url(#tealGlow)"/>
+  <text x="1200" y="464" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="44" font-weight="700" fill="#ffffff" text-anchor="middle">Experiment Board</text>
+</svg>

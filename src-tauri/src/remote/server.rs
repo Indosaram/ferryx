@@ -48,6 +48,29 @@ const REMOTE_TERMINAL_METADATA_TERMINATOR: u8 = 0x07;
 const REMOTE_TERMINAL_HARD_RESET: &[u8] = b"\x1bc";
 const REMOTE_GRID_MAX_COLS: u16 = 512;
 const REMOTE_GRID_MAX_ROWS: u16 = 256;
+pub(crate) const MACHINE_GRID_FRAME_MAX_BYTES: usize = 128 * 1024;
+const WS_HEADER_BYTES: usize = 10;
+
+// Wire budget and resident memory invariant:
+// 1. Wire transmission: Each serialized grid frame is bounded by 128 KiB
+//    including WebSocket frame header overhead (`WS_HEADER_BYTES = 10`). Every
+//    emitted text frame charges its wire size (`text.len() + 10`) against
+//    `MachineReceiver`'s 1 MiB semaphore budget until flushed to the wire.
+// 2. Resident mirror memory: `RemoteTerminalMirror` retains baseline runs in
+//    `last_lines` for differential encoding, strictly bounded by the geometry
+//    ceiling (`REMOTE_GRID_MAX_COLS = 512` x `REMOTE_GRID_MAX_ROWS = 256`), while
+//    `NativeTerminal` internal engine allocations remain bounded by its 32 MiB policy.
+fn machine_grid_text(frame: &RemoteGridFrame) -> Result<String, ()> {
+    let text = serde_json::to_string(frame).map_err(|_| ())?;
+    if text
+        .len()
+        .checked_add(WS_HEADER_BYTES)
+        .map_or(true, |total| total > MACHINE_GRID_FRAME_MAX_BYTES)
+    {
+        return Err(());
+    }
+    Ok(text)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -885,6 +908,7 @@ async fn get_workspace_state(
                     .any(|project| project.workspace_id == id)
         })
     });
+    let active_selection_for_epoch = active_selection.clone();
     let mut projects = cache.projects(active_selection.as_ref());
     projects.extend(ssh_projects.iter().map(|project| RemoteProjectInfo {
         workspace_id: project.workspace_id.clone(),
@@ -1025,9 +1049,53 @@ async fn get_workspace_state(
         }
     }
 
+    let daemon_epoch = if let (Some(selection), Some(services)) =
+        (active_selection_for_epoch.as_ref(), state.machine_services.as_ref())
+    {
+        match (
+            selection.session_id.as_deref(),
+            selection.workspace_id.as_deref(),
+        ) {
+            (Some(session_id), Some(workspace_id))
+                if !session_id.starts_with("standby:")
+                    && state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire) != 0 =>
+            {
+                let epoch = crate::scoped_contracts::Epoch(
+                    state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire),
+                );
+                match services
+                    .sessions
+                    .machine_detail_routed(session_id, epoch)
+                    .await
+                {
+                    Ok(
+                        crate::remote::machine_protocol::SessionDetail::Running { session }
+                        | crate::remote::machine_protocol::SessionDetail::Exited { session, .. },
+                    ) if session.target.session_id == session_id
+                        && session.workspace_id == workspace_id
+                        && session.target.daemon_epoch == epoch
+                        && session.worktree.as_ref().map(|worktree| worktree.slug.as_str())
+                            == selection.worktree_slug.as_deref() =>
+                    {
+                        Some(epoch)
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::debug!(%error, session_id, "No authoritative epoch for active desktop selection");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     Ok(Json(RemoteWorkspaceState {
         projects,
         active_context,
+        daemon_epoch,
         active_workspace_id: active_ws,
         worktrees,
         sessions,
@@ -1215,6 +1283,13 @@ async fn get_agent_history(
                             &home,
                             &target_session_id,
                         )
+                    }).or_else(|| {
+                        // A daemon that took over by handover knows no agent's conversation until
+                        // that agent next changes state; the agent's own process says which it is.
+                        crate::ipc::agents::omo_session_id_for_ferryx_session(&target_session_id)
+                            .and_then(|id| {
+                                crate::agent_transcript::transcript_path_for_session(&home, &id)
+                            })
                     }) {
                         Some(transcript_path) => Some(transcript_path),
                         None => {
@@ -1841,10 +1916,15 @@ async fn machine_terminal_upgrade(
     if device.permission != DevicePermission::Control {
         return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED"));
     }
-    // No host-scope stripping, grid negotiation or query-driven geometry in v1.
-    if id.contains("::") || query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
+    // No host-scope stripping or query-driven geometry in machine socket.
+    if id.contains("::") || query.cols.is_some() || query.rows.is_some() {
         return Err(machine_socket_error("INVALID_REQUEST"));
     }
+    let render_grid = match query.render.as_deref() {
+        None => false,
+        Some("grid") => true,
+        Some(_) => return Err(machine_socket_error("INVALID_REQUEST")),
+    };
     let epoch = query
         .daemon_epoch
         .ok_or_else(|| machine_socket_error("STALE_EPOCH"))?;
@@ -1902,6 +1982,7 @@ async fn machine_terminal_upgrade(
                 device,
                 Arc::clone(&state),
                 Arc::clone(&resized),
+                render_grid,
             );
             tokio::select! {
                 biased;
@@ -1998,6 +2079,7 @@ async fn handle_machine_terminal_socket(
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
     resized: Arc<std::sync::atomic::AtomicBool>,
+    render_grid: bool,
 ) {
     use crate::remote::protocol::MachineTerminalControl;
     use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
@@ -2016,10 +2098,10 @@ async fn handle_machine_terminal_socket(
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
         receiver: mut output,
+        history_ranges,
     } = attachment;
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
-
     let gap = snapshot
         .gap
         .as_ref()
@@ -2048,35 +2130,112 @@ async fn handle_machine_terminal_socket(
     {
         return;
     }
-    let replay = |snapshot: &AttachmentSnapshot, reset| {
-        encode_frame(
-            Metadata::Replay {
-                start: snapshot.history_start_sequence,
-                end: snapshot.history_end_sequence,
-                gap: snapshot.gap.as_ref().map(|g| ReplayGap {
-                    requested_after_sequence: g.requested_after_sequence,
-                    available_from_sequence: g.available_from_sequence,
-                }),
-            },
-            &snapshot.history,
-            reset,
-        )
-    };
-    let mut last = snapshot.history_end_sequence;
-    if !snapshot.history.is_empty() || snapshot.gap.is_some() {
-        let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
-            return;
-        };
-        let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
-            return;
-        };
-        if machine_send(&mut sender, frame, &mut termination)
-            .await
-            .is_err()
+    let grid_notify = Arc::new(tokio::sync::Notify::new());
+    let mirror: Option<Arc<parking_lot::Mutex<RemoteTerminalMirror>>> = if render_grid {
+        if session.cols == 0
+            || session.rows == 0
+            || session.cols > REMOTE_GRID_MAX_COLS
+            || session.rows > REMOTE_GRID_MAX_ROWS
         {
             return;
         }
-    }
+        for range in &history_ranges {
+            if let (Some(cols), Some(rows)) = (range.cols, range.rows) {
+                if cols == 0
+                    || rows == 0
+                    || cols > REMOTE_GRID_MAX_COLS
+                    || rows > REMOTE_GRID_MAX_ROWS
+                {
+                    return;
+                }
+            }
+        }
+        let (initial_frame, mirror_inst) = {
+            let mut m = match RemoteTerminalMirror::new(session.cols, session.rows) {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            if !history_ranges.is_empty() {
+                for range in &history_ranges {
+                    if let (Some(cols), Some(rows)) = (range.cols, range.rows) {
+                        if m.dimensions().ok() != Some((cols, rows)) {
+                            if m.resize(cols, rows).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    let slice = &snapshot.history[range.start..range.end];
+                    if !slice.is_empty() && m.feed(slice).is_err() {
+                        return;
+                    }
+                }
+            } else if !snapshot.history.is_empty() && m.feed(&snapshot.history).is_err() {
+                return;
+            }
+            if m.dimensions().ok() != Some((session.cols, session.rows)) {
+                if m.resize(session.cols, session.rows).is_err() {
+                    return;
+                }
+            }
+            let initial_frame = match m.full_frame() {
+                Ok(frame) => frame,
+                Err(_) => return,
+            };
+            (initial_frame, m)
+        };
+        let initial_text = match machine_grid_text(&initial_frame) {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+        let _permit = match output.try_charge(initial_text.len() + WS_HEADER_BYTES) {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        if machine_send(
+            &mut sender,
+            Message::Text(initial_text.into()),
+            &mut termination,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        drop(_permit);
+        Some(Arc::new(parking_lot::Mutex::new(mirror_inst)))
+    } else {
+        let replay = |snapshot: &AttachmentSnapshot, reset| {
+            encode_frame(
+                Metadata::Replay {
+                    start: snapshot.history_start_sequence,
+                    end: snapshot.history_end_sequence,
+                    gap: snapshot.gap.as_ref().map(|g| ReplayGap {
+                        requested_after_sequence: g.requested_after_sequence,
+                        available_from_sequence: g.available_from_sequence,
+                    }),
+                },
+                &snapshot.history,
+                reset,
+            )
+        };
+        if !snapshot.history.is_empty() || snapshot.gap.is_some() {
+            let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
+                return;
+            };
+            let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
+                return;
+            };
+            if machine_send(&mut sender, frame, &mut termination)
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        None
+    };
+    let mut last = snapshot.history_end_sequence;
+    drop(history_ranges);
     drop(charged_snapshot);
 
     // Send initial authoritative agent state snapshot immediately after the boundary
@@ -2089,10 +2248,11 @@ async fn handle_machine_terminal_socket(
             }
         }
     }
-
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
+    let send_mirror = mirror.clone();
+    let send_grid_notify = Arc::clone(&grid_notify);
     let send = async {
         loop {
             let next = tokio::select! {
@@ -2100,6 +2260,29 @@ async fn handle_machine_terminal_socket(
                 control = control_rx.recv() => {
                     let Some(control) = control else { return; };
                     if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                _ = send_grid_notify.notified(), if send_mirror.is_some() => {
+                    let Some(mirror) = &send_mirror else { continue; };
+                    let frame = {
+                        let mut m = mirror.lock();
+                        match m.full_frame() {
+                            Ok(frame) => frame,
+                            Err(_) => return,
+                        }
+                    };
+                    let text = match machine_grid_text(&frame) {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    let _permit = match output.try_charge(text.len() + WS_HEADER_BYTES) {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    if machine_send(&mut sender, Message::Text(text.into()), &mut termination).await.is_err() {
+                        return;
+                    }
+                    drop(_permit);
                     continue;
                 }
                 agent_update = agent_subscription.receiver.recv() => {
@@ -2145,27 +2328,67 @@ async fn handle_machine_terminal_socket(
                     {
                         continue;
                     }
-                    let Ok(frame) = encode_frame(
-                        Metadata::Output {
-                            sequence: chunk.sequence,
-                            gap: chunk.replay_gap.as_ref().map(|g| ReplayGap {
-                                requested_after_sequence: g.requested_after_sequence,
-                                available_from_sequence: g.available_from_sequence,
-                            }),
-                        },
-                        &chunk.bytes,
-                        false,
-                    ) else {
-                        return;
-                    };
-                    let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else {
-                        return;
-                    };
-                    if machine_send(&mut sender, frame, &mut termination)
-                        .await
-                        .is_err()
-                    {
-                        return;
+                    if let Some(mirror) = &send_mirror {
+                        let frame_res = {
+                            let mut m = mirror.lock();
+                            if chunk.replay_gap.is_some() {
+                                let (cols, rows) = m.dimensions().unwrap_or((session.cols, session.rows));
+                                let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
+                                    Ok(rep) => rep,
+                                    Err(_) => return,
+                                };
+                                if replacement.feed(&chunk.bytes).is_err() {
+                                    return;
+                                }
+                                let full = match replacement.full_frame() {
+                                    Ok(f) => f,
+                                    Err(_) => return,
+                                };
+                                *m = replacement;
+                                Ok(full)
+                            } else {
+                                m.feed(&chunk.bytes)
+                            }
+                        };
+                        let Ok(frame) = frame_res else {
+                            return;
+                        };
+                        let Ok(text) = machine_grid_text(&frame) else {
+                            return;
+                        };
+                        let Ok(_permit) = output.try_charge(text.len() + WS_HEADER_BYTES) else {
+                            return;
+                        };
+                        if machine_send(&mut sender, Message::Text(text.into()), &mut termination)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        drop(_permit);
+                    } else {
+                        let Ok(frame) = encode_frame(
+                            Metadata::Output {
+                                sequence: chunk.sequence,
+                                gap: chunk.replay_gap.as_ref().map(|g| ReplayGap {
+                                    requested_after_sequence: g.requested_after_sequence,
+                                    available_from_sequence: g.available_from_sequence,
+                                }),
+                            },
+                            &chunk.bytes,
+                            false,
+                        ) else {
+                            return;
+                        };
+                        let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else {
+                            return;
+                        };
+                        if machine_send(&mut sender, frame, &mut termination)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     last = Some(chunk.sequence);
                     drop(charged);
@@ -2241,6 +2464,8 @@ async fn handle_machine_terminal_socket(
             }
         }
     };
+    let recv_mirror = mirror.clone();
+    let recv_grid_notify = Arc::clone(&grid_notify);
     let receive = async {
         loop {
             let Some(message) = input_rx.recv().await else {
@@ -2285,16 +2510,23 @@ async fn handle_machine_terminal_socket(
                                 && cols > 0
                                 && rows > 0
                                 && cols <= 1000
-                                && rows <= 1000 =>
+                                && rows <= 1000
+                                && (recv_mirror.is_none()
+                                    || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
-                                let res = state
+                                state
                                     .session_backend
                                     .resize(&target.session_id, cols, rows)
-                                    .await;
-                                if res.is_ok() {
-                                    resized.store(true, std::sync::atomic::Ordering::Release);
+                                    .await?;
+                                resized.store(true, std::sync::atomic::Ordering::Release);
+                                if let Some(mirror) = &recv_mirror {
+                                    {
+                                        let mut m = mirror.lock();
+                                        m.resize(cols, rows).map_err(|e| e.to_string())?;
+                                    }
+                                    recv_grid_notify.notify_one();
                                 }
-                                res
+                                Ok(())
                             }
                             Ok(MachineTerminalControl::Signal {
                                 generation: supplied,
@@ -2313,6 +2545,24 @@ async fn handle_machine_terminal_socket(
                                 controls
                                     .try_send(control)
                                     .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                                Ok(())
+                            }
+                            Ok(MachineTerminalControl::Scroll {
+                                generation: supplied,
+                                rows: scroll_rows,
+                            }) if supplied.0 == generation && recv_mirror.is_some() => {
+                                let Some(mirror) = &recv_mirror else {
+                                    return Err("INVALID_CONTROL_OR_GENERATION".into());
+                                };
+                                let clamped = scroll_rows.clamp(-50, 50);
+                                if clamped == 0 {
+                                    return Err("INVALID_CONTROL".into());
+                                }
+                                {
+                                    let mut m = mirror.lock();
+                                    m.scroll(clamped).map_err(|e| e.to_string())?;
+                                }
+                                recv_grid_notify.notify_one();
                                 Ok(())
                             }
                             _ => Err("INVALID_CONTROL_OR_GENERATION".into()),

@@ -55,6 +55,12 @@ type RemoteTerminalProps = {
     pathAndQuery: string,
   ) => Promise<WebSocketLike> | WebSocketLike;
   readonly daemonEpoch?: string | number | null;
+  /**
+   * Receives the raw text of every string frame before grid decoding. The machine
+   * terminal socket carries `agent_state` control frames as strings; frames that are not
+   * agent state reach the grid parser exactly as before.
+   */
+  readonly onAgentStateFrame?: (raw: string) => void;
   readonly followHostSize?: boolean;
 };
 
@@ -369,6 +375,14 @@ function cursorOverlayStyle(cursor: GridCursor, cell: CellMetrics, color: string
   };
 }
 
+/* Epoch rides the machine wire as a canonical decimal u64 string (scoped_contracts::Epoch);
+   numeric generations and non-canonical strings are protocol errors, never generations. */
+const MACHINE_GENERATION_U64_MAX = "18446744073709551615";
+function isMachineGeneration(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) return false;
+  return value.length < 20 || (value.length === 20 && value <= MACHINE_GENERATION_U64_MAX);
+}
+
 export function RemoteTerminal({
   sessionId,
   token,
@@ -387,9 +401,15 @@ export function RemoteTerminal({
   attachKey,
   createWebSocket,
   daemonEpoch,
+  onAgentStateFrame,
   followHostSize = false,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
+  // The account tunnel dials the machine terminal protocol: PTY input is raw binary and
+  // resize/signal/scroll are MachineTerminalControl frames fenced by the Epoch generation
+  // (canonical decimal string) from `attached`. The legacy gateway keeps remoteStatus
+  // generations on remoteWrite/remoteResize; the two protocols never mix on one socket.
+  const machineTransport = isAccountSession === true && createWebSocket !== undefined;
   const wheelRemainderRowsRef = useRef(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
@@ -408,6 +428,10 @@ export function RemoteTerminal({
   const activeSocketRequestRef = useRef<SocketRequest | null>(null);
   const generationRef = useRef<string | null>(null);
   const lastSentGenerationRef = useRef<string | null>(null);
+  const machineGenerationRef = useRef<string | null>(null);
+  const lastSentMachineGenerationRef = useRef<string | null>(null);
+  const pendingMachineSignalRef = useRef<string | null>(null);
+  const pendingMachineScrollRowsRef = useRef(0);
   const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
   const [connected, setConnected] = useState(false);
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
@@ -475,6 +499,42 @@ export function RemoteTerminal({
     }
     sendPayload(payload);
   }, [sendPayload]);
+
+  /* Machine controls queue until the `attached` boundary names the generation: resize is
+     re-driven by that boundary, while an interrupt or scroll typed in the gap is held
+     boundedly and flushed with it. */
+  const flushMachineControls = () => {
+    const generation = machineGenerationRef.current;
+    if (generation === null) return;
+    const signal = pendingMachineSignalRef.current;
+    if (signal !== null) {
+      pendingMachineSignalRef.current = null;
+      sendPayload(JSON.stringify({ type: "signal", generation, signal }));
+    }
+    const rows = pendingMachineScrollRowsRef.current;
+    if (rows !== 0) {
+      pendingMachineScrollRowsRef.current = 0;
+      sendPayload(JSON.stringify({ type: "scroll", generation, rows }));
+    }
+  };
+
+  /* The machine tunnel always requests render=grid, so a fenced scroll is grid-only by
+     construction; the legacy gateway keeps its unfenced {type:"scroll"} frame. */
+  const sendScroll = (rows: number) => {
+    if (machineTransport) {
+      const generation = machineGenerationRef.current;
+      if (generation === null) {
+        pendingMachineScrollRowsRef.current = Math.max(
+          -120,
+          Math.min(120, pendingMachineScrollRowsRef.current + rows),
+        );
+        return;
+      }
+      sendPayload(JSON.stringify({ type: "scroll", generation, rows }));
+      return;
+    }
+    sendPayload(JSON.stringify({ type: "scroll", rows }));
+  };
 
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
@@ -552,12 +612,18 @@ export function RemoteTerminal({
         lastSentGeometryRef.current = null;
         lastSentGenerationRef.current = null;
         generationRef.current = null;
+        lastSentMachineGenerationRef.current = null;
+        machineGenerationRef.current = null;
+        pendingMachineSignalRef.current = null;
+        pendingMachineScrollRowsRef.current = 0;
         setSocketRequest(nextRequest);
         return;
       }
 
       const socket = socketRef.current;
-      const generationChanged = generationRef.current !== lastSentGenerationRef.current;
+      const generationChanged = machineTransport
+        ? machineGenerationRef.current !== lastSentMachineGenerationRef.current
+        : generationRef.current !== lastSentGenerationRef.current;
       if (
         followHostSize ||
         !socket ||
@@ -565,7 +631,19 @@ export function RemoteTerminal({
         !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
         (!generationChanged && geometriesEqual(lastSentGeometryRef.current, geometry))
       ) return;
-      if (generationRef.current !== null) {
+      if (machineTransport) {
+        const generation = machineGenerationRef.current;
+        // MachineTerminalControl rejects an unfenced resize; hold geometry until
+        // `attached` names the generation, then send it on the attached-triggered pass.
+        if (generation === null) return;
+        socket.send(JSON.stringify({
+          type: "resize",
+          generation,
+          cols: geometry.cols,
+          rows: geometry.rows,
+        }));
+        lastSentMachineGenerationRef.current = generation;
+      } else if (generationRef.current !== null) {
         socket.send(JSON.stringify({
           type: "remoteResize",
           generation: generationRef.current,
@@ -604,6 +682,10 @@ export function RemoteTerminal({
     lastSentGeometryRef.current = socketRequest.geometry;
     lastSentGenerationRef.current = null;
     generationRef.current = null;
+    lastSentMachineGenerationRef.current = null;
+    machineGenerationRef.current = null;
+    pendingMachineSignalRef.current = null;
+    pendingMachineScrollRowsRef.current = 0;
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
@@ -649,6 +731,10 @@ export function RemoteTerminal({
           setConnected(false);
           lastSentGenerationRef.current = null;
           generationRef.current = null;
+          lastSentMachineGenerationRef.current = null;
+          machineGenerationRef.current = null;
+          pendingMachineSignalRef.current = null;
+          pendingMachineScrollRowsRef.current = 0;
           if (onTransportFailure) {
             onTransportFailure();
             return;
@@ -666,6 +752,7 @@ export function RemoteTerminal({
         socket.onmessage = (event: any) => {
           if (disposed || socketRef.current !== socket) return;
           const rawData = event.data;
+          if (typeof rawData === "string") onAgentStateFrame?.(rawData);
           const data = typeof rawData === "string"
             ? rawData
             : rawData instanceof Uint8Array
@@ -680,6 +767,28 @@ export function RemoteTerminal({
                 generationRef.current = parsed.generation;
                 lastSentGenerationRef.current = null;
                 requestResizeRef.current();
+                return;
+              }
+              if (parsed?.type === "attached" && isMachineGeneration(parsed.generation)) {
+                const target =
+                  parsed.target && typeof parsed.target === "object"
+                    ? (parsed.target as { sessionId?: unknown; daemonEpoch?: unknown })
+                    : null;
+                const targetSession = typeof target?.sessionId === "string" ? target.sessionId : null;
+                const targetEpoch = typeof target?.daemonEpoch === "string" ? target.daemonEpoch : null;
+                // Adopt only a boundary addressed to this dial: an unrelated target
+                // session or epoch never fences a socket it did not request.
+                const requestEpoch =
+                  daemonEpoch === undefined || daemonEpoch === null ? "" : String(daemonEpoch).trim();
+                const addressed =
+                  (targetSession === null || targetSession === socketRequest.sessionId) &&
+                  (targetEpoch === null || targetEpoch === requestEpoch);
+                if (addressed) {
+                  machineGenerationRef.current = parsed.generation;
+                  lastSentMachineGenerationRef.current = null;
+                  requestResizeRef.current();
+                  flushMachineControls();
+                }
                 return;
               }
             } catch {
@@ -711,7 +820,9 @@ export function RemoteTerminal({
           if (onTransportFailure) onTransportFailure();
           return;
         }
-        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}`;
+        // The machine tunnel renders the grid server-side (Ghostty mirror); geometry stays
+        // server-owned, so cols/rows are never sent on this route.
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}&render=grid`;
         Promise.resolve(createWebSocket(pathAndQuery))
           .then(initSocket)
           .catch((error) => {
@@ -771,6 +882,10 @@ export function RemoteTerminal({
       wheelRemainderRowsRef.current = 0;
       lastSentGenerationRef.current = null;
       generationRef.current = null;
+      lastSentMachineGenerationRef.current = null;
+      machineGenerationRef.current = null;
+      pendingMachineSignalRef.current = null;
+      pendingMachineScrollRowsRef.current = 0;
       abort.abort();
       clearReconnectTimer();
       const currentSocket = socketRef.current;
@@ -780,7 +895,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure, isAccountSession, attachKey, createWebSocket, daemonEpoch, followHostSize, onAgentStateFrame]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;
@@ -798,7 +913,7 @@ export function RemoteTerminal({
     wheelRemainderRowsRef.current = accumulatedRows - rawRows;
     const rows = Math.min(10, Math.max(-10, rawRows));
     if (rows !== 0) {
-      socket.send(JSON.stringify({ type: "scroll", rows }));
+      sendScroll(rows);
     }
   };
 
@@ -862,7 +977,7 @@ export function RemoteTerminal({
             const rows = Math.min(10, Math.max(-10, rawRows));
             const socket = socketRef.current;
             if (socket && socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: "scroll", rows }));
+              sendScroll(rows);
             }
             accumulatedScrollDeltaYRef.current += rows * cellMetrics.height;
             lastScrollTimeRef.current = now;
@@ -881,7 +996,7 @@ export function RemoteTerminal({
         const socket = socketRef.current;
         while (remaining !== 0 && socket?.readyState === WebSocket.OPEN) {
           const rows = Math.min(10, Math.max(-10, remaining));
-          socket.send(JSON.stringify({ type: "scroll", rows }));
+          sendScroll(rows);
           remaining -= rows;
         }
       }
@@ -1082,6 +1197,18 @@ export function RemoteTerminal({
       if (generationRef.current !== null) {
         // A terminal interrupt is ETX; the gateway does not forward `signal` for SSH.
         sendInput("\u0003");
+        return;
+      }
+      if (machineTransport) {
+        const generation = machineGenerationRef.current;
+        // MachineTerminalControl fences every control with the attached generation; hold
+        // the interrupt until the boundary names it instead of shipping a frame the
+        // server answers with INVALID_CONTROL_OR_GENERATION.
+        if (generation === null) {
+          pendingMachineSignalRef.current = "interrupt";
+          return;
+        }
+        sendPayload(JSON.stringify({ type: "signal", generation, signal: "interrupt" }));
         return;
       }
       sendPayload(JSON.stringify({ type: "signal", signal: "interrupt" }));

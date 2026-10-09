@@ -137,6 +137,52 @@ pub(crate) fn with_git_budget<T>(budget: GitBudget, work: impl FnOnce() -> T) ->
     let _restore = Restore(GIT_BUDGET.with(|slot| slot.replace(Some(budget))));
     work()
 }
+
+/// Nested use is the same operation: pass clones of its cancellation sources.
+/// This preserves inherited grant revocation and can only shorten its deadline.
+pub(crate) fn with_preparation_git_budget<T>(
+    deadline: std::time::Instant,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancellation: Option<std::sync::Arc<tokio::sync::Notify>>,
+    work: impl FnOnce() -> T,
+) -> T {
+    let (_grant, revoked) = tokio::sync::watch::channel(false);
+    let inherited = GIT_BUDGET.with(|slot| slot.borrow().clone());
+    let budget = match inherited {
+        Some(mut budget) => {
+            assert!(std::sync::Arc::ptr_eq(&budget.cancelled, &cancelled),
+                "nested preparation must retain the operation cancellation flag");
+            assert!(match (&budget.cancellation, &cancellation) {
+                (Some(parent), Some(child)) => std::sync::Arc::ptr_eq(parent, child),
+                (None, None) => true,
+                _ => false,
+            }, "nested preparation must retain the operation cancellation notification");
+            budget.deadline = budget.deadline.min(deadline);
+            budget
+        }
+        None => GitBudget { deadline, revoked, cancelled, cancellation },
+    };
+    with_git_budget(budget, work)
+}
+
+#[cfg(test)]
+pub(crate) type GitObserver = std::sync::Arc<dyn Fn(&Path, &[&str]) + Send + Sync>;
+#[cfg(test)]
+thread_local! {
+    static GIT_OBSERVER: std::cell::RefCell<Option<GitObserver>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn with_git_observer<T>(observer: GitObserver, work: impl FnOnce() -> T) -> T {
+    struct Restore(Option<GitObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GIT_OBSERVER.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(GIT_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    work()
+}
+
 fn bounded_output(
     cwd: &Path,
     args: &[&str],
@@ -254,6 +300,65 @@ fn bounded_output(
 #[cfg(test)]
 mod local_budget_tests {
     use super::*;
+
+    #[test]
+    fn preparation_split_uses_one_deadline() {
+        let deadline = std::time::Instant::now();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        with_preparation_git_budget(deadline, cancelled, None, || {
+            with_local_worktree_budget(|| {
+                let budget = GIT_BUDGET.with(|slot| slot.borrow().clone().unwrap());
+                assert_eq!(budget.deadline, deadline);
+                assert!(!budget.revoked.has_changed().unwrap());
+                let result = run_git(std::path::Path::new("."), &["status"]);
+                assert!(matches!(result, Err(WorktreeError::ParseError(ref code)) if code == "TIMEOUT"));
+            });
+        });
+        assert!(GIT_BUDGET.with(|slot| slot.borrow().is_none()));
+    }
+
+    #[test]
+    fn preparation_nested_budget_preserves_revocation_and_cancellation() {
+        let (grant, revoked) = tokio::sync::watch::channel(false);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = std::sync::Arc::new(tokio::sync::Notify::new());
+        let earlier = std::time::Instant::now();
+        let original = earlier + std::time::Duration::from_secs(9);
+        with_git_budget(GitBudget {
+            deadline: original, revoked, cancelled: cancelled.clone(),
+            cancellation: Some(cancellation.clone()),
+        }, || {
+            with_preparation_git_budget(earlier, cancelled.clone(), Some(cancellation.clone()), || {
+                let budget = GIT_BUDGET.with(|slot| slot.borrow().clone().unwrap());
+                assert_eq!(budget.deadline, earlier);
+                assert!(std::sync::Arc::ptr_eq(&budget.cancelled, &cancelled));
+                assert!(std::sync::Arc::ptr_eq(budget.cancellation.as_ref().unwrap(), &cancellation));
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+                grant.send(true).unwrap();
+                assert!(*budget.revoked.borrow());
+                assert!(budget.cancelled.load(std::sync::atomic::Ordering::Acquire));
+            });
+            assert_eq!(GIT_BUDGET.with(|slot| slot.borrow().as_ref().unwrap().deadline), original);
+        });
+        assert!(GIT_BUDGET.with(|slot| slot.borrow().is_none()));
+    }
+
+    #[test]
+    fn preparation_git_observer_is_scoped_and_restored() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let observer: GitObserver = std::sync::Arc::new(move |_, args| {
+            observed.lock().unwrap().push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        });
+        with_git_observer(observer, || {
+            with_preparation_git_budget(std::time::Instant::now(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), None, || {
+                    assert!(run_git(".", &["worktree", "list", "--porcelain"]).is_err());
+                });
+        });
+        assert_eq!(*calls.lock().unwrap(), vec![vec!["worktree", "list", "--porcelain"]]);
+        assert!(GIT_OBSERVER.with(|slot| slot.borrow().is_none()));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -772,6 +877,10 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
     let cwd_path = cwd.as_ref();
     let normalized_cwd = normalize_path_for_git(cwd_path);
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
+    #[cfg(test)]
+    if let Some(observer) = GIT_OBSERVER.with(|slot| slot.borrow().clone()) {
+        observer(&normalized_cwd, &arg_strs);
+    }
     let command_str = format!(
         "git {}",
         arg_strs

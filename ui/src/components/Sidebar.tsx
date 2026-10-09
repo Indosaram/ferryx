@@ -16,6 +16,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
+  Activity,
   CheckCheck,
   ChevronRight,
   Folder,
@@ -106,6 +107,7 @@ type SidebarProps = {
   onOpenHistory?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
+  onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
   /** Present when the sidebar offers the attention inbox as a sub view behind its header icon. */
@@ -146,6 +148,7 @@ export function Sidebar({
   onManageDisk,
   onOpenHistory,
   onOpenSettings,
+  onOpenResources,
   onToggle,
   onHide,
   attention,
@@ -603,6 +606,9 @@ export function Sidebar({
               {attention.openSessionCount} {attention.openSessionCount === 1 ? "session" : "sessions"} watched
             </span>
           ) : null}
+          <IconButton label="System resources" size="sm" onClick={onOpenResources}>
+            <Activity className="size-3.5" />
+          </IconButton>
           <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
             <Settings2 className="size-3.5" />
           </IconButton>

@@ -1,4 +1,5 @@
 import type { NativeTerminalSearchResult } from "./TerminalSearchOverlay";
+// @ts-ignore
 import { JSDOM } from "jsdom";
 
 if (typeof window === "undefined") {
@@ -201,10 +202,76 @@ describe("TerminalSearchOverlay native session search", () => {
     expect(screen.getByText("2/3")).toBeInTheDocument();
   });
 
+  it("scrolls native terminal viewport to match row when navigating matches", async () => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_search") {
+        return {
+          matches: [
+            { row: 10, startCol: 5, endCol: 10 },
+            { row: 25, startCol: 2, endCol: 7 },
+            { row: 40, startCol: 0, endCol: 5 },
+          ],
+          totalMatches: 3,
+        };
+      }
+      return undefined;
+    });
+    const onClose = vi.fn();
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
+
+    const input = screen.getByTestId("terminal-search-input");
+    fireEvent.change(input, { target: { value: "test" } });
+
+    await waitFor(() => {
+      expect(screen.getByText("1/3")).toBeInTheDocument();
+    });
+
+    // Selecting initial match scrolls to match 0 row (10)
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "backend-term-1",
+      behavior: { type: "row", offset: 10 },
+    });
+
+    // Selecting next match via Enter invokes scroll command with match 1 row (25)
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+    expect(screen.getByText("2/3")).toBeInTheDocument();
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "backend-term-1",
+      behavior: { type: "row", offset: 25 },
+    });
+
+    // Selecting next match via Next button invokes scroll command with match 2 row (40)
+    fireEvent.click(screen.getByLabelText("Next match"));
+    expect(screen.getByText("3/3")).toBeInTheDocument();
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "backend-term-1",
+      behavior: { type: "row", offset: 40 },
+    });
+
+    // Selecting previous match via Shift+Enter invokes scroll command with match 1 row (25)
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(screen.getByText("2/3")).toBeInTheDocument();
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "backend-term-1",
+      behavior: { type: "row", offset: 25 },
+    });
+
+    // Selecting previous match via Previous button invokes scroll command with match 0 row (10)
+    fireEvent.click(screen.getByLabelText("Previous match"));
+    expect(screen.getByText("1/3")).toBeInTheDocument();
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "backend-term-1",
+      behavior: { type: "row", offset: 10 },
+    });
+  });
+
   it("ignores an out-of-order stale search result and keeps the newest query's counts", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      if (cmd !== "cmd_native_terminal_search") {
+        return Promise.resolve();
+      }
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
@@ -251,7 +318,10 @@ describe("TerminalSearchOverlay native session search", () => {
   it("does not let a stale rejection overwrite a newer successful result", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      if (cmd !== "cmd_native_terminal_search") {
+        return Promise.resolve();
+      }
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
@@ -290,7 +360,10 @@ describe("TerminalSearchOverlay native session search", () => {
   it("resets stale counts and re-searches the new session on sessionId change", async () => {
     type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
     const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
-    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+    tauriCoreMocks.invoke.mockImplementation((cmd: string, args?: { query?: string; sessionId?: string }) => {
+      if (cmd !== "cmd_native_terminal_search") {
+        return Promise.resolve();
+      }
       let resolve: (value: NativeTerminalSearchResult) => void = () => {};
       let reject: (error: unknown) => void = () => {};
       const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {

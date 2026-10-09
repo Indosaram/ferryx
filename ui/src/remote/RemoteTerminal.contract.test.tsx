@@ -116,7 +116,7 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).not.toHaveBeenCalled();
   });
 
-  it("builds account terminal socket URL with daemonEpoch and contains neither render nor cols", async () => {
+  it("builds account tunnel socket URL with daemonEpoch and render=grid but no client geometry", async () => {
     let capturedPath: string | null = null;
     const mockSocket = new MockWebSocket("mock://socket");
     const createWebSocket = vi.fn((pathAndQuery: string) => {
@@ -140,12 +140,14 @@ describe("remote terminal grid contract", () => {
     });
 
     expect(capturedPath).not.toBeNull();
-    expect(capturedPath).toContain("daemonEpoch=");
     expect(capturedPath).toContain("daemonEpoch=1790310731270");
-    expect(capturedPath).not.toContain("render=");
+    // The machine API renders the grid server-side: request it, but never geometry.
+    expect(capturedPath).toContain("render=grid");
     expect(capturedPath).not.toContain("cols=");
     expect(capturedPath).not.toContain("rows=");
-    expect(capturedPath).toBe("/api/v1/terminal/session-account-123?daemonEpoch=1790310731270");
+    expect(capturedPath).toBe(
+      "/api/v1/terminal/session-account-123?daemonEpoch=1790310731270&render=grid",
+    );
   });
 
   it("reports failure and avoids sending an empty or guessed value when daemonEpoch is genuinely unknown in account mode", async () => {
@@ -1454,5 +1456,212 @@ describe("remote terminal grid contract", () => {
     expect(followGrid.className).toContain("overflow-x-auto");
     expect(followGrid.className).toContain("overflow-y-hidden");
     expect(followGrid.style.touchAction).toBe("pan-x");
+  });
+
+  function attachedFrame(generation: unknown, epoch = "epoch-1"): string {
+    return JSON.stringify({
+      type: "attached",
+      target: { machineId: "mach-1", sessionId: "session-machine-1", daemonEpoch: epoch },
+      generation,
+      cols: 80,
+      rows: 20,
+      startSequence: 0,
+      endSequence: 0,
+      replayGap: null,
+    });
+  }
+
+  function renderMachineTerminal(epoch: string) {
+    const sockets: MockWebSocket[] = [];
+    const paths: string[] = [];
+    const createWebSocket = vi.fn((pathAndQuery: string) => {
+      paths.push(pathAndQuery);
+      const ws = new MockWebSocket("mock://machine");
+      sockets.push(ws);
+      return ws;
+    });
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-machine-1"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch={epoch}
+        createWebSocket={createWebSocket}
+      />,
+    );
+    return { createWebSocket, paths, sockets, ...view };
+  }
+
+  it("holds machine controls until attached, fences them with its generation, and keeps PTY input binary", async () => {
+    const { createWebSocket, paths, sockets } = renderMachineTerminal("epoch-1");
+    await waitFor(() => expect(createWebSocket).toHaveBeenCalledTimes(1));
+    expect(paths[0]).toBe("/api/v1/terminal/session-machine-1?daemonEpoch=epoch-1&render=grid");
+
+    const ws = sockets[0];
+    act(() => ws.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+
+    // Before the boundary, no unfenced control may reach the machine wire.
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
+    fireEvent.wheel(surface(), { deltaY: -20 });
+    expect(ws.send).not.toHaveBeenCalled();
+
+    act(() => {
+      ws.onmessage?.({ data: attachedFrame("7") } as MessageEvent);
+    });
+
+    // The boundary drives resize with the attached generation and measured geometry.
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "7", cols: 80, rows: 20 }),
+    );
+    // Held interrupt and scroll flush fenced with the same generation.
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "signal", generation: "7", signal: "interrupt" }),
+    );
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "scroll", generation: "7", rows: -1 }),
+    );
+    // Machine generation never turns PTY input into legacy remoteWrite.
+    expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining("remoteWrite"));
+
+    ws.send.mockClear();
+    fireEvent.keyDown(surface(), { key: "a" });
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const [payload] = ws.send.mock.calls[0];
+    expect(Object.prototype.toString.call(payload)).toBe("[object Uint8Array]");
+    expect(Array.from(payload as Uint8Array)).toEqual(Array.from(new TextEncoder().encode("a")));
+
+    // Post-boundary controls stay fenced and scroll keeps its wheel clamp.
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "signal", generation: "7", signal: "interrupt" }),
+    );
+    fireEvent.wheel(surface(), { deltaY: -20 });
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "scroll", generation: "7", rows: -1 }),
+    );
+  });
+
+  it("stays deferred when attached carries a non-canonical generation", async () => {
+    const { sockets } = renderMachineTerminal("epoch-1");
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    act(() => ws.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+
+    const boundary = (generation: unknown) =>
+      JSON.stringify({
+        type: "attached",
+        target: { machineId: "mach-1", sessionId: "session-machine-1", daemonEpoch: "epoch-1" },
+        generation,
+        cols: 80,
+        rows: 20,
+        startSequence: 0,
+        endSequence: 0,
+        replayGap: null,
+      });
+
+    act(() => ws.onmessage?.({ data: boundary(7) } as MessageEvent));
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    act(() => ws.onmessage?.({ data: boundary("07") } as MessageEvent));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    act(() => ws.onmessage?.({ data: boundary("11") } as MessageEvent));
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "11", cols: 80, rows: 20 }),
+    );
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "signal", generation: "11", signal: "interrupt" }),
+    );
+  });
+
+  it("ignores an attached boundary addressed to another session or epoch", async () => {
+    const { sockets } = renderMachineTerminal("epoch-1");
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    act(() => ws.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+
+    const wrongSession = JSON.stringify({
+      type: "attached",
+      target: { machineId: "mach-1", sessionId: "session-OTHER", daemonEpoch: "epoch-1" },
+      generation: "5",
+      cols: 80,
+      rows: 20,
+      startSequence: 0,
+      endSequence: 0,
+      replayGap: null,
+    });
+    const wrongEpoch = attachedFrame("6", "epoch-9");
+
+    act(() => ws.onmessage?.({ data: wrongSession } as MessageEvent));
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    act(() => ws.onmessage?.({ data: wrongEpoch } as MessageEvent));
+    expect(ws.send).not.toHaveBeenCalled();
+
+    act(() => ws.onmessage?.({ data: attachedFrame("7") } as MessageEvent));
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "7", cols: 80, rows: 20 }),
+    );
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "signal", generation: "7", signal: "interrupt" }),
+    );
+    expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining("\"generation\":\"5\""));
+    expect(ws.send).not.toHaveBeenCalledWith(expect.stringContaining("\"generation\":\"6\""));
+  });
+
+  it("drops the replaced epoch's machine generation instead of fencing the new target's socket", async () => {
+    const { createWebSocket, paths, sockets, rerender } = renderMachineTerminal("epoch-1");
+    await waitFor(() => expect(paths).toHaveLength(1));
+    const ws1 = sockets[0];
+    act(() => ws1.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+    act(() => {
+      ws1.onmessage?.({ data: attachedFrame("7") } as MessageEvent);
+    });
+    expect(ws1.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "7", cols: 80, rows: 20 }),
+    );
+    ws1.send.mockClear();
+
+    rerender(
+      <RemoteTerminal
+        sessionId="session-machine-1"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch="epoch-2"
+        createWebSocket={createWebSocket}
+      />,
+    );
+    await waitFor(() => expect(paths).toHaveLength(2));
+    expect(paths[1]).toBe("/api/v1/terminal/session-machine-1?daemonEpoch=epoch-2&render=grid");
+
+    const ws2 = sockets[1];
+    act(() => ws2.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
+
+    // The replaced epoch's generation must not fence the new target: input stays binary.
+    fireEvent.keyDown(surface(), { key: "b" });
+    expect(ws2.send).toHaveBeenCalledTimes(1);
+    expect(Object.prototype.toString.call(ws2.send.mock.calls[0][0])).toBe("[object Uint8Array]");
+    expect(Array.from(ws2.send.mock.calls[0][0] as Uint8Array)).toEqual(
+      Array.from(new TextEncoder().encode("b")),
+    );
+
+    // The replacement's boundary re-fences controls with its own generation.
+    act(() => {
+      ws2.onmessage?.({ data: attachedFrame("9", "epoch-2") } as MessageEvent);
+    });
+    expect(ws2.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "9", cols: 80, rows: 20 }),
+    );
+    expect(ws2.send).not.toHaveBeenCalledWith(
+      JSON.stringify({ type: "resize", generation: "7", cols: 80, rows: 20 }),
+    );
+    expect(ws2.send).not.toHaveBeenCalledWith(expect.stringContaining("remoteWrite"));
   });
 });

@@ -141,6 +141,13 @@ impl TerminalService {
         &self.pty_manager
     }
 
+    pub(crate) fn try_acquire_cwd_probe(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pty_manager.try_acquire_cwd_probe(session_id)
+    }
+
     pub fn output_hub(&self) -> &Arc<TerminalOutputHub> {
         &self.output_hub
     }
@@ -185,6 +192,19 @@ impl TerminalService {
             worktree_manager,
             worktree_path,
         )?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
+
+    pub(crate) fn spawn_resolved_with_id(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        context: super::pty::ResolvedSpawnContext,
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
+        let (session_id, pty_rx) = self.pty_manager
+            .spawn_resolved_with_id(session_id, cmd, cols, rows, context)?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 
@@ -520,5 +540,113 @@ impl TerminalService {
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {
         self.pty_manager.get_session(session_id)
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn preparation_resolved_spawn_context_and_probe_permit_lifetime() {
+        let service = TerminalService::default();
+        let spawning = service.clone();
+        let (root, spawned) = crate::ipc::run_blocking(move || {
+            let root = tempfile::tempdir().unwrap();
+            let cwd = root.path().join("nested");
+            std::fs::create_dir(&cwd).unwrap();
+            let mut command = if cfg!(windows) {
+                let mut command = CommandBuilder::new("cmd.exe");
+                command.args(["/D", "/Q", "/K"]);
+                command
+            } else {
+                CommandBuilder::new("/bin/sh")
+            };
+            command.env("FERRYX_WORKSPACE_ID", "foreign-daemon-identity");
+            let context = super::super::pty::ResolvedSpawnContext {
+                root: root.path().to_owned(), cwd, managed_workspace_id: None,
+            };
+            let spawned = spawning.spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(), command, 80, 24, context,
+            );
+            Ok((root, spawned))
+        }).await.unwrap();
+        let (id, _lifecycle) = spawned.unwrap();
+        let permit = service.try_acquire_cwd_probe(&id);
+        let acquired = permit.is_some();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(std::time::Duration::from_secs(5))
+        });
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx).await;
+        let busy = service.try_acquire_cwd_probe(&id).is_none();
+        let ownership = service.get_session(&id).and_then(|session| session.worktree_path());
+        let close = service.close_session(&id).await;
+        let removed = service.try_acquire_cwd_probe(&id).is_none();
+        let released = release_tx.send(());
+        let joined = worker.await;
+        assert!(close.is_ok(), "{close:?}");
+        assert!(matches!(entered, Ok(Ok(()))));
+        assert!(released.is_ok());
+        assert!(matches!(joined, Ok(Ok(()))));
+        assert!(acquired && busy && removed);
+        assert_eq!(ownership.as_deref(), Some(root.path()));
+        assert!(service.try_acquire_cwd_probe("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn preparation_cold_path_does_not_discover_login_path() {
+        let service = TerminalService::default();
+        let (legacy_entered_tx, legacy_entered_rx) = tokio::sync::oneshot::channel();
+        let (legacy_release_tx, legacy_release_rx) = std::sync::mpsc::channel();
+        let legacy = tokio::task::spawn_blocking(move || {
+            let entered = std::sync::Mutex::new(Some(legacy_entered_tx));
+            let release = std::sync::Mutex::new(legacy_release_rx);
+            super::super::shell::with_path_discovery(Arc::new(move || {
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+                Vec::new()
+            }), super::super::shell::legacy_search_paths)
+        });
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(5), legacy_entered_rx).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let git_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let git_counted = git_calls.clone();
+        let spawning = service.clone();
+        let setup = crate::ipc::run_blocking(move || {
+            let root = tempfile::tempdir().unwrap();
+            let result = super::super::shell::with_path_discovery(Arc::new(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            }), || crate::worktree::git::with_git_observer(Arc::new(move |_, _| {
+                git_counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }), || {
+                let command = super::super::shell::resolve_ordinary_shell_command(
+                    Some(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }),
+                )?;
+                spawning.spawn_resolved_with_id(uuid::Uuid::new_v4().to_string(), command, 80, 24,
+                    super::super::pty::ResolvedSpawnContext {
+                        root: root.path().to_owned(), cwd: root.path().to_owned(),
+                        managed_workspace_id: None,
+                    })
+            }));
+            Ok((root, result))
+        }).await;
+        let close = match &setup {
+            Ok((_, Ok((id, _)))) => service.close_session(id).await,
+            _ => Ok(()),
+        };
+        let released = legacy_release_tx.send(());
+        let joined = legacy.await;
+        assert!(matches!(entered, Ok(Ok(()))));
+        assert!(released.is_ok() && joined.is_ok());
+        assert!(close.is_ok(), "{close:?}");
+        assert!(matches!(setup, Ok((_, Ok(_)))), "{setup:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(git_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

@@ -824,6 +824,16 @@ describe("Sidebar navigation", () => {
     expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
   });
 
+  it("offers the resource panel from the sidebar footer", () => {
+    const onOpenResources = vi.fn();
+    renderSidebar({ projects, activeProjectId: "maho-workspace", onOpenResources });
+
+    const button = screen.getByRole("button", { name: "System resources" });
+    fireEvent.click(button);
+
+    expect(onOpenResources).toHaveBeenCalledTimes(1);
+  });
+
   it("renders emptyState hint text when a project has zero worktrees", () => {
     const emptyProjects = [
       { workspaceId: "empty-proj", repoRoot: "/repos/empty-proj", gitRoot: "/repos/empty-proj" },

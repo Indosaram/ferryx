@@ -395,14 +395,16 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(reboundSession.lifecycle).toBe("running");
   });
 
-  it("closes deferred spawned backend session if the pane is closed before spawn resolves", async () => {
+  it("cancels the owned deferred creation after the pane is closed", async () => {
     let resolveDeferredSpawn!: (backendId: string) => void;
+    let enteredCreate!: () => void;
+    const createEntered = new Promise<void>((resolve) => { enteredCreate = resolve; });
     const deferredSpawnPromise = new Promise<string>((resolve) => {
       resolveDeferredSpawn = resolve;
     });
 
     const { services } = createServices();
-    (services.spawnTerminal as any).mockImplementation(async () => deferredSpawnPromise);
+    (services.spawnTerminal as any).mockImplementation(() => { enteredCreate(); return deferredSpawnPromise; });
 
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
     act(() => result.current.restoreWorkspace(restoredSplitState()));
@@ -416,6 +418,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     const inFlightLeafId = layout.activeLeafId!;
     expect(inFlightLeafId).not.toBe("leaf-2");
 
+    await act(async () => { await createEntered; });
     await act(async () => {
       await result.current.closePane("tab-primary", inFlightLeafId);
     });

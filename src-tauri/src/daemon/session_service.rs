@@ -2,17 +2,18 @@ use super::workspace_service::DaemonWorkspaceService;
 use crate::daemon::agent_state::AgentStateHub;
 use crate::daemon::protocol::{
     AgentProviderSessionKey, DaemonRemoteEvent, DaemonResponse, DaemonSessionDetails,
-    TerminalStartup,
+    TerminalStartup, LocalSplitEnvelope, SplitOperationResult, SplitUnknownReason,
+    SplitOwnership, SplitNoChild, LOCAL_SPLIT_VALIDITY_MS,
 };
 use crate::session::{load_session_from_path, save_session_to_path};
 use crate::terminal::{PtySessionState, TerminalService};
 use crate::worktree::WorktreeIdentity;
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Weak},
+    sync::{Arc, Weak, atomic::{AtomicBool, Ordering}},
     time::{Duration, Instant},
 };
 use tokio::sync::broadcast;
@@ -65,6 +66,93 @@ pub(crate) struct MachineSpawn {
 }
 tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
 
+pub(super) struct SpawnOperation {
+    fingerprint: Option<SpawnRequestFingerprint>,
+    machine_digest: Option<String>,
+    envelope: Option<LocalSplitEnvelope>,
+    deadline: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+    cancellation: Arc<tokio::sync::Notify>,
+    result: tokio::sync::watch::Sender<Option<Result<String, SpawnError>>>,
+    state: SplitOperationResult,
+    child: Option<String>,
+    machine_target: Option<String>,
+    cleanup_started: bool,
+    changed: tokio::sync::watch::Sender<u64>,
+    workspace_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+struct SpawnReservation {
+    id: String,
+    claim: Option<ProviderSessionClaimKey>,
+    live: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    pending: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    capacity: Arc<Mutex<HashSet<String>>>,
+    retain_capacity: bool,
+    published: bool,
+}
+
+impl SpawnReservation {
+    fn reserve(id: String, claim: Option<ProviderSessionClaimKey>, machine: bool,
+        live: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+        pending: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+        capacity: Arc<Mutex<HashSet<String>>>, limit: usize) -> Result<Self, SpawnError> {
+        let reservation = Self { id, claim, live: live.clone(), pending, capacity, retain_capacity: false, published: false };
+        if let Some(claim) = &reservation.claim {
+            let mut claims = live.lock();
+            if let Some(existing) = claims.get(claim) {
+                return Err(SpawnError::AgentSessionConflict { agent_type: claim.agent_type.clone(),
+                    provider_key: claim.provider_key, provider_id: claim.provider_id.clone(), existing_session_id: existing.clone() });
+            }
+            reservation.pending.lock().insert(claim.clone(), reservation.id.clone());
+            claims.insert(claim.clone(), reservation.id.clone());
+        }
+        if machine {
+            let mut capacity = reservation.capacity.lock();
+            if capacity.len() >= limit {
+                drop(capacity);
+                return Err("CAPACITY_EXCEEDED".into());
+            }
+            capacity.insert(reservation.id.clone());
+        }
+        Ok(reservation)
+    }
+}
+
+impl Drop for SpawnReservation {
+    fn drop(&mut self) {
+        if let Some(claim) = &self.claim {
+            let mut live = self.live.lock();
+            if !self.published && live.get(claim) == Some(&self.id) { live.remove(claim); }
+            let mut pending = self.pending.lock();
+            if !self.published && pending.get(claim) == Some(&self.id) { pending.remove(claim); }
+        }
+        if !self.retain_capacity { self.capacity.lock().remove(&self.id); }
+    }
+}
+
+pub(super) struct AdmissionClock {
+    logical_ms: u64,
+    measured: Instant,
+}
+
+impl Default for AdmissionClock {
+    fn default() -> Self {
+        Self { logical_ms: 0, measured: Instant::now() }
+    }
+}
+
+impl AdmissionClock {
+    fn now(&mut self) -> u64 {
+        let observed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
+        let elapsed = self.measured.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        self.logical_ms = self.logical_ms.saturating_add(elapsed).max(observed);
+        self.measured += Duration::from_millis(elapsed);
+        self.logical_ms
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SpawnCacheEntry {
     session_id: String,
@@ -106,6 +194,23 @@ pub(super) struct SpawnRequestFingerprint {
     pub(super) shell: Option<String>,
     pub(super) provider_claim: Option<ProviderSessionClaimKey>,
     pub(super) startup: Option<TerminalStartup>,
+    /// GUI-minted session id; part of the fingerprint so a retry of the same
+    /// clientRequestId with a different id is a conflict, not a silent reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) requested_session_id: Option<String>,
+}
+
+/// Holds a GUI-minted session id while its spawn is in flight so two different
+/// requests cannot both pass the conflict check before the PTY is registered.
+struct RequestedSessionIdClaim {
+    id: String,
+    claims: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for RequestedSessionIdClaim {
+    fn drop(&mut self) {
+        self.claims.lock().remove(&self.id);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -144,7 +249,7 @@ impl ProviderSessionClaimKey {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub(super) enum SpawnError {
     #[error(
         "AgentSessionConflict: {agent_type} {provider_key:?} '{provider_id}' is already owned by session '{existing_session_id}'"
@@ -157,6 +262,8 @@ pub(super) enum SpawnError {
     },
     #[error("{0}")]
     InvalidAgentResume(String),
+    #[error("{0}")]
+    Structured(crate::ipc::IpcError),
     #[error("{0}")]
     Other(String),
 }
@@ -172,6 +279,10 @@ impl From<String> for SpawnError {
     fn from(value: String) -> Self {
         Self::Other(value)
     }
+}
+
+impl From<&str> for SpawnError {
+    fn from(value: &str) -> Self { Self::Other(value.to_owned()) }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -337,12 +448,19 @@ impl Drop for MachineSocketLease {
 /// Holds no server/gateway or AppHandle. Handover is weak to avoid a callback cycle.
 pub struct DaemonSessionService {
     pub(crate) workspace_service: Arc<DaemonWorkspaceService>,
+    pub(crate) machine_id: Result<String, String>,
     pub(super) terminal_service: Arc<TerminalService>,
     pub(super) session_router: Arc<super::proxy::SessionRouter>,
     pub(super) handover_manager: Weak<super::handover::HandoverManager>,
     pub(super) remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
     pub(super) spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
-    pub(super) spawn_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(super) spawn_operations: Mutex<HashMap<String, Arc<Mutex<SpawnOperation>>>>,
+    pub(super) admission_clock: Mutex<AdmissionClock>,
+    pub(super) epoch: u64,
+    pub(super) machine_capacity: Arc<Mutex<HashSet<String>>>,
+    pub(super) capacity_initialized: tokio::sync::OnceCell<()>,
+    pub(super) pending_provider_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    pub(super) requested_session_ids: Arc<Mutex<HashSet<String>>>,
     /// Sole authority shared by socket replacement, input, resize and HTTP close.
     pub(crate) machine_controllers: tokio::sync::Mutex<HashMap<String, MachineController>>,
     pub(super) machine_lifecycles: Arc<Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>>,
@@ -353,9 +471,366 @@ pub struct DaemonSessionService {
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
     pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
+    #[cfg(test)]
+    pub(super) split_probe: RwLock<Option<Arc<dyn Fn(&str, &str) + Send + Sync>>>,
+    #[cfg(test)]
+    pub(super) cwd_probe: RwLock<Option<Arc<dyn Fn(u32) -> Option<PathBuf> + Send + Sync>>>,
+    #[cfg(test)]
+    pub(super) split_wire_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    #[cfg(test)]
+    pub(super) split_git_observer: RwLock<Option<crate::worktree::git::GitObserver>>,
+    #[cfg(test)]
+    pub(super) split_probe_workers: Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(test)]
+    pub(super) split_close_failure: AtomicBool,
 }
 
 impl DaemonSessionService {
+    #[cfg(test)]
+    pub(super) fn advance_admission_clock_for_test(&self, milliseconds: u64) {
+        let mut clock = self.admission_clock.lock();
+        clock.logical_ms = clock.now().saturating_add(milliseconds);
+    }
+    #[cfg(test)]
+    pub(super) async fn drain_split_fixture(&self) {
+        let probes = std::mem::take(&mut *self.split_probe_workers.lock());
+        for probe in probes { tokio::time::timeout(Duration::from_secs(5), probe).await.unwrap().unwrap(); }
+        let operations: Vec<_> = self.spawn_operations.lock().values().cloned().collect();
+        for operation in operations {
+            let mut result = operation.lock().result.subscribe();
+            if operation.lock().fingerprint.is_none() { continue; }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while result.borrow().is_none() { result.changed().await.unwrap(); }
+            }).await.unwrap();
+        }
+        let tasks = std::mem::take(&mut *self.split_wire_tasks.lock());
+        for task in tasks { tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap(); }
+    }
+
+    #[cfg(test)]
+    async fn split_test_stage(&self, request: &str, stage: &'static str) {
+        let probe = self.split_probe.read().clone();
+        if let Some(probe) = probe {
+            let request = request.to_owned();
+            if let Err(error) = crate::ipc::run_blocking(move || { probe(&request, stage); Ok(()) }).await {
+                tracing::error!(%error, "Split test barrier failed");
+            }
+        }
+    }
+
+    pub(super) fn admission_time_unix_ms(&self) -> u64 {
+        self.admission_clock.lock().now()
+    }
+
+    fn split_error(code: crate::ipc::IpcErrorCode, request: &str, epoch: u64, stage: &str) -> SpawnError {
+        SpawnError::Structured(crate::ipc::IpcError::new(code, stage).with_details(
+            serde_json::json!({"requestId":request,"originEpoch":epoch.to_string(),
+                "stage":stage,"delivery":"confirmed","operationState":"pending"})))
+    }
+
+    fn operation_key(request: &str, envelope: Option<&LocalSplitEnvelope>) -> String {
+        match envelope {
+            Some(envelope) => format!("split:{}:{request}", envelope.origin_epoch),
+            None => format!("legacy:{request}"),
+        }
+    }
+
+    pub(super) async fn admit_spawn(
+        self: &Arc<Self>, request: &str, workspace: &str,
+        worktree: Option<WorktreeIdentity>, cwd: Option<String>, cols: u16, rows: u16,
+        shell: Option<String>, startup: Option<TerminalStartup>,
+        requested_session_id: Option<String>,
+        machine: Option<Arc<MachineSpawn>>, envelope: Option<LocalSplitEnvelope>,
+        #[cfg(test)] helper_home: Option<String>,
+    ) -> Result<String, SpawnError> {
+        use crate::ipc::IpcErrorCode;
+        if request.trim().is_empty() {
+            return Err("clientRequestId cannot be empty".into());
+        }
+        // Machine (remote-issued) spawns carry their own target id.
+        let requested_session_id = if machine.is_some() { None } else { requested_session_id };
+        if let Some(id) = &requested_session_id {
+            if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id) {
+                return Err(SpawnError::Structured(crate::ipc::IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "sessionId must be a canonical lowercase UUID",
+                ).with_details(serde_json::json!({"sessionId": id}))));
+            }
+        }
+        if let Some(split) = &envelope {
+            if uuid::Uuid::parse_str(request).ok().is_none_or(|id| id.to_string() != request)
+            {
+                return Err(Self::split_error(IpcErrorCode::InvalidArgument, request, split.origin_epoch, "admission"));
+            }
+            if split.origin_epoch != self.epoch {
+                return Err(Self::split_error(IpcErrorCode::SpawnEpochChanged, request, split.origin_epoch, "admission"));
+            }
+        }
+        let fingerprint = SpawnRequestFingerprint {
+            workspace_id: workspace.into(), worktree: worktree.clone(), cwd: cwd.clone(), cols, rows,
+            shell: shell.clone(), provider_claim: ProviderSessionClaimKey::from_startup(startup.as_ref()),
+            startup: startup.clone(), requested_session_id: requested_session_id.clone(),
+        };
+        let key = Self::operation_key(request, envelope.as_ref());
+        let now = self.admission_time_unix_ms();
+        let (operation, owner) = {
+        let mut operations = self.spawn_operations.lock();
+        operations.retain(|_, operation| {
+            let operation = operation.lock();
+            !matches!(operation.state, SplitOperationResult::Cancelled | SplitOperationResult::Exited | SplitOperationResult::Failed { .. })
+                || operation.envelope.as_ref().is_none_or(|split| split.expires_at_unix_ms > now)
+        });
+        let digest = machine.as_ref().map(|machine| machine.digest.clone());
+        if let Some(operation) = operations.get(&key) {
+            let record = operation.lock();
+            if record.envelope.as_ref().map(|split| split.expires_at_unix_ms)
+                    != envelope.as_ref().map(|split| split.expires_at_unix_ms)
+                || record.fingerprint.as_ref().is_some_and(|stored| stored != &fingerprint)
+                || record.machine_digest != digest
+            {
+                return Err(match &envelope {
+                    Some(split) => Self::split_error(IpcErrorCode::SpawnRequestConflict, request, split.origin_epoch, "fingerprint"),
+                    None if machine.is_some() => SpawnError::Other("REQUEST_CONFLICT".into()),
+                    None => SpawnError::Other(format!("clientRequestId '{request}' was reused with a different spawn request")),
+                });
+            }
+            if matches!(record.state, SplitOperationResult::Cancelled) {
+                return Err(Self::split_error(IpcErrorCode::SpawnCancelled, request, self.epoch, "cancelled"));
+            }
+            (operation.clone(), false)
+        } else {
+            if let Some(split) = &envelope {
+                if machine.is_some() || startup.is_some() || crate::ssh::projects::is_remote(workspace) || cwd.is_none() {
+                    return Err(Self::split_error(IpcErrorCode::InvalidArgument, request, split.origin_epoch, "admission"));
+                }
+                if split.expires_at_unix_ms <= now || split.expires_at_unix_ms > now.saturating_add(LOCAL_SPLIT_VALIDITY_MS) {
+                    return Err(Self::split_error(IpcErrorCode::SpawnRequestExpired, request, split.origin_epoch, "admission"));
+                }
+            }
+            let operation = Arc::new(Mutex::new(SpawnOperation {
+                fingerprint: Some(fingerprint), machine_digest: digest,
+                deadline: envelope.as_ref().map(|split| Instant::now() + Duration::from_millis(split.remaining_ms.min(9_000)))
+                    .or_else(|| machine.as_ref().map(|machine| machine.deadline)),
+                envelope: envelope.clone(), cancelled: Arc::new(AtomicBool::new(false)),
+                cancellation: Arc::new(tokio::sync::Notify::new()),
+                result: tokio::sync::watch::channel(None).0,
+                state: SplitOperationResult::Pending { cancel_requested: false }, child: None,
+                machine_target: machine.as_ref().map(|machine| machine.target.session_id.clone()),
+                cleanup_started: false, changed: tokio::sync::watch::channel(0).0,
+                workspace_guard: None,
+            }));
+            operations.insert(key.clone(), operation.clone());
+            (operation, true)
+        }
+        };
+        let mut receiver = operation.lock().result.subscribe();
+        if owner {
+            let service = self.clone();
+            let request = request.to_owned();
+            let workspace = workspace.to_owned();
+            let admission = self.handover_manager.upgrade()
+                .ok_or_else(|| SpawnError::Other("HOST_UNAVAILABLE".into()))
+                .and_then(|manager| manager.retain_spawn_owner().map_err(SpawnError::Other));
+            tokio::spawn(async move {
+                let _retirement = service.handover_manager.upgrade()
+                    .and_then(|manager| manager.retain_request(service.terminal_service.clone()).ok());
+                let started = Instant::now();
+                tracing::info!(request_id = %request, epoch = service.epoch, stage = "admission", boundary = "begin");
+                let mut retained_owner = None;
+                let machine_settlement = machine.clone();
+                let mut result = match admission {
+                    Ok(owner) => {
+                        retained_owner = Some(owner);
+                        service.spawn_owned(&request, &workspace, worktree, cwd, cols, rows,
+                            shell, startup, requested_session_id, machine, operation.clone(), #[cfg(test)] helper_home).await
+                    },
+                    Err(error) => Err(error),
+                };
+                if result.is_err() {
+                    if let Some(machine) = machine_settlement {
+                        let workspace = service.workspace_service.clone();
+                        let settled = crate::ipc::run_blocking(move || {
+                            let record = workspace.journal.reconcile(&machine.device, &machine.request.request_id)
+                                .map_err(crate::ipc::IpcError::internal)?;
+                            if record.is_some_and(|record| matches!(record.operation, crate::remote::machine_protocol::Operation::Pending { .. })) {
+                                workspace.journal.mark_unknown(&machine.device, &machine.request.request_id)
+                                    .map_err(crate::ipc::IpcError::internal)?;
+                                return Ok(true);
+                            }
+                            Ok(false)
+                        }).await;
+                        if !matches!(settled, Ok(false)) { result = Err("OPERATION_OUTCOME_UNKNOWN".into()); }
+                    }
+                }
+                service.finish_operation(&operation, &result).await;
+                tracing::info!(request_id = %request, epoch = service.epoch, stage = "admission", boundary = if result.is_ok() { "end" } else { "failure" }, elapsed_ms = started.elapsed().as_millis() as u64);
+                {
+                    let record = operation.lock();
+                    record.result.send_replace(Some(result));
+                    record.changed.send_modify(|revision| *revision += 1);
+                }
+                operation.lock().workspace_guard.take();
+                drop(retained_owner);
+                if envelope.is_none() {
+                    let mut map = service.spawn_operations.lock();
+                    if map.get(&key).is_some_and(|current| Arc::ptr_eq(current, &operation)) {
+                        map.remove(&key);
+                    }
+                }
+            });
+        }
+        loop {
+            if let Some(result) = receiver.borrow().clone() { return result; }
+            receiver.changed().await.map_err(|_| SpawnError::Other("OPERATION_OUTCOME_UNKNOWN".into()))?;
+        }
+    }
+
+    async fn finish_operation(&self, operation: &Arc<Mutex<SpawnOperation>>, result: &Result<String, SpawnError>) {
+        let child = operation.lock().child.clone();
+        let described = child.as_deref().map(|id| self.handle_describe_session(id));
+        {
+            let mut record = operation.lock();
+            if matches!(record.state, SplitOperationResult::Exited | SplitOperationResult::Cancelled) {
+                return;
+            }
+            record.state = match (result, described) {
+                (Ok(id), Some(DaemonResponse::DescribeSessionOk { session })) => SplitOperationResult::Created {
+                    session_id: id.clone(), daemon_epoch: self.epoch, session, ownership: SplitOwnership::Created,
+                },
+                (_, _) if record.child.is_some() => SplitOperationResult::Unknown { reason: SplitUnknownReason::PublicationUncertain },
+                (Err(error), _) => SplitOperationResult::Failed {
+                    error: match error { SpawnError::Structured(error) => error.clone(), _ => crate::ipc::IpcError::internal(error.to_string()) },
+                    no_child: SplitNoChild,
+                },
+                _ => SplitOperationResult::Unknown { reason: SplitUnknownReason::PublicationUncertain },
+            };
+            if record.cancelled.load(Ordering::Acquire) && record.child.is_none() {
+                record.state = SplitOperationResult::Cancelled;
+            }
+        }
+        let cancelled = operation.lock().cancelled.load(Ordering::Acquire);
+        if cancelled {
+            self.cancel_operation_child(operation).await;
+        }
+    }
+
+    async fn cancel_operation_child(&self, operation: &Arc<Mutex<SpawnOperation>>) {
+        let child = {
+            let mut record = operation.lock();
+            if record.cleanup_started || matches!(record.state, SplitOperationResult::Cancelled | SplitOperationResult::Exited) { return; }
+            if record.child.is_none() {
+                record.state = SplitOperationResult::Cancelled;
+                record.changed.send_modify(|revision| *revision += 1);
+                return;
+            }
+            record.cleanup_started = true;
+            record.state = SplitOperationResult::Pending { cancel_requested: true };
+            record.child.clone()
+        };
+        if let Some(child) = child {
+            let lifecycle = self.machine_lifecycles.lock().get(&child).cloned();
+            #[cfg(test)]
+            let injected_failure = self.split_close_failure.swap(false, Ordering::AcqRel);
+            #[cfg(not(test))]
+            let injected_failure = false;
+            let closed = if injected_failure {
+                Err(crate::terminal::PtyError::Other("injected close failure".into()))
+            } else { self.terminal_service.close_session(&child).await };
+            if let Err(error) = closed {
+                tracing::error!(%error, session_id = %child, "Split cancellation cleanup failed");
+                let mut record = operation.lock();
+                record.cleanup_started = false;
+                record.state = SplitOperationResult::Pending { cancel_requested: true };
+                record.changed.send_modify(|revision| *revision += 1);
+                return;
+            }
+            if let Some(mut lifecycle) = lifecycle {
+                while !*lifecycle.borrow() {
+                    if lifecycle.changed().await.is_err() {
+                        let mut record = operation.lock();
+                        record.cleanup_started = false;
+                        record.changed.send_modify(|revision| *revision += 1);
+                        return;
+                    }
+                }
+            }
+            let mut record = operation.lock();
+            if matches!(record.state, SplitOperationResult::Unknown { .. }) { return; }
+            record.state = SplitOperationResult::Cancelled;
+            record.changed.send_modify(|revision| *revision += 1);
+        }
+    }
+
+    pub(super) fn split_operation(self: &Arc<Self>, request: &str, origin_epoch: u64, expiry: u64, cancel: bool) -> Result<SplitOperationResult, SpawnError> {
+        use crate::ipc::IpcErrorCode;
+        if uuid::Uuid::parse_str(request).ok().is_none_or(|id| id.to_string() != request) {
+            return Err(Self::split_error(IpcErrorCode::InvalidArgument, request, origin_epoch, "identity"));
+        }
+        let envelope = LocalSplitEnvelope { origin_epoch, expires_at_unix_ms: expiry, remaining_ms: 0 };
+        let key = Self::operation_key(request, Some(&envelope));
+        let now = self.admission_time_unix_ms();
+        let mut operations = self.spawn_operations.lock();
+        if let Some(operation) = operations.get(&key).cloned() {
+            let mut record = operation.lock();
+            if record.envelope.as_ref().is_none_or(|split| split.expires_at_unix_ms != expiry) {
+                return Err(Self::split_error(IpcErrorCode::SpawnRequestConflict, request, origin_epoch, "identity"));
+            }
+            if cancel && !matches!(record.state, SplitOperationResult::Cancelled | SplitOperationResult::Exited | SplitOperationResult::Failed { .. }) {
+                record.cancelled.store(true, Ordering::Release);
+                record.cancellation.notify_waiters();
+                record.state = SplitOperationResult::Pending { cancel_requested: true };
+                if record.result.borrow().is_some() {
+                    let service = self.clone();
+                    let cleanup = operation.clone();
+                    tokio::spawn(async move { service.cancel_operation_child(&cleanup).await; });
+                }
+            }
+            return Ok(record.state.clone());
+        }
+        if origin_epoch != self.epoch {
+            return Ok(SplitOperationResult::Unknown { reason: SplitUnknownReason::EpochChanged });
+        }
+        let valid = expiry > now && expiry <= now.saturating_add(LOCAL_SPLIT_VALIDITY_MS);
+        if cancel && valid {
+            operations.insert(key, Arc::new(Mutex::new(SpawnOperation {
+                fingerprint: None, machine_digest: None, envelope: Some(envelope), deadline: None,
+                cancelled: Arc::new(AtomicBool::new(true)), cancellation: Arc::new(tokio::sync::Notify::new()),
+                result: tokio::sync::watch::channel(None).0, state: SplitOperationResult::Cancelled, child: None,
+                machine_target: None,
+                cleanup_started: false, changed: tokio::sync::watch::channel(0).0,
+                workspace_guard: None,
+            })));
+            return Ok(SplitOperationResult::Cancelled);
+        }
+        Ok(SplitOperationResult::Absent { can_create: valid })
+    }
+
+    pub(super) async fn cancel_split_until(self: &Arc<Self>, request: &str, epoch: u64, expiry: u64) -> Result<SplitOperationResult, SpawnError> {
+        let key = format!("split:{epoch}:{request}");
+        let mut changed = self.spawn_operations.lock().get(&key).map(|operation| operation.lock().changed.subscribe());
+        let initial = self.split_operation(request, epoch, expiry, true)?;
+        let Some(ref mut changed) = changed else { return Ok(initial); };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2_500);
+        loop {
+            let state = self.split_operation(request, epoch, expiry, false)?;
+            if !matches!(state, SplitOperationResult::Pending { .. }) { return Ok(state); }
+            if !matches!(tokio::time::timeout_at(deadline, changed.changed()).await, Ok(Ok(()))) {
+                return self.split_operation(request, epoch, expiry, false);
+            }
+        }
+    }
+
+    fn check_spawn_operation(operation: &Mutex<SpawnOperation>) -> Result<(), SpawnError> {
+        let record = operation.lock();
+        if record.cancelled.load(Ordering::Acquire) {
+            return Err(SpawnError::Structured(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::SpawnCancelled, "cancelled before child")));
+        }
+        if record.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(SpawnError::Structured(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::SpawnAttemptTimeout, "pre-child deadline")));
+        }
+        Ok(())
+    }
+
     pub(crate) fn subscribe_agent_states(&self, session_id: &str) -> crate::daemon::agent_state::AgentStateSubscription {
         self.agent_states.subscribe(session_id)
     }
@@ -426,8 +901,9 @@ impl DaemonSessionService {
     #[cfg(test)]
     pub(crate) fn journal_spawn_probe_handles(
         &self,
+        workspace: &str,
     ) -> (Arc<tokio::sync::Mutex<()>>, Arc<TerminalService>) {
-        (self.spawn_lock.clone(), self.terminal_service.clone())
+        (self.workspace_service.spawn_queue(workspace), self.terminal_service.clone())
     }
 
     pub(crate) fn attach_machine_output(
@@ -456,50 +932,223 @@ impl DaemonSessionService {
             .map_err(|error| format!("Machine target validation task failed: {error}"))?
     }
 
-    fn validate_machine_target_blocking(
+    pub(crate) fn project_desktop_gui_session(
         &self,
-        target: &crate::remote::machine_protocol::RemoteTerminalTarget,
+        session_id: &str,
+        epoch: crate::scoped_contracts::Epoch,
+        catalog: &crate::remote::workspace_catalog::Catalog,
     ) -> Result<crate::remote::machine_protocol::Session, String> {
-        // Metadata publication is not loss of authority. Wait off-runtime with
-        // a bounded lock deadline; socket revocation/fencing remains cancellable.
         let deadline = Instant::now() + Duration::from_secs(10);
         let metadata = self
             .session_metadata
             .try_read_until(deadline)
             .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
-        let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?;
-        let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
-        if session.target != *target {
-            return Err("STALE_EPOCH".into());
-        }
-        if meta.workspace_id != session.workspace_id
-            || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
-                != session.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
-            || !self
-                .workspace_service
-                .catalog
-                .try_lock_until(deadline)
-                .ok_or("MACHINE_SERVICE_UNAVAILABLE")?
+        let meta = metadata.get(session_id).ok_or("SESSION_NOT_FOUND")?.clone();
+        drop(metadata);
+
+        if crate::ssh::projects::is_remote(&meta.workspace_id)
+            || meta.workspace_id.starts_with("ssh:")
+            || meta.workspace_id.contains("::")
+        {
+            // A remote/ssh session's cwd lives on the remote host, so the local root jail
+            // cannot apply. Serve it from the remote runtime instead of refusing it: desktop
+            // parity means the machine inventory describes every session the desktop shows.
+            let details = self
+                .terminal_service
+                .remote()
+                .details(session_id)
+                .ok_or("SESSION_NOT_FOUND")?;
+            if epoch.0 != self.epoch {
+                return Err("STALE_EPOCH".into());
+            }
+            let machine_id = self
+                .machine_id
                 .as_ref()
                 .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
-                .workspaces
-                .contains_key(&meta.workspace_id)
+                .clone();
+            let (start, end) = self
+                .terminal_service
+                .output_hub()
+                .session_sequence_range(session_id)
+                .unwrap_or_default();
+            let descriptor = details.descriptor;
+            return Ok(crate::remote::machine_protocol::Session {
+                title: None,
+                agent_type: None,
+                target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                    machine_id,
+                    daemon_epoch: epoch,
+                    session_id: session_id.to_owned(),
+                },
+                workspace_id: meta.workspace_id.clone(),
+                worktree: meta.worktree.as_ref().map(|w| {
+                    crate::remote::machine_protocol::WorktreeIdentity {
+                        ws_id: w.ws_id.clone(),
+                        slug: w.slug.clone(),
+                    }
+                }),
+                cwd: descriptor.config.project_path.clone(),
+                cols: descriptor.cols,
+                rows: descriptor.rows,
+                running: details.state == crate::terminal::remote::RemoteConnectionState::Connected,
+                provider_session: None,
+                start_sequence: crate::scoped_contracts::Epoch(start.unwrap_or(0)),
+                end_sequence: crate::scoped_contracts::Epoch(end.unwrap_or(0)),
+            });
+        }
+        if epoch.0 != self.epoch {
+            return Err("STALE_EPOCH".into());
+        }
+
+        let cat_row = catalog
+            .workspaces
+            .get(&meta.workspace_id)
+            .ok_or("SESSION_NOT_FOUND")?;
+        if !matches!(cat_row.availability, crate::remote::machine_protocol::Availability::Ready) {
+            return Err("SESSION_NOT_FOUND".into());
+        }
+        let root_dir = if let Some(ref identity) = meta.worktree {
+            if identity.ws_id != meta.workspace_id {
+                return Err("SESSION_OWNERSHIP_CHANGED".into());
+            }
+            if let Ok((_mgr, path)) = self
+                .workspace_service
+                .registry
+                .resolve_terminal_target(&meta.workspace_id, Some(identity))
+            {
+                path
+            } else {
+                let manager = self.workspace_service.worktree_manager(&meta.workspace_id, false)?;
+                let worktree = manager
+                    .find_worktree_by_slug(&identity.ws_id, &identity.slug)
+                    .map_err(|_| "WORKTREE_NOT_FOUND")?
+                    .ok_or("WORKTREE_NOT_FOUND")?;
+                manager
+                    .canonical_allowed_path(&worktree.path)
+                    .map_err(|_| "INVALID_PATH")?
+            }
+        } else if let Ok((_mgr, path)) = self
+            .workspace_service
+            .registry
+            .resolve_terminal_target(&meta.workspace_id, None)
         {
+            path
+        } else {
+            cat_row.repo_root.clone()
+        };
+
+        let canonical_meta_cwd = std::fs::canonicalize(&meta.cwd)
+            .map_err(|_| "INVALID_PATH")?;
+        let canonical_root = std::fs::canonicalize(&root_dir)
+            .map_err(|_| "INVALID_PATH")?;
+        if !canonical_meta_cwd.starts_with(&canonical_root) {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
-        let pty = self
+        let rel_cwd = canonical_meta_cwd
+            .strip_prefix(&canonical_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map_err(|_| "INVALID_PATH")?;
+        let cwd_str = if rel_cwd.is_empty() { ".".to_string() } else { rel_cwd };
+
+        let pty = self.terminal_service.get_session(session_id).ok_or("SESSION_EXPIRED")?;
+        let running = matches!(pty.state(), PtySessionState::Starting | PtySessionState::Running);
+        let (cols, rows) = pty.get_size();
+        let (start, end) = self
             .terminal_service
-            .get_session(&target.session_id)
-            .ok_or("SESSION_EXPIRED")?;
-        if !matches!(
-            pty.state(),
-            PtySessionState::Starting | PtySessionState::Running
-        ) {
-            return Err("SESSION_EXPIRED".into());
+            .output_hub()
+            .session_sequence_range(session_id)
+            .unwrap_or_default();
+        let machine_id = self
+            .machine_id
+            .as_ref()
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
+            .clone();
+
+        Ok(crate::remote::machine_protocol::Session {
+            title: None,
+            agent_type: None,
+            target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                machine_id,
+                daemon_epoch: epoch,
+                session_id: session_id.to_owned(),
+            },
+            workspace_id: meta.workspace_id.clone(),
+            worktree: meta.worktree.as_ref().map(|w| crate::remote::machine_protocol::WorktreeIdentity {
+                ws_id: w.ws_id.clone(),
+                slug: w.slug.clone(),
+            }),
+            cwd: cwd_str,
+            cols,
+            rows,
+            running,
+            provider_session: None,
+            start_sequence: crate::scoped_contracts::Epoch(start.unwrap_or(0)),
+            end_sequence: crate::scoped_contracts::Epoch(end.unwrap_or(0)),
+        })
+    }
+
+    fn validate_machine_target_blocking(
+        &self,
+        target: &crate::remote::machine_protocol::RemoteTerminalTarget,
+    ) -> Result<crate::remote::machine_protocol::Session, String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let metadata = self
+            .session_metadata
+            .try_read_until(deadline)
+            .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
+        let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?.clone();
+        drop(metadata);
+
+        let catalog = self
+            .workspace_service
+            .catalog
+            .try_lock_until(deadline)
+            .ok_or("MACHINE_SERVICE_UNAVAILABLE")?
+            .as_ref()
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
+            .clone();
+
+        match meta.machine_session.as_ref() {
+            Some(session) => {
+                if session.target != *target {
+                    return Err("STALE_EPOCH".into());
+                }
+                if meta.workspace_id != session.workspace_id
+                    || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+                        != session.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+                    || !catalog.workspaces.contains_key(&meta.workspace_id)
+                {
+                    return Err("SESSION_OWNERSHIP_CHANGED".into());
+                }
+                let pty = self
+                    .terminal_service
+                    .get_session(&target.session_id)
+                    .ok_or("SESSION_EXPIRED")?;
+                if !matches!(
+                    pty.state(),
+                    PtySessionState::Starting | PtySessionState::Running
+                ) {
+                    return Err("SESSION_EXPIRED".into());
+                }
+                let mut session = session.clone();
+                (session.cols, session.rows) = pty.get_size();
+                Ok(session)
+            }
+            None => {
+                let machine_id = self
+                    .machine_id
+                    .as_ref()
+                    .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+                if target.daemon_epoch.0 != self.epoch || &target.machine_id != machine_id {
+                    return Err("STALE_EPOCH".into());
+                }
+                let session = self.project_desktop_gui_session(&target.session_id, target.daemon_epoch, &catalog)?;
+                if !session.running {
+                    return Err("SESSION_EXPIRED".into());
+                }
+                Ok(session)
+            }
         }
-        let mut session = session.clone();
-        (session.cols, session.rows) = pty.get_size();
-        Ok(session)
     }
 
     pub(crate) fn acquire_machine_controller(
@@ -556,7 +1205,7 @@ impl DaemonSessionService {
     }
 
     pub(crate) async fn spawn_machine(
-        &self,
+        self: &Arc<Self>,
         request: crate::remote::machine_protocol::CreateSessionRequest,
         device: String,
         digest: String,
@@ -608,6 +1257,7 @@ impl DaemonSessionService {
                     request.rows,
                     None,
                     startup,
+                    None,
                     #[cfg(test)]
                     None,
                 ),
@@ -645,6 +1295,7 @@ impl DaemonSessionService {
         result.map_err(|e| match e {
             SpawnError::AgentSessionConflict { .. } => "AGENT_SESSION_CONFLICT".into(),
             SpawnError::InvalidAgentResume(_) => "AGENT_RESUME_INVALID".into(),
+            SpawnError::Structured(error) => error.to_string(),
             SpawnError::Other(code) => match code.as_str() {
                 "UNAUTHORIZED"
                 | "TIMEOUT"
@@ -669,11 +1320,38 @@ impl DaemonSessionService {
         epoch: crate::scoped_contracts::Epoch,
     ) -> Result<crate::remote::machine_protocol::SessionDetail, String> {
         use crate::remote::machine_protocol::SessionDetail;
-        let mut record = self
-            .workspace_service
-            .journal
-            .session(id)?
-            .ok_or("SESSION_NOT_FOUND")?;
+        let mut record = match self.workspace_service.journal.session(id)? {
+            Some(record) => record,
+            None => {
+                let catalog = self.workspace_service.catalog().map_err(|e| e.to_string())?;
+                let session = match self.project_desktop_gui_session(id, epoch, &catalog) {
+                    Ok(s) => s,
+                    Err(e) if e == "SESSION_EXPIRED" => {
+                        let machine_id = self
+                            .machine_id
+                            .as_ref()
+                            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
+                            .clone();
+                        return Ok(SessionDetail::Expired {
+                            target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                                machine_id,
+                                daemon_epoch: epoch,
+                                session_id: id.to_owned(),
+                            },
+                        });
+                    }
+                    Err(e) => return Err(e.to_string()),
+                };
+                if session.running {
+                    return Ok(SessionDetail::Running { session });
+                } else {
+                    return Ok(SessionDetail::Exited {
+                        session,
+                        exit: crate::remote::machine_protocol::ExitMetadata { code: None, signal: None },
+                    });
+                }
+            }
+        };
         if let Some(exit) = record.exit {
             record.session.running = false;
             return Ok(SessionDetail::Exited {
@@ -751,14 +1429,33 @@ impl DaemonSessionService {
     ) -> Result<(), String> {
         use crate::remote::{machine_operation_journal::Begin, machine_protocol::*};
         let _retirement = self.retain_machine_request()?;
-        let _spawn = self.spawn_lock.lock().await;
+        let pending: Vec<_> = self.spawn_operations.lock().values().cloned().collect();
+        for operation in pending {
+            let mut completion = {
+                let record = operation.lock();
+                (record.child.as_deref() == Some(id) || record.machine_target.as_deref() == Some(id)).then(|| record.result.subscribe())
+            };
+            if let Some(ref mut completion) = completion {
+                while completion.borrow().is_none() {
+                    completion.changed().await.map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+                }
+            }
+        }
+        let workspaces = self.workspace_service.clone();
+        let owned_id = id.to_owned();
+        let workspace = crate::ipc::run_blocking(move || {
+            Ok(workspaces.journal.session(&owned_id).map_err(crate::ipc::IpcError::internal)?
+                .ok_or_else(|| crate::ipc::IpcError::internal("SESSION_NOT_FOUND"))?.session.workspace_id)
+        }).await.map_err(|_| "SESSION_NOT_FOUND")?;
+        let _spawn = self.workspace_service.spawn_queue(&workspace).lock_owned().await;
         let controllers = self.machine_controllers.lock().await;
         check()?;
-        let mut record = self
-            .workspace_service
-            .journal
-            .session(id)?
-            .ok_or("SESSION_NOT_FOUND")?;
+        let workspaces = self.workspace_service.clone();
+        let owned_id = id.to_owned();
+        let mut record = crate::ipc::run_blocking(move || {
+            workspaces.journal.session(&owned_id).map_err(crate::ipc::IpcError::internal)?
+                .ok_or_else(|| crate::ipc::IpcError::internal("SESSION_NOT_FOUND"))
+        }).await.map_err(|error| error.message)?;
         if record.session.target.daemon_epoch != expected_epoch {
             return Err("STALE_EPOCH".into());
         }
@@ -1414,8 +2111,15 @@ impl DaemonSessionService {
     /// daemon owns for it, so remote clients cannot keep using already-spawned
     /// PTYs of a workspace the user removed. Idempotent: unregistering an
     /// unknown workspace (e.g. after a daemon restart) succeeds as a no-op.
-    pub async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
-        let _spawn_guard = Arc::clone(&self.spawn_lock).lock_owned().await;
+    pub async fn handle_unregister_workspace(self: &Arc<Self>, workspace_id: &str) -> Result<(), String> {
+        let service = self.clone();
+        let workspace = workspace_id.to_owned();
+        tokio::spawn(async move { service.unregister_workspace_owned(&workspace).await })
+            .await.map_err(|error| error.to_string())?
+    }
+
+    async fn unregister_workspace_owned(&self, workspace_id: &str) -> Result<(), String> {
+        let _spawn_guard = self.workspace_service.spawn_queue(workspace_id).lock_owned().await;
         // SSH owns a separate inventory, but still needs the session cleanup
         // below. Never send remote identities through the local catalog gate.
         if !crate::ssh::projects::is_remote(workspace_id) {
@@ -1456,7 +2160,7 @@ impl DaemonSessionService {
     }
 
     pub(super) async fn handle_spawn(
-        &self,
+        self: &Arc<Self>,
         client_request_id: &str,
         workspace_id: &str,
         worktree: Option<WorktreeIdentity>,
@@ -1465,9 +2169,31 @@ impl DaemonSessionService {
         rows: u16,
         shell: Option<String>,
         startup: Option<TerminalStartup>,
+        requested_session_id: Option<String>,
         #[cfg(test)] helper_home: Option<String>,
     ) -> Result<String, SpawnError> {
         let machine = MACHINE_SPAWN.try_with(Arc::clone).ok();
+        self.admit_spawn(client_request_id, workspace_id, worktree, cwd, cols, rows,
+            shell, startup, requested_session_id, machine, None, #[cfg(test)] helper_home).await
+    }
+
+    async fn spawn_owned(
+        self: &Arc<Self>,
+        client_request_id: &str,
+        workspace_id: &str,
+        worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        shell: Option<String>,
+        startup: Option<TerminalStartup>,
+        requested_session_id: Option<String>,
+        machine: Option<Arc<MachineSpawn>>,
+        operation: Arc<Mutex<SpawnOperation>>,
+        #[cfg(test)] helper_home: Option<String>,
+    ) -> Result<String, SpawnError> {
+        #[cfg(test)]
+        self.split_test_stage(client_request_id, "ownerEntered").await;
         if let Some(machine) = &machine {
             (machine.check)()?;
         }
@@ -1483,6 +2209,53 @@ impl DaemonSessionService {
 
         if client_request_id.trim().is_empty() {
             return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
+        }
+
+        #[cfg(test)]
+        if machine.is_some() {
+            let probe = self.workspace_service.transaction_probe.read().clone();
+            if let Some(probe) = probe {
+                probe("sessionBeforeSpawnGate");
+            }
+        }
+        let deadline = operation.lock().deadline;
+        let wait_started = Instant::now();
+        tracing::info!(request_id = client_request_id, epoch = self.epoch, stage = "workspaceWait", boundary = "begin");
+        let queue = self.workspace_service.spawn_queue(workspace_id);
+        let mut acquisition = Box::pin(queue.lock_owned());
+        #[cfg(test)]
+        let acquisition = {
+            use std::future::Future;
+            use std::task::Poll;
+            let probe = self.split_probe.read().clone();
+            let mut reported = false;
+            std::future::poll_fn(move |cx| {
+                let polled = acquisition.as_mut().poll(cx);
+                if polled.is_pending() && !reported {
+                    reported = true;
+                    if let Some(probe) = &probe { probe(client_request_id, "workspaceQueued"); }
+                }
+                match polled { Poll::Ready(guard) => Poll::Ready(guard), Poll::Pending => Poll::Pending }
+            })
+        };
+        let _spawn_guard = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                acquisition,
+            )
+            .await
+            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?
+        } else {
+            acquisition.await
+        };
+        operation.lock().workspace_guard = Some(_spawn_guard);
+        #[cfg(test)]
+        self.split_test_stage(client_request_id, "workspaceAcquired").await;
+        tracing::info!(request_id = client_request_id, epoch = self.epoch, stage = "workspaceWait", boundary = "end", elapsed_ms = wait_started.elapsed().as_millis() as u64);
+        if let Some(machine) = &machine { (machine.check)()?; }
+        Self::check_spawn_operation(&operation)?;
+        if self.handover_manager.upgrade().is_none_or(|manager| manager.is_draining()) {
+            return Err("HANDOVER_BUSY".into());
         }
 
         let remote = match (
@@ -1515,39 +2288,27 @@ impl DaemonSessionService {
             }
             (false, _) => None,
         };
-        #[cfg(test)]
-        if machine.is_some() {
-            let probe = self.workspace_service.transaction_probe.read().clone();
-            if let Some(probe) = probe {
-                probe("sessionBeforeSpawnGate");
-            }
-        }
-        let _spawn_guard = if let Some(machine) = &machine {
-            tokio::time::timeout_at(
-                tokio::time::Instant::from_std(machine.deadline),
-                Arc::clone(&self.spawn_lock).lock_owned(),
-            )
-            .await
-            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?
-        } else {
-            Arc::clone(&self.spawn_lock).lock_owned().await
-        };
 
-        let (_spawn_guard, previous) = if let Some(machine) = &machine {
+        let previous = if let Some(machine) = &machine {
             (machine.check)()?;
             let context = machine.clone();
             let workspaces = self.workspace_service.clone();
             crate::ipc::run_blocking(move || {
-                // The worker owns the spawn gate until the journal wait really drains.
+                let gate = workspaces.worktree_gate(&context.request.workspace_id);
+                #[cfg(test)]
+                if let Some(probe) = workspaces.transaction_probe.read().clone() { probe("sessionBeforeWorktreeGate"); }
+                let _gate = gate.try_lock_until(context.deadline)
+                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?;
+                (context.check)().map_err(crate::ipc::IpcError::internal)?;
                 let record = workspaces
                     .journal
                     .reconcile(&context.device, &context.request.request_id);
-                Ok((_spawn_guard, record))
+                Ok(record)
             })
             .await
-            .map_err(|_| SpawnError::Other("MACHINE_SERVICE_UNAVAILABLE".into()))?
+            .map_err(|error| SpawnError::Other(error.message))?
         } else {
-            (_spawn_guard, Ok(None))
+            Ok(None)
         };
         let now = Instant::now();
         if let Some(machine) = &machine {
@@ -1576,6 +2337,7 @@ impl DaemonSessionService {
             shell: shell.clone(),
             provider_claim: provider_claim.clone(),
             startup: startup.clone(),
+            requested_session_id: requested_session_id.clone(),
         };
         self.prune_dead_spawn_ownership(now);
         {
@@ -1591,14 +2353,10 @@ impl DaemonSessionService {
             }
         }
 
-        let existing_request = self
-            .session_metadata
-            .read()
-            .iter()
-            .find(|(session_id, meta)| {
-                meta.client_request_id == client_request_id && self.session_is_live(session_id)
-            })
-            .map(|(session_id, meta)| (session_id.clone(), meta.spawn_fingerprint.clone()));
+        let candidates: Vec<_> = self.session_metadata.read().iter()
+            .filter(|(_, meta)| meta.client_request_id == client_request_id)
+            .map(|(id, meta)| (id.clone(), meta.spawn_fingerprint.clone())).collect();
+        let existing_request = candidates.into_iter().find(|(id, _)| self.session_is_live(id));
         if let Some((live_session_id, existing_fingerprint)) = existing_request {
             if existing_fingerprint != spawn_fingerprint {
                 return Err(SpawnError::Other(format!(
@@ -1668,29 +2426,78 @@ impl DaemonSessionService {
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
+        if machine.is_some() {
+            self.capacity_initialized.get_or_try_init(|| async {
+                let workspaces = self.workspace_service.clone();
+                let terminals = self.terminal_service.clone();
+                let ids = crate::ipc::run_blocking(move || {
+                    let records = workspaces.journal.sessions().map_err(crate::ipc::IpcError::internal)?;
+                    Ok(records.into_iter().filter(|record| terminals.get_session(&record.session.target.session_id).is_some())
+                        .map(|record| record.session.target.session_id).collect::<HashSet<_>>())
+                }).await.map_err(|error| SpawnError::Other(error.to_string()))?;
+                self.machine_capacity.lock().extend(ids);
+                Ok::<(), SpawnError>(())
+            }).await?;
+        }
+        // A GUI-minted id that is already known (live, exited-but-registered, remote)
+        // or reserved by another in-flight spawn belongs to a different request:
+        // same-request retries were answered by the idempotency checks above.
+        let _requested_id_claim = match (&machine, &requested_session_id) {
+            (None, Some(id)) => {
+                let mut reserved = self.requested_session_ids.lock();
+                if reserved.contains(id)
+                    || self.terminal_service.get_session(id).is_some()
+                    || self.terminal_service.remote().contains(id)
+                    || self.session_metadata.read().contains_key(id)
+                {
+                    return Err(SpawnError::Structured(crate::ipc::IpcError::new(
+                        crate::ipc::IpcErrorCode::SessionIdConflict,
+                        format!("sessionId '{id}' already belongs to another terminal session"),
+                    ).with_details(serde_json::json!({"sessionId": id, "requestId": client_request_id}))));
+                }
+                reserved.insert(id.clone());
+                Some(RequestedSessionIdClaim { id: id.clone(), claims: self.requested_session_ids.clone() })
+            }
+            _ => None,
+        };
+        let raw_id = machine.as_ref().map(|machine| machine.target.session_id.clone())
+            .or_else(|| requested_session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let machine_capacity = self.machine_capacity.clone();
+        let pending_claims = self.pending_provider_claims.clone();
         let max_machine_sessions = self.max_machine_sessions();
+        let reservation = SpawnReservation::reserve(raw_id.clone(), spawn_claim.clone(),
+            machine.is_some(), claims.clone(), pending_claims.clone(), machine_capacity.clone(), max_machine_sessions)?;
+        let (deadline, cancelled, cancellation, reliable) = {
+            let record = operation.lock();
+            (record.deadline, record.cancelled.clone(), record.cancellation.clone(), record.envelope.is_some())
+        };
+        let epoch = self.epoch;
+        #[cfg(test)]
+        let split_probe = self.split_probe.read().clone();
+        #[cfg(test)]
+        let git_observer = self.split_git_observer.read().clone();
         crate::ipc::run_blocking(move || {
-            // Cancellation cannot release admission before PTY ownership is published.
-            let _spawn_guard = _spawn_guard;
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
-            let deadline = machine.as_ref().map(|m| m.deadline);
+            let fence_started = Instant::now();
+            tracing::info!(request_id = %client_request_id, epoch, stage = "workspaceFence", boundary = "begin");
             let _workspace_gate = match deadline {
                 Some(deadline) => workspace_gate
                     .try_lock_until(deadline)
                     .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_gate.lock(),
             };
-            let _gate = match deadline {
-                Some(deadline) => workspace_service
-                    .mutation_gate
-                    .try_lock_until(deadline)
-                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
-                None => workspace_service.mutation_gate.lock(),
-            };
-            let result = (|| -> Result<_, SpawnError> {
+            tracing::info!(request_id = %client_request_id, epoch, stage = "workspaceFence", boundary = "end", elapsed_ms = fence_started.elapsed().as_millis() as u64);
+            let mut reservation = reservation;
+            let preparation_started = Instant::now();
+            tracing::info!(request_id = %client_request_id, epoch, stage = "preparation", boundary = "begin");
+            let mut work = || -> Result<_, SpawnError> {
                 if let Some(machine) = &machine {
                     (machine.check)()?;
                 }
+                Self::check_spawn_operation(&operation)?;
+                #[cfg(test)]
+                if let Some(probe) = &split_probe { probe(&client_request_id, "preparation"); }
                 // Machine roots stay out of the shared mirror registry.
                 let (mgr, default_cwd) = if machine.is_some() {
                     let manager = workspace_service.worktree_manager(&workspace_id_owned, false)?;
@@ -1711,6 +2518,8 @@ impl DaemonSessionService {
                         )
                     {
                         SpawnError::Other("WORKTREE_NOT_FOUND".into())
+                    } else if reliable {
+                        SpawnError::Structured(e.into())
                     } else {
                         SpawnError::Other(e.to_string())
                     }
@@ -1822,6 +2631,7 @@ impl DaemonSessionService {
                 let cwd = resume_cwd
                     .map(|path| path.to_string_lossy().into_owned())
                     .or(cwd);
+                let selected_root = default_cwd.clone();
                 let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
                     let custom_path = PathBuf::from(custom_cwd_str);
                     if !custom_path.exists() {
@@ -1853,37 +2663,25 @@ impl DaemonSessionService {
                     default_cwd
                 };
 
-                let mut cmd = match crate::terminal::shell::resolve_startup_command(
-                    shell.as_deref(),
-                    spawn_startup.as_ref(),
-                ) {
-                    Ok(cmd) => cmd,
-                    Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
+                let mut cmd = if reliable {
+                    crate::terminal::shell::resolve_ordinary_shell_command(shell.as_deref())
+                        .map_err(|err| SpawnError::Structured(err.into()))?
+                } else {
+                    crate::terminal::shell::resolve_startup_command(
+                        shell.as_deref(),
+                        spawn_startup.as_ref(),
+                    )
+                    .map_err(|err| SpawnError::InvalidAgentResume(err.to_string()))?
                 };
-                if let Some(claim) = spawn_claim.as_ref() {
-                    if let Some(existing_session_id) = claims.lock().get(claim) {
-                        return Err(SpawnError::AgentSessionConflict {
-                            agent_type: claim.agent_type.clone(),
-                            provider_key: claim.provider_key,
-                            provider_id: claim.provider_id.clone(),
-                            existing_session_id: existing_session_id.clone(),
-                        });
-                    }
-                }
                 cmd.env("PROMPT_EOL_MARK", "");
                 cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
-                let raw_id = if let Some(machine) = &machine {
+                if let Some(machine) = &machine {
                     (machine.check)()?;
-                    if terminal_service
-                        .list_sessions()
-                        .iter()
-                        .filter(|id| workspace_service.journal.owns_session(id))
-                        .count()
-                        >= max_machine_sessions
-                    {
-                        return Err("CAPACITY_EXCEEDED".to_string().into());
-                    }
+                    Self::check_spawn_operation(&operation)?;
+                    reservation.retain_capacity = true;
+                    #[cfg(test)]
+                    if let Some(probe) = workspace_service.transaction_probe.read().clone() { probe("sessionBeforeIntent"); }
                     match workspace_service.journal.begin(
                         &machine.device,
                         &machine.request.request_id,
@@ -1896,10 +2694,7 @@ impl DaemonSessionService {
                             return Err("OPERATION_OUTCOME_UNKNOWN".to_string().into())
                         }
                     }
-                    machine.target.session_id.clone()
-                } else {
-                    uuid::Uuid::new_v4().to_string()
-                };
+                }
                 #[cfg(test)]
                 if machine.is_some() {
                     let probe = workspace_service.transaction_probe.read().clone();
@@ -1907,9 +2702,32 @@ impl DaemonSessionService {
                         probe("sessionIntent");
                     }
                 }
-                let (session_id, mut lifecycle_rx) = terminal_service
-                    .spawn_in_worktree_with_id(raw_id, cmd, cols, rows, &mgr, &resolved_cwd)
+                if let Some(machine) = &machine { (machine.check)()?; }
+                #[cfg(test)]
+                if let Some(probe) = &split_probe { probe(&client_request_id, "preChild"); }
+                Self::check_spawn_operation(&operation)?;
+                tracing::info!(request_id = %client_request_id, epoch, stage = "preparation", boundary = "end", elapsed_ms = preparation_started.elapsed().as_millis() as u64);
+                let pty_started = Instant::now();
+                tracing::info!(request_id = %client_request_id, epoch, stage = "ptySpawn", boundary = "begin");
+                let spawned = if reliable {
+                    terminal_service.spawn_resolved_with_id(raw_id.clone(), cmd, cols, rows,
+                        crate::terminal::pty::ResolvedSpawnContext {
+                            root: selected_root, cwd: resolved_cwd.clone(),
+                            managed_workspace_id: spawn_worktree.as_ref().map(|worktree| worktree.ws_id.clone()),
+                        })
+                } else {
+                    terminal_service.spawn_in_worktree_with_id(raw_id.clone(), cmd, cols, rows, &mgr, &resolved_cwd)
+                };
+                let (session_id, mut lifecycle_rx) = spawned
                     .map_err(|e| SpawnError::Other(e.to_string()))?;
+                operation.lock().child = Some(session_id.clone());
+                reservation.retain_capacity = true;
+                reservation.published = true;
+                #[cfg(test)]
+                if let Some(probe) = &split_probe { probe(&client_request_id, "childCreated"); }
+                tracing::info!(request_id = %client_request_id, epoch, session_id = %session_id, stage = "ptySpawn", boundary = "end", elapsed_ms = pty_started.elapsed().as_millis() as u64);
+                let publication_started = Instant::now();
+                tracing::info!(request_id = %client_request_id, epoch, stage = "publication", boundary = "begin");
                 #[cfg(test)]
                 if machine.is_some() {
                     let probe = workspace_service.transaction_probe.read().clone();
@@ -1988,8 +2806,10 @@ impl DaemonSessionService {
                         .lock()
                         .insert(claim, session_id.clone());
                 }
+                reservation.published = true;
 
                 let cleanup_session_id = session_id.clone();
+                let cleanup_pending_claims = pending_claims.clone();
                 let cleanup_router = Arc::clone(&session_router);
                 let cleanup_cache = Arc::clone(&spawn_idempotency_cache);
                 let cleanup_metadata = Arc::clone(&session_metadata);
@@ -2002,14 +2822,12 @@ impl DaemonSessionService {
                 let lifecycle_workspaces = workspace_service.clone();
                 let durable_exit = durable.clone();
                 let metadata_target = durable.as_ref().map(|record| record.session.target.clone());
-                let lifecycle_done = if machine.is_some() {
+                let lifecycle_done = {
                     let (done, receiver) = tokio::sync::watch::channel(false);
                     machine_lifecycles
                         .lock()
                         .insert(session_id.clone(), receiver);
                     Some(done)
-                } else {
-                    None
                 };
                 // Persist before starting exit publication, so a fast exit cannot be overwritten
                 // by the initial running record. Even on failure, install lifecycle cleanup.
@@ -2030,8 +2848,33 @@ impl DaemonSessionService {
                         }
                         result
                     }
-                    _ => Ok(()),
+                    _ => {
+                        if let Ok(catalog) = workspace_service.catalog() {
+                            if catalog.workspaces.contains_key(&workspace_id_owned)
+                                && !crate::ssh::projects::is_remote(&workspace_id_owned)
+                                && !workspace_id_owned.starts_with("ssh:")
+                                && !workspace_id_owned.contains("::")
+                            {
+                                workspace_service.machine_events.publish(
+                                    "sessionStarted",
+                                    Some(&workspace_id_owned),
+                                    Some(&session_id),
+                                    serde_json::json!({
+                                        "sessionId": session_id,
+                                        "workspaceId": workspace_id_owned,
+                                    }),
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
                 };
+                if persisted.is_ok() {
+                    if let Some(claim) = &spawn_claim {
+                        let mut pending = pending_claims.lock();
+                        if pending.get(claim) == Some(&session_id) { pending.remove(claim); }
+                    }
+                }
                 #[cfg(test)]
                 if machine.is_some() && persisted.is_ok() {
                     let probe = workspace_service.transaction_probe.read().clone();
@@ -2053,8 +2896,14 @@ impl DaemonSessionService {
                 } else {
                     Ok(None)
                 };
+                let cleanup_operation = operation.clone();
+                let cleanup_capacity = machine_capacity.clone();
                 tokio::spawn(async move {
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] waiting for PTY lifecycle change");
                     let _ = lifecycle_rx.changed().await;
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] PTY lifecycle change received");
                     match metadata_task {
                         Ok(Some(task)) => {
                             if let Err(error) = task.await {
@@ -2066,6 +2915,9 @@ impl DaemonSessionService {
                             tracing::warn!(%error, "Machine metadata subscription failed")
                         }
                     }
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] metadata task complete");
+                    let is_gui = durable_exit.is_none();
                     if let Some(mut record) = durable_exit {
                         record.session.running = false;
                         record.exit = Some(crate::remote::machine_protocol::ExitMetadata {
@@ -2075,19 +2927,20 @@ impl DaemonSessionService {
                             }),
                             signal: None,
                         });
+                        let persistence_workspaces = Arc::clone(&lifecycle_workspaces);
                         if let Err(error) = crate::ipc::run_blocking(move || {
-                            lifecycle_workspaces
+                            persistence_workspaces
                                 .journal
                                 .save_session(record.clone())
                                 .map_err(crate::ipc::IpcError::internal)?;
-                            let record = lifecycle_workspaces
+                            let record = persistence_workspaces
                                 .journal
                                 .session(&record.session.target.session_id)
                                 .map_err(crate::ipc::IpcError::internal)?
                                 .ok_or_else(|| {
                                     crate::ipc::IpcError::internal("SESSION_NOT_FOUND")
                                 })?;
-                            lifecycle_workspaces.machine_events.publish(
+                            persistence_workspaces.machine_events.publish(
                                 "sessionExited",
                                 Some(&record.session.workspace_id),
                                 Some(&record.session.target.session_id),
@@ -2098,35 +2951,112 @@ impl DaemonSessionService {
                         .await
                         {
                             tracing::error!(%error, "Machine exit persistence failed");
+                            let mut operation = cleanup_operation.lock();
+                            operation.state = SplitOperationResult::Unknown { reason: SplitUnknownReason::PublicationUncertain };
+                            operation.changed.send_modify(|revision| *revision += 1);
+                            if let Some(done) = lifecycle_done { done.send_replace(true); }
+                            return;
                         }
                     }
                     cleanup_router.remove_workspace(&cleanup_session_id);
                     cleanup_agent_states.remove(&cleanup_session_id);
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] router cleanup complete");
                     cleanup_cache
                         .lock()
                         .retain(|_, entry| entry.session_id != cleanup_session_id);
-                    if let Some(meta) = cleanup_metadata.write().remove(&cleanup_session_id) {
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] cache cleanup complete");
+                    let removed_meta = cleanup_metadata.write().remove(&cleanup_session_id);
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] metadata removed");
+                    if let Some(meta) = removed_meta {
+                        if is_gui {
+                            let exit_workspaces = Arc::clone(&lifecycle_workspaces);
+                            let workspace_id = meta.workspace_id.clone();
+                            let event_session_id = cleanup_session_id.clone();
+                            #[cfg(test)]
+                            eprintln!("[session_exit:{cleanup_session_id}] starting GUI exit catalog/event task");
+                            if let Err(error) = crate::ipc::run_blocking(move || {
+                                let catalog = exit_workspaces
+                                    .catalog()
+                                    .map_err(crate::ipc::IpcError::internal)?;
+                                if catalog.workspaces.contains_key(&workspace_id)
+                                    && !crate::ssh::projects::is_remote(&workspace_id)
+                                    && !workspace_id.starts_with("ssh:")
+                                    && !workspace_id.contains("::")
+                                {
+                                    exit_workspaces.machine_events.publish(
+                                        "sessionExited",
+                                        Some(&workspace_id),
+                                        Some(&event_session_id),
+                                        serde_json::json!({
+                                            "sessionId": event_session_id,
+                                            "workspaceId": workspace_id,
+                                        }),
+                                    );
+                                }
+                                Ok(())
+                            })
+                            .await
+                            {
+                                tracing::error!(%error, session_id = %cleanup_session_id, "Desktop session exit event publication failed");
+                            } else {
+                                #[cfg(test)]
+                                eprintln!("[session_exit:{cleanup_session_id}] GUI exit catalog/event task complete");
+                            }
+                        }
+                        #[cfg(test)]
+                        eprintln!("[session_exit:{cleanup_session_id}] metadata branch complete");
                         if let Some(claim) = meta.provider_claim {
                             cleanup_claims
                                 .lock()
+                                .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
+                            cleanup_pending_claims.lock()
                                 .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
                         }
                     }
                     cleanup_desktop_geometries
                         .lock()
                         .remove(&cleanup_session_id);
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] geometry cleanup complete");
                     if let Some(manager) = handover_manager.upgrade() {
                         manager.check_retirement_if_empty(&terminal_service);
                     }
+                    #[cfg(test)]
+                    eprintln!("[session_exit:{cleanup_session_id}] retirement check complete");
                     if let Some(done) = lifecycle_done {
+                        #[cfg(test)]
+                        eprintln!("[session_exit:{cleanup_session_id}] signaling lifecycle completion");
+                        cleanup_capacity.lock().remove(&cleanup_session_id);
+                        let mut operation = cleanup_operation.lock();
+                        operation.state = if operation.cancelled.load(Ordering::Acquire) {
+                            SplitOperationResult::Cancelled
+                        } else { SplitOperationResult::Exited };
+                        operation.changed.send_modify(|revision| *revision += 1);
                         done.send_replace(true);
                         machine_lifecycles.lock().remove(&cleanup_session_id);
+                        #[cfg(test)]
+                        eprintln!("[session_exit:{cleanup_session_id}] cleanup complete");
                     }
                 });
 
+                tracing::info!(request_id = %client_request_id, epoch, stage = "publication", boundary = "end", elapsed_ms = publication_started.elapsed().as_millis() as u64, certain = persisted.is_ok());
+                #[cfg(test)]
+                if let Some(probe) = &split_probe { probe(&client_request_id, "published"); }
                 persisted?;
                 Ok(session_id)
-            })();
+            };
+            #[cfg(test)]
+            let mut work = || match git_observer {
+                Some(observer) => crate::worktree::git::with_git_observer(observer, work),
+                None => work(),
+            };
+            let result = match deadline {
+                Some(deadline) => crate::worktree::git::with_preparation_git_budget(deadline, cancelled, Some(cancellation), work),
+                None => work(),
+            };
             Ok(result)
         })
         .await
@@ -2215,28 +3145,35 @@ impl DaemonSessionService {
                 self.provider_session_claims
                     .lock()
                     .retain(|key, owner| key != &claim || owner != session_id);
+                self.pending_provider_claims.lock()
+                    .retain(|key, owner| key != &claim || owner != session_id);
             }
         }
     }
 
     pub(super) fn prune_dead_spawn_ownership(&self, now: Instant) {
-        let dead_sessions: Vec<String> = self
-            .session_metadata
-            .read()
-            .keys()
-            .filter(|session_id| !self.session_is_live(session_id))
-            .cloned()
-            .collect();
-        for session_id in dead_sessions {
-            self.release_session_ownership(&session_id);
+        let cached: Vec<_> = self.spawn_idempotency_cache.lock().iter()
+            .map(|(key, entry)| (key.clone(), entry.clone())).collect();
+        for (key, entry) in cached {
+            if now.duration_since(entry.created_at) > SPAWN_REQUEST_TTL || !self.session_is_live(&entry.session_id) {
+                let mut cache = self.spawn_idempotency_cache.lock();
+                if cache.get(&key).is_some_and(|current| current.session_id == entry.session_id
+                    && current.created_at == entry.created_at && current.fingerprint == entry.fingerprint) {
+                    cache.remove(&key);
+                }
+            }
         }
-        self.spawn_idempotency_cache.lock().retain(|_, entry| {
-            now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
-                && self.session_is_live(&entry.session_id)
-        });
-        self.provider_session_claims
-            .lock()
-            .retain(|_, session_id| self.session_is_live(session_id));
+        let claims: Vec<_> = self.provider_session_claims.lock().iter()
+            .map(|(key, id)| (key.clone(), id.clone())).collect();
+        for (key, id) in claims {
+            if !self.session_is_live(&id) {
+                let mut claims = self.provider_session_claims.lock();
+                let pending = self.pending_provider_claims.lock();
+                if claims.get(&key) == Some(&id) && pending.get(&key) != Some(&id) {
+                    claims.remove(&key);
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2297,10 +3234,69 @@ impl DaemonSessionService {
                     shell: None,
                     provider_claim: ProviderSessionClaimKey::from_startup(Some(startup)),
                     startup: Some(startup.clone()),
+                    requested_session_id: None,
                 },
             },
         );
         Ok(session_id.to_string())
+    }
+
+    pub(super) async fn describe_session_until(&self, session_id: &str, deadline: tokio::time::Instant) -> DaemonResponse {
+        let mut response = self.handle_describe_session(session_id);
+        if self.terminal_service.remote().contains(session_id)
+            || super::super::terminal::paired_runtime::Runtime::owns(session_id) { return response; }
+        let DaemonResponse::DescribeSessionOk { session } = &mut response else { return response; };
+        let fallback = session.cwd.take();
+        let Some(permit) = self.terminal_service.try_acquire_cwd_probe(session_id) else { return response; };
+        let pty = self.terminal_service.get_session(session_id);
+        let pid = pty.as_ref().and_then(|pty| pty.pid());
+        let worktree = pty.and_then(|pty| pty.worktree_path());
+        let workspace = session.workspace_id.clone();
+        let identity = session.worktree.clone();
+        let workspaces = self.workspace_service.clone();
+        let preparation_deadline = deadline.into_std();
+        let (latest, validated) = tokio::sync::watch::channel(None);
+        #[cfg(test)]
+        let probe = self.cwd_probe.read().clone();
+        #[cfg(test)]
+        let completed = {
+            let (completed, receiver) = tokio::sync::oneshot::channel();
+            self.split_probe_workers.lock().push(receiver);
+            completed
+        };
+        let worker = crate::ipc::run_blocking(move || {
+            let _permit = permit;
+            let validate = |path: PathBuf| {
+                if crate::ipc::terminal::is_plausible_absolute_cwd(&path) && path.is_dir() {
+                    Some(path.to_string_lossy().into_owned())
+                } else { None }
+            };
+            let fallback = fallback.map(PathBuf::from).and_then(&validate)
+                .or_else(|| worktree.and_then(&validate))
+                .or_else(|| workspace.and_then(|workspace| {
+                    crate::worktree::git::with_preparation_git_budget(preparation_deadline,
+                        Arc::new(AtomicBool::new(false)), None, || {
+                            workspaces.registry.resolve_terminal_target(&workspace, identity.as_ref())
+                                .ok().and_then(|(_, root)| validate(root))
+                        })
+                }));
+            latest.send_replace(fallback.clone());
+            let cwd = pid.and_then(|pid| {
+                #[cfg(test)]
+                if let Some(probe) = &probe { return probe(pid); }
+                crate::ipc::terminal::process_cwd(pid)
+            }).and_then(validate).or(fallback);
+            latest.send_replace(cwd.clone());
+            drop(_permit);
+            #[cfg(test)]
+            if completed.send(()).is_err() { tracing::debug!("Describe fixture receiver dropped"); }
+            Ok(cwd)
+        });
+        session.cwd = match tokio::time::timeout_at(deadline, worker).await {
+            Ok(Ok(cwd)) => cwd,
+            _ => validated.borrow().clone(),
+        };
+        response
     }
 
     pub(super) fn handle_describe_session(&self, session_id: &str) -> DaemonResponse {

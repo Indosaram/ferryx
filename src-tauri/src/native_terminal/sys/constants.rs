@@ -134,3 +134,26 @@ pub const GHOSTTY_KEY_F12: c_int = 132;
 pub const GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT: c_int = 6;
 pub const GHOSTTY_OPTION_AS_ALT_FALSE: c_int = 0;
 pub const GHOSTTY_OPTION_AS_ALT_TRUE: c_int = 1;
+
+// Ghostty snapshot envelope magic and format version matching `ghostty/vt/snapshot.h`.
+pub const GHOSTTY_SNAPSHOT_MAGIC: &[u8; 8] = b"GHOSTSNP";
+pub const GHOSTTY_SNAPSHOT_VERSION_1: u16 = 1;
+
+// GhosttySnapshotDecoderOption constants matching `ghostty/vt/snapshot.h`.
+pub const GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES: c_int = 0;
+pub const GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION: c_int = 1;
+
+// GhosttySnapshotDecoderData constants matching `ghostty/vt/snapshot.h`.
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_INVALID: c_int = 0;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES: c_int = 1;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET: c_int = 2;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY: c_int = 3;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE: c_int = 4;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN: c_int = 5;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS: c_int = 6;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING: c_int = 7;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_RETAIN_CONTINUATION: c_int = 8;
+
+// GhosttyTerminal continuation options matching `ghostty/vt/terminal.h`.
+pub const GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES: c_int = 31;
+pub const GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES: c_int = 36;

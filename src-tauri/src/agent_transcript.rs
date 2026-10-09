@@ -12,6 +12,80 @@ pub struct ConversationMessage {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// Reasoning text from `thinking` parts of an assistant record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Tool calls made by an assistant record, in order. Kept out of `text` so a client can
+    /// render them as tool blocks and pair each one with its result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallSummary>,
+    /// On a `toolResult` record: the id of the call it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// On a `toolResult` record: the tool that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// On a `toolResult` record: whether the tool reported an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    /// The call's own one-line description (`summary` / `description` argument), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The main argument to show: code for `eval`, the command for `bash`, else the path/query or
+    /// the compact JSON of all arguments. Bounded by [`TOOL_INPUT_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+}
+
+/// Characters of a tool call's input sent to the client. The client polls every few seconds, so a
+/// multi-kilobyte prompt or file body must not ride along in full on every call.
+const TOOL_INPUT_LIMIT: usize = 4000;
+const TOOL_SUMMARY_LIMIT: usize = 200;
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((cut, _)) => format!("{}\n…", &value[..cut]),
+        None => value.to_string(),
+    }
+}
+
+fn tool_call_summary(arguments: &serde_json::Value) -> Option<String> {
+    ["summary", "description"]
+        .iter()
+        .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_chars(s, TOOL_SUMMARY_LIMIT))
+}
+
+fn tool_call_input(arguments: &serde_json::Value) -> Option<String> {
+    let direct = [
+        "code", "command", "cmd", "pattern", "query", "url", "path", "file_path", "prompt",
+    ]
+    .iter()
+    .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()))
+    .map(str::to_string);
+    let raw = match direct {
+        Some(value) => value,
+        None => {
+            if arguments.as_object().map_or(true, |object| object.is_empty()) {
+                return None;
+            }
+            serde_json::to_string(arguments).ok()?
+        }
+    };
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&raw, TOOL_INPUT_LIMIT))
 }
 
 pub fn is_valid_session_id(session_id: &str) -> bool {
@@ -129,6 +203,10 @@ struct MessageBody {
     content: Option<serde_json::Value>,
     #[serde(rename = "toolName")]
     tool_name: Option<String>,
+    #[serde(rename = "toolCallId")]
+    tool_call_id: Option<String>,
+    #[serde(rename = "isError")]
+    is_error: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -136,7 +214,10 @@ struct ContentPart {
     #[serde(rename = "type")]
     part_type: Option<String>,
     text: Option<String>,
+    thinking: Option<String>,
+    id: Option<String>,
     name: Option<String>,
+    arguments: Option<serde_json::Value>,
 }
 
 pub fn read_conversation(
@@ -203,6 +284,8 @@ fn parse_conversation<R: BufRead>(
 
         let role = body.role.unwrap_or_else(|| "user".to_string());
         let mut text = String::new();
+        let mut thinking = String::new();
+        let mut tool_calls: Vec<ToolCallSummary> = Vec::new();
 
         if let Some(content) = body.content {
             if let Some(s) = content.as_str() {
@@ -210,21 +293,41 @@ fn parse_conversation<R: BufRead>(
             } else if let Some(arr) = content.as_array() {
                 for item in arr {
                     if let Ok(part) = serde_json::from_value::<ContentPart>(item.clone()) {
-                        if part.part_type.as_deref() == Some("text") {
-                            if let Some(t) = part.text {
-                                text.push_str(&t);
+                        let kind = part.part_type.clone();
+                        match kind.as_deref() {
+                            Some("text") => {
+                                if let Some(t) = part.text {
+                                    text.push_str(&t);
+                                }
                             }
-                        } else if part.part_type.as_deref() == Some("toolCall") {
-                            let tool = part.name.as_deref().unwrap_or("tool");
-                            if !text.is_empty() {
-                                text.push('\n');
+                            Some("thinking") => {
+                                if let Some(t) = part.thinking.or(part.text) {
+                                    if !t.trim().is_empty() {
+                                        if !thinking.is_empty() {
+                                            thinking.push_str("\n\n");
+                                        }
+                                        thinking.push_str(&t);
+                                    }
+                                }
                             }
-                            text.push_str(&format!("→ {tool}"));
+                            Some("toolCall") => {
+                                let arguments = part.arguments.unwrap_or(serde_json::Value::Null);
+                                tool_calls.push(ToolCallSummary {
+                                    id: part.id,
+                                    name: part.name.unwrap_or_else(|| "tool".to_string()),
+                                    summary: tool_call_summary(&arguments),
+                                    input: tool_call_input(&arguments),
+                                });
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
         }
+
+        let is_tool_result = role == "toolResult";
+        let tool_name = if is_tool_result { body.tool_name.clone() } else { None };
 
         if role == "toolResult" && text.is_empty() {
             let tool = body.tool_name.as_deref().unwrap_or("tool");
@@ -237,6 +340,11 @@ fn parse_conversation<R: BufRead>(
             text,
             id: record.id,
             timestamp: record.timestamp.clone(),
+            thinking: (!thinking.is_empty()).then_some(thinking),
+            tool_calls,
+            tool_call_id: if is_tool_result { body.tool_call_id } else { None },
+            tool_name,
+            is_error: if is_tool_result { body.is_error } else { None },
         });
         current_ordinal += 1;
     }
@@ -841,10 +949,68 @@ mod tests {
         assert_eq!(malformed, 0);
         assert_eq!(messages.len(), 3);
 
-        assert!(messages[0].text.contains("checking"));
-        assert!(messages[0].text.contains("→ bash"));
-        assert_eq!(messages[0].text, "checking\n→ bash");
+        // The call is structured, not flattened into the prose.
+        assert_eq!(messages[0].text, "checking");
+        assert_eq!(messages[0].tool_calls.len(), 1);
+        assert_eq!(messages[0].tool_calls[0].name, "bash");
+        assert_eq!(messages[0].tool_calls[0].id.as_deref(), Some("c1"));
         assert_eq!(messages[1].text, "ok");
+        assert_eq!(messages[1].tool_name.as_deref(), Some("bash"));
         assert_eq!(messages[2].text, "← bash result");
+    }
+
+    #[test]
+    fn test_thinking_and_tool_call_arguments_are_structured() {
+        let transcript = concat!(
+            r#"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan the probe","thinkingSignature":"x"},{"type":"text","text":"Checking now."},{"type":"toolCall","id":"call_1","name":"eval","arguments":{"code":"print(1)","language":"js","summary":"Probe the daemon"}},{"type":"toolCall","id":"call_2","name":"read","arguments":{"path":"/tmp/a.txt","offset":1}}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"call_1","toolName":"eval","isError":true,"content":[{"type":"text","text":"boom"}]}}"#,
+            "\n",
+        );
+
+        let (messages, malformed) = read_conversation_from_bytes(transcript.as_bytes(), 10, None);
+        assert_eq!(malformed, 0);
+        assert_eq!(messages.len(), 2);
+
+        let assistant = &messages[0];
+        assert_eq!(assistant.text, "Checking now.");
+        assert_eq!(assistant.thinking.as_deref(), Some("plan the probe"));
+        assert_eq!(
+            assistant.tool_calls,
+            vec![
+                ToolCallSummary {
+                    id: Some("call_1".into()),
+                    name: "eval".into(),
+                    summary: Some("Probe the daemon".into()),
+                    input: Some("print(1)".into()),
+                },
+                ToolCallSummary {
+                    id: Some("call_2".into()),
+                    name: "read".into(),
+                    summary: None,
+                    input: Some("/tmp/a.txt".into()),
+                },
+            ]
+        );
+        assert_eq!(assistant.tool_call_id, None);
+
+        let result = &messages[1];
+        assert_eq!(result.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(result.tool_name.as_deref(), Some("eval"));
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.text, "boom");
+
+        let json = serde_json::to_value(assistant).unwrap();
+        assert_eq!(json["toolCalls"][0]["input"], "print(1)");
+        assert!(json.get("toolCallId").is_none(), "absent fields must not be serialized");
+    }
+
+    #[test]
+    fn test_tool_input_is_bounded() {
+        let long = "x".repeat(TOOL_INPUT_LIMIT + 50);
+        let args = serde_json::json!({ "code": long });
+        let input = tool_call_input(&args).unwrap();
+        assert_eq!(input.chars().count(), TOOL_INPUT_LIMIT + 2);
+        assert!(input.ends_with("\n…"));
     }
 }
