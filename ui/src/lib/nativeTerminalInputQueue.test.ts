@@ -406,4 +406,64 @@ describe("NativeTerminalInputQueueManager", () => {
     await inFlightPromise;
     expect(queue.getQueuedBytes("session-1")).toBe(0);
   });
+
+  it("maintains isolated per-lane in-flight request ID and running age when input and preedit overlap", async () => {
+    vi.useFakeTimers();
+    try {
+      const inputDeferred = createDeferred<string>();
+      const preeditDeferred = createDeferred<string>();
+
+      let capturedInputReqId = "";
+      let capturedPreeditReqId = "";
+
+      const inputPromise = queue.enqueue("session-concurrent", 1, 10, async (reqId) => {
+        capturedInputReqId = reqId;
+        await inputDeferred.promise;
+        return "input-done";
+      });
+
+      expect(capturedInputReqId).toMatch(/^req-[a-zA-Z0-9_-]+-session-concurrent-\d+$/);
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedInputReqId);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(0);
+
+      vi.advanceTimersByTime(50);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(50);
+
+      const preeditPromise = queue.enqueuePreedit("session-concurrent", 1, 10, async (reqId) => {
+        capturedPreeditReqId = reqId;
+        await preeditDeferred.promise;
+        return "preedit-done";
+      });
+
+      // While input is in flight, serialized pump keeps preedit queued
+      expect(capturedPreeditReqId).toBe("");
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedInputReqId);
+
+      vi.advanceTimersByTime(25);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(75);
+
+      // Settle input: pump now dispatches the queued preedit operation
+      inputDeferred.resolve("done");
+      await inputPromise;
+
+      expect(capturedPreeditReqId).toMatch(/^req-preedit-[a-zA-Z0-9_-]+-session-concurrent-\d+$/);
+      expect(capturedInputReqId).not.toBe(capturedPreeditReqId);
+
+      // Now preedit is in flight: request ID points to preedit and running age tracks preedit
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedPreeditReqId);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(0);
+
+      vi.advanceTimersByTime(40);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(40);
+
+      // Completing preedit lane clears remaining in-flight state cleanly
+      preeditDeferred.resolve("done");
+      await preeditPromise;
+
+      expect(queue.getInFlightRequestId("session-concurrent")).toBeNull();
+      expect(queue.getRunningAgeMs("session-concurrent")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

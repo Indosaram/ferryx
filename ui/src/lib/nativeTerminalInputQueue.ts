@@ -1,3 +1,7 @@
+import { safeRandomUUID } from "./uuid";
+
+const queueRunId = safeRandomUUID().replace(/-/g, "").slice(0, 8);
+
 export class NativeTerminalQueueOverflowError extends Error {
   constructor(message = "Terminal input queue overflow: limit exceeded") {
     super(message);
@@ -70,13 +74,21 @@ export function resetTerminalInputDropCountsForTest(): void {
 
 interface QueuedItem<T = unknown> {
   readonly id: number;
+  readonly requestId: string;
+  readonly operationName: string;
+  readonly queuedAt: number;
   readonly generation: number | null;
   readonly bytes: number;
-  readonly execute: () => Promise<T>;
+  readonly execute: (requestId: string) => Promise<T>;
   readonly resolve: (value: T) => void;
   readonly reject: (error: unknown) => void;
   readonly kind?: "input" | "preedit";
   readonly supersededResolvers?: Array<(value: T) => void>;
+}
+
+interface LaneExecutionState {
+  runningSince: number | null;
+  runningRequestId: string | null;
 }
 
 interface SessionQueueState {
@@ -85,6 +97,8 @@ interface SessionQueueState {
   allocatedEntries: number;
   running: boolean;
   preeditRunning: boolean;
+  inputLane: LaneExecutionState;
+  preeditLane: LaneExecutionState;
   activeGeneration: number | null;
 }
 
@@ -141,6 +155,24 @@ export class NativeTerminalInputQueueManager {
     return (s?.running ?? false) || (s?.preeditRunning ?? false);
   }
 
+  public getInFlightRequestId(sessionId: string): string | null {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    return s.inputLane.runningRequestId ?? s.preeditLane.runningRequestId ?? null;
+  }
+
+  public getRunningAgeMs(sessionId: string): number | null {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    const inputSince = s.inputLane.runningSince;
+    const preeditSince = s.preeditLane.runningSince;
+    const earliestSince =
+      inputSince !== null && preeditSince !== null
+        ? Math.min(inputSince, preeditSince)
+        : (inputSince ?? preeditSince);
+    return earliestSince == null ? null : Math.max(0, Date.now() - earliestSince);
+  }
+
   public recordDrop(reason: TerminalInputDropReason): void {
     recordTerminalInputDrop(reason);
   }
@@ -166,6 +198,8 @@ export class NativeTerminalInputQueueManager {
         allocatedEntries: 0,
         running: false,
         preeditRunning: false,
+        inputLane: { runningSince: null, runningRequestId: null },
+        preeditLane: { runningSince: null, runningRequestId: null },
         activeGeneration: null,
       };
       this.sessions.set(sessionId, state);
@@ -182,6 +216,8 @@ export class NativeTerminalInputQueueManager {
         allocatedEntries: 0,
         running: false,
         preeditRunning: false,
+        inputLane: { runningSince: null, runningRequestId: null },
+        preeditLane: { runningSince: null, runningRequestId: null },
         activeGeneration: currentGeneration,
       });
       return;
@@ -231,7 +267,9 @@ export class NativeTerminalInputQueueManager {
     sessionId: string,
     generation: number | null,
     payloadBytes: number,
-    operation: () => Promise<T>,
+    operation: (requestId: string) => Promise<T>,
+    customRequestId?: string,
+    operationName = "input",
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -254,9 +292,15 @@ export class NativeTerminalInputQueueManager {
     state.allocatedBytes += boundedBytes;
     state.allocatedEntries += 1;
 
+    const itemId = this.nextItemId++;
+    const requestId = customRequestId ?? `req-${queueRunId}-${sessionId}-${itemId}`;
+
     return new Promise<T>((resolve, reject) => {
       const item: QueuedItem<T> = {
-        id: this.nextItemId++,
+        id: itemId,
+        requestId,
+        operationName,
+        queuedAt: Date.now(),
         generation,
         bytes: boundedBytes,
         execute: operation,
@@ -274,7 +318,8 @@ export class NativeTerminalInputQueueManager {
     sessionId: string,
     generation: number | null,
     payloadBytes: number,
-    operation: () => Promise<T>,
+    operation: (requestId: string) => Promise<T>,
+    customRequestId?: string,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -332,9 +377,15 @@ export class NativeTerminalInputQueueManager {
     state.allocatedBytes += boundedBytes;
     state.allocatedEntries += 1;
 
+    const itemId = this.nextItemId++;
+    const requestId = customRequestId ?? `req-preedit-${queueRunId}-${sessionId}-${itemId}`;
+
     return new Promise<T>((resolve, reject) => {
       const item: QueuedItem<T> = {
-        id: this.nextItemId++,
+        id: itemId,
+        requestId,
+        operationName: "preedit",
+        queuedAt: Date.now(),
         generation,
         bytes: boundedBytes,
         execute: operation,
@@ -359,11 +410,15 @@ export class NativeTerminalInputQueueManager {
     if (!item) return;
 
     const isInput = item.kind !== "preedit";
+    const lane = isInput ? state.inputLane : state.preeditLane;
     if (isInput) {
       state.running = true;
     } else {
       state.preeditRunning = true;
     }
+    const startedAt = Date.now();
+    lane.runningSince = startedAt;
+    lane.runningRequestId = item.requestId;
 
     void (async () => {
       try {
@@ -376,7 +431,7 @@ export class NativeTerminalInputQueueManager {
           notifySuperseded(item.supersededResolvers, undefined);
         } else {
           try {
-            const result = await item.execute();
+            const result = await item.execute(item.requestId);
             item.resolve(result);
             notifySuperseded(item.supersededResolvers, result);
           } catch (error: unknown) {
@@ -392,6 +447,8 @@ export class NativeTerminalInputQueueManager {
         } else {
           state.preeditRunning = false;
         }
+        lane.runningSince = null;
+        lane.runningRequestId = null;
         this.pump(sessionId);
       }
     })();

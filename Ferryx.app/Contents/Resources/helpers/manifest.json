@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "helperVersion": "2026.930.1",
+  "protocolVersion": 1,
+  "sourceFingerprint": "4c74e5fd038615c26296c86a1b4df09f3d4faef4ff3245115ab795e8cdf8c315",
+  "requiredCapabilities": [
+    "sshHelperV1",
+    "dagSubscribeV1",
+    "agentStateV1"
+  ],
+  "artifacts": [
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "filename": "ferryx-remote-helper",
+      "sha256": "feeaa891216fdfcc4e0b2dc54594053d29d2c900a3502d338d98737390a52173",
+      "byteLength": 1435272,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentStateV1"
+      ]
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "filename": "ferryx-remote-helper",
+      "sha256": "fae9210568b0e50029d48ae63a2384356d6e8a2a4e6801c631e22f743903a186",
+      "byteLength": 1294704,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentStateV1"
+      ]
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "filename": "ferryx-remote-helper",
+      "sha256": "6de27da1baea821ce43b7274a2b37b0ebe4606b6f146e85f51512e6de24c9b7c",
+      "byteLength": 1474368,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentStateV1"
+      ]
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "filename": "ferryx-remote-helper",
+      "sha256": "5978a9dccb7a4e513e2087a93d016438b462482c56054bbd0df241687ab4a2fc",
+      "byteLength": 1540968,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentStateV1"
+      ]
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "filename": "ferryx-remote-helper.exe",
+      "sha256": "57f8131d50ff38d363351d6539501c6bd7406ffddde3bfcaad5254d5ebc761bf",
+      "byteLength": 1267200,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentStateV1"
+      ]
+    }
+  ]
+}

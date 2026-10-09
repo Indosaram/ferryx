@@ -1954,11 +1954,6 @@ where
         state.detail.clone(),
     );
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
-
-    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
-    // so no racing agent state update or initial conversation identity is lost.
-    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
-
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
     // exceeds the 1024-byte control slot, fallback to sending the essential provider identity
@@ -2012,6 +2007,11 @@ async fn handle_machine_terminal_socket(
     let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
         return;
     };
+
+    // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
+    // so no racing agent state update or initial conversation identity is lost.
+    let mut agent_subscription = services.sessions.subscribe_agent_states(&target.session_id);
+
     let (mut sender, mut receiver) = socket.split();
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
@@ -2020,43 +2020,7 @@ async fn handle_machine_terminal_socket(
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
 
-    // Send initial authoritative agent state snapshot immediately after the boundary
-    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
-        if initial_state.session_id == target.session_id
-            && services.sessions.validate_machine_target(target).await.is_ok()
-        {
-            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
-                return;
-            }
-        }
-    }
     let gap = snapshot
-                agent_update = agent_subscription.receiver.recv() => {
-                    match agent_update {
-                        Ok(update) if update.state.session_id == target.session_id => {
-                            if services.sessions.validate_machine_target(target).await.is_err() {
-                                return;
-                            }
-                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
-                                if current.session_id == target.session_id
-                                    && services.sessions.validate_machine_target(target).await.is_ok()
-                                {
-                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                    continue;
-                }
         .gap
         .as_ref()
         .map(|g| crate::remote::machine_protocol::ReplayGap {
@@ -2114,6 +2078,18 @@ async fn handle_machine_terminal_socket(
         }
     }
     drop(charged_snapshot);
+
+    // Send initial authoritative agent state snapshot immediately after the boundary
+    if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
+        if initial_state.session_id == target.session_id
+            && services.sessions.validate_machine_target(target).await.is_ok()
+        {
+            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
@@ -2124,6 +2100,32 @@ async fn handle_machine_terminal_socket(
                 control = control_rx.recv() => {
                     let Some(control) = control else { return; };
                     if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                agent_update = agent_subscription.receiver.recv() => {
+                    match agent_update {
+                        Ok(update) if update.state.session_id == target.session_id => {
+                            if services.sessions.validate_machine_target(target).await.is_err() {
+                                return;
+                            }
+                            if send_machine_agent_state(&mut sender, &update.state, target, &mut termination).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
+                                if current.session_id == target.session_id
+                                    && services.sessions.validate_machine_target(target).await.is_ok()
+                                {
+                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
                     continue;
                 }
                 next = output.recv() => next,
@@ -4670,6 +4672,60 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
+    /// Prepare a replacement without changing the active listener or relay publication.
+    pub(crate) async fn prepare_relay(
+        state: Arc<RemoteGatewayState>,
+        relay_url: Option<&str>,
+        address: SocketAddr,
+    ) -> Result<crate::remote::relay_client::RelayClient, String> {
+        let url = relay_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        crate::remote::relay_client::validate_relay_url(
+            url,
+            crate::remote::relay_client::is_insecure_relay_allowed(),
+        )
+        .map_err(|error| format!("Invalid relay configuration: {error}"))?;
+        let identity = load_gateway_identity(Arc::clone(&state))
+            .await
+            .map_err(|_| "Machine identity unavailable".to_string())?;
+        let client = match std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url, token, address.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url, identity.clone(), address.to_string(),
+            ),
+        };
+        Ok(client
+            .with_machine_id(&identity.machine_id)
+            .with_auth_manager((*state.auth_manager).clone()))
+    }
+
+    /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
+    pub(crate) fn replace_relay(
+        &mut self,
+        state: Arc<RemoteGatewayState>,
+        client: crate::remote::relay_client::RelayClient,
+    ) {
+        if let Some(task) = self.relay_task.take() {
+            task.abort();
+        }
+        let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: client.pairing_coordinator(),
+            epoch,
+        });
+        *state.relay_client.write() = Some(client.clone());
+        self.published_pairing = Some((state, epoch));
+        self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+    }
+
     pub fn is_external_bound(&self) -> bool {
         !self._extra_shutdown_txs.is_empty()
     }
