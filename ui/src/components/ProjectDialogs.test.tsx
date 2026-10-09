@@ -1316,6 +1316,40 @@ describe("AddWorktreeDialog GitHub issue intake", () => {
     expect(native.createWorktree).not.toHaveBeenCalled();
   });
 
+  it("loads the issue on Enter without submitting an existing worktree slug", async () => {
+    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    native.previewGitHubIssue.mockResolvedValue(preview);
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    render(<AddWorktreeDialog project={issueProject} onClose={onClose} onCreated={onCreated} />);
+    await act(async () => {});
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "existing-slug" } });
+    const input = screen.getByLabelText("GitHub issue");
+    fireEvent.change(input, { target: { value: "12" } });
+    const form = screen.getByRole("form", { name: "Add Worktree" });
+    const onSubmit = vi.fn();
+    form.addEventListener("submit", onSubmit);
+
+    let defaultAllowed = true;
+    await act(async () => {
+      defaultAllowed = fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+      // JSDOM does not perform implicit form submission for keyboard events.
+      // Model the browser default only if the input did not prevent it.
+      if (defaultAllowed) fireEvent.submit(form);
+    });
+
+    expect(defaultAllowed).toBe(false);
+    expect(native.previewGitHubIssue).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "orca-lite",
+      issueRef: "12",
+    });
+    expect(screen.getByLabelText("Issue preview")).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(native.createWorktree).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("creates the worktree from the edited slug on the retained base branch", async () => {
     native.previewGitHubIssue.mockResolvedValue(preview);
     native.createWorktree.mockResolvedValue({ path: "/repo/.orca-worktrees/wt-custom" });

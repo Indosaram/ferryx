@@ -961,6 +961,12 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
                       value={issueRef}
                       disabled={loadingIssue || submitting}
                       placeholder="12 or https://github.com/owner/repo/issues/12"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void loadIssue();
+                        }
+                      }}
                       onChange={(event) => {
                         setIssueRef(event.target.value);
                         // Editing the reference retires any preview still in flight.
