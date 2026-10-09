@@ -2,7 +2,7 @@ import { switchDebug } from "./switchDebug";
 import type { PaneAttachTuple } from "./types";
 import { createAttemptBudget, matchesAttachTuple, type AttemptBudget } from "./localSplitContract";
 
-const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget }>();
+const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget | null }>();
 
 export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs = performance.now(), expectedPrevious?: PaneAttachTuple): boolean {
   const current = durableBindings.get(tuple.backendSessionId);
@@ -24,7 +24,11 @@ export function getDurableNativeBinding(sessionId: string): PaneAttachTuple | un
 }
 
 export function nativeBindingRemainingMs(sessionId: string, stageCapMs: number): number {
-  return durableBindings.get(sessionId)?.budget.stageBudget(stageCapMs) ?? 0;
+  const binding = durableBindings.get(sessionId);
+  if (!binding) return 0;
+  // A presented binding uses a fresh bounded deadline per operation, not the
+  // completed startup deadline. Unready bindings retain their original budget.
+  return binding.budget === null ? Math.max(0, stageCapMs) : binding.budget.stageBudget(stageCapMs);
 }
 
 type NativeTerminalLifecycleOperation<T> = () => Promise<T>;
@@ -432,6 +436,16 @@ export function subscribeNativeTerminalPresentation(
 export function emitNativeTerminalPresentation(
   receipt: NativeTerminalPresentationReceipt,
 ): number {
+  const binding = durableBindings.get(receipt.backendSessionId);
+  if (binding?.budget && !binding.budget.isExpired() &&
+      receipt.bindingKey !== null && receipt.daemonEpoch !== undefined &&
+      matchesAttachTuple(binding.tuple, {
+        ...receipt, bindingKey: receipt.bindingKey, daemonEpoch: receipt.daemonEpoch,
+      })) {
+    // Only the exact current tuple's accepted presentation completes startup.
+    // A late receipt cannot revive an expired attempt.
+    binding.budget = null;
+  }
   let delivered = 0;
   for (const [subscriptionId, record] of [...presentationSubscriptions]) {
     if (presentationSubscriptions.get(subscriptionId) !== record) continue;

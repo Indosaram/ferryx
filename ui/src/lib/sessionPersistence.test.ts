@@ -168,7 +168,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
     const restored = deserializeWorkspaceState("default", saved, ["backend-1", "backend-2", "backend-3"]);
     expect(restored?.sessions[ready.id].backendSessionId).toBe("backend-1");
     expect(restored?.sessions[ready.id].reconnectLifecycle).toBe("idle");
-    expect(restored && localSplitIntent(restored.sessions[ready.id])?.ready).toBe(true);
+    expect(restored && localSplitIntent(restored.sessions[ready.id])).toBeUndefined();
   });
 
   it.each([false, true])("round trips hidden prepared intent with cancellation %s and save key", (cancelRequested) => {

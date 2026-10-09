@@ -702,10 +702,11 @@ export function NativeTerminalPane({
   const splitAttemptGeneration = splitAttempt?.generation ?? 0;
   useLayoutEffect(() => {
     const tuple = session?.spawnIntent?.attachTuple;
-    if (tuple && (session?.spawnIntent?.bindingPersisted || session?.spawnIntent?.ready)) {
+    if (tuple && (!session?.spawnIntent?.ready || session.spawnIntent.cancelRequested) &&
+        (session?.spawnIntent?.bindingPersisted || session?.spawnIntent?.ready)) {
       registerDurableNativeBinding(tuple);
     }
-  }, [session?.spawnIntent?.attachTuple, session?.spawnIntent?.bindingPersisted, session?.spawnIntent?.ready]);
+  }, [session?.spawnIntent?.attachTuple, session?.spawnIntent?.bindingPersisted, session?.spawnIntent?.ready, session?.spawnIntent?.cancelRequested]);
 
   const rearmBoundsRef = useRef<((attemptGeneration: number) => void) | null>(null);
   const previousSplitAttemptGenerationRef = useRef(splitAttemptGeneration);
@@ -1158,7 +1159,7 @@ export function NativeTerminalPane({
     return { bounds, scaleFactor };
   }, []);
 
-  const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
+  const performAttach = useCallback((targetId: string, force = false, onAttach?: (tuple: PaneAttachTuple) => void): Promise<void> => {
     const owner = attachmentOwnerRef.current;
     if (!owner?.live || owner.sessionId !== targetId) return Promise.resolve();
     if (quarantinedBindingRef.current?.sessionId === targetId) return Promise.resolve();
@@ -1180,18 +1181,31 @@ export function NativeTerminalPane({
     const attachOp = force || bindingChanged || splitAttemptRef.current ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
       const session = sessionRef.current;
-      if (!getDurableNativeBinding(targetId) && session && !session.spawnIntent) {
-        const attachTuple: PaneAttachTuple = session.attachTuple ?? {
+      const completedSpawn = !session?.spawnIntent ||
+        (session.spawnIntent.ready && !session.spawnIntent.cancelRequested);
+      if (!getDurableNativeBinding(targetId) && session?.backendSessionId === targetId && completedSpawn) {
+        const savedTuple = session.attachTuple ?? session.spawnIntent?.attachTuple;
+        const currentTuple: PaneAttachTuple = {
           backendSessionId: targetId, incarnation: session.incarnation ?? null,
           daemonEpoch: session.daemonEpoch ?? "", frontendSessionId: session.id,
-          paneIdentity: session.id, bindingKey: owner.bindingKey ?? "", attemptGeneration: 0,
+          paneIdentity: session.id, bindingKey: owner.bindingKey ?? "",
+          attemptGeneration: savedTuple?.attemptGeneration ?? 0,
         };
+        const attachTuple = savedTuple && !matchesAttachTuple(savedTuple, currentTuple)
+          ? { ...currentTuple, attemptGeneration: currentTuple.attemptGeneration + 1 }
+          : currentTuple;
         const started = performance.now();
         await persistNativeBinding({ ...session, attachTuple });
-        registerDurableNativeBinding(attachTuple, started);
+        if (attachmentOwnerRef.current !== owner) return;
+        if (!registerDurableNativeBinding(attachTuple, started)) throw new Error("Stale native binding");
       }
       const previousTuple = getDurableNativeBinding(targetId);
-      if ((force || bindingChanged) && previousTuple && session && !session.spawnIntent) {
+      const identityChanged = previousTuple && session && (
+        previousTuple.daemonEpoch !== (session.daemonEpoch ?? "") ||
+        previousTuple.incarnation !== (session.incarnation ?? null) ||
+        previousTuple.bindingKey !== (owner.bindingKey ?? "")
+      );
+      if ((force || bindingChanged || identityChanged) && previousTuple && session && completedSpawn) {
         const attachTuple = { ...previousTuple, incarnation: session.incarnation ?? null,
           daemonEpoch: session.daemonEpoch ?? "", bindingKey: owner.bindingKey ?? "",
           attemptGeneration: previousTuple.attemptGeneration + 1 };
@@ -1207,6 +1221,7 @@ export function NativeTerminalPane({
       if (quarantinedBindingRef.current?.sessionId === targetId) return;
       const attachTuple = getDurableNativeBinding(targetId);
       if (!attachTuple) throw new Error("Durable native binding is unavailable");
+      onAttach?.(attachTuple);
       await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         attachTuple,
@@ -2731,7 +2746,9 @@ export function NativeTerminalPane({
       let attemptPromise: Promise<void> | null = null;
       attemptPromise = (async () => {
         try {
-          await performAttach(targetSessionId, force || retryCount > 0);
+          await performAttach(targetSessionId, force || retryCount > 0, (tuple) => {
+            teardownTuple = tuple;
+          });
           if (!isSubscribed) return;
           teardownTuple = getDurableNativeBinding(targetSessionId);
           if (

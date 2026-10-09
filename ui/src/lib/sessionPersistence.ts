@@ -654,9 +654,8 @@ export function deserializeWorkspaceState(
     } else if (persistedIncarnation) {
       sessions[localSessionId].incarnation = persistedIncarnation;
     }
-    if (savedIntent?.ready && !savedIntent.cancelRequested) {
-      sessions[localSessionId].spawnIntent = savedIntent;
-    }
+    // Completed spawns restore as ordinary durable sessions. Only unfinished or
+    // cancelled requests above retain their reconciliation coordinator.
   }
 
   function deserializeLayout(
