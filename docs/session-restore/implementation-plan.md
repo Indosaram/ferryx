@@ -1,8 +1,9 @@
 # Ferryx Session Preservation and Recovery Implementation Plan
 
-- Basis specification: `docs/session-restore/spec.md` v11.1 (hereinafter "the specification")
+- Basis specification: `docs/session-restore/spec.md` v11.2 (hereinafter "the specification")
 - Date written: 2026-10-09
-- Status: Executable. However, some designs in P2 and P3 may change depending on the outcome of resolving the P0 risks (marked on each item).
+- Status: Executable. P0, P1 and P2 are done; the pure state machines of P5 (replica client, Resize lease client, writer) and P6 (binding FSM reducer) are implemented and tested but not yet wired into the GUI. P3 onward is open.
+- Placement change: P1 and P2 live in standalone crates `crates/fxsh` and `crates/session-core` instead of modules under `src-tauri/src/`. They have no Tauri, GPU or I/O dependency, so they build and test on every OS without the desktop stack, and the host binary of P3 can depend on them without pulling in the GUI.
 
 ---
 
@@ -71,6 +72,7 @@ Completion criteria: a results report for the five experiments and, if needed, a
 - Use manual encode/decode only (serde forbidden, spec §7.1).
 - Tests: golden vectors, rejection of truncated frames and invalid bool/UTF-8/tag/opt conditions, ignoring of trailing bytes, 16 MiB limit.
 - Completion criteria: `cargo test fxsh::` passes, fuzzer (`cargo fuzz` or proptest random bytes) 0 panics in 1 hour.
+- **Done** (`crates/fxsh`, commit 7bc8cb91): 34 commands, 22 error codes, Appendix A, `canonical_encode`, `state_digest`; tests pass on macOS, Linux and Windows. Two PROTOCOL_VIOLATION reasons (8 bad_order, 9 bad_shape) were added to spec §7.6.
 ### P2. Host core state machines (3~4 weeks, no I/O)
 New module `src-tauri/src/session_host/`. Each item is a pure state machine + proptest.
 1. **Session actor state** (§2.1~§2.3): S, revision, line_id, size normalization, `S_MAX` eviction, hyperlink table cleanup. Input is the extractor from P0-2.
@@ -80,6 +82,7 @@ New module `src-tauri/src/session_host/`. Each item is a pure state machine + pr
 5. **lease host side** (§3.3, §4.4): input·Resize, `revokees`, `LeaseVacated`.
 6. **operation table** (§7.5): reservation, request hash, failure result storage, eviction, monotonic clock abstraction (accelerated in tests).
 - Completion criteria: per-module proptests (at least 10,000 cases each) pass. All invariants of the execution model exist as Rust tests.
+- **Done** (`crates/session-core`): all six items, plus the P5 client state machines. Property tests run at 10,000 cases (`PROPTEST_CASES` overrides). Results and the four defects they found are in spec §9.1; the fixes are spec v11.2.
 ### P3. Host process (2 weeks, requires P0-1·P0-4·P1·P2)
 - New binary `ferryx-host` (`Cargo.toml` `[[bin]]`). A tokio task per session actor, a PTY reader thread and an 8 MiB mailbox (§2.1).
 - Local IPC endpoint, directory·peer credential verification (§1.2), Hello/HelloAck (§7.3).
@@ -100,7 +103,7 @@ New module `src-tauri/src/session_host/`. Each item is a pure state machine + pr
 - **Resize lease client** (§4.4) and **composer state machine** (§3.6): place the pure state machine (same approach as P2) in Rust and expose it via Tauri commands. `nativeTerminalInputQueue.ts` becomes a thin layer that calls this state machine.
 - Completion criteria: pass Gate 4a~4f, 10, 11, 12, 13.
 ### P6. GUI state & restore (2 weeks, requires P4·P5)
-- Implement the binding FSM (§5.5) as a pure reducer in `ui/src/state/`. Remove the epoch-guessing revival clause and the `backendSessionId = null` handling in `sessionPersistence.ts`, and connect `workspaceRestore.ts` to FSM events.
+- Implement the binding FSM (§5.5) as a pure reducer in `ui/src/state/`. (**Reducer done**: `ui/src/state/sessionBinding.ts` with a seeded port of the binding model in `sessionBinding.test.ts`; wiring remains.) Remove the epoch-guessing revival clause and the `backendSessionId = null` handling in `sessionPersistence.ts`, and connect `workspaceRestore.ts` to FSM events.
 - Layout hint adoption procedure, displaying the final screen of terminated sessions.
 - Tauri JSON boundary (§7.8): u64 as decimal strings, TS `BigInt`.
 - Completion criteria: `bun run --cwd ui test` passes. Pass Gates 1, 8, 9 with the actual GUI.
