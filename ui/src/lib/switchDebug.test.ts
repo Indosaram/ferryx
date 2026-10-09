@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createSwitchDebugLogger,
+  isReleasePersistedInputEvent,
   resolveSwitchDebugEnabled,
 } from "./switchDebug";
 
@@ -36,6 +37,52 @@ describe("switchDebug", () => {
     });
 
     expect(log("project.select")).toBeNull();
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  it("persists release allowlisted input events even when general debug is disabled", () => {
+    const sink = vi.fn();
+    const log = createSwitchDebugLogger({
+      enabled: false,
+      runId: "run-prod",
+      now: () => 5678,
+      sink,
+    });
+
+    expect(isReleasePersistedInputEvent("terminal.surface.input.accepted")).toBe(true);
+    expect(isReleasePersistedInputEvent("terminal.surface.input.dispatch")).toBe(true);
+    expect(isReleasePersistedInputEvent("terminal.render.vt_consumed")).toBe(true);
+    expect(isReleasePersistedInputEvent("terminal.surface.presentation.receipt")).toBe(true);
+    expect(isReleasePersistedInputEvent("project.select")).toBe(false);
+
+    const entry = log("terminal.surface.input.accepted", {
+      operationId: "req-1",
+      backendSessionId: "sess-1",
+    });
+    expect(entry).toEqual({
+      runId: "run-prod",
+      sequence: 1,
+      event: "terminal.surface.input.accepted",
+      wallTimeMs: 5678,
+      details: {
+        operationId: "req-1",
+        backendSessionId: "sess-1",
+      },
+    });
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops all events when allowReleasePersisted is explicitly false", () => {
+    const sink = vi.fn();
+    const log = createSwitchDebugLogger({
+      enabled: false,
+      runId: "run-silent",
+      now: () => 1000,
+      sink,
+      allowReleasePersisted: false,
+    });
+
+    expect(log("terminal.surface.input.accepted")).toBeNull();
     expect(sink).not.toHaveBeenCalled();
   });
 

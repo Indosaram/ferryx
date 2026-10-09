@@ -591,4 +591,56 @@ describe("NativeTerminalInputQueueManager", () => {
       vi.useRealTimers();
     }
   });
+
+  it("distinguishes in-flight execution age from waiting queued head age", async () => {
+    vi.useFakeTimers();
+    try {
+      const d1 = createDeferred<string>();
+      const d2 = createDeferred<string>();
+
+      let req1 = "";
+      let req2 = "";
+
+      const p1 = queue.enqueue("sess-queue-age", 1, 10, async (id) => {
+        req1 = id;
+        await d1.promise;
+        return "first";
+      });
+
+      vi.advanceTimersByTime(20);
+
+      const p2 = queue.enqueue("sess-queue-age", 1, 10, async (id) => {
+        req2 = id;
+        await d2.promise;
+        return "second";
+      }, undefined, "input", {
+        paneIdentity: "pane-1",
+        bindingKey: "bk-1",
+      });
+
+      vi.advanceTimersByTime(50);
+
+      const queuedId = queue.getHeadQueuedRequestId("sess-queue-age");
+      expect(queuedId).toBeTruthy();
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(req1);
+      expect(queue.getRunningAgeMs("sess-queue-age")).toBe(70);
+      expect(queue.getQueuedHeadAgeMs("sess-queue-age")).toBe(50);
+
+      d1.resolve("first");
+      await p1;
+
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(queuedId);
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(req2);
+      expect(queue.getHeadQueuedRequestId("sess-queue-age")).toBeNull();
+      expect(queue.getQueuedHeadAgeMs("sess-queue-age")).toBeNull();
+
+      d2.resolve("second");
+      await p2;
+
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBeNull();
+      expect(queue.getRunningAgeMs("sess-queue-age")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

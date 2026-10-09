@@ -1720,6 +1720,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let is_paired_workspace = request.workspace_id.starts_with("daemon:")
         || matches!(request.startup, Some(TerminalStartup::PairedDaemon { .. }));
     let spawn_result = if is_remote_workspace {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        let _held = maybe_hold_remote_rpc_barrier(&request.workspace_id, "remote_spawn_ssh").await;
+
         if request.startup.is_some() {
             return Err(crate::ssh::projects::unsupported());
         }
@@ -1744,6 +1747,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             )
             .await?
     } else if is_paired_workspace {
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        let _held = maybe_hold_remote_rpc_barrier(&request.workspace_id, "remote_spawn_paired").await;
+
         if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
             return Err(crate::ssh::projects::unsupported());
         }
@@ -2259,6 +2265,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 end_sequence: Some(remote_session.end_sequence.0),
                 last_output_age_ms: None,
                 suspended: false,
+                reader_paused: None,
+                kernel_stopped: None,
+                registry_suspended: None,
+                suspension_source: None,
             },
         }
     } else {
@@ -2805,6 +2815,101 @@ pub async fn cmd_terminal_resize(
     daemon_client.resize_terminal(&session_id, cols, rows).await
 }
 
+pub const HELD_RPC_BARRIER: &str = "held-rpc";
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+struct HeldRpcClaim {
+    channel: std::sync::Arc<crate::ipc::qa_barrier::QaBarrierChannel>,
+    operation_id: String,
+    target_id: String,
+    stage: String,
+    settled: bool,
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+impl Drop for HeldRpcClaim {
+    fn drop(&mut self) {
+        self.channel.release_held_rpc_claim(&self.operation_id, self.settled);
+        if !self.settled {
+            self.channel.schedule_cancellation_receipt(
+                HELD_RPC_BARRIER,
+                &self.operation_id,
+                serde_json::json!({
+                    "sessionId": self.target_id,
+                    "stage": format!("{}_cancelled", self.stage),
+                    "heldRpc": true,
+                    "releaseOutcome": "cancelled",
+                }),
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+pub(crate) async fn maybe_hold_remote_rpc_barrier(
+    target_id: &str,
+    stage: &str,
+) -> Option<crate::ipc::qa_barrier::ReleaseOutcome> {
+    let channel = crate::ipc::qa_barrier::active_channel()?;
+    let spec = channel.spec(HELD_RPC_BARRIER)?;
+
+    // Channel-owned claim state: avoids static registries and pointer casting.
+    if !channel.try_claim_held_rpc(&spec.operation_id) {
+        return None;
+    }
+
+    let mut claim = HeldRpcClaim {
+        channel: channel.clone(),
+        operation_id: spec.operation_id.clone(),
+        target_id: target_id.to_string(),
+        stage: stage.to_string(),
+        settled: false,
+    };
+
+    // Privacy contract: never log input payloads, keystrokes, or private command data.
+    let extra = serde_json::json!({
+        "heldRpc": true,
+        "operation": stage,
+    });
+
+    channel.write_held(&spec, target_id, stage, extra);
+
+    let outcome = channel.wait_for_release(&spec).await;
+    claim.settled = true;
+
+    let channel_cloned = channel.clone();
+    let spec_op_id = spec.operation_id.clone();
+    let target_id_str = target_id.to_string();
+    let stage_str = stage.to_string();
+    let outcome_str = outcome.as_str().to_string();
+
+    let _ = run_blocking(move || {
+        channel_cloned.append_receipt(
+            HELD_RPC_BARRIER,
+            &spec_op_id,
+            serde_json::json!({
+                "sessionId": target_id_str,
+                "stage": format!("{}_settled", stage_str),
+                "heldRpc": true,
+                "releaseOutcome": outcome_str,
+            }),
+        );
+        Ok::<(), IpcError>(())
+    })
+    .await;
+
+    Some(outcome)
+}
+
+#[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+#[inline(always)]
+pub(crate) async fn maybe_hold_remote_rpc_barrier(
+    _target_id: &str,
+    _stage: &str,
+) -> Option<()> {
+    None
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_remote_write(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -2812,6 +2917,9 @@ pub async fn cmd_terminal_remote_write(
     generation: u64,
     data: String,
 ) -> Result<(), IpcError> {
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let _held = maybe_hold_remote_rpc_barrier(&session_id, "remote_write").await;
+
     daemon_client
         .write_terminal_at_generation(&session_id, Some(generation), data.into_bytes())
         .await
@@ -2825,6 +2933,9 @@ pub async fn cmd_terminal_remote_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), IpcError> {
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let _held = maybe_hold_remote_rpc_barrier(&session_id, "remote_resize").await;
+
     daemon_client
         .resize_terminal_at_generation(&session_id, Some(generation), cols, rows)
         .await
@@ -2862,6 +2973,9 @@ pub async fn cmd_terminal_remote_status(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
 ) -> Result<crate::daemon::protocol::DaemonResponse, IpcError> {
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let _held = maybe_hold_remote_rpc_barrier(&session_id, "remote_status").await;
+
     daemon_client.remote_session_status(&session_id).await
 }
 
@@ -2870,6 +2984,9 @@ pub async fn cmd_terminal_remote_retry(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
 ) -> Result<crate::daemon::protocol::DaemonResponse, IpcError> {
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let _held = maybe_hold_remote_rpc_barrier(&session_id, "remote_retry").await;
+
     daemon_client.retry_remote_session(&session_id).await
 }
 
@@ -3342,5 +3459,331 @@ mod tests {
         )
         .expect_err("an existing cwd outside the worktree must be rejected");
         assert_eq!(err.code, IpcErrorCode::PathOutsideWorkspace);
+    }
+
+    #[cfg(all(test, feature = "local-split-qa", feature = "native-terminal"))]
+    mod qa_held_rpc_tests {
+        use super::*;
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+        use crate::ipc::qa_barrier::{
+            active_channel, deactivate, install, QaBarrierChannel, PRODUCER_ID,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tauri::Manager;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        static RUN_NONCE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+        struct ScopedChannelFixture {
+            dir: std::path::PathBuf,
+            run_id: String,
+            operation_id: String,
+            _temp: tempfile::TempDir,
+        }
+
+        impl ScopedChannelFixture {
+            fn create() -> Self {
+                let temp = tempfile::tempdir().unwrap();
+                let dir = temp.path().join("barriers");
+                std::fs::create_dir_all(&dir).unwrap();
+                let idx = RUN_NONCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                let run_id = format!("qa-run-held-rpc-{idx}");
+                let operation_id = format!("qa-op-held-rpc-{idx}");
+
+                std::fs::write(
+                    dir.join(format!("{HELD_RPC_BARRIER}.arm.json")),
+                    serde_json::to_string(&serde_json::json!({
+                        "name": HELD_RPC_BARRIER,
+                        "runId": run_id,
+                        "operationId": operation_id,
+                        "deadlineMs": 5_000,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+
+                install(QaBarrierChannel::new(dir.clone(), run_id.clone()));
+                let channel = active_channel().expect("channel installed");
+
+                let (acked, rejected) = channel.scan_and_ack_arms();
+                assert_eq!(acked, vec![HELD_RPC_BARRIER.to_string()]);
+                assert!(rejected.is_empty());
+
+                Self {
+                    dir,
+                    run_id,
+                    operation_id,
+                    _temp: temp,
+                }
+            }
+
+            fn release(&self) {
+                std::fs::write(
+                    self.dir.join(format!("{HELD_RPC_BARRIER}.release.json")),
+                    serde_json::to_string(&serde_json::json!({
+                        "name": HELD_RPC_BARRIER,
+                        "runId": self.run_id,
+                        "operationId": self.operation_id,
+                        "releasedAt": "2026-10-03T00:00:01.000Z",
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+
+            async fn cleanup(&self) {
+                if let Some(ch) = active_channel() {
+                    ch.await_pending_workers().await;
+                }
+                deactivate();
+            }
+        }
+
+        impl Drop for ScopedChannelFixture {
+            fn drop(&mut self) {
+                deactivate();
+            }
+        }
+
+        #[tokio::test]
+        async fn remote_command_holds_while_local_dispatch_executes_concurrently() {
+            let fixture = ScopedChannelFixture::create();
+            let channel = active_channel().unwrap();
+
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+
+            // Set up an isolated private test daemon socket listener.
+            // On Windows and Unix alike, we inject an exact tempdir token path via
+            // DaemonClient::new_with_socket_and_token_path, ensuring failure never
+            // contacts production and zero writes occur to get_transport_token_path().
+            let daemon_dir = tempfile::tempdir().unwrap();
+            let sock_path = daemon_dir.path().join("test-daemon.sock");
+            let token_path = daemon_dir.path().join("test-daemon.token");
+            std::fs::write(&token_path, "mock-transport-token-fixture").unwrap();
+
+            #[cfg(unix)]
+            let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            #[cfg(not(unix))]
+            let listener = {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                std::fs::write(&sock_path, l.local_addr().unwrap().port().to_string()).unwrap();
+                l
+            };
+
+            let client = Arc::new(DaemonClient::new_with_socket_and_token_path(
+                sock_path, token_path,
+            ));
+
+            let app = tauri::test::mock_builder()
+                .manage(client.clone())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+
+            // Background mock daemon responder handling handshake and wire dispatch requests
+            let (daemon_stop_tx, mut daemon_stop_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut daemon_stop_rx => break,
+                        accept_res = listener.accept() => {
+                            if let Ok((mut stream, _)) = accept_res {
+                                tokio::spawn(async move {
+                                    let (reader, mut writer) = stream.split();
+                                    let mut lines = BufReader::new(reader).lines();
+                                    while let Ok(Some(line)) = lines.next_line().await {
+                                        if let Ok(req) = serde_json::from_str::<DaemonRequest>(&line) {
+                                            let resp = match req {
+                                                DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                                    version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION,
+                                                    pid: std::process::id(),
+                                                    epoch: 1,
+                                                    binary_path: None,
+                                                    binary_mtime_ms: None,
+                                                    daemon_version: None,
+                                                },
+                                                DaemonRequest::Write { .. } => DaemonResponse::WriteOk,
+                                                DaemonRequest::RemoteWrite { .. } => DaemonResponse::WriteOk,
+                                                _ => DaemonResponse::WriteOk,
+                                            };
+                                            let mut out = serde_json::to_string(&resp).unwrap();
+                                            out.push('\n');
+                                            let _ = writer.write_all(out.as_bytes()).await;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 1. Invoke the REAL Tauri command handler for remote write
+            let app_state = app.state::<Arc<DaemonClient>>();
+            let remote_session = "isolated-task-remote-sess-1";
+            let remote_fut = cmd_terminal_remote_write(
+                app_state.clone(),
+                remote_session.into(),
+                1,
+                "remote-payload-data".into(),
+            );
+            tokio::pin!(remote_fut);
+
+            // 2. Await the prearmed held event from the command execution
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, HELD_RPC_BARRIER).await;
+            let held = held_event.payload;
+            assert_eq!(held["runId"], serde_json::json!(fixture.run_id));
+            assert_eq!(held["operationId"], serde_json::json!(fixture.operation_id));
+            assert_eq!(held["producer"], serde_json::json!(PRODUCER_ID));
+            assert_eq!(held["sessionId"], serde_json::json!(remote_session));
+            assert_eq!(held["stage"], serde_json::json!("remote_write"));
+            assert_eq!(held["heldRpc"], serde_json::json!(true));
+
+            // Verify remote command stays parked
+            tokio::select! {
+                _ = &mut remote_fut => panic!("remote RPC command settled before release"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+
+            // 3. CONCURRENT LOCAL DISPATCH EXECUTION:
+            // Proves local IPC command dispatch concurrency to the daemon client while remote RPC is held.
+            let local_write_result = cmd_terminal_write(
+                app_state.clone(),
+                "local-isolated-active-sess".into(),
+                "local-marker-input".into(),
+            )
+            .await;
+            assert!(
+                local_write_result.is_ok(),
+                "local IPC dispatch path must execute and succeed concurrently without waiting on held remote RPC"
+            );
+
+            // 4. Release the barrier and verify remote command completes
+            fixture.release();
+            let remote_res = remote_fut.await;
+            assert!(remote_res.is_ok(), "remote command should complete successfully after release");
+
+            // 5. Await prearmed receipt event
+            let settled = QaBarrierChannel::await_receipt_event(&mut receipt_rx, HELD_RPC_BARRIER, 1).await;
+            assert_eq!(settled["runId"], serde_json::json!(fixture.run_id));
+            assert_eq!(settled["operationId"], serde_json::json!(fixture.operation_id));
+            assert_eq!(settled["stage"], serde_json::json!("remote_write_settled"));
+            assert_eq!(settled["heldRpc"], serde_json::json!(true));
+            assert_eq!(settled["releaseOutcome"], serde_json::json!("released"));
+
+            let _ = daemon_stop_tx.send(());
+            fixture.cleanup().await;
+        }
+
+        #[tokio::test]
+        async fn cancellation_via_worker_and_retry_without_stale_lockout() {
+            let fixture = ScopedChannelFixture::create();
+            let channel = active_channel().unwrap();
+
+            let mut held_rx = channel.subscribe_held();
+            let mut receipt_rx = channel.subscribe_receipts();
+
+            let target_session = "remote-session-to-cancel";
+
+            // Spawn real task holding the barrier
+            let hold_task = tokio::spawn(async move {
+                maybe_hold_remote_rpc_barrier(target_session, "remote_resize").await
+            });
+
+            // Wait for hold to arrive
+            let _ = QaBarrierChannel::await_held_event(&mut held_rx, HELD_RPC_BARRIER).await;
+
+            // Trigger REAL task cancellation / future abort
+            hold_task.abort();
+            let _ = hold_task.await;
+
+            // Await cancellation receipt scheduled via owned worker
+            let receipt = QaBarrierChannel::await_receipt_event(&mut receipt_rx, HELD_RPC_BARRIER, 1).await;
+            assert_eq!(receipt["stage"], serde_json::json!("remote_resize_cancelled"));
+            assert_eq!(receipt["heldRpc"], serde_json::json!(true));
+            assert_eq!(receipt["releaseOutcome"], serde_json::json!("cancelled"));
+
+            // RETRY VERIFICATION: Retrying the operation must NOT be locked out by the prior cancellation
+            let retry_fut = maybe_hold_remote_rpc_barrier(target_session, "remote_resize");
+            tokio::pin!(retry_fut);
+
+            let held_retry = QaBarrierChannel::await_held_event(&mut held_rx, HELD_RPC_BARRIER).await;
+            assert_eq!(held_retry.payload["stage"], serde_json::json!("remote_resize"));
+            assert_eq!(held_retry.payload["heldRpc"], serde_json::json!(true));
+
+            fixture.release();
+            let retry_outcome = retry_fut.await;
+            assert_eq!(retry_outcome, Some(crate::ipc::qa_barrier::ReleaseOutcome::Released));
+
+            fixture.cleanup().await;
+        }
+
+        #[tokio::test]
+        async fn scoped_per_channel_isolation_prevents_cross_test_races() {
+            let fixture_a = ScopedChannelFixture::create();
+            let channel_a = active_channel().unwrap();
+            let mut held_rx_a = channel_a.subscribe_held();
+
+            // Concurrently create channel B
+            let temp_b = tempfile::tempdir().unwrap();
+            let dir_b = temp_b.path().join("barriers-b");
+            std::fs::create_dir_all(&dir_b).unwrap();
+            let channel_b = std::sync::Arc::new(QaBarrierChannel::new(dir_b, "qa-run-b".into()));
+
+            // Channel B has no arms; verify its channel-owned state is completely independent
+            assert!(!channel_b.is_armed(HELD_RPC_BARRIER));
+
+            // Channel A holds cleanly
+            let hold_fut = maybe_hold_remote_rpc_barrier("sess-a", "remote_status");
+            tokio::pin!(hold_fut);
+
+            let held_a = QaBarrierChannel::await_held_event(&mut held_rx_a, HELD_RPC_BARRIER).await;
+            assert_eq!(held_a.payload["runId"], serde_json::json!(fixture_a.run_id));
+
+            fixture_a.release();
+            let _ = hold_fut.await;
+            fixture_a.cleanup().await;
+        }
+
+        #[tokio::test]
+        async fn privacy_contract_never_logs_input_payload() {
+            let fixture = ScopedChannelFixture::create();
+            let channel = active_channel().unwrap();
+            let mut held_rx = channel.subscribe_held();
+
+            let target_session = "privacy-test-session";
+            let rpc_fut = maybe_hold_remote_rpc_barrier(target_session, "remote_write");
+            tokio::pin!(rpc_fut);
+
+            let held_event = QaBarrierChannel::await_held_event(&mut held_rx, HELD_RPC_BARRIER).await;
+            let held_str = serde_json::to_string(&held_event.payload).unwrap();
+
+            let secret_token = "TOP_SECRET_USER_INPUT_KEYSTROKES";
+            assert!(!held_str.contains(secret_token));
+
+            let held_file = std::fs::read_to_string(fixture.dir.join(format!("{HELD_RPC_BARRIER}.held.json"))).unwrap();
+            assert!(!held_file.contains(secret_token));
+
+            fixture.release();
+            let _ = rpc_fut.await;
+            fixture.cleanup().await;
+        }
+
+        #[tokio::test]
+        async fn unarmed_or_inactive_channel_never_blocks() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("barriers");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            install(QaBarrierChannel::new(dir, "qa-unarmed".into()));
+            let ch = active_channel().unwrap();
+
+            let res = maybe_hold_remote_rpc_barrier("sess", "remote_write").await;
+            assert!(res.is_none());
+
+            ch.await_pending_workers().await;
+            deactivate();
+        }
+
     }
 }

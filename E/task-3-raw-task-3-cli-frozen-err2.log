@@ -1,0 +1,8 @@
+ferryx.exe : INVALID_QA_INVOCATION: expected exactly `ferryx diagnostic-classifier --headless`
+At line:51 char:1
++ & $binPath diagnostic-classifier --wrong > cli-frozen-err2.log 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INVALID_QA_INVO...ier --headless`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+

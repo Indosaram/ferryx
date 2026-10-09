@@ -2332,6 +2332,10 @@ impl DaemonSessionService {
                     end_sequence,
                     last_output_age_ms: None,
                     suspended: false,
+                    reader_paused: None,
+                    kernel_stopped: None,
+                    registry_suspended: None,
+                    suspension_source: None,
                 },
             };
         }
@@ -2356,6 +2360,10 @@ impl DaemonSessionService {
                         end_sequence,
                         last_output_age_ms: None,
                         suspended: false,
+                        reader_paused: None,
+                        kernel_stopped: None,
+                        registry_suspended: None,
+                        suspension_source: None,
                     },
                 };
             }
@@ -2396,6 +2404,21 @@ impl DaemonSessionService {
             None => (None, None, worktree_cwd),
         };
 
+        let kernel_stopped = Some(pty_session.process_stopped());
+        let registry_state = self.terminal_service.process_state(session_id);
+        let registry_suspended = Some(
+            registry_state
+                == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended),
+        );
+        let is_stopped = kernel_stopped.unwrap_or(false)
+            || (cfg!(windows) && registry_suspended.unwrap_or(false));
+        let reader_paused = Some(pty_session.is_reader_paused());
+        let suspension_source = if is_stopped {
+            Some("unknown".to_string())
+        } else {
+            None
+        };
+
         DaemonResponse::DescribeSessionOk {
             session: DaemonSessionDetails {
                 session_id: session_id.to_string(),
@@ -2410,10 +2433,11 @@ impl DaemonSessionService {
                 last_output_age_ms: pty_session.last_output_age_ms(),
                 // Unix answers from the kernel; Windows has no queryable NtSuspendProcess
                 // state, so it falls back to the daemon's own lifecycle record.
-                suspended: pty_session.process_stopped()
-                    || (cfg!(windows)
-                        && self.terminal_service.process_state(session_id)
-                            == Some(crate::daemon::session_lifecycle::SessionProcessState::Suspended)),
+                suspended: is_stopped,
+                reader_paused,
+                kernel_stopped,
+                registry_suspended,
+                suspension_source,
             },
         }
     }

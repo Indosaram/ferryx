@@ -1180,6 +1180,14 @@ export function NativeTerminalPane({
             preedit,
           });
         },
+        undefined,
+        {
+          paneIdentity,
+          bindingKey,
+          attemptGeneration: generation,
+          daemonEpoch: session?.daemonEpoch ?? null,
+          incarnation: null,
+        },
       )
       .catch((error: unknown) => {
         if (error instanceof NativeTerminalStaleGenerationError) {
@@ -1265,6 +1273,15 @@ export function NativeTerminalPane({
               ...(generation != null ? { generation } : {}),
               requestId,
             });
+          },
+          undefined,
+          "input",
+          {
+            paneIdentity,
+            bindingKey,
+            attemptGeneration: generation,
+            daemonEpoch: session?.daemonEpoch ?? null,
+            incarnation: null,
           },
         );
         if (!isCurrentOwner()) return;
@@ -2412,6 +2429,7 @@ export function NativeTerminalPane({
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
+      const isRemote = isRemoteWorkspaceId(session?.workspaceId);
       const presentationReceipt: NativeTerminalPresentationReceipt | null =
         paneIdentity !== undefined
           ? {
@@ -2419,7 +2437,7 @@ export function NativeTerminalPane({
               paneIdentity,
               backendSessionId: targetSessionId,
               bindingKey,
-              attemptGeneration: 0,
+              attemptGeneration: isRemote ? session?.remoteGeneration ?? null : null,
             }
           : null;
       if (presentationFrame !== null) {
@@ -2442,6 +2460,14 @@ export function NativeTerminalPane({
       })
         .then((receipt) => {
           if (isSubscribed) {
+            if (receipt?.presented !== true) {
+              switchDebug("terminal.surface.bounds_acknowledged", {
+                localSessionId: sessionId,
+                backendSessionId: targetSessionId,
+                presented: receipt?.presented ?? false,
+                renderDeferred: receipt?.renderDeferred ?? false,
+              });
+            }
             if (receipt?.presented === false) {
               if (receipt.renderDeferred) return;
               lastGeometry = null;
@@ -2492,9 +2518,8 @@ export function NativeTerminalPane({
                 });
               }
             }
-            presentNativeTerminalLifecycle(targetSessionId);
-            refreshScrollbar();
-            if (receipt) {
+            if (receipt?.presented === true) {
+              presentNativeTerminalLifecycle(targetSessionId);
               switchDebug("terminal.surface.presented", {
                 localSessionId: sessionId,
                 backendSessionId: targetSessionId,
@@ -2504,6 +2529,7 @@ export function NativeTerminalPane({
                 cellHeightPx: receipt.cellHeightPx,
               });
             }
+            refreshScrollbar();
           }
         })
         .catch((error: unknown) => {
@@ -2520,10 +2546,28 @@ export function NativeTerminalPane({
             });
             return;
           }
+          const errorCode = isStructuredIpcError(error) &&
+          [
+            "TIMEOUT",
+            "SESSION_NOT_FOUND",
+            "STALE_GENERATION",
+            "QUEUE_OVERFLOW",
+            "IO_ERROR",
+            "PERMISSION_DENIED",
+            "DISCONNECTED",
+            "ALREADY_EXISTS",
+            "INVALID_VALUE",
+            "INTERNAL_ERROR",
+            "PAIRED_HOST_DISCONNECTED",
+            "PAIRED_HOST_INVALID_RESPONSE",
+            "PAIRED_PROXY_MISSING",
+          ].includes(error.code)
+            ? error.code
+            : "UNKNOWN_BOUNDS_ERROR";
           switchDebug("terminal.surface.bounds.error", {
             localSessionId: sessionId,
             backendSessionId: targetSessionId,
-            error: isStructuredIpcError(error) ? error : String(error),
+            errorCode,
           });
           reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
           if (isSubscribed) {

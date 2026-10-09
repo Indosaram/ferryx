@@ -89,6 +89,25 @@ mod paired_host_compatibility_tests {
             !path.exists()
         );
     }
+
+    #[tokio::test]
+    async fn isolated_test_client_fails_fast_without_spawning_production_daemon() {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("missing-fixture.sock");
+        let token = directory.path().join("missing-fixture.token");
+        let client = DaemonClient::new_with_socket_and_token_path(socket.clone(), token.clone());
+
+        // Cloned upgrade client must carry the token_path
+        let upgraded = client.upgrade_rpc_client();
+        assert_eq!(upgraded.token_path, Some(token));
+
+        // Connect attempt must fail immediately without falling through to spawn
+        let result = client.connect_and_handshake_once().await;
+        assert!(result.is_err(), "must fail fast when socket is missing");
+        let err = result.unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::IoError);
+        assert!(err.message.contains("auto-spawn disabled"));
+    }
 }
 
 #[cfg(test)]
@@ -813,6 +832,7 @@ struct LocalSessionSlot {
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
+    token_path: Option<PathBuf>,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
     remote_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<RemoteSessionSlot>>>>,
@@ -832,6 +852,7 @@ impl DaemonClient {
     pub fn new() -> Self {
         Self {
             socket_path: get_socket_path(),
+            token_path: None,
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -845,6 +866,7 @@ impl DaemonClient {
     pub fn new_with_socket(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
+            token_path: None,
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -852,6 +874,29 @@ impl DaemonClient {
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    #[cfg(any(test, feature = "local-split-qa"))]
+    pub fn new_with_socket_and_token_path(socket_path: PathBuf, token_path: PathBuf) -> Self {
+        Self {
+            socket_path,
+            token_path: Some(token_path),
+            connection: Arc::new(Mutex::new(None)),
+            interactive_connection: Arc::new(Mutex::new(None)),
+            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            epoch: Arc::new(parking_lot::RwLock::new(None)),
+            upgrade_requested: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn resolve_transport_token(&self) -> Option<String> {
+        if let Some(ref path) = self.token_path {
+            read_transport_token_at(path)
+        } else {
+            read_transport_token()
         }
     }
 
@@ -957,7 +1002,7 @@ impl DaemonClient {
             crate::ipc::run_blocking(move || Self::validate_existing_socket_path(&socket_path)).await.map_err(|_| ServiceError::unavailable())?;
             // The credential is read before the port is, the order the daemon publishes them in:
             // the token presented can then never be newer than the port it is presented to.
-            let credential = read_transport_token();
+            let credential = self.resolve_transport_token();
             let stream = Self::connect_socket(&self.socket_path).await.map_err(|_| ServiceError::unavailable())?;
             let (reader, writer) = stream.into_split();
             let mut connection = ActiveConnection { reader: BufReader::new(reader), writer };
@@ -1250,6 +1295,7 @@ impl DaemonClient {
     fn upgrade_rpc_client(&self) -> Self {
         Self {
             socket_path: self.socket_path.clone(),
+            token_path: self.token_path.clone(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::clone(&self.remote_connections),
@@ -1374,6 +1420,18 @@ impl DaemonClient {
             return Ok(stream);
         }
 
+        // Explicit test-isolated client path: must fail immediately without auto-spawn or recovery.
+        // Never contact or launch the production daemon when an isolated fixture is unavailable.
+        if self.token_path.is_some() {
+            return Err(IpcError::new(
+                IpcErrorCode::IoError,
+                format!(
+                    "Cannot connect to isolated fixture daemon socket (auto-spawn disabled for isolated test client): {}",
+                    self.socket_path.display()
+                ),
+            ));
+        }
+
         // Bounded retry loop only if the socket file already exists on disk (e.g. during rolling handover when old
         // daemon unlinks the socket and new daemon binds it). If no socket file exists, do not waste 200ms sleeping.
         if fs::symlink_metadata(&self.socket_path).is_ok() {
@@ -1460,7 +1518,7 @@ impl DaemonClient {
     /// One attempt: the credential is read before the port is, so the token presented can never be
     /// newer than the port it is presented to.
     async fn connect_and_handshake_once(&self) -> Result<ActiveConnection, IpcError> {
-        let credential = read_transport_token();
+        let credential = self.resolve_transport_token();
         let stream = self.connect_or_spawn().await?;
         // A port was published but the credential that authenticates it was not on disk when it
         // was read: the same straddled pair a rejection reports, so re-read both halves instead of
@@ -2315,7 +2373,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: self.resolve_transport_token(),
             },
             DaemonRequest::SubscribeRemoteEvents,
         ] {
@@ -2423,7 +2481,7 @@ impl DaemonClient {
         for req in [
             DaemonRequest::Handshake {
                 version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token(),
+                token: self.resolve_transport_token(),
             },
             DaemonRequest::SubscribeDag {
                 workspace_id: workspace_id.to_string(),
@@ -2550,7 +2608,7 @@ impl DaemonClient {
 
         let handshake = DaemonRequest::Handshake {
             version: DAEMON_PROTOCOL_VERSION,
-            token: read_transport_token(),
+            token: self.resolve_transport_token(),
         };
         let mut json = serde_json::to_string(&handshake).map_err(|e| {
             IpcError::new(

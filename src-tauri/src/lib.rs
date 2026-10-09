@@ -1457,6 +1457,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_set_focus,
         cmd_native_terminal_set_preedit,
         cmd_native_terminal_send_input,
+        cmd_native_terminal_pane_liveness,
         cmd_native_terminal_scroll,
         cmd_native_terminal_scrollbar,
         cmd_native_terminal_set_scrollbar_overlay,

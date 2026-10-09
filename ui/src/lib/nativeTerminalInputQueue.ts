@@ -1,4 +1,5 @@
 import { safeRandomUUID } from "./uuid";
+import { switchDebug } from "./switchDebug";
 
 const queueRunId = safeRandomUUID().replace(/-/g, "").slice(0, 8);
 
@@ -72,6 +73,14 @@ export function resetTerminalInputDropCountsForTest(): void {
   dropListeners.clear();
 }
 
+export interface InputIdentityMeta {
+  readonly paneIdentity?: string | null;
+  readonly bindingKey?: string | null;
+  readonly attemptGeneration?: number | null;
+  readonly daemonEpoch?: string | null;
+  readonly incarnation?: string | null;
+}
+
 interface QueuedItem<T = unknown> {
   readonly id: number;
   readonly requestId: string;
@@ -84,6 +93,8 @@ interface QueuedItem<T = unknown> {
   readonly reject: (error: unknown) => void;
   readonly kind?: "input" | "preedit";
   readonly supersededResolvers?: Array<(value: T) => void>;
+  readonly identityMeta?: InputIdentityMeta;
+  dispatchedAt?: number | null;
 }
 
 interface LaneExecutionState {
@@ -159,6 +170,18 @@ export class NativeTerminalInputQueueManager {
     const s = this.sessions.get(sessionId);
     if (!s) return null;
     return s.inputLane.runningRequestId ?? s.preeditLane.runningRequestId ?? null;
+  }
+
+  public getQueuedHeadAgeMs(sessionId: string): number | null {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.items.length === 0) return null;
+    return Math.max(0, Date.now() - s.items[0].queuedAt);
+  }
+
+  public getHeadQueuedRequestId(sessionId: string): string | null {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.items.length === 0) return null;
+    return s.items[0].requestId;
   }
 
   public getRunningAgeMs(sessionId: string): number | null {
@@ -270,6 +293,7 @@ export class NativeTerminalInputQueueManager {
     operation: (requestId: string) => Promise<T>,
     customRequestId?: string,
     operationName = "input",
+    identityMeta?: InputIdentityMeta,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -307,9 +331,21 @@ export class NativeTerminalInputQueueManager {
         resolve,
         reject,
         kind: "input",
+        identityMeta,
       };
 
       state.items.push(item as QueuedItem);
+      switchDebug("terminal.surface.input.accepted", {
+        operationId: requestId,
+        backendSessionId: sessionId,
+        paneIdentity: identityMeta?.paneIdentity ?? null,
+        bindingKey: identityMeta?.bindingKey ?? null,
+        attemptGeneration: identityMeta?.attemptGeneration ?? generation,
+        daemonEpoch: identityMeta?.daemonEpoch ?? null,
+        incarnation: null,
+        payloadBytes: boundedBytes,
+        queuedAt: item.queuedAt,
+      });
       this.pump(sessionId);
     });
   }
@@ -320,6 +356,7 @@ export class NativeTerminalInputQueueManager {
     payloadBytes: number,
     operation: (requestId: string) => Promise<T>,
     customRequestId?: string,
+    identityMeta?: InputIdentityMeta,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -393,9 +430,21 @@ export class NativeTerminalInputQueueManager {
         reject,
         kind: "preedit",
         supersededResolvers: supersededResolvers as Array<(value: T) => void>,
+        identityMeta,
       };
 
       state.items.push(item as QueuedItem);
+      switchDebug("terminal.surface.input.accepted", {
+        operationId: requestId,
+        backendSessionId: sessionId,
+        paneIdentity: identityMeta?.paneIdentity ?? null,
+        bindingKey: identityMeta?.bindingKey ?? null,
+        attemptGeneration: identityMeta?.attemptGeneration ?? generation,
+        daemonEpoch: identityMeta?.daemonEpoch ?? null,
+        incarnation: null,
+        payloadBytes: boundedBytes,
+        queuedAt: item.queuedAt,
+      });
       this.pump(sessionId);
     });
   }
@@ -419,6 +468,18 @@ export class NativeTerminalInputQueueManager {
     const startedAt = Date.now();
     lane.runningSince = startedAt;
     lane.runningRequestId = item.requestId;
+    item.dispatchedAt = startedAt;
+
+    switchDebug("terminal.surface.input.dispatch", {
+      operationId: item.requestId,
+      backendSessionId: sessionId,
+      paneIdentity: item.identityMeta?.paneIdentity ?? null,
+      bindingKey: item.identityMeta?.bindingKey ?? null,
+      attemptGeneration: item.identityMeta?.attemptGeneration ?? item.generation,
+      daemonEpoch: item.identityMeta?.daemonEpoch ?? null,
+      incarnation: null,
+      dispatchedAt: startedAt,
+    });
 
     void (async () => {
       try {

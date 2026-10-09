@@ -1,0 +1,39 @@
+{
+  "registered": {
+    "processes": [
+      {
+        "pid": 3476,
+        "label": "diagnostic-classifier --headless"
+      }
+    ],
+    "sockets": [],
+    "directories": [
+      "C:\\Users\\sook\\task3-product-gate-01a100ad\\qa-isolation-frozen-final"
+    ]
+  },
+  "reaped": [
+    3476
+  ],
+  "receipts": [
+    {
+      "kind": "process",
+      "pid": 3476,
+      "label": "diagnostic-classifier --headless",
+      "exited": true,
+      "code": null,
+      "signal": "SIGTERM",
+      "method": "taskkill /T (process tree)"
+    },
+    {
+      "kind": "directory",
+      "path": "C:\\Users\\sook\\task3-product-gate-01a100ad\\qa-isolation-frozen-final",
+      "removed": true
+    }
+  ],
+  "gate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true
+  }
+}

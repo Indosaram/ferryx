@@ -114,6 +114,52 @@ pub struct DaemonSessionDetails {
     /// Absent from older daemons, which decode as not suspended.
     #[serde(default)]
     pub suspended: bool,
+    /// Whether the daemon's ring buffer reader is paused for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_paused: Option<bool>,
+    /// Whether the process is stopped in the OS kernel (SIGSTOP/SIGTSTP on Unix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_stopped: Option<bool>,
+    /// Whether the daemon's lifecycle registry records this session as suspended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_suspended: Option<bool>,
+    /// Attribution for process suspension ("unknown" in Task 2, verified in Task 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension_source: Option<String>,
+}
+
+impl DaemonSessionDetails {
+    pub fn new(
+        session_id: String,
+        workspace_id: Option<String>,
+        worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        running: bool,
+        start_sequence: Option<u64>,
+        end_sequence: Option<u64>,
+        last_output_age_ms: Option<u64>,
+        suspended: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            workspace_id,
+            worktree,
+            cwd,
+            cols,
+            rows,
+            running,
+            start_sequence,
+            end_sequence,
+            last_output_age_ms,
+            suspended,
+            reader_paused: None,
+            kernel_stopped: None,
+            registry_suspended: None,
+            suspension_source: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1402,6 +1448,10 @@ mod tests {
                 end_sequence: Some(50),
                 last_output_age_ms: None,
                 suspended: false,
+                reader_paused: None,
+                kernel_stopped: None,
+                registry_suspended: None,
+                suspension_source: None,
             },
         };
         let desc_resp_json = serde_json::to_string(&desc_resp).expect("serialize describe resp");
