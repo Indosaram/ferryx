@@ -259,6 +259,8 @@ mod endpoint_owner_probe_tests {
             binary_path: None,
             binary_mtime_ms: None,
             daemon_version: None,
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         })
         .unwrap();
         reply.push('\n');
@@ -1354,7 +1356,7 @@ impl DaemonClient {
             )
             .await?
         {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             _ => Err(split_transport_error(
                 IpcError::internal("Unexpected describe response"),
                 Some(identity),
@@ -1372,7 +1374,7 @@ impl DaemonClient {
             &DaemonRequest::DescribeSession { session_id: session_id.into() },
             None, deadline, false).await?
         {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             DaemonResponse::Error { message, code, details } => {
                 let mut error = IpcError::new(code.as_deref().map(IpcErrorCode::from_code_str)
                     .unwrap_or(IpcErrorCode::InternalError), message);
@@ -2053,6 +2055,9 @@ impl DaemonClient {
         daemon_version: Option<String>,
         daemon_mtime_ms: Option<u64>,
     ) {
+        if cfg!(debug_assertions) {
+            return;
+        }
         let own_version = env!("CARGO_PKG_VERSION");
         let own_exe = std::env::current_exe().ok();
         let own_mtime = own_exe
@@ -3125,7 +3130,7 @@ impl DaemonClient {
             .await?;
 
         match resp {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
@@ -3133,6 +3138,21 @@ impl DaemonClient {
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
             )),
+        }
+    }
+
+    pub async fn describe_session_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<(DaemonSessionDetails, Option<String>), IpcError> {
+        match self.send_request(DaemonRequest::DescribeSession {
+            session_id: session_id.into(),
+        }).await? {
+            DaemonResponse::DescribeSessionOk { session, daemon_epoch } => {
+                Ok((session, daemon_epoch))
+            }
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal("Unexpected identity description response")),
         }
     }
 

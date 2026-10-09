@@ -3448,7 +3448,7 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                                         false,
                                     );
                                 session.incarnation = Some(P13_PROXY_INCARNATION.into());
-                                DaemonResponse::DescribeSessionOk { session }
+                                DaemonResponse::DescribeSessionOk { session, daemon_epoch: None }
                             } else {
                                 DaemonResponse::Error {
                                     message: format!("Session '{session_id}' not found"),

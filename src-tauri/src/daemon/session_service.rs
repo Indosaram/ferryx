@@ -411,7 +411,7 @@ impl DaemonSessionService {
             session_id, session: recorded, ownership, ..
         } = &operation {
             match self.handle_describe_session(session_id) {
-                DaemonResponse::DescribeSessionOk { session }
+                DaemonResponse::DescribeSessionOk { session, .. }
                     if recorded.incarnation.is_some() && recorded.incarnation == session.incarnation
                         && recorded.workspace_id == session.workspace_id && recorded.worktree == session.worktree =>
                 {
@@ -537,7 +537,7 @@ impl DaemonSessionService {
             Ok(session_id) => {
                 entry.session_id = Some(session_id.clone());
                 match self.handle_describe_session(&session_id) {
-                    DaemonResponse::DescribeSessionOk { session } => R::Created {
+                    DaemonResponse::DescribeSessionOk { session, .. } => R::Created {
                         session_id, daemon_epoch: current_epoch, session,
                         ownership: crate::daemon::protocol::SplitOwnership::Created,
                     },
@@ -2775,6 +2775,7 @@ impl DaemonSessionService {
                 .session_sequence_range(session_id)
                 .unwrap_or((None, None));
             return DaemonResponse::DescribeSessionOk {
+                daemon_epoch: None,
                 session: DaemonSessionDetails {
                     session_id: session_id.into(),
                     workspace_id: Some(d.config.project_id),
@@ -2822,6 +2823,7 @@ impl DaemonSessionService {
                 // unprovable (`Attach binding incarnation cannot be proven`, ipc/terminal.rs).
                 let incarnation = self.terminal_service.paired().session_incarnation(session_id);
                 return DaemonResponse::DescribeSessionOk {
+                    daemon_epoch: None,
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
                         workspace_id: None,
@@ -2881,6 +2883,7 @@ impl DaemonSessionService {
         };
 
         DaemonResponse::DescribeSessionOk {
+            daemon_epoch: None,
             session: DaemonSessionDetails {
                 session_id: session_id.to_string(),
                 workspace_id,
@@ -3002,7 +3005,7 @@ mod tests {
             .expect("install paired proxy");
 
         let describe = |session_id: &str| match server.session_service().handle_describe_session(session_id) {
-            DaemonResponse::DescribeSessionOk { session } => session,
+            DaemonResponse::DescribeSessionOk { session, .. } => session,
             other => panic!("a paired session must describe: {other:?}"),
         };
 
