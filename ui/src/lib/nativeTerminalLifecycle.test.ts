@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./switchDebug", () => ({ switchDebug: vi.fn() }));
 
@@ -12,6 +12,7 @@ import {
   resetNativeTerminalLifecycleForTest,
   registerDurableNativeBinding,
   getDurableNativeBinding,
+  nativeBindingRemainingMs,
 } from "./nativeTerminalLifecycle";
 import type { PaneAttachTuple } from "./types";
 
@@ -24,6 +25,93 @@ function deferred() {
   });
   return { promise, resolve, reject };
 }
+
+describe("nativeTerminalLifecycle presentation budget", () => {
+  const tuple: PaneAttachTuple = {
+    backendSessionId: "back", incarnation: "life", daemonEpoch: "8",
+    frontendSessionId: "front", paneIdentity: "pane", bindingKey: "binding", attemptGeneration: 3,
+  };
+  let nowMs = 0;
+
+  beforeEach(() => {
+    resetNativeTerminalLifecycleForTest();
+    nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("gives post-ready geometry its operation cap after the startup deadline", () => {
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    nowMs = 14_000;
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(1_000);
+    let budgetAtPresentation = 0;
+    subscribeNativeTerminalPresentation(tuple, () => {
+      budgetAtPresentation = nativeBindingRemainingMs("back", 2_000);
+    });
+
+    emitNativeTerminalPresentation(tuple);
+    nowMs = 16_000;
+
+    expect(budgetAtPresentation).toBe(2_000);
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(2_000);
+    nowMs = 60_000;
+    expect(nativeBindingRemainingMs("back", 500)).toBe(500);
+    expect(nativeBindingRemainingMs("missing", 2_000)).toBe(0);
+  });
+
+  it("does not refresh an expired unready attempt or accept its late receipt", () => {
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    nowMs = 15_000;
+    presentNativeTerminalLifecycle("back");
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+
+    emitNativeTerminalPresentation(tuple);
+
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+  });
+
+  it("does not complete startup for a receipt mismatching any tuple field", () => {
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    nowMs = 14_000;
+    const stale: NativeTerminalPresentationReceipt[] = [
+      { ...tuple, backendSessionId: "other" }, { ...tuple, incarnation: "other" },
+      { ...tuple, daemonEpoch: "7" }, { ...tuple, frontendSessionId: "other" },
+      { ...tuple, paneIdentity: "other" }, { ...tuple, bindingKey: "other" },
+      { ...tuple, attemptGeneration: 2 },
+    ];
+
+    for (const receipt of stale) {
+      emitNativeTerminalPresentation(receipt);
+      expect(nativeBindingRemainingMs("back", 2_000)).toBe(1_000);
+    }
+    nowMs = 15_000;
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+  });
+
+  it("starts a new generation deadline without inheriting ready state", () => {
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    emitNativeTerminalPresentation(tuple);
+    nowMs = 20_000;
+    const retry = { ...tuple, attemptGeneration: 4 };
+
+    expect(registerDurableNativeBinding(retry)).toBe(true);
+    nowMs = 34_000;
+    emitNativeTerminalPresentation(tuple);
+
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(1_000);
+    nowMs = 35_000;
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    nowMs = 36_000;
+    const next = { ...tuple, attemptGeneration: 5 };
+    expect(registerDurableNativeBinding(next)).toBe(true);
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(2_000);
+    nowMs = 50_000;
+    emitNativeTerminalPresentation(next);
+    nowMs = 52_000;
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(2_000);
+  });
+});
 
 describe("nativeTerminalLifecycle sibling pane ownership", () => {
   beforeEach(resetNativeTerminalLifecycleForTest);

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, MainThreadMarker};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{NSColor, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::CAMetalLayer;
@@ -517,14 +517,172 @@ impl MacosCompositorTarget {
         if let Some(mtm) = MainThreadMarker::new() {
             let _ = mtm;
             let view = unsafe { &*(view_ptr as *const FerryxNativeTerminalView) };
+            unsafe { raise_above_terminal_siblings(view) };
             view.setHidden(false);
+            trace_revealed_view(view);
         } else {
             dispatch2::DispatchQueue::main().exec_async(move || unsafe {
                 let view = &*(view_ptr as *const FerryxNativeTerminalView);
+                raise_above_terminal_siblings(view);
                 view.setHidden(false);
+                trace_revealed_view(view);
             });
         }
     }
+}
+
+/// Moves a view that is being revealed directly above every other terminal view, which keeps it
+/// below the web view because terminal views are always inserted beneath it.
+///
+/// `new` inserts each child view at the back of the content view, so a surface created after
+/// another one sits beneath it. When the older view is still visible (a pane that was replaced
+/// but not yet released), it covers the newly revealed one and the pane shows frozen pixels
+/// while input and output keep flowing. Measured in the 2026-10-08 boot trace: the target view
+/// was revealed under visible older siblings with overlapping frames.
+///
+/// Must run on the main thread.
+unsafe fn raise_above_terminal_siblings(view: &FerryxNativeTerminalView) {
+    unsafe {
+        let Some(parent) = view.superview() else {
+            return;
+        };
+        let terminal_class = FerryxNativeTerminalView::class();
+        let children = parent.subviews();
+        let mut view_index = None;
+        let mut topmost_other_terminal = None;
+        for (index, sibling) in children.iter().enumerate() {
+            if std::ptr::eq(&*sibling, &**view) {
+                view_index = Some(index);
+                continue;
+            }
+            let is_terminal: bool = msg_send![&*sibling, isKindOfClass: terminal_class];
+            if is_terminal {
+                topmost_other_terminal = Some((index, sibling));
+            }
+        }
+        let (Some(view_index), Some((other_index, other))) = (view_index, topmost_other_terminal)
+        else {
+            return;
+        };
+        if other_index > view_index {
+            parent.addSubview_positioned_relativeTo(
+                view,
+                NSWindowOrderingMode::Above,
+                Some(&other),
+            );
+        }
+    }
+}
+
+// Capture only geometry and compositor state, once per hidden-to-visible transition.
+// AppKit is read on the main thread; file I/O is offloaded to the blocking pool.
+fn trace_revealed_view(view: &FerryxNativeTerminalView) {
+    let Some(_mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    fn collect(node: &NSView, views: &mut Vec<serde_json::Value>) {
+        let frame = node.frame();
+        views.push(serde_json::json!({
+            "viewPtr": format!("{node:p}"),
+            "hidden": node.isHidden(),
+            "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+        }));
+        if views.len() < 8 {
+            if let Some(parent) = unsafe { node.superview() } {
+                collect(&parent, views);
+            }
+        }
+    }
+    let mut views = Vec::new();
+    collect(view, &mut views);
+    // SAFETY: The main-thread marker above guards all AppKit reads. The view owns
+    // its backing layer; returned siblings and sublayers stay retained by their
+    // arrays throughout capture. drawableSize is read only after selector probing.
+    let details = unsafe {
+        let mut siblings = Vec::new();
+        let mut sibling_count = 0;
+        if let Some(parent) = view.superview() {
+            let children = parent.subviews();
+            sibling_count = children.len();
+            for (index, sibling) in children.iter().take(32).enumerate() {
+                let frame = sibling.frame();
+                let class: &objc2::runtime::AnyClass = msg_send![&*sibling, class];
+                siblings.push(serde_json::json!({
+                    "index": index,
+                    "viewPtr": format!("{:p}", &*sibling),
+                    "class": class.name().to_string_lossy(),
+                    "target": std::ptr::eq(&*sibling, &**view),
+                    "hidden": sibling.isHidden(),
+                    "opaque": sibling.isOpaque(),
+                    "alpha": sibling.alphaValue(),
+                    "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+                }));
+            }
+        }
+        let backing: Option<&AnyObject> = msg_send![view, layer];
+        let mut metal_layers = Vec::new();
+        let backing = backing.map(|layer| {
+            let frame: NSRect = msg_send![layer, frame];
+            let bounds: NSRect = msg_send![layer, bounds];
+            let hidden: bool = msg_send![layer, isHidden];
+            let opaque: bool = msg_send![layer, isOpaque];
+            let opacity: f32 = msg_send![layer, opacity];
+            let sublayers: Option<&AnyObject> = msg_send![layer, sublayers];
+            let count: usize = sublayers.map_or(0, |layers| msg_send![layers, count]);
+            if let Some(layers) = sublayers {
+                for index in 0..count.min(8) {
+                    let sublayer: &AnyObject = msg_send![layers, objectAtIndex: index];
+                    let is_metal: bool = msg_send![sublayer, respondsToSelector: sel!(drawableSize)];
+                    if !is_metal {
+                        continue;
+                    }
+                    let frame: NSRect = msg_send![sublayer, frame];
+                    let bounds: NSRect = msg_send![sublayer, bounds];
+                    let hidden: bool = msg_send![sublayer, isHidden];
+                    let drawable_size: NSSize = msg_send![sublayer, drawableSize];
+                    metal_layers.push(serde_json::json!({
+                        "index": index,
+                        "layerPtr": format!("{sublayer:p}"),
+                        "hidden": hidden,
+                        "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+                        "bounds": [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height],
+                        "drawableSize": [drawable_size.width, drawable_size.height],
+                    }));
+                }
+            }
+            serde_json::json!({
+                "layerPtr": format!("{layer:p}"),
+                "hidden": hidden,
+                "opaque": opaque,
+                "opacity": opacity,
+                "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+                "bounds": [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height],
+                "sublayerCount": count,
+            })
+        });
+        let window = view.window().map(|window| serde_json::json!({
+            "windowPtr": format!("{:p}", &*window),
+            "visible": window.isVisible(),
+            "miniaturized": window.isMiniaturized(),
+        }));
+        serde_json::json!({
+            "viewPtr": format!("{view:p}"),
+            "views": views,
+            "siblings": siblings,
+            "siblingCount": sibling_count,
+            "backingLayer": backing,
+            "metalLayers": metal_layers,
+            "window": window,
+        })
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = crate::ipc::diagnostics::append_boot_trace(
+            &crate::ipc::diagnostics::boot_trace_path(),
+            "native.revealed.geometry",
+            &details,
+            1024 * 1024,
+        );
+    });
 }
 
 impl Drop for MacosCompositorTarget {

@@ -615,6 +615,46 @@ describe("workspaceRestore coordinator", () => {
     await expect(defaultListLiveBackendSessionIds()).rejects.toThrow("daemon list unavailable");
   });
 
+  it.each([
+    { incarnation: "original-pty", backendSessionId: "backend-1", daemonEpoch: "18446744073709551614", lifecycle: "working" },
+    { incarnation: "replacement-pty", backendSessionId: "standby:sess-1", daemonEpoch: null, lifecycle: "exited" },
+  ])("preloads default inventory across epochs with $incarnation", async ({ incarnation, backendSessionId, daemonEpoch, lifecycle }) => {
+    const workspaceId = "ws-default-inventory";
+    const persisted = persistedSingleTerminal(workspaceId, "backend-1", "18446744073709551613");
+    const session = persisted.workspaces[workspaceId].terminalSessions["sess-1"];
+    tauriMocks.loadSession.mockResolvedValueOnce({
+      ...persisted,
+      workspaces: {
+        [workspaceId]: {
+          ...persisted.workspaces[workspaceId],
+          terminalSessions: { "sess-1": { ...session, incarnation: "original-pty" } },
+        },
+      },
+    });
+    tauriMocks.listTerminalSessions.mockResolvedValueOnce([{
+      sessionId: "backend-1",
+      worktreePath: "/repo/test",
+      running: true,
+      daemonEpoch: "18446744073709551614",
+      incarnation,
+    }]);
+
+    await preloadWorkspaceSnapshots([workspaceId]);
+
+    expect(tauriMocks.loadSession).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.listTerminalSessions).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceSnapshot(workspaceId)?.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId,
+      daemonEpoch,
+      lifecycle,
+      incarnation: "original-pty",
+      worktreePath: "/repo/test",
+      lastOutputSequence: null,
+    });
+    expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+  });
+
   it("restores SSH pane identity while the daemon list is temporarily unavailable", async () => {
     const workspaceId = "ssh:list-unavailable";
     const persisted = persistedSingleTerminal(workspaceId, "stable", "old");

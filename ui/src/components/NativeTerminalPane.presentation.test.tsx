@@ -1,8 +1,9 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NativeTerminalPane, resetNativeTerminalPaneForTest } from "./NativeTerminalPane";
-import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
+import { resetNativeTerminalLifecycleForTest, subscribeNativeTerminalPresentation } from "../lib/nativeTerminalLifecycle";
 import type { TerminalSession } from "../lib/types";
+import { deserializeWorkspaceState, WORKSPACE_SESSION_VERSION } from "../lib/sessionPersistence";
 import * as shortcuts from "../lib/shortcuts";
 
 const bridge = vi.hoisted(() => ({
@@ -95,6 +96,164 @@ function dialog() {
 }
 
 describe("native terminal presentation retention", () => {
+  it.each(["saved", "completed spawn"])("binds the live backend instead of a stale %s tuple", async (source) => {
+    // Given: backend replacement retains the previous completed attachment tuple.
+    const oldTuple = {
+      backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+    };
+    const owner: TerminalSession = {
+      ...session("backend-b"), incarnation: "life-b", daemonEpoch: "epoch-b",
+      ...(source === "saved" ? { attachTuple: oldTuple } : { spawnIntent: {
+        requestId: "completed", prepared: null, generation: 3, createSent: true,
+        cancelRequested: false, ready: true, bindingPersisted: true, attachTuple: oldTuple,
+      } }),
+    };
+
+    // When: the pane binds the current authoritative backend after replacement.
+    const view = render(<NativeTerminalPane session={owner} />);
+    await act(async () => {});
+
+    // Then: persistence, dispatch, and presentation use the same fresh seven-field identity.
+    const expectedTuple = {
+      backendSessionId: "backend-b", incarnation: "life-b", daemonEpoch: "epoch-b",
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-b:epoch-b:0:", attemptGeneration: 4,
+    };
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
+    expect(commands("cmd_native_terminal_attach")[0][1]).toEqual(expect.objectContaining({
+      sessionId: "backend-b", attachTuple: expectedTuple,
+    }));
+    expect(persistedBindings.get(owner.id)?.attachTuple).toEqual(expectedTuple);
+    expect(view.getByTestId("native-terminal-pane").getAttribute("data-native-terminal-presented")).toBe("true");
+  });
+
+  it.each([false, true])("binds a completed spawn through authoritative handover restoration (retained intent %s)", async (retainIntent) => {
+    // Given: a completed split has a persisted tuple from the predecessor epoch.
+    const oldTuple = {
+      backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+    };
+    const intent = {
+      requestId: "completed", prepared: null, generation: 3, createSent: true,
+      cancelRequested: false, ready: true, bindingPersisted: true, attachTuple: oldTuple,
+    };
+    const restored = deserializeWorkspaceState("ws-main", {
+      version: WORKSPACE_SESSION_VERSION,
+      timestamp: 0, activeWorkspaceId: "ws-main",
+      workspaces: {
+        "ws-main": {
+          workspaceId: "ws-main", repoRoot: "/workspace", worktrees: [], activeWorktreePath: null,
+          layout: {
+            splitMode: "none", primaryTabId: "tab-a", secondaryTabId: null, activeTabId: "tab-a",
+            tabs: [{ id: "tab-a", kind: "terminal", label: "main", terminal: {
+              primarySessionId: "pane-a", paneTree: { type: "leaf", leafId: "leaf-a" },
+              activeLeafId: "leaf-a", expandedLeafId: null, sessionIdsByLeafId: { "leaf-a": "pane-a" },
+            } }],
+          },
+          terminalSessions: {
+            "pane-a": { localSessionId: "pane-a", backendSessionId: "backend-a", cwd: "/workspace", worktreePath: "/workspace", createdAt: 0,
+              daemonEpoch: "epoch-a", incarnation: "life-a", attachTuple: oldTuple, spawnIntent: intent },
+          },
+        },
+      },
+    }, {
+      authoritative: true, daemonEpoch: "epoch-b",
+      sessions: [{ sessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-b", running: true }],
+    });
+    const owner = restored?.sessions["pane-a"];
+    if (!owner) throw new Error("Restored pane missing");
+    expect(owner.spawnIntent).toBeUndefined();
+    expect(owner.daemonEpoch).toBe("epoch-b");
+    const paneOwner = retainIntent ? { ...owner, spawnIntent: intent } : owner;
+
+    // When: the restored session reaches the real pane's durable binding path.
+    const view = render(<NativeTerminalPane session={paneOwner} />);
+    await act(async () => {});
+
+    // Then: only the seven-field replacement tuple is dispatched and persisted.
+    const expectedTuple = { ...oldTuple, daemonEpoch: "epoch-b", bindingKey: "backend-a:epoch-b:0:", attemptGeneration: 4 };
+    expect(persistedBindings.get(owner.id)?.attachTuple).toEqual(expectedTuple);
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
+    expect(commands("cmd_native_terminal_attach")[0][1]?.attachTuple).toEqual(expectedTuple);
+    expect(view.getByTestId("native-terminal-pane").getAttribute("data-native-terminal-presented")).toBe("true");
+  });
+
+  it("refreshes a completed spawn tuple on forced input recovery", async () => {
+    // Given: a presented ready spawn needs native reattachment before input can resume.
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const tuple = {
+      backendSessionId: "backend-a", incarnation: "life-a", daemonEpoch: "epoch-a",
+      frontendSessionId: "pane-a", paneIdentity: "pane-a", bindingKey: "backend-a:epoch-a:0:", attemptGeneration: 3,
+    };
+    const owner: TerminalSession = { ...session(), incarnation: "life-a", daemonEpoch: "epoch-a", spawnIntent: {
+      requestId: "completed", prepared: null, generation: 3, createSent: true,
+      cancelRequested: false, ready: true, bindingPersisted: true, attachTuple: tuple,
+    } };
+    bridge.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_send_input") throw { code: "SESSION_NOT_FOUND", message: "Surface missing", details: { inputWritten: false } };
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const view = render(<NativeTerminalPane session={owner} />);
+    await act(async () => {});
+    expect(commands("cmd_native_terminal_attach")[0][1]?.attachTuple).toEqual(tuple);
+    // When: input failure invokes the real pane's forced reattachment path.
+    await act(async () => {
+      fireEvent.keyDown(view.getByTestId("native-terminal-focus-sink"), { key: "x", code: "KeyX" });
+    });
+
+    // Then: the exact identity is retained with a fresh fenced attempt generation.
+    const replacement = { ...tuple, attemptGeneration: 4 };
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
+    expect(commands("cmd_native_terminal_attach")[1][1]?.attachTuple).toEqual(replacement);
+    expect(persistedBindings.get(owner.id)?.attachTuple).toEqual(replacement);
+    expect(view.getByTestId("native-terminal-pane").getAttribute("data-native-terminal-presented")).toBe("true");
+  });
+
+  it("dispatches bounded geometry after a matching presentation outlives startup", async () => {
+    // Given: the session and emitted receipt share all seven tuple fields.
+    let nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const owner: TerminalSession = { ...session(), incarnation: "life-a", daemonEpoch: "epoch-a" };
+    let acceptPresentation: () => void = () => undefined;
+    const presented = new Promise<void>((resolve) => { acceptPresentation = resolve; });
+    const unsubscribe = subscribeNativeTerminalPresentation({
+      frontendSessionId: owner.id, paneIdentity: owner.id, backendSessionId: "backend-a",
+      incarnation: "life-a", daemonEpoch: "epoch-a",
+    }, acceptPresentation);
+    const view = render(<NativeTerminalPane session={owner} />);
+    await act(async () => { await presented; });
+    unsubscribe();
+    const tuple = persistedBindings.get(owner.id)?.attachTuple;
+    expect(tuple).toBeDefined();
+    expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "true");
+    let reportResize: () => void = () => undefined;
+    const resized = new Promise<void>((resolve) => { reportResize = resolve; });
+    bridge.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") {
+        reportResize();
+        return PRESENTED;
+      }
+      return undefined;
+    });
+
+    // When: geometry changes after the initial 15-second attempt deadline.
+    nowMs = 16_000;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(10, 20, 800, 700));
+    await act(async () => {
+      fireEvent(window, new Event("resize"));
+      await resized;
+    });
+
+    // Then: the real pane dispatch retains the exact tuple and operation cap.
+    expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(2);
+    expect(commands("cmd_native_terminal_set_bounds").at(-1)?.[1]).toEqual(expect.objectContaining({
+      sessionId: "backend-a", attachTuple: tuple,
+      bounds: { x: 10, y: 20, width: 800, height: 700 }, remainingMs: 2_000,
+    }));
+  });
+
   it("does not steal dialog focus when an earlier attachment finishes", async () => {
     let finishAttach: () => void = () => undefined;
     const attachment = new Promise<void>((resolve) => { finishAttach = resolve; });
@@ -273,6 +432,35 @@ describe("native terminal presentation retention", () => {
     expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "false");
     expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
     expect(commands("cmd_native_terminal_detach")).toHaveLength(1);
+  });
+
+  it.each([false, true])("detaches only the outgoing SSH surface on a local workspace switch (attach pending %s)", async (attachPending) => {
+    // Given: an unrelated pane stays mounted while SSH owns the outgoing surface.
+    let finishAttach!: () => void;
+    const pendingAttach = new Promise<void>((resolve) => { finishAttach = resolve; });
+    bridge.invoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args?.sessionId === "backend-a" && attachPending) return pendingAttach;
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const outgoing = { ...session(), workspaceId: "remote:ssh", incarnation: "ssh-life", daemonEpoch: "ssh-epoch" };
+    const sibling = { ...session("backend-sibling"), id: "pane-sibling" };
+    const incoming = { ...session("backend-local"), id: "pane-local", workspaceId: "ws-ferryx", cwd: "/workspace/ferryx" };
+    const view = render(<><NativeTerminalPane key="sibling" session={sibling} /><NativeTerminalPane key="ssh" session={outgoing} /></>);
+    await act(async () => {});
+    const outgoingTuple = structuredClone(persistedBindings.get(outgoing.id)!.attachTuple!);
+    expect(commands("cmd_native_terminal_attach").map(([, args]) => args?.sessionId)).toContain("backend-a");
+
+    // When: the actual outgoing component is replaced by a different workspace's pane.
+    await act(async () => {
+      view.rerender(<><NativeTerminalPane key="sibling" session={sibling} /><NativeTerminalPane key="local" session={incoming} /></>);
+    });
+    await act(async () => { finishAttach(); await pendingAttach; });
+
+    // Then: teardown carries the SSH tuple, never the incoming or sibling identity.
+    expect(commands("cmd_native_terminal_detach")).toEqual([
+      ["cmd_native_terminal_detach", { sessionId: "backend-a", attachTuple: outgoingTuple }],
+    ]);
+    expect(view.getAllByTestId("native-terminal-pane").map((pane) => pane.getAttribute("data-native-terminal-presented"))).toEqual(["true", "true"]);
   });
 
   it("holds the final frame until a reconnected replacement is presented", async () => {
