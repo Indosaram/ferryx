@@ -237,6 +237,7 @@ impl HostShared {
     }
 
     fn start_session(self: &Arc<Self>, s: &Spawn) -> Result<(Uuid, SpawnResult), (ErrorDetail, String)> {
+        crate::platform::init();
         let (cols, rows) = normalize_size(s.cols, s.rows);
         let fail = |what: &str, e: &dyn std::fmt::Display| (ErrorDetail::SpawnFailed, format!("{what}: {e}"));
         let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| fail("open pty", &e))?;

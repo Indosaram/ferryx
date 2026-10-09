@@ -114,7 +114,7 @@ impl Client {
     async fn drive(&mut self, rc: &mut ReplicaClient, mut until: impl FnMut(&ReplicaClient) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !until(rc) {
-            let f = self.next_frame(deadline).await.unwrap_or_else(|| panic!("timed out; replica revision {}", rc.local_revision));
+            let f = self.next_frame(deadline).await.unwrap_or_else(|| panic!("timed out; replica revision {}, screen {:?}", rc.local_revision, row_texts(rc).into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>()));
             let out = match f.message {
                 Message::SnapshotFrame(s) => rc.on_snapshot(&s),
                 Message::Delta(d) => rc.on_delta(&d),

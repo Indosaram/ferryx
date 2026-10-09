@@ -1,4 +1,5 @@
 use std::io;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -165,15 +166,29 @@ pub mod windows {
         r
     }
 
+    struct PipeSecurity(SECURITY_ATTRIBUTES);
+
+    unsafe impl Send for PipeSecurity {}
+
+    impl PipeSecurity {
+        fn from_sddl(sddl: &[u16]) -> io::Result<Self> {
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) } == 0 {
+                return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32));
+            }
+            Ok(PipeSecurity(SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor, bInheritHandle: 0 }))
+        }
+
+        fn as_ptr(&mut self) -> *mut c_void {
+            &mut self.0 as *mut SECURITY_ATTRIBUTES as *mut c_void
+        }
+    }
+
     pub async fn serve(host: Arc<HostShared>, info: Arc<HostInfo>, name: &str, ready: impl FnOnce()) -> io::Result<()> {
         let sid = user_sid()?;
         let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})\0").encode_utf16().collect();
-        let mut descriptor: *mut c_void = std::ptr::null_mut();
-        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) } == 0 {
-            return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32));
-        }
-        let mut attrs = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor, bInheritHandle: 0 };
-        let make = |first: bool| unsafe { ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create_with_security_attributes_raw(name, &mut attrs as *mut _ as *mut c_void) };
+        let mut attrs = PipeSecurity::from_sddl(&sddl)?;
+        let mut make = |first: bool| unsafe { ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create_with_security_attributes_raw(name, attrs.as_ptr()) };
         let mut server = make(true)?;
         ready();
         loop {

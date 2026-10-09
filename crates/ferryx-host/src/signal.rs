@@ -13,9 +13,19 @@ pub fn deliver(pid: u32, _killer: &mut (dyn ChildKiller + Send + Sync), signal: 
 }
 
 #[cfg(windows)]
-pub fn deliver(_pid: u32, killer: &mut (dyn ChildKiller + Send + Sync), signal: Signal) -> bool {
+pub fn deliver(pid: u32, _killer: &mut (dyn ChildKiller + Send + Sync), signal: Signal) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     match signal {
-        Signal::Hangup | Signal::Terminate | Signal::Kill => killer.kill().is_ok(),
-        Signal::Interrupt => false,
+        Signal::Hangup | Signal::Terminate | Signal::Kill if pid != 0 => {
+            let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+            if process.is_null() {
+                return false;
+            }
+            let ok = unsafe { TerminateProcess(process, 1) } != 0;
+            unsafe { CloseHandle(process) };
+            ok
+        }
+        _ => false,
     }
 }
