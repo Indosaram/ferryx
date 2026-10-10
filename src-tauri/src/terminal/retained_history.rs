@@ -123,10 +123,15 @@ impl RetainedHistory {
         let mut records: Vec<_> = self.text.iter().chain(self.images.iter())
             .map(|record| (record.order, record.sequence, record.bytes.as_slice()))
             .collect();
-        for (index, &(start, order, sequence)) in pending.parts.iter().enumerate() {
-            let end = pending.parts.get(index + 1).map_or(pending.bytes.len(), |part| part.0);
-            if start < end {
-                records.push((order, sequence, &pending.bytes[start..end]));
+        if pending.parts.is_empty() && !pending.bytes.is_empty() {
+            let next_order = records.iter().map(|r| r.0).max().map_or(0, |m| m + 1);
+            records.push((next_order, pending.sequence.unwrap_or(0), &pending.bytes[..]));
+        } else {
+            for (index, &(start, order, sequence)) in pending.parts.iter().enumerate() {
+                let end = pending.parts.get(index + 1).map_or(pending.bytes.len(), |part| part.0);
+                if start < end {
+                    records.push((order, sequence, &pending.bytes[start..end]));
+                }
             }
         }
         records.sort_by_key(|record| record.0);
@@ -560,11 +565,13 @@ mod tests {
         let mut retained = RetainedHistory::new(RetentionBudget::default());
         retained.push(1, b"before");
         retained.seal();
-        retained.push(3, b"after");
+        retained.push(1, b"after");
         let records = retained.records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].0, 1);
-        assert_eq!(records[1].0, 3);
+        assert_eq!(records[0].1, b"before");
+        assert_eq!(records[1].0, 1);
+        assert_eq!(records[1].1, b"after");
     }
 
     #[test]
@@ -575,5 +582,25 @@ mod tests {
         retained.push(2, b"fresh\x1b\\");
         assert!(retained.is_empty() || history(&retained).starts_with(b"fresh"));
         assert_eq!(retained.image_bytes(), 0);
+    }
+
+    #[test]
+    fn csi_discard_with_empty_text_retains_introducer_in_replay() {
+        let budget = RetentionBudget {
+            text_bytes: 64,
+            image_bytes: 64,
+        };
+        let max_unit = budget.max_unit_bytes();
+        let mut retained = RetainedHistory::new(budget);
+        let mut oversized_csi = b"\x1b[".to_vec();
+        oversized_csi.extend(std::iter::repeat_n(b'1', max_unit + 1));
+        retained.push(1, &oversized_csi);
+
+        let replayed = retained.replay();
+        assert!(
+            replayed.ends_with(b"\x1b[") || replayed.windows(2).any(|w| w == b"\x1b["),
+            "csi discard introducer must be preserved in replay, got: {:?}",
+            replayed
+        );
     }
 }

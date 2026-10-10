@@ -487,13 +487,35 @@ impl BoundedBuffer {
         ledger: &[ResizePoint],
         from_retained: bool,
     ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
-        let first = self.start_sequence();
+        let first = if from_retained {
+            self.retained_start_sequence()
+        } else {
+            self.start_sequence()
+        };
         let last = self.end_sequence();
-        let gap = after_sequence.zip(first).and_then(|(requested, first)| {
-            (requested < first.saturating_sub(1)).then_some(ReplayGap {
-                requested_after_sequence: requested,
-                available_from_sequence: first,
-            })
+        let gap = after_sequence.and_then(|requested| {
+            if let Some(first) = first {
+                if requested < first.saturating_sub(1) {
+                    Some(ReplayGap {
+                        requested_after_sequence: requested,
+                        available_from_sequence: first,
+                    })
+                } else if requested > last.unwrap_or(0) {
+                    Some(ReplayGap {
+                        requested_after_sequence: requested,
+                        available_from_sequence: first,
+                    })
+                } else {
+                    None
+                }
+            } else if self.next_sequence > 1 || requested > 0 {
+                Some(ReplayGap {
+                    requested_after_sequence: requested,
+                    available_from_sequence: self.next_sequence,
+                })
+            } else {
+                None
+            }
         });
         let full = after_sequence.is_none() || gap.is_some();
         // Full reconstruction uses retained VT units; contiguous deltas and the
@@ -534,7 +556,7 @@ impl BoundedBuffer {
                     }]
                 })
                 .unwrap_or_default();
-            return (Vec::new(), ranges, None, last, None);
+            return (Vec::new(), ranges, None, last, gap);
         }
 
         let first_sequence = items.first().map(|(sequence, _)| *sequence).or(last);
@@ -703,6 +725,11 @@ pub struct SessionHub {
     pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
     pub(crate) resize_ledger: Vec<ResizePoint>,
     pub(crate) replay_gap: Option<ReplayGap>,
+    /// Someone subscribed to this session at least once.
+    pub(crate) subscribed: bool,
+    /// The PTY output ended before the first subscription: the session is kept only so that
+    /// late first attach still sees the output (see `end_session`).
+    pub(crate) ended: bool,
 }
 
 impl SessionHub {
@@ -797,6 +824,8 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
             replay_gap: None,
+            subscribed: false,
+            ended: false,
         };
         self.sessions
             .write()
@@ -853,6 +882,7 @@ impl TerminalOutputHub {
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
+        hub.replay_gap = None;
 
         hub.machine_senders.retain(|sender| sender.publish(&chunk));
         // Broadcast to sequence subscribers (cheap Arc refcount bump on the payload).
@@ -922,10 +952,16 @@ impl TerminalOutputHub {
             sessions.get(session_id).cloned()
         }?;
 
-        let hub = session_hub.read();
+        let mut hub = session_hub.write();
         // Subscribe first to preserve subscriber-first snapshot invariant
         let rx = hub.raw_sender.subscribe();
         let history = hub.buffer.snapshot();
+        hub.subscribed = true;
+        let ended = hub.ended;
+        drop(hub);
+        if ended {
+            self.remove_ended_session(session_id);
+        }
         Some((history, rx))
     }
 
@@ -954,16 +990,17 @@ impl TerminalOutputHub {
             sessions.get(session_id).cloned()
         }?;
 
-        let hub = session_hub.read();
+        let mut hub = session_hub.write();
         // 1. Subscribe FIRST in the critical section
         let rx = hub.sender.subscribe();
+        hub.subscribed = true;
         // 2. Snapshot within the same critical section
         let (history, history_segments, history_start_sequence, history_end_sequence, gap) = hub
             .buffer
             .snapshot_after_ranges(after_sequence, &hub.resize_ledger);
         let gap = gap.or_else(|| {
             hub.replay_gap.clone().filter(|gap| {
-                after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
+                after_sequence.is_some_and(|after| after < gap.available_from_sequence - 1)
             })
         });
 
@@ -975,6 +1012,11 @@ impl TerminalOutputHub {
             history_segments: Vec::new(),
             gap,
         };
+        let ended = hub.ended;
+        drop(hub);
+        if ended {
+            self.remove_ended_session(session_id);
+        }
 
         Some((SessionAttachment {
             snapshot,
@@ -989,6 +1031,35 @@ impl TerminalOutputHub {
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
+    }
+
+    /// The session's PTY output ended. A session that was subscribed to is removed, which ends
+    /// every subscriber's stream. One nobody has subscribed to yet (a command that exited before
+    /// its first attach) keeps its output for that first attach, which then removes it; returns
+    /// `false` in that case so the caller can bound the wait with `remove_ended_session`.
+    pub fn end_session(&self, session_id: &str) -> bool {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return true;
+        };
+        {
+            let mut hub = session_hub.write();
+            if !hub.subscribed {
+                hub.ended = true;
+                return false;
+            }
+        }
+        self.remove_session(session_id);
+        true
+    }
+
+    /// Removes a session that `end_session` kept for a first attach, if it is still waiting.
+    pub fn remove_ended_session(&self, session_id: &str) {
+        let mut sessions = self.sessions.write();
+        if sessions.get(session_id).is_some_and(|hub| hub.read().ended) {
+            sessions.remove(session_id);
+            drop(sessions);
+            self.transport_owners.write().remove(session_id);
+        }
     }
 
     pub fn claim_transport(&self, session_id: &str) -> bool {
@@ -1067,6 +1138,8 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: snapshot.resize_ledger,
             replay_gap: snapshot.replay_gap,
+            subscribed: false,
+            ended: false,
         };
 
         self.sessions
@@ -1756,7 +1829,7 @@ mod tests {
         let pred_attachment = hub1
             .subscribe_with_sequence(session_id, None)
             .expect("pred attachment");
-        assert!(pred_attachment.snapshot.gap.is_some());
+        assert_eq!(pred_attachment.snapshot.gap, None);
         assert_eq!(pred_attachment.snapshot.history_start_sequence, Some(2));
         assert_eq!(pred_attachment.snapshot.history_end_sequence, Some(3));
         assert_eq!(
@@ -1787,7 +1860,7 @@ mod tests {
             .expect("export session state");
         assert_eq!(snapshot.next_sequence, 5);
         assert!(snapshot.bracketed_paste_enabled);
-        assert!(snapshot.replay_gap.is_some());
+        assert_eq!(snapshot.replay_gap, None);
         assert!(snapshot.transport_owner);
         assert_eq!(snapshot.chunks.len(), 2);
         assert_eq!(snapshot.resize_ledger.len(), 2);
@@ -2132,6 +2205,98 @@ mod tests {
         assert_eq!(
             snap_gap_future.validate(),
             Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
+        );
+    }
+
+    #[test]
+    fn ended_machine_attachment_keeps_snapshot_and_releases_hub() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.register_session("ended-machine");
+        hub.publish("ended-machine", b"final output".to_vec());
+        assert!(!hub.end_session("ended-machine"));
+        let attachment = hub.subscribe_machine("ended-machine", None).unwrap().unwrap();
+        assert_eq!(attachment.snapshot.value.history, b"final output");
+        assert!(hub.session_sequence_range("ended-machine").is_none());
+    }
+
+    #[test]
+    fn test_snapshot_after_ranges_emits_gap_when_requested_exceeds_last() {
+        let mut buffer = BoundedBuffer::new(1024);
+        buffer.push_with_read_timestamp(b"hello".to_vec(), None);
+        buffer.push_with_read_timestamp(b"world".to_vec(), None);
+        assert_eq!(buffer.end_sequence(), Some(2));
+
+        let (history, _ranges, _first, _last, gap) = buffer.snapshot_after_ranges(Some(500), &[]);
+        assert!(gap.is_some(), "expected ReplayGap when requested sequence exceeds end sequence");
+        let gap = gap.unwrap();
+        assert_eq!(gap.requested_after_sequence, 500);
+        assert_eq!(gap.available_from_sequence, 1);
+        assert_eq!(history, b"helloworld");
+    }
+
+    #[test]
+    fn test_snapshot_after_ranges_emits_gap_when_all_chunks_evicted() {
+        let mut buffer = BoundedBuffer::new(10);
+        buffer.push_with_read_timestamp(vec![b'x'; 20], None);
+        assert!(buffer.chunks().is_empty());
+        assert!(buffer.next_sequence() > 1);
+
+        let (_history, _ranges, _first, _last, gap) = buffer.snapshot_after_ranges(Some(0), &[]);
+        assert!(gap.is_some(), "expected ReplayGap when all chunks have been evicted");
+        let gap = gap.unwrap();
+        assert_eq!(gap.requested_after_sequence, 0);
+        assert_eq!(gap.available_from_sequence, buffer.next_sequence());
+    }
+
+    #[test]
+    fn test_snapshot_after_ranges_retained_avoids_spurious_gap_when_in_retained_range() {
+        let mut buffer = BoundedBuffer::with_retention(
+            10,
+            retained_history::RetentionBudget {
+                text_bytes: 1024,
+                image_bytes: 1024,
+            },
+        );
+        for seq in 1..=10u64 {
+            buffer.push_with_read_timestamp(format!("d{seq:02}").into_bytes(), None);
+        }
+        let ring_start = buffer.start_sequence().expect("ring start");
+        let retained_start = buffer.retained_start_sequence().expect("retained start");
+        assert!(retained_start < ring_start, "retained start ({retained_start}) should be older than ring start ({ring_start})");
+
+        let (history, _ranges, _first, _last, gap) = buffer.snapshot_after_ranges(Some(2), &[]);
+        assert_eq!(gap, None, "spurious ReplayGap emitted even though retained history covers the requested range");
+        assert!(!history.is_empty(), "history should not be empty");
+    }
+
+    #[test]
+    fn test_publish_clears_replay_gap_and_does_not_pollute_none_subscribers() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.register_session("gap-clear-test");
+
+        hub.publish_gap("gap-clear-test");
+        {
+            let sessions = hub.sessions.read();
+            let session_hub = sessions.get("gap-clear-test").unwrap().read();
+            assert!(session_hub.replay_gap.is_some(), "replay_gap should be set after publish_gap");
+        }
+
+        for i in 0..5 {
+            hub.publish("gap-clear-test", format!("chunk-{i}\n").into_bytes());
+        }
+
+        {
+            let sessions = hub.sessions.read();
+            let session_hub = sessions.get("gap-clear-test").unwrap().read();
+            assert_eq!(session_hub.replay_gap, None, "hub.replay_gap must be cleared after publishing new output");
+        }
+
+        let (attachment, _ranges) = hub
+            .subscribe_with_sequence_ranges("gap-clear-test", None)
+            .expect("attachment");
+        assert_eq!(
+            attachment.snapshot.gap, None,
+            "fresh subscriber with after_sequence: None must not receive stale replay gap"
         );
     }
 }

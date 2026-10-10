@@ -213,6 +213,12 @@ impl TerminalOutputHub {
         let result = build();
         if result.is_err() {
             hub.machine_senders.pop();
+        } else {
+            hub.subscribed = true;
+            if hub.ended {
+                drop(hub);
+                self.remove_ended_session(session_id);
+            }
         }
         Some(result)
     }

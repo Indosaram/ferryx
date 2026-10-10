@@ -8,6 +8,24 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 
+/// How long the output of a PTY that ended before its first attach is kept for that attach.
+const UNATTACHED_EXIT_OUTPUT_RETENTION: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Ends a local session's output stream at PTY EOF. A command that exited before anyone
+/// attached keeps its output for the first attach (which a spawn's caller issues right after
+/// the spawn returns), bounded by `UNATTACHED_EXIT_OUTPUT_RETENTION`.
+fn end_output(output_hub: &Arc<TerminalOutputHub>, session_id: &str) {
+    if output_hub.end_session(session_id) {
+        return;
+    }
+    let output_hub = Arc::clone(output_hub);
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(UNATTACHED_EXIT_OUTPUT_RETENTION).await;
+        output_hub.remove_ended_session(&session_id);
+    });
+}
+
 #[derive(Clone)]
 pub struct TerminalService {
     pty_manager: Arc<PtyManager>,
@@ -306,7 +324,7 @@ impl TerminalService {
                 output_hub.publish_with_read_timestamp(&session_id_clone, chunk, read_unix_micros);
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
-            output_hub.remove_session(&session_id_clone);
+            end_output(&output_hub, &session_id_clone);
             let mut registry = lifecycle.lock();
             if registry.state(&session_id_clone) != Some(SessionProcessState::Hibernated) {
                 registry.remove(&session_id_clone);
@@ -341,7 +359,7 @@ impl TerminalService {
                 output_hub.publish_with_read_timestamp(&session_id, chunk, read_unix_micros);
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id);
-            output_hub.remove_session(&session_id);
+            end_output(&output_hub, &session_id);
             let mut registry = lifecycle.lock();
             if registry.state(&session_id) != Some(SessionProcessState::Hibernated) {
                 registry.remove(&session_id);
@@ -353,7 +371,7 @@ impl TerminalService {
         &self,
         session_id: &str,
     ) -> Result<(Vec<u8>, broadcast::Receiver<Vec<u8>>), PtyError> {
-        if !self.list_sessions().contains(&session_id.to_string()) {
+        if !self.list_sessions().contains(&session_id.to_string()) && !self.output_hub.has_session(session_id) {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
@@ -367,7 +385,7 @@ impl TerminalService {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<SessionAttachment, PtyError> {
-        if !self.list_sessions().contains(&session_id.to_string()) {
+        if !self.list_sessions().contains(&session_id.to_string()) && !self.output_hub.has_session(session_id) {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
@@ -384,7 +402,7 @@ impl TerminalService {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<(SessionAttachment, Vec<HistoryRange>), PtyError> {
-        if !self.list_sessions().contains(&session_id.to_string()) {
+        if !self.list_sessions().contains(&session_id.to_string()) && !self.output_hub.has_session(session_id) {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
@@ -822,5 +840,44 @@ mod preparation_tests {
         assert!(matches!(setup, Ok((_, Ok(_)))), "{setup:?}");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(git_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn regression_local_pty_create_6_fast_exit_keeps_output_for_the_first_attach() {
+        let service = TerminalService::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut command = portable_pty::CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+        if cfg!(windows) {
+            command.arg("/c");
+            command.arg("echo quick_exit_output");
+        } else {
+            command.arg("-c");
+            command.arg("echo quick_exit_output; exit 0");
+        }
+        let context = super::super::pty::ResolvedSpawnContext {
+            root: root.path().to_owned(),
+            cwd: root.path().to_owned(),
+            managed_workspace_id: None,
+        };
+        let (id, mut output_pump) = service
+            .spawn_resolved_with_id(uuid::Uuid::new_v4().to_string(), command, 80, 24, context)
+            .expect("spawn fast exiting command");
+        // The output pump drops this sender once the PTY output has ended.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), output_pump.changed())
+            .await
+            .expect("the command's output ended");
+
+        let (snapshot, mut stream) = service
+            .attach(&id)
+            .expect("the first attach after a fast exit still sees the output");
+        let text = String::from_utf8_lossy(&snapshot);
+        assert!(text.contains("quick_exit_output"), "snapshot lost the exited command's output: {text}");
+        // The stream of an ended session is already over, and the session is gone afterwards.
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv()).await,
+            Ok(Err(broadcast::error::RecvError::Closed))
+        ));
+        assert!(!service.output_hub.has_session(&id));
+        assert!(service.attach(&id).is_err());
     }
 }

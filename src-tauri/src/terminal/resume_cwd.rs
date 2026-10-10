@@ -51,15 +51,14 @@ pub(crate) fn resolve_agent_resume_cwd(
         roots.push(config.join("sessions"));
         match fs::read_dir(config.join("profiles")) {
             Ok(profiles) => {
-                for profile in profiles {
-                    let profile = profile?;
-                    if profile.file_type()?.is_dir() {
+                for profile in profiles.flatten() {
+                    if profile.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         roots.push(profile.path().join("agent/sessions"));
                     }
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(_) => {}
         }
     }
     roots.sort();
@@ -117,15 +116,15 @@ fn resolve_omo_cwd(
     for root in session_roots {
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(_) => continue,
         };
         let mut files = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                for file in fs::read_dir(entry.path())? {
-                    files.push(file?.path());
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Ok(sub_entries) = fs::read_dir(entry.path()) {
+                    for file in sub_entries.flatten() {
+                        files.push(file.path());
+                    }
                 }
             } else {
                 files.push(entry.path());
@@ -301,5 +300,25 @@ mod tests {
         assert!(output.status.success());
         let printed = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         assert_eq!(fs::canonicalize(printed).unwrap(), cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regression_local_pty_create_7_resolve_omo_cwd_ignores_unreadable_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable_dir = dir.path().join("unreadable_dir");
+        fs::create_dir(&unreadable_dir).unwrap();
+        fs::set_permissions(&unreadable_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let cwd = dir.path().join("project/vuev.net");
+        transcript(dir.path(), SESSION_ID, &cwd);
+
+        let result = resolve_omo_cwd(
+            &provider(None),
+            &[unreadable_dir.clone(), dir.path().to_path_buf()],
+        );
+        let _ = fs::set_permissions(&unreadable_dir, fs::Permissions::from_mode(0o755));
+        assert_eq!(result.unwrap(), Some(cwd));
     }
 }

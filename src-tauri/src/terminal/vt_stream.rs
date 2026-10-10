@@ -177,6 +177,8 @@ impl VtUnitSplitter {
         };
         if let Some(mark) = mark {
             parts.push((bytes.len(), mark.order, mark.sequence));
+        } else if self.scan == Scan::CsiDiscard {
+            parts.push((bytes.len(), self.next_order, self.sequence));
         }
         match self.scan {
             Scan::String | Scan::StringEscape => {
@@ -191,7 +193,9 @@ impl VtUnitSplitter {
                 // The discarded parameters are gone, but the introducer must be replayed so
                 // the receiver consumes the live tail through the real final byte.
                 bytes.extend_from_slice(b"\x1b[");
-                sequence = sequence.or(self.text_mark.map(|mark| mark.sequence));
+                sequence = sequence
+                    .or(self.text_mark.map(|mark| mark.sequence))
+                    .or(Some(self.sequence));
             }
             _ => {
                 bytes.extend_from_slice(&self.text);
@@ -852,5 +856,17 @@ mod tests {
         harness.feed(b"1mb");
         assert_eq!(harness.units.len(), 1);
         assert_eq!(harness.units[0].bytes, b"a\x1b[31mb");
+    }
+
+    #[test]
+    fn csi_discard_with_empty_text_populates_pending_parts_and_bytes() {
+        let mut harness = Harness::new(64);
+        let mut oversized = b"\x1b[".to_vec();
+        oversized.extend(std::iter::repeat_n(b'1', 100));
+        harness.feed(&oversized);
+        let pending = harness.pending();
+        assert!(pending.bytes.ends_with(b"\x1b["));
+        assert!(!pending.parts.is_empty(), "pending.parts must not be empty for CsiDiscard with empty text");
+        assert_eq!(pending.sequence, Some(1));
     }
 }
