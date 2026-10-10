@@ -2,7 +2,6 @@
 /**
  * Herdr reference-chat isolated acceptance runner (plan task 14).
  *
- * AUTHORED, NOT EXECUTED. The complete-code merge barrier owns every run of this file.
  * Contract: docs/chat/herdr-port-contract.md (rev 2). Routes were registered by task 13 on
  * the EXISTING gateway; this runner consumes them and never mounts a second listener.
  *
@@ -71,6 +70,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import {
   IsolatedGatewayError,
   OwnedProcessLedger,
@@ -763,8 +763,7 @@ async function openChatPage(ctx, host, session) {
   let screenshot = null;
   let screenshotError = null;
   try {
-    ctx.recordFile(screenshotName, await page.screenshot());
-    screenshot = screenshotName;
+    screenshot = ctx.recordFile(screenshotName, await page.screenshot());
   } catch (error) {
     screenshotError = String(error && error.message ? error.message : error);
   }
@@ -1445,7 +1444,7 @@ function createContext(args, fixtureRaw, candidateRaw, fixture, candidate, ledge
       return path;
     },
     recordFile(name, bytes) {
-      const path = join(evidenceDir, name);
+      const path = join(tmpdir(), "ferryx-reference-chat", randomUUID(), name);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, bytes);
       artifacts.push({ name, path });
