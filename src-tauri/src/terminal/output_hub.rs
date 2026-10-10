@@ -231,7 +231,7 @@ pub struct BoundedBuffer {
 }
 
 pub fn scan_dec_mode_2004(bytes: &[u8]) -> Option<bool> {
-    if !bytes.windows(4).any(|w| w == b"2004") {
+    if !bytes.contains(&b'2') {
         return None;
     }
     let mut last_state = None;
@@ -703,6 +703,7 @@ pub struct SessionHub {
     pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
     pub(crate) resize_ledger: Vec<ResizePoint>,
     pub(crate) replay_gap: Option<ReplayGap>,
+    pub(crate) published_bytes: u64,
 }
 
 impl SessionHub {
@@ -797,6 +798,7 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
             replay_gap: None,
+            published_bytes: 0,
         };
         self.sessions
             .write()
@@ -853,6 +855,10 @@ impl TerminalOutputHub {
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
+        hub.published_bytes = hub
+            .published_bytes
+            .checked_add(chunk.bytes.len() as u64)
+            .expect("published byte counter overflow");
 
         hub.machine_senders.retain(|sender| sender.publish(&chunk));
         // Broadcast to sequence subscribers (cheap Arc refcount bump on the payload).
@@ -1067,6 +1073,7 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: snapshot.resize_ledger,
             replay_gap: snapshot.replay_gap,
+            published_bytes: 0,
         };
 
         self.sessions
@@ -1089,6 +1096,16 @@ impl TerminalOutputHub {
         }?;
         let hub = session_hub.read();
         Some(hub.buffer.next_sequence())
+    }
+
+    /// Cumulative bytes published to this session's hub across its local in-process lifetime.
+    ///
+    /// This counter measures actual committed output chunks produced into the local hub.
+    /// It is intentionally scoped to the local session hub lifetime and resets on state import.
+    pub fn session_published_bytes(&self, session_id: &str) -> Option<u64> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        Some(hub.published_bytes)
     }
 }
 
@@ -2133,5 +2150,41 @@ mod tests {
             snap_gap_future.validate(),
             Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
         );
+    }
+
+    #[test]
+    fn test_output_hub_cumulative_published_bytes_and_eviction_gap() {
+        let hub = TerminalOutputHub::new(64);
+        let session_id = "test_cumul_session";
+        let _rx = hub.register_session(session_id);
+
+        assert_eq!(hub.session_published_bytes(session_id), Some(0));
+
+        // Publish 40 bytes (fits in 64-byte ring)
+        let c1 = hub.publish(session_id, vec![b'a'; 40]).expect("chunk 1");
+        assert_eq!(c1.bytes.len(), 40);
+        assert_eq!(hub.session_published_bytes(session_id), Some(40));
+        assert_eq!(hub.session_sequence_range(session_id), Some((Some(1), Some(1))));
+
+        // Publish another 40 bytes (total 80 bytes -> causes eviction of c1 from 64-byte ring)
+        let c2 = hub.publish(session_id, vec![b'b'; 40]).expect("chunk 2");
+        assert_eq!(c2.bytes.len(), 40);
+        assert_eq!(hub.session_published_bytes(session_id), Some(80));
+        // Sequence 1 was evicted from the ring
+        assert_eq!(hub.session_sequence_range(session_id), Some((Some(2), Some(2))));
+
+        // Publish gap: gap chunk has 0 bytes, sequence advances, published_bytes unchanged
+        let gap = hub.publish_gap(session_id).expect("gap chunk");
+        assert_eq!(gap.bytes.len(), 0);
+        assert!(gap.replay_gap.is_some());
+        assert_eq!(hub.session_published_bytes(session_id), Some(80));
+
+        // Import does not carry published_bytes across handover (document not handover lifetime)
+        let snap = hub.export_session_state(session_id).expect("snapshot");
+        let hub2 = TerminalOutputHub::new(64);
+        hub2.import_session_state("imported_session", snap).expect("import");
+        assert_eq!(hub2.session_published_bytes("imported_session"), Some(0));
+        hub2.publish("imported_session", vec![b'c'; 15]).expect("publish after import");
+        assert_eq!(hub2.session_published_bytes("imported_session"), Some(15));
     }
 }

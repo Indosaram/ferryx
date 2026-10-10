@@ -215,11 +215,19 @@ impl VtUnitSplitter {
             let byte = bytes[index];
             match self.scan {
                 Scan::Ground => {
-                    self.push_text(byte);
-                    if byte == ESC {
-                        self.scan = Scan::Escape;
+                    let run_len = match bytes[index..].iter().position(|&b| b == ESC) {
+                        Some(pos) => pos,
+                        None => bytes.len() - index,
+                    };
+                    if run_len > 0 {
+                        self.push_text_slice(&bytes[index..index + run_len]);
+                        index += run_len;
                     }
-                    index += 1;
+                    if index < bytes.len() {
+                        self.push_text(ESC);
+                        self.scan = Scan::Escape;
+                        index += 1;
+                    }
                 }
                 Scan::Escape => {
                     match byte {
@@ -325,6 +333,16 @@ impl VtUnitSplitter {
             self.text_mark = Some(self.allocate());
         }
         self.text.push(byte);
+    }
+
+    fn push_text_slice(&mut self, slice: &[u8]) {
+        if slice.is_empty() {
+            return;
+        }
+        if self.text.is_empty() {
+            self.text_mark = Some(self.allocate());
+        }
+        self.text.extend_from_slice(slice);
     }
 
     fn begin_string(&mut self, introducer: u8) {
@@ -852,5 +870,57 @@ mod tests {
         harness.feed(b"1mb");
         assert_eq!(harness.units.len(), 1);
         assert_eq!(harness.units[0].bytes, b"a\x1b[31mb");
+    }
+
+    #[test]
+    fn trailing_and_leading_esc_partitions_preserve_retained_bytes() {
+        let payload = b"prefix\x1b[31mcolor\x1b[0msuffix";
+        for split_pos in 0..=payload.len() {
+            let mut harness = Harness::new(1 << 20);
+            let (first, second) = payload.split_at(split_pos);
+            if !first.is_empty() {
+                harness.feed(first);
+            }
+            if !second.is_empty() {
+                harness.feed(second);
+            }
+            assert_eq!(
+                harness.retained(),
+                payload.as_slice(),
+                "partition at split_pos={split_pos} must preserve exact retained bytes"
+            );
+            assert!(
+                harness.pending().bytes.is_empty(),
+                "partition at split_pos={split_pos} must have no pending tail"
+            );
+        }
+    }
+
+    #[test]
+    fn nul_and_non_esc_bulk_bytes_are_retained_intact() {
+        let mut bulk = Vec::new();
+        bulk.extend_from_slice(b"start");
+        bulk.extend_from_slice(&[0u8; 16]);
+        for b in 1u8..=0x1a {
+            bulk.push(b);
+        }
+        for b in 0x1cu8..=0x1f {
+            bulk.push(b);
+        }
+        bulk.extend_from_slice(b"\x1b[32mgreen\x1b[0m");
+        bulk.extend_from_slice(&[0u8; 32]);
+        bulk.extend_from_slice(b"end");
+
+        let mut harness = Harness::new(1 << 20);
+        harness.feed(&bulk);
+        assert_eq!(harness.retained(), bulk.as_slice());
+        assert!(harness.pending().bytes.is_empty());
+
+        let mut chunked = Harness::new(1 << 20);
+        for chunk in bulk.chunks(17) {
+            chunked.feed(chunk);
+        }
+        assert_eq!(chunked.retained(), bulk.as_slice());
+        assert!(chunked.pending().bytes.is_empty());
     }
 }
