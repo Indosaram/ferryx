@@ -44,6 +44,33 @@ describe("automation turn attention quieting", () => {
     expect(state.activityBySessionId?.a).toMatchObject({ state: "done", seen: true, notificationSuppressed: true });
   });
 
+  it("replays a completion from the same reducer input without suppressing it", () => {
+    const working = screen(fixture(), "working");
+    const first = screen(working, "idle");
+    const replay = screen(working, "idle");
+    expect(first.activityBySessionId?.a).toMatchObject({ state: "done", seen: false, notificationSuppressed: false });
+    expect(replay.activityBySessionId?.a).toEqual(first.activityBySessionId?.a);
+    expect(replay.unreadTabIds).toEqual(first.unreadTabIds);
+  });
+
+  it("does not share completion episodes between independent workspace states", () => {
+    const first = screen(screen(fixture(), "working"), "idle");
+    const independent = screen(screen(fixture(), "working"), "idle");
+    expect(first.activityBySessionId?.a).toMatchObject({ seen: false, notificationSuppressed: false });
+    expect(independent.activityBySessionId?.a).toMatchObject({ seen: false, notificationSuppressed: false });
+  });
+
+  it("keeps restored snapshots from suppressing the first live completion", () => {
+    let state = fixture();
+    state = workspaceReducer(state, {
+      type: "SESSION_SCREEN_ACTIVITY", tabId: "a", sessionId: "a", state: "idle",
+      ruleId: "test", manifestId: "omo", isSnapshot: true,
+    });
+    expect(state.activityBySessionId?.a).toMatchObject({ seen: true, notificationSuppressed: true });
+    state = screen(screen(state, "working"), "idle");
+    expect(state.activityBySessionId?.a).toMatchObject({ seen: false, notificationSuppressed: false });
+  });
+
   it("keeps a completion loud when the user engaged after the previous episode", () => {
     let state = fixture();
     state = screen(state, "working");

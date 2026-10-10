@@ -102,6 +102,7 @@ export type WorkspaceState = {
   unreadWorktreePaths: Record<string, boolean>;
   /** Optional for backwards compatibility with persisted/test states created before activity tracking. */
   activityBySessionId?: Record<string, TerminalActivity>;
+  attentionEpisodeAtBySession?: Record<string, number>;
   /**
    * Sessions whose NEXT attention transition is app-initiated noise (e.g. auto-resume
    * landing at a prompt). Values are the epoch-ms timestamp when suppression was armed;
@@ -3088,7 +3089,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "RESET_AGENT_STATE": {
       let nextState = state;
-      lastAttentionEpisodeAtBySession.delete(action.sessionId);
+      const attentionEpisodeAtBySession = { ...state.attentionEpisodeAtBySession };
+      delete attentionEpisodeAtBySession[action.sessionId];
+      nextState = { ...nextState, attentionEpisodeAtBySession };
       lastSessionEngagementAtBySession.delete(action.sessionId);
       if (state.activityBySessionId?.[action.sessionId]) {
         const activityBySessionId = { ...(nextState.activityBySessionId ?? {}) };
@@ -3289,27 +3292,25 @@ function isSessionBackendDead(state: WorkspaceState, sessionId: string): boolean
 }
 
 /**
- * Engagement and attention-episode clocks, keyed by frontend session id.
+ * Engagement clocks, keyed by frontend session id.
  *
  * `ferryx:session-interacted` (input, paste, pane focus, navigation) records the last moment the
  * user was part of a session's loop; every fresh attention episode records when it began. A
  * `done` that starts without any engagement after the previous episode is an automation turn
- * re-driving itself, so it is stored quietly instead of re-arming attention. Module-level rather
- * than store state: keystroke-rate updates must not dispatch reducer actions, and losing the
- * clocks on reload only re-arms one benign completion.
+ * re-driving itself, so it is stored quietly instead of re-arming attention. Engagement stays
+ * module-level to avoid keystroke-rate dispatches; episode clocks belong to reducer state so
+ * replaying an action cannot change whether its completion is suppressed.
  */
 const lastSessionEngagementAtBySession = new Map<string, number>();
-const lastAttentionEpisodeAtBySession = new Map<string, number>();
 
 /** Record that the user just engaged with a session (input, paste, pane focus, navigation). */
 export function markSessionEngagementForAttention(sessionId: string): void {
   lastSessionEngagementAtBySession.set(sessionId, Date.now());
 }
 
-/** Test hook: clears the engagement/episode clocks. */
+/** Test hook: clears the engagement clocks. */
 export function resetAttentionEngagementClocksForTests(): void {
   lastSessionEngagementAtBySession.clear();
-  lastAttentionEpisodeAtBySession.clear();
 }
 
 function applySessionActivity(
@@ -3365,7 +3366,7 @@ function applySessionActivity(
   // re-arming the pane frame, tab dots and the notification center. `waiting` is never quieted
   // — an agent asking for input is a real request regardless of who drove the run — and the
   // armed resume-blip suppression keeps its own, narrower contract alongside this one.
-  const previousAttentionAt = lastAttentionEpisodeAtBySession.get(sessionId);
+  const previousAttentionAt = state.attentionEpisodeAtBySession?.[sessionId];
   const lastEngagementAt = lastSessionEngagementAtBySession.get(sessionId);
   const freshAttentionEpisode = isAttentionState && (!wasAttentionState || previous?.state !== activity.state);
   const automationQuietDone =
@@ -3394,12 +3395,14 @@ function applySessionActivity(
         }
       : {}),
   };
-  if (freshAttentionEpisode) lastAttentionEpisodeAtBySession.set(sessionId, Date.now());
 
   // The flag is consumed by the first attention transition either way: an effective
   // suppression eats the resume blip, an expired one lets the genuine completion through.
   let nextState: WorkspaceState = {
     ...state,
+    ...(freshAttentionEpisode && activity.notificationSuppressed !== true
+      ? { attentionEpisodeAtBySession: { ...state.attentionEpisodeAtBySession, [sessionId]: Date.now() } }
+      : {}),
     activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: stored },
     ...(hasSuppressionFlag && isAttentionState
       ? {
