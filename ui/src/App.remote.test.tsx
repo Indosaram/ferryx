@@ -93,6 +93,7 @@ function seed(projects: RegisteredProject[], active = projects[0]?.workspaceId) 
   if (active) localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, active);
 }
 async function mount() { await act(async () => { render(<App />); }); }
+// 7e8fdfb7 uses detailed spawn for new tabs so their durable identity is available immediately.
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
   native.isTauriRuntime.mockReturnValue(false);
@@ -114,10 +115,10 @@ describe("App SSH project lifecycle", () => {
     await mount();
     const registration = deferred<RegisteredRemoteProject>();
     const restore = deferred<null>();
-    const spawn = deferred<string>();
+    const spawn = deferred<Awaited<ReturnType<typeof import("./lib/tauri").spawnTerminalDetailed>>>();
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
     native.loadSession.mockReturnValueOnce(restore.promise);
-    native.spawnTerminal.mockReturnValueOnce(spawn.promise);
+    native.spawnTerminalDetailed.mockReturnValueOnce(spawn.promise);
 
     // When the user selects the SSH root, each unresolved stage stays busy.
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
@@ -128,23 +129,23 @@ describe("App SSH project lifecycle", () => {
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
     expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
     await act(async () => { restore.resolve(null); await restore.promise; });
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
     expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
-    await act(async () => { spawn.resolve("connected"); await spawn.promise; });
+    await act(async () => { spawn.resolve({ sessionId: "connected", daemonEpoch: "epoch", session: { sessionId: "connected", incarnation: "life:connected", cwd: remote.repoRoot, cols: 80, rows: 24, running: true } }); await spawn.promise; });
 
     // Then the terminal replaces progress, without an extra tab.
     expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
     expect(screen.getByTestId("active-tab")).not.toBeEmptyDOMElement();
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
   });
 
   it("shows progress for manual first-tab creation and allows retry after failure", async () => {
     seed([remote]);
     await mount();
     expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
-    const spawn = deferred<string>();
-    native.spawnTerminal.mockReturnValueOnce(spawn.promise);
+    const spawn = deferred<Awaited<ReturnType<typeof import("./lib/tauri").spawnTerminalDetailed>>>();
+    native.spawnTerminalDetailed.mockReturnValueOnce(spawn.promise);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
     expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
@@ -189,14 +190,14 @@ describe("App SSH project lifecycle", () => {
   });
 
   it("focuses the existing SSH terminal addressed by its backend identity", async () => {
-    native.spawnTerminal.mockResolvedValueOnce("backend-first").mockResolvedValueOnce("backend-second");
+    native.spawnTerminalDetailed.mockResolvedValueOnce({ sessionId: "backend-first", daemonEpoch: "epoch", session: { sessionId: "backend-first", incarnation: "life:backend-first", cwd: remote.repoRoot, cols: 80, rows: 24, running: true } }).mockResolvedValueOnce({ sessionId: "backend-second", daemonEpoch: "epoch", session: { sessionId: "backend-second", incarnation: "life:backend-second", cwd: remote.repoRoot, cols: 80, rows: 24, running: true } });
     seed([remote]);
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
     const first = screen.getByTestId("active-tab").textContent;
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New remote tab" })); });
     if (!native.remoteSelection) throw new Error("Missing remote session bridge");
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(2);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("active-tab").textContent).not.toBe(first);
     await act(async () => {
       native.remoteSelection?.({ workspaceId: remote.workspaceId, sessionId: "backend-first" });
@@ -220,7 +221,7 @@ describe("App SSH project lifecycle", () => {
   });
 
   it("returns from a local project to the requested existing SSH session", async () => {
-    native.spawnTerminal.mockResolvedValueOnce("backend-ssh");
+    native.spawnTerminalDetailed.mockResolvedValueOnce({ sessionId: "backend-ssh", daemonEpoch: "epoch", session: { sessionId: "backend-ssh", incarnation: "life:backend-ssh", cwd: remote.repoRoot, cols: 80, rows: 24, running: true } });
     seed([remote, { workspaceId: "local", repoRoot: "/local", gitRoot: null }]);
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
@@ -232,7 +233,7 @@ describe("App SSH project lifecycle", () => {
     });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
     expect(screen.getByTestId("active-tab").textContent).toBe(first);
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
   });
 
   it("opens the registered SSH project from remote without a preexisting terminal", async () => {
@@ -240,7 +241,7 @@ describe("App SSH project lifecycle", () => {
     await mount();
     await act(async () => { native.remoteSelection?.({ workspaceId: remote.workspaceId }); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: remote.workspaceId, cwd: remote.repoRoot,
     }));
   });
@@ -264,10 +265,10 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "roblox-game-forge build" })); });
 
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(folder.workspaceId);
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: folder.workspaceId, cwd: folder.repoRoot,
     }));
-    expect(native.spawnTerminal.mock.calls.some(([request]) => request.workspaceId === "project" && request.cwd === "C:/Users/sook")).toBe(false);
+    expect(native.spawnTerminalDetailed.mock.calls.some(([request]) => request.workspaceId === "project" && request.cwd === "C:/Users/sook")).toBe(false);
   });
 
   it("handles the chooser's registered remote project through actual App registration", async () => {
@@ -305,14 +306,14 @@ describe("App SSH project lifecycle", () => {
     await mount();
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!)).toEqual([expect.objectContaining(remote)]);
-    const spawn = deferred<string>();
-    native.spawnTerminal.mockReturnValueOnce(spawn.promise);
+    const spawn = deferred<Awaited<ReturnType<typeof import("./lib/tauri").spawnTerminalDetailed>>>();
+    native.spawnTerminalDetailed.mockReturnValueOnce(spawn.promise);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
-    expect(native.spawnTerminal).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot, worktree: null }));
-    await act(async () => { spawn.resolve("remote-backend"); await spawn.promise; });
+    expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot, worktree: null }));
+    await act(async () => { spawn.resolve({ sessionId: "remote-backend", daemonEpoch: "epoch", session: { sessionId: "remote-backend", incarnation: "life:remote-backend", cwd: remote.repoRoot, cols: 80, rows: 24, running: true } }); await spawn.promise; });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New remote tab" })); });
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect(native.spawnTerminal.mock.calls.every(([request]) => request.workspaceId === remote.workspaceId && request.cwd === remote.repoRoot)).toBe(true);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+    expect(native.spawnTerminalDetailed.mock.calls.every(([request]) => request.workspaceId === remote.workspaceId && request.cwd === remote.repoRoot)).toBe(true);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split remote pane" })); });
     expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, worktree: null, cwd: null, inheritFromSessionId: "remote-backend" }));
     expect(native.registerProject).not.toHaveBeenCalled();
@@ -333,10 +334,12 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "repo build" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     await act(async () => { restore.resolve(null); await restore.promise; });
-    expect(native.spawnTerminal).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
+    expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(local.workspaceId);
     expect(native.registerProject.mock.calls.every(([request]) => request.workspaceId === "local")).toBe(true);
@@ -352,6 +355,7 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { registration.reject({ code: "WORKSPACE_NOT_FOUND", message: "Host disabled" }); await registration.promise.catch(() => undefined); });
     expect(native.registerProject).not.toHaveBeenCalled();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     expect(native.listWorktrees).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "New Terminal" })).not.toBeInTheDocument();
     native.registerRemoteProject.mockResolvedValue(registered);
@@ -372,6 +376,7 @@ describe("App SSH project lifecycle", () => {
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("local");
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!).some((project: RegisteredProject) => project.workspaceId === "ssh:changed")).toBe(false);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     expect(native.registerProject.mock.calls.every(([request]) => request.workspaceId === "local")).toBe(true);
   });
 
@@ -406,6 +411,7 @@ describe("App SSH project lifecycle", () => {
     native.registerRemoteProject.mockReturnValue(registration.promise);
     await mount();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });
     expect(native.getTerminalRemoteStatus).toHaveBeenCalledWith("old-backend");
     await act(async () => {
@@ -423,6 +429,8 @@ describe("App SSH project lifecycle", () => {
       });
       await status.promise;
     });
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     expect(screen.getByTestId("active-tab")).toHaveTextContent("saved-tab");

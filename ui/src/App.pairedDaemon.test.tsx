@@ -135,6 +135,7 @@ function seed(projects: RegisteredProject[], active = projects[0]?.workspaceId) 
   if (active) localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, active);
 }
 async function mount() { await act(async () => { render(<App />); }); }
+// 7e8fdfb7 uses detailed spawn for new tabs as well as split panes.
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
   native.isTauriRuntime.mockReturnValue(false);
@@ -199,6 +200,8 @@ describe("App paired desktop shell", () => {
     });
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
   });
 
   it("refreshes unavailable paired inventory when selecting its project without refocusing the window", async () => {
@@ -209,6 +212,7 @@ describe("App paired desktop shell", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select paired project" })); });
     expect(inventory.refresh).toHaveBeenCalledTimes(1);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
   });
 
   it("refreshes unavailable inventory when selecting a different worktree in the active paired project", async () => {
@@ -219,10 +223,11 @@ describe("App paired desktop shell", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select second paired worktree" })); });
     expect(inventory.refresh).toHaveBeenCalledTimes(1);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     await act(async () => {
       remoteHostStore.setState((state) => ({ ...state, nativeStatus: "ready", machineFeaturesEnabled: true }));
     });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: paired.workspaceId, cwd: secondPairedWorktree.path,
       worktree: { wsId: "remote-project", slug: "second" },
     }));
@@ -242,13 +247,13 @@ describe("App paired desktop shell", () => {
     expect(screen.getByRole("dialog")).toBe(palette);
     expect(screen.getByTestId("active-tab").textContent).toBe(tab);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New remote tab" })); });
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(2);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
     expect(native.newTab).toBeTypeOf("function");
     await act(async () => { native.newTab!(); });
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(3);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(3);
     expect(native.split).toBeTypeOf("function");
     await act(async () => { native.split!(); });
-    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(4);
     expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspaceId: "local" }),
       expect.objectContaining({
@@ -261,7 +266,7 @@ describe("App paired desktop shell", () => {
     await act(async () => {
       fireEvent.keyDown(window, { key: "t", code: "KeyT", metaKey: isMacShortcutPlatform(), ctrlKey: !isMacShortcutPlatform() });
     });
-    expect(native.spawnTerminal).toHaveBeenCalledTimes(4);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(5);
   });
 
   it("selects a worktree on a paired machine and requests terminal spawn with worktree path and identity", async () => {
@@ -288,7 +293,7 @@ describe("App paired desktop shell", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" }));
     });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceId: paired.workspaceId,
         worktree: { wsId: "remote-project", slug: "feature" },
@@ -304,11 +309,11 @@ describe("App paired desktop shell", () => {
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select second paired worktree" })); });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: paired.workspaceId, cwd: pairedWorktree.path,
       worktree: { wsId: "remote-project", slug: "feature" },
     }));
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: paired.workspaceId, cwd: secondPairedWorktree.path,
       worktree: { wsId: "remote-project", slug: "second" },
     }));
@@ -338,7 +343,7 @@ describe("App paired desktop shell", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" }));
     });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceId: paired.workspaceId,
         worktree: { wsId: "remote-project", slug: "feature" },
