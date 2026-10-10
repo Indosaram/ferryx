@@ -2,6 +2,8 @@ use ferryx_lib::{daemon::server::DaemonServer, remote::server::create_remote_rou
 use futures_util::FutureExt;
 use std::time::Duration;
 use serde_json::{json, Value};
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 
 async fn response(request: reqwest::RequestBuilder, expected: u16) -> Value {
     let response = request.send().await.unwrap();
@@ -41,6 +43,7 @@ async fn shell_proof(backend: &ferryx_lib::terminal::TerminalService, id: &str) 
 
 #[tokio::test]
 async fn machine_session_creation_uses_owner() {
+    if supervisor::run("machine_session_creation_uses_owner").await { return; }
     let (root, owner, token, repo) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("project");
@@ -68,7 +71,8 @@ async fn machine_session_creation_uses_owner() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
+    let router = create_remote_router(state.clone());
+    let task = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
     let result = std::panic::AssertUnwindSafe(async {
         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();
         let project_response = client.post(format!("http://{addr}/api/v1/workspace/projects")).bearer_auth(&token).body(serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(),"repoPath":repo}).to_string()).send().await.unwrap();
@@ -132,6 +136,13 @@ async fn machine_session_creation_uses_owner() {
         let denied = tokio_tungstenite::connect_async(socket).await.unwrap_err();
         assert!(matches!(denied, tokio_tungstenite::tungstenite::Error::Http(ref response) if response.status().as_u16() == 403));
         owner.remote_state().clear_active_selection();
+        let pty_count_before = backend.list_sessions().len();
+        let absent_active = response(client.get(format!("http://{addr}/api/v1/workspace/state")).bearer_auth("mirror-token"), 200).await;
+        assert!(absent_active["activeContext"]["sessionId"].is_null());
+        assert_eq!(absent_active["activeContext"]["terminalTabs"], json!([]));
+        assert_eq!(absent_active["activeContext"]["attentionInventory"], json!([]));
+        assert_eq!(absent_active["sessions"], json!([]));
+        assert_eq!(backend.list_sessions().len(), pty_count_before);
         response(client.post(&sessions_url).bearer_auth("mirror-token").body(request.to_string()), 403).await;
         response(client.get(format!("{sessions_url}/{id}")).bearer_auth("mirror-token"), 403).await;
         response(client.post(&sessions_url).body(request.to_string()), 401).await;
@@ -183,9 +194,13 @@ async fn machine_session_creation_uses_owner() {
             .body(json!({"requestId":uuid::Uuid::new_v4().to_string(),"daemonEpoch":epoch}).to_string()), 204).await;
         eprintln!("A09 HTTP replay=same-target same-PID=true changed-digest=409 two-roots=true close=reaped epoch={epoch}");
     }).catch_unwind().await;
-    for id in backend.list_sessions() { backend.close_session(&id).await.unwrap(); }
+    for id in backend.list_sessions() {
+        backend.close_session(&id).await.unwrap();
+    }
     let _ = stop.send(());
     task.await.unwrap();
+    drop(backend);
+    drop(state);
     drop(owner);
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
     tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();

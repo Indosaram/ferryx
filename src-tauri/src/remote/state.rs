@@ -2072,7 +2072,16 @@ mod tests {
         assert_eq!(bumped, 2);
         assert_eq!(state.browser_service_epoch(), 2);
 
-        // Browser backend defaults to unavailable
+        // Browser backend defaults to unavailable; inject absent private temp socket to test deterministically
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let absent_socket = temp_dir.path().join("absent-browser.sock");
+        let local_backend = Arc::new(
+            crate::remote::browser_backend::LocalIpcBrowserBackend::new(
+                absent_socket.to_string_lossy().to_string(),
+                None,
+            ),
+        );
+        state.set_browser_backend(local_backend);
         let caps = state.browser_backend().capabilities().await;
         assert!(!caps.browser_available);
 

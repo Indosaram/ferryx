@@ -2485,17 +2485,49 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
         .parse()
         .expect("parse bound address");
 
-    let pair_code = daemon_client
+    let machine_pair_code = match daemon_client
+        .send_request(crate::daemon::protocol::DaemonRequest::RemoteCreateMachinePairingCode)
+        .await
+        .expect("create machine control pairing code")
+    {
+        crate::daemon::protocol::DaemonResponse::RemotePairingCodeOk { code, .. } => code,
+        response => panic!("expected machine pairing code response, got {response:?}"),
+    };
+    let (machine_pair_status, machine_pair_body) = http_request(
+        bound_addr,
+        "POST",
+        "/api/v1/pair/exchange",
+        None,
+        Some(&format!(
+            r#"{{"code":"{machine_pair_code}","deviceName":"Remote E2E Machine"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(machine_pair_status, 200);
+    let machine_pair_response =
+        serde_json::from_str::<serde_json::Value>(&machine_pair_body)
+            .expect("machine pair response JSON");
+    assert_eq!(
+        machine_pair_response["device"]["accessScope"],
+        "machine",
+        "workspace projection uses an explicitly machine-scoped pairing"
+    );
+    let machine_token = machine_pair_response["token"]
+        .as_str()
+        .expect("machine pair token")
+        .to_string();
+
+    let mirror_pair_code = daemon_client
         .remote_create_pairing_code(Some(DevicePermission::Control))
         .await
-        .expect("create control pairing code");
+        .expect("create mirror control pairing code");
     let (pair_status, pair_body) = http_request(
         bound_addr,
         "POST",
         "/api/v1/pair/exchange",
         None,
         Some(&format!(
-            r#"{{"code":"{pair_code}","deviceName":"Remote E2E"}}"#
+            r#"{{"code":"{mirror_pair_code}","deviceName":"Remote E2E Mirror"}}"#
         )),
     )
     .await;
@@ -2559,7 +2591,7 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
         bound_addr,
         "GET",
         "/api/v1/workspace/state",
-        Some(&token),
+        Some(&machine_token),
         None,
     )
     .await;
@@ -2608,7 +2640,7 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
         bound_addr,
         "GET",
         "/api/v1/workspace/state",
-        Some(&token),
+        Some(&machine_token),
         None,
     )
     .await;
