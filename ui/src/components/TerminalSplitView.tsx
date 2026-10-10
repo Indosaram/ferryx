@@ -225,6 +225,8 @@ type TerminalSplitViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onResetAgentState?: (tabId: string) => void;
   onBackendSessionUnavailable?: (
@@ -282,6 +284,8 @@ export function TerminalSplitView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectLocalSession,
+  onRefreshSessionIdentity,
   onOpenNewShell,
   onResetAgentState,
   onBackendSessionUnavailable,
@@ -521,6 +525,8 @@ export function TerminalSplitView({
     onCloseSearch,
     onReconnectAgentSession,
     onReconnectSshSession,
+    onReconnectLocalSession,
+    onRefreshSessionIdentity,
     onOpenNewShell,
     onResetAgentState,
     onBackendSessionUnavailable,
@@ -712,6 +718,8 @@ type TabGroupViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -766,6 +774,8 @@ function TabGroupView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectLocalSession,
+  onRefreshSessionIdentity,
   onOpenNewShell,
   onBackendSessionUnavailable,
   splitTerminalTab,
@@ -902,6 +912,8 @@ function TabGroupView({
                     onCloseSearch={onCloseSearch}
                     onReconnectAgentSession={onReconnectAgentSession}
                     onReconnectSshSession={onReconnectSshSession}
+                    onReconnectLocalSession={onReconnectLocalSession}
+                    onRefreshSessionIdentity={onRefreshSessionIdentity}
                     onOpenNewShell={onOpenNewShell}
                     onBackendSessionUnavailable={onBackendSessionUnavailable}
                     onSplitPane={onSplitPane}
@@ -947,6 +959,8 @@ type PaneRendererProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -991,6 +1005,8 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onCloseSearch={props.onCloseSearch}
         onReconnectAgentSession={props.onReconnectAgentSession}
         onReconnectSshSession={props.onReconnectSshSession}
+        onReconnectLocalSession={props.onReconnectLocalSession}
+        onRefreshSessionIdentity={props.onRefreshSessionIdentity}
         onOpenNewShell={props.onOpenNewShell}
         onBackendSessionUnavailable={props.onBackendSessionUnavailable}
         onNavigateBrowserTab={onNavigateBrowserTab}
@@ -1046,6 +1062,8 @@ type PaneLeafViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -1076,6 +1094,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectLocalSession,
+  onRefreshSessionIdentity,
   onOpenNewShell,
   onBackendSessionUnavailable,
   onNavigateBrowserTab,
@@ -1324,7 +1344,18 @@ const PaneLeafView = React.memo(function PaneLeafView({
       <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
         {(() => {
           switch (content.kind) {
-            case "terminal":
+            case "terminal": {
+              const isAgent = Boolean(
+                session?.agentType ||
+                session?.providerSession ||
+                activity?.isAgent ||
+                activity?.agentType
+              );
+              const onReconnect = session && isRemoteWorkspaceId(session.workspaceId)
+                ? (onReconnectSshSession ?? onReconnectAgentSession)
+                : isAgent
+                  ? onReconnectAgentSession
+                  : (onReconnectLocalSession ?? onOpenNewShell);
               return (
                 <TerminalPane
                   session={session}
@@ -1334,15 +1365,13 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   needsAttention={needsAttention || flashToken !== null}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
-                  onReconnect={
-                    session && isRemoteWorkspaceId(session.workspaceId)
-                      ? (onReconnectSshSession ?? onReconnectAgentSession)
-                      : onReconnectAgentSession
-                  }
+                  onReconnect={onReconnect}
+                  onRefreshSessionIdentity={onRefreshSessionIdentity}
                   onOpenNewShell={onOpenNewShell}
                   onBackendSessionUnavailable={onBackendSessionUnavailable}
                 />
               );
+            }
             case "browser": {
               const designFeedbackTargetsForTab = Object.values(sessions).map((candidateSession) => ({
                 sessionId: candidateSession.id,

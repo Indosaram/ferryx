@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearShellReplacementInflightForTests, replaceExitedShellSession } from "./shellReplacement";
+import {
+  clearShellReplacementInflightForTests,
+  reconnectLocalSession,
+  replaceExitedShellSession,
+} from "./shellReplacement";
 import type { TerminalSession } from "./types";
 import { PROJECTS_STORAGE_KEY } from "./storageKeys";
 
@@ -95,6 +99,110 @@ describe("shell replacement", () => {
       cwd: "/remote/path",
       daemonEpoch: "epoch-remote",
       clearAgent: undefined,
+    });
+  });
+
+  describe("reconnectLocalSession", () => {
+    it("rebinds with live daemonEpoch and incarnation without dispatching LOCAL_SESSIONS_RECONCILED when backend is alive", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: "live-backend-pty",
+        lifecycle: "exited",
+        daemonEpoch: "epoch-old",
+      };
+      const list = vi.fn().mockResolvedValue([
+        {
+          sessionId: "live-backend-pty",
+          daemonEpoch: "epoch-new",
+          incarnation: "inc-1",
+          running: true,
+        },
+      ]);
+      const dispatch = vi.fn();
+      const persist = vi.fn();
+      const openNewShell = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        list,
+        dispatch,
+        persist,
+        openNewShell,
+      });
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: "pane",
+        backendSessionId: "live-backend-pty",
+        cwd: "/repo",
+        daemonEpoch: "epoch-new",
+        incarnation: "inc-1",
+      });
+      expect(persist).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "pane",
+          backendSessionId: "live-backend-pty",
+          daemonEpoch: "epoch-new",
+          incarnation: "inc-1",
+        }),
+      );
+      expect(openNewShell).not.toHaveBeenCalled();
+      expect(
+        dispatch.mock.calls.some(([action]) => (action as any).type === "LOCAL_SESSIONS_RECONCILED"),
+      ).toBe(false);
+    });
+
+    it("falls back to openNewShell when backend session is not live on daemon", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: "dead-backend-pty",
+        lifecycle: "exited",
+      };
+      const list = vi.fn().mockResolvedValue([
+        { sessionId: "dead-backend-pty", running: false },
+      ]);
+      const dispatch = vi.fn();
+      const openNewShell = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        list,
+        dispatch,
+        openNewShell,
+      });
+
+      expect(openNewShell).toHaveBeenCalledWith("pane");
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("falls back to openNewShell when list throws an error", async () => {
+      const session: TerminalSession = {
+        id: "pane",
+        workspaceId: "local-ws",
+        cwd: "/repo",
+        worktree: null,
+        backendSessionId: "any-pty",
+        lifecycle: "exited",
+      };
+      const list = vi.fn().mockRejectedValue(new Error("daemon unreachable"));
+      const dispatch = vi.fn();
+      const openNewShell = vi.fn();
+
+      await reconnectLocalSession("pane", {
+        getSessions: () => ({ pane: session }),
+        list,
+        dispatch,
+        openNewShell,
+      });
+
+      expect(openNewShell).toHaveBeenCalledWith("pane");
+      expect(dispatch).not.toHaveBeenCalled();
     });
   });
 });

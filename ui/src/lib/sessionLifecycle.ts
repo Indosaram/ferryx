@@ -3,7 +3,7 @@ import { useSyncExternalStore } from "react";
 import type { TerminalActivityState } from "./activity";
 import { loadGeneralSettings } from "./generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
-import { describeTerminal, getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed } from "./tauri";
+import { describeTerminal, getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
 import type { SessionProcessState, TerminalSession } from "./types";
 import { safeRandomUUID } from "./uuid";
 
@@ -80,6 +80,7 @@ export type SessionRebindHandler = (
   backendSessionId: string,
   cwd?: string,
   daemonEpoch?: string | null,
+  incarnation?: string | null,
 ) => Promise<void> | void;
 
 let globalRebindHandler: SessionRebindHandler | null = null;
@@ -306,6 +307,17 @@ export async function resumeRegisteredSession(sessionId: string): Promise<void> 
       entry.session = { ...session, processState: "running" };
       entry.idleSince = Date.now();
     } catch (error) {
+      const ipcError = toIpcError(error);
+      if (ipcError.code === "SESSION_NOT_FOUND" || ipcError.code === "PROCESS_NOT_FOUND") {
+        setSessionSleeping(sessionId, false);
+        suspensionDetails.delete(sessionId);
+        entry.session = {
+          ...session,
+          backendSessionId: null,
+          processState: "standby",
+          lifecycle: "exited",
+        };
+      }
       throw error;
     }
   })();
@@ -360,12 +372,22 @@ export async function restartRegisteredSession(
 
       const rebind = onRebind ?? globalRebindHandler;
       if (rebind) {
-        await rebind(
-          sessionId,
-          spawnResult.sessionId,
-          spawnResult.session.cwd ?? session.cwd,
-          spawnResult.daemonEpoch,
-        );
+        if (spawnResult.session.incarnation != null) {
+          await rebind(
+            sessionId,
+            spawnResult.sessionId,
+            spawnResult.session.cwd ?? session.cwd,
+            spawnResult.daemonEpoch,
+            spawnResult.session.incarnation,
+          );
+        } else {
+          await rebind(
+            sessionId,
+            spawnResult.sessionId,
+            spawnResult.session.cwd ?? session.cwd,
+            spawnResult.daemonEpoch,
+          );
+        }
       }
     } catch (error) {
       entry.session = {

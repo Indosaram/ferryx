@@ -290,16 +290,15 @@ export function serializeWorkspaceState(
     for (const tab of layout.tabs) {
       if (tab.kind === "browser") continue;
       const terminal = tab.terminal;
+      if (terminal?.primarySessionId) referencedSessionIds.add(terminal.primarySessionId);
+      for (const sessionId of Object.values(terminal?.sessionIdsByLeafId ?? {})) {
+        if (sessionId) referencedSessionIds.add(sessionId);
+      }
       if (terminal?.contentsByLeafId) {
         for (const content of Object.values(terminal.contentsByLeafId)) {
           if (content && content.kind === "terminal" && content.sessionId) {
             referencedSessionIds.add(content.sessionId);
           }
-        }
-      } else {
-        if (terminal?.primarySessionId) referencedSessionIds.add(terminal.primarySessionId);
-        for (const sessionId of Object.values(terminal?.sessionIdsByLeafId ?? {})) {
-          if (sessionId) referencedSessionIds.add(sessionId);
         }
       }
     }
@@ -991,16 +990,15 @@ export function deserializeWorkspaceState(
     for (const tab of layout.tabs) {
       if (tab.kind === "browser" || tab.kind === "file") continue;
       const tabLayout = layout.layoutsByTabId[tab.id];
+      if (tab.sessionId) referencedSessionIds.add(tab.sessionId);
+      for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
+        if (sessionId) referencedSessionIds.add(sessionId);
+      }
       if (tabLayout?.contentsByLeafId) {
         for (const content of Object.values(tabLayout.contentsByLeafId)) {
           if (content && content.kind === "terminal" && content.sessionId) {
             referencedSessionIds.add(content.sessionId);
           }
-        }
-      } else {
-        if (tab.sessionId) referencedSessionIds.add(tab.sessionId);
-        for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
-          if (sessionId) referencedSessionIds.add(sessionId);
         }
       }
     }

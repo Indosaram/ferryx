@@ -116,6 +116,7 @@ import {
   spawnTerminal,
   spawnTerminalDetailed,
   retryTerminalRemoteSession,
+  listTerminalSessions,
   toIpcError,
   writeTerminal,
   bootTrace,
@@ -139,7 +140,7 @@ import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessio
 import { flashPane } from "./lib/paneFlash";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
-import { replaceExitedShellSession } from "./lib/shellReplacement";
+import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
@@ -1402,6 +1403,124 @@ function WorkspaceApp({
     [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
   );
 
+  const handleOpenNewShell = useCallback(
+    (sessionId: string) => {
+      const session = stateRef.current.sessions[sessionId];
+      const isAgent = Boolean(
+        session?.agentType ||
+        session?.providerSession ||
+        stateRef.current.activityBySessionId?.[sessionId]?.isAgent
+      );
+      if (session?.agentType) {
+        dispatchWorkspaceAction({ type: "RESET_AGENT_STATE", sessionId });
+      }
+      return replaceExitedShellSession(sessionId, {
+        getSessions: () => stateRef.current.sessions,
+        dispatch: dispatchWorkspaceAction,
+        persist: async (result, localSession) => {
+          const current = stateRef.current;
+          const nextState = workspaceReducer(current, {
+            type: "REBIND_SESSION_BACKEND",
+            sessionId: localSession.id,
+            backendSessionId: result.sessionId,
+            cwd: result.session.cwd ?? localSession.cwd,
+            daemonEpoch: result.daemonEpoch,
+            incarnation: result.session.incarnation ?? null,
+            clearAgent: isAgent,
+          });
+          await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+        },
+      }, { clearAgent: isAgent }).then(() => undefined).catch((error) => {
+        reportRuntimeError(error);
+        throw error;
+      });
+    },
+    [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
+  );
+
+  const handleReconnectLocalSession = useCallback(
+    async (sessionId: string) => {
+      await reconnectLocalSession(sessionId, {
+        getSessions: () => stateRef.current.sessions,
+        list: listTerminalSessions,
+        dispatch: dispatchWorkspaceAction,
+        persist: async (session) => {
+          const current = stateRef.current;
+          const nextState = workspaceReducer(current, {
+            type: "REBIND_SESSION_BACKEND",
+            sessionId,
+            backendSessionId: session.backendSessionId!,
+            cwd: session.cwd,
+            daemonEpoch: session.daemonEpoch,
+            ...(session.incarnation != null ? { incarnation: session.incarnation } : {}),
+          });
+          const project = activeProjectRef.current;
+          if (project) {
+            await persistSessionStrict(project.workspaceId, project.repoRoot, nextState).catch((err) => {
+              console.error("Failed to persist reconnected session:", err);
+            });
+          }
+        },
+        openNewShell: handleOpenNewShell,
+      });
+    },
+    [dispatchWorkspaceAction, handleOpenNewShell, persistSessionStrict],
+  );
+
+  const handleRefreshSessionIdentity = useCallback(
+    async (sessionId: string): Promise<TerminalSession | null> => {
+      const session = stateRef.current.sessions[sessionId];
+      if (!session || !session.backendSessionId) return null;
+      const project = activeProjectRef.current;
+      try {
+        const liveSummaries = await listTerminalSessions();
+        if (activeProjectRef.current !== project || stateRef.current.sessions[sessionId] !== session) return null;
+        const live = liveSummaries.find(
+          (candidate) => candidate.sessionId === session.backendSessionId && candidate.running !== false,
+        );
+        if (!live) return null;
+        const daemonEpoch = live.daemonEpoch ?? session.daemonEpoch;
+        const incarnation = live.incarnation ?? session.incarnation ?? null;
+        if (daemonEpoch === session.daemonEpoch && incarnation === (session.incarnation ?? null)) {
+          return session;
+        }
+        const updatedSession: TerminalSession = {
+          ...session,
+          daemonEpoch,
+          ...(incarnation != null ? { incarnation } : {}),
+        };
+        const current = stateRef.current;
+        const nextState = workspaceReducer(current, {
+          type: "REBIND_SESSION_BACKEND",
+          sessionId,
+          backendSessionId: session.backendSessionId,
+          cwd: session.cwd,
+          daemonEpoch,
+          ...(incarnation != null ? { incarnation } : {}),
+        });
+        stateRef.current = nextState;
+        dispatchWorkspaceAction({
+          type: "REBIND_SESSION_BACKEND",
+          sessionId,
+          backendSessionId: session.backendSessionId,
+          cwd: session.cwd,
+          daemonEpoch,
+          ...(incarnation != null ? { incarnation } : {}),
+        });
+        if (project) {
+          await persistSessionStrict(project.workspaceId, project.repoRoot, nextState).catch((err) => {
+            console.error("Failed to persist refreshed session:", err);
+          });
+        }
+        if (activeProjectRef.current !== project || stateRef.current.sessions[sessionId]?.backendSessionId !== session.backendSessionId) return null;
+        return updatedSession;
+      } catch {
+        return null;
+      }
+    },
+    [dispatchWorkspaceAction, persistSessionStrict],
+  );
+
   const reconnectingSshRef = useRef<Map<string, Promise<void>>>(new Map());
   const handleReconnectSshSession = useCallback(
     (sessionId: string) => {
@@ -1485,7 +1604,7 @@ function WorkspaceApp({
   }, [activeProject.workspaceId]);
 
   useEffect(() => {
-    setSessionRebindHandler(async (sessionId, backendSessionId, cwd, daemonEpoch) => {
+    setSessionRebindHandler(async (sessionId, backendSessionId, cwd, daemonEpoch, incarnation) => {
       const current = stateRef.current;
       const nextState = workspaceReducer(current, {
         type: "REBIND_SESSION_BACKEND",
@@ -1493,6 +1612,7 @@ function WorkspaceApp({
         backendSessionId,
         cwd,
         daemonEpoch,
+        ...(incarnation != null ? { incarnation } : {}),
       });
       dispatchWorkspaceAction({
         type: "REBIND_SESSION_BACKEND",
@@ -1500,6 +1620,7 @@ function WorkspaceApp({
         backendSessionId,
         cwd,
         daemonEpoch,
+        ...(incarnation != null ? { incarnation } : {}),
       });
       const project = activeProjectRef.current;
       if (project) {
@@ -3476,36 +3597,9 @@ function WorkspaceApp({
               await handleReconnectAgentSession(sessionId);
             }}
             onReconnectSshSession={handleReconnectSshSession}
-            onOpenNewShell={(sessionId) => {
-              const session = stateRef.current.sessions[sessionId];
-              const isAgent = Boolean(
-                session?.agentType ||
-                session?.providerSession ||
-                stateRef.current.activityBySessionId?.[sessionId]?.isAgent
-              );
-              if (session?.agentType) {
-                dispatchWorkspaceAction({ type: "RESET_AGENT_STATE", sessionId });
-              }
-              return replaceExitedShellSession(sessionId, {
-                getSessions: () => stateRef.current.sessions,
-                dispatch: dispatchWorkspaceAction,
-                persist: async (result, localSession) => {
-                  const current = stateRef.current;
-                  const nextState = workspaceReducer(current, {
-                    type: "REBIND_SESSION_BACKEND",
-                    sessionId: localSession.id,
-                    backendSessionId: result.sessionId,
-                    cwd: result.session.cwd ?? localSession.cwd,
-                    daemonEpoch: result.daemonEpoch,
-                    clearAgent: isAgent,
-                  });
-                  await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
-                },
-              }, { clearAgent: isAgent }).then(() => undefined).catch((error) => {
-                reportRuntimeError(error);
-                throw error;
-              });
-            }}
+            onReconnectLocalSession={handleReconnectLocalSession}
+            onRefreshSessionIdentity={handleRefreshSessionIdentity}
+            onOpenNewShell={handleOpenNewShell}
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
               const session = stateRef.current.sessions[sessionId];

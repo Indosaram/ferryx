@@ -7519,8 +7519,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(getTerminalInputDropCount("outage")).toBe(1);
     view2.unmount();
 
-    // Scenario 3: quarantined (attach failure marks session confirmed-missing)
+    // Scenario 3: quarantined (input failure; the recovery reattach finds the session missing)
     const quarantineSession = createSession("term-session-drop-quarantine");
+    let quarantineAttachCalls = 0;
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_send_input") {
         const err = new Error("input failed");
@@ -7531,6 +7532,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         throw err;
       }
       if (cmd === "cmd_native_terminal_attach") {
+        // The initial attach succeeds so only the input-recovery path can report the loss.
+        quarantineAttachCalls += 1;
+        if (quarantineAttachCalls === 1) {
+          return { cellWidthPx: 8, cellHeightPx: 16, cursorCol: 0, cursorRow: 0, cols: 80, rows: 24 };
+        }
         const err = new Error("session missing");
         Object.assign(err, {
           code: "SESSION_NOT_FOUND",
@@ -7558,6 +7564,12 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     await waitFor(() => {
       expect(onUnavailable).toHaveBeenCalled();
     });
+    // The recovery report must carry the binding it observed, so the store can drop it
+    // when the session was rebound (e.g. a new SSH generation) while recovery was in flight.
+    expect(onUnavailable.mock.calls.length).toBeGreaterThan(0);
+    for (const call of onUnavailable.mock.calls) {
+      expect(call[2]).toEqual(expect.stringContaining("term-session-drop-quarantine:"));
+    }
     // Classification records the blocked input once; a further blocked key would
     // legitimately add another, so this scenario drives exactly one key.
     await waitFor(() => {

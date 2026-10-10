@@ -36,10 +36,19 @@ vi.mock("../lib/nativeMenu", () => ({
   ),
 }));
 
+const lastTerminalPaneProps = vi.hoisted(() => ({ current: null as any }));
+
 vi.mock("./TerminalPane", () => ({
-  TerminalPane: ({ session }: { session: TerminalSession }) => (
-    <div data-testid="terminal-pane" data-session-id={session.id} />
-  ),
+  TerminalPane: (props: any) => {
+    lastTerminalPaneProps.current = props;
+    return (
+      <div
+        data-testid="terminal-pane"
+        data-session-id={props.session?.id}
+        onClick={() => props.onReconnect?.(props.session?.id)}
+      />
+    );
+  },
 }));
 
 const mockTauri = vi.hoisted(() => ({
@@ -263,5 +272,175 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
 
     nativeMenu.lastCall!.onAction((cmdEntry as { id: string }).id);
     expect(onAddTab).toHaveBeenCalledWith("cmd");
+  });
+
+  describe("ui-attach-transport-2 reconnect routing", () => {
+    it("wires onReconnect to local shell handler instead of onReconnectAgentSession for non-agent shells", async () => {
+      const onReconnectAgentSession = vi.fn();
+      const onReconnectLocalSession = vi.fn();
+      const onOpenNewShell = vi.fn();
+
+      const localNonAgentSession: TerminalSession = {
+        id: "session-local-plain",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-local-1",
+        lifecycle: "exited",
+      };
+
+      const layout: LayoutState = {
+        tabs: [{ id: "tab-local", label: "Local", sessionId: "session-local-plain" }],
+        activeTabId: "tab-local",
+        layoutsByTabId: {
+          "tab-local": {
+            root: { type: "leaf", leafId: "leaf-local" },
+            activeLeafId: "leaf-local",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-local": "session-local-plain" },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{ "session-local-plain": localNonAgentSession }}
+          onReconnectAgentSession={onReconnectAgentSession}
+          onReconnectLocalSession={onReconnectLocalSession}
+          onOpenNewShell={onOpenNewShell}
+        />,
+      );
+
+      const pane = screen.getByTestId("terminal-pane");
+      fireEvent.click(pane);
+
+      expect(onReconnectLocalSession).toHaveBeenCalledWith("session-local-plain");
+      expect(onReconnectAgentSession).not.toHaveBeenCalled();
+    });
+
+    it("wires onReconnect to onReconnectAgentSession for agent sessions", async () => {
+      const onReconnectAgentSession = vi.fn();
+      const onReconnectLocalSession = vi.fn();
+
+      const agentSession: TerminalSession = {
+        id: "session-agent",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-agent-1",
+        lifecycle: "exited",
+        agentType: "claude",
+        providerSession: { key: "session_id", id: "agent-123" },
+      };
+
+      const layout: LayoutState = {
+        tabs: [{ id: "tab-agent", label: "Agent", sessionId: "session-agent" }],
+        activeTabId: "tab-agent",
+        layoutsByTabId: {
+          "tab-agent": {
+            root: { type: "leaf", leafId: "leaf-agent" },
+            activeLeafId: "leaf-agent",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-agent": "session-agent" },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{ "session-agent": agentSession }}
+          onReconnectAgentSession={onReconnectAgentSession}
+          onReconnectLocalSession={onReconnectLocalSession}
+        />,
+      );
+
+      const pane = screen.getByTestId("terminal-pane");
+      fireEvent.click(pane);
+
+      expect(onReconnectAgentSession).toHaveBeenCalledWith("session-agent");
+      expect(onReconnectLocalSession).not.toHaveBeenCalled();
+    });
+
+    it("falls back to onOpenNewShell for local non-agent shell when onReconnectLocalSession is omitted", async () => {
+      const onReconnectAgentSession = vi.fn();
+      const onOpenNewShell = vi.fn();
+
+      const localNonAgentSession: TerminalSession = {
+        id: "session-local-fallback",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-local-2",
+        lifecycle: "exited",
+      };
+
+      const layout: LayoutState = {
+        tabs: [{ id: "tab-fb", label: "Fallback", sessionId: "session-local-fallback" }],
+        activeTabId: "tab-fb",
+        layoutsByTabId: {
+          "tab-fb": {
+            root: { type: "leaf", leafId: "leaf-fb" },
+            activeLeafId: "leaf-fb",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-fb": "session-local-fallback" },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{ "session-local-fallback": localNonAgentSession }}
+          onReconnectAgentSession={onReconnectAgentSession}
+          onOpenNewShell={onOpenNewShell}
+        />,
+      );
+
+      const pane = screen.getByTestId("terminal-pane");
+      fireEvent.click(pane);
+
+      expect(onOpenNewShell).toHaveBeenCalledWith("session-local-fallback");
+      expect(onReconnectAgentSession).not.toHaveBeenCalled();
+    });
+
+    it("wires onRefreshSessionIdentity through TerminalSplitView down to TerminalPane", () => {
+      const onRefreshSessionIdentity = vi.fn();
+      const session: TerminalSession = {
+        id: "session-wire-test",
+        cwd: "/repo",
+        worktreePath: "/repo",
+        workspaceId: "ws-1",
+        worktree: null,
+        backendSessionId: "backend-wire-1",
+        lifecycle: "running",
+      };
+      const layout: LayoutState = {
+        tabs: [{ id: "tab-wire", label: "Wire", sessionId: "session-wire-test" }],
+        activeTabId: "tab-wire",
+        layoutsByTabId: {
+          "tab-wire": {
+            root: { type: "leaf", leafId: "leaf-wire" },
+            activeLeafId: "leaf-wire",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-wire": "session-wire-test" },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView
+          layout={layout}
+          sessions={{ "session-wire-test": session }}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+        />,
+      );
+
+      expect(lastTerminalPaneProps.current.onRefreshSessionIdentity).toBe(onRefreshSessionIdentity);
+    });
   });
 });

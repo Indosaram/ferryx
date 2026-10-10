@@ -8,6 +8,7 @@ import { resetSessionLifecycleForTests, setSessionSleeping } from "../lib/sessio
 import type { TerminalSession } from "../lib/types";
 import { dagStore } from "../state/dagStore";
 import { remoteHostStore } from "../state/remoteHostStore";
+import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalPane } from "./TerminalPane";
 
 const parsedDagSnapshot = parseDagRunSnapshot(dagRunSampleJson);
@@ -628,5 +629,23 @@ describe("TerminalPane native routing contract", () => {
     fireEvent.click(reconnectBtn);
     expect(onReconnect).toHaveBeenCalledOnce();
     expect(onReconnect).toHaveBeenCalledWith("session-recoverable");
+  });
+
+  it("forwards onRefreshSessionIdentity to NativeTerminalPane", () => {
+    const session = createSession();
+    const onRefreshSessionIdentity = vi.fn();
+    render(
+      <TerminalPane
+        session={session}
+        active={true}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
+      />,
+    );
+    expect(NativeTerminalPane).toHaveBeenCalledWith(
+      expect.objectContaining({
+        onRefreshSessionIdentity,
+      }),
+      expect.anything(),
+    );
   });
 });

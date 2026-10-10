@@ -1,4 +1,4 @@
-import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
+import { closeTerminal, listTerminalSessions, spawnTerminalDetailed, toIpcError } from "./tauri";
 import { isStandbyBackendSessionId } from "./sessionLifecycle";
 import { safeRandomUUID } from "./uuid";
 import type { SpawnTerminalResult } from "./tauri";
@@ -11,6 +11,7 @@ type RebindAction = {
   backendSessionId: string;
   cwd?: string;
   daemonEpoch?: string | null;
+  incarnation?: string | null;
   clearAgent?: boolean;
 };
 
@@ -30,7 +31,12 @@ function invalidReplacement(message: string): StructuredIpcError {
 }
 
 function hasReplaceableBackend(session: TerminalSession): boolean {
-  return session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";
+  return (
+    session.backendSessionId === null ||
+    isStandbyBackendSessionId(session.backendSessionId) ||
+    session.lifecycle === "exited" ||
+    session.lifecycle === "failed"
+  );
 }
 
 export type ShellReplacementOptions = {
@@ -79,6 +85,7 @@ export function replaceExitedShellSession(
         backendSessionId: spawned.sessionId,
         cwd: spawned.session.cwd ?? current.cwd,
         daemonEpoch: spawned.daemonEpoch,
+        ...(spawned.session.incarnation != null ? { incarnation: spawned.session.incarnation } : {}),
         clearAgent: options?.clearAgent,
       });
       return spawned;
@@ -97,4 +104,52 @@ export function replaceExitedShellSession(
 
 export function clearShellReplacementInflightForTests(): void {
   inFlightReplacements.clear();
+}
+
+export type ReconnectLocalSessionDependencies = {
+  getSessions: () => Readonly<Record<string, TerminalSession>>;
+  list?: () => Promise<Array<{ sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>>;
+  dispatch: (action: RebindAction) => void;
+  persist?: (session: TerminalSession) => void | Promise<void>;
+  openNewShell: (sessionId: string) => Promise<void> | void;
+};
+
+export async function reconnectLocalSession(
+  sessionId: string,
+  dependencies: ReconnectLocalSessionDependencies,
+): Promise<void> {
+  const session = dependencies.getSessions()[sessionId];
+  if (!session) return;
+
+  if (session.backendSessionId) {
+    try {
+      const liveSummaries = await (dependencies.list ?? listTerminalSessions)();
+      const live = liveSummaries.find(
+        (candidate) => candidate.sessionId === session.backendSessionId && candidate.running !== false,
+      );
+      if (live) {
+        const daemonEpoch = live.daemonEpoch ?? session.daemonEpoch;
+        const incarnation = live.incarnation ?? session.incarnation ?? null;
+        const updatedSession: TerminalSession = {
+          ...session,
+          daemonEpoch,
+          ...(incarnation != null ? { incarnation } : {}),
+        };
+        await dependencies.persist?.(updatedSession);
+        dependencies.dispatch({
+          type: "REBIND_SESSION_BACKEND",
+          sessionId,
+          backendSessionId: session.backendSessionId,
+          cwd: session.cwd,
+          daemonEpoch,
+          ...(incarnation != null ? { incarnation } : {}),
+        });
+        return;
+      }
+    } catch {
+      // Backend session dead or daemon unreachable; fall through to openNewShell
+    }
+  }
+
+  await dependencies.openNewShell(sessionId);
 }

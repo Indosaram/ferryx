@@ -35,6 +35,7 @@ type TerminalPaneProps = {
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onReconnect?: (sessionId: string) => Promise<void> | void;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onOpenNewShell?: (sessionId: string) => Promise<void> | void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -93,6 +94,7 @@ export function TerminalPane({
   searchOpen,
   onCloseSearch,
   onReconnect,
+  onRefreshSessionIdentity,
   onOpenNewShell,
   onBackendSessionUnavailable,
 }: TerminalPaneProps) {
@@ -311,6 +313,7 @@ export function TerminalPane({
         active={active}
         activity={activity}
         needsAttention={needsAttention}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
         onBackendSessionUnavailable={(backendSessionId, reason, bindingKey) => {
           onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
         }}

@@ -781,6 +781,7 @@ export function useWorkspaceStore({
     [createSpawnedTab, dispatch, dispatchToOwner, services, workspaceId],
   );
 
+  const sshRearmsRef = useRef(new Map<string, number>());
   const sshRecoveryKey = Object.values(renderedState.sessions)
     .filter(session => isRemoteWorkspaceId(session.workspaceId))
     .map(session => `${session.id}:${session.backendSessionId}:${session.remoteConnectionState ?? ""}`).join("|");
@@ -790,6 +791,7 @@ export function useWorkspaceStore({
       sessions: Object.values(stateRef.current.sessions).filter(session => isRemoteWorkspaceId(session.workspaceId)),
       dispatch,
       onError: error => console.error("SSH session reconciliation failed:", error),
+      rearms: sshRearmsRef.current,
     });
     void recovery.ready.catch(error => console.error("SSH status subscription failed:", error));
     return recovery.stop;
@@ -933,25 +935,35 @@ export function useWorkspaceStore({
             if (!session || session.backendSessionId != null) return;
             await services.ensureTerminalEvents();
             const startup = resolvePairedStartup(workspaceId);
-            const backendSessionId = await services.spawnTerminal({
-              workspaceId,
-              worktree: session.worktree,
-              cwd: session.cwd ?? session.worktreePath,
-              ...(startup ? { startup } : {}),
-            });
-            // Recovery spawns can outlive a project switch; rebinding now would
-            // point another project's session at this PTY.
-            if (mountedWorkspaceIdRef.current !== workspaceId) {
-              await closeBackendSession({ ...session, backendSessionId }, services);
-              return;
+            try {
+              const backendSessionId = await services.spawnTerminal({
+                workspaceId,
+                worktree: session.worktree,
+                cwd: session.cwd ?? session.worktreePath,
+                ...(startup ? { startup } : {}),
+              });
+              // Recovery spawns can outlive a project switch; rebinding now would
+              // point another project's session at this PTY.
+              if (mountedWorkspaceIdRef.current !== workspaceId) {
+                await closeBackendSession({ ...session, backendSessionId }, services);
+                return;
+              }
+              const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+              dispatch({
+                type: "REBIND_SESSION_BACKEND",
+                sessionId,
+                backendSessionId,
+                clearAgent: options?.fallbackToShell || isAgent,
+              });
+            } catch (spawnError) {
+              dispatch({
+                type: "SESSION_BACKEND_UNAVAILABLE",
+                sessionId,
+                backendSessionId: null,
+                reason: toIpcError(spawnError).message,
+              });
+              throw spawnError;
             }
-            const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
-            dispatch({
-              type: "REBIND_SESSION_BACKEND",
-              sessionId,
-              backendSessionId,
-              clearAgent: options?.fallbackToShell || isAgent,
-            });
           } finally {
             // Let the caller surface registration/host failures, while allowing retry.
             spawningSessionIdsRef.current.delete(sessionId);
@@ -2225,7 +2237,50 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
   if (action.type === "LOCAL_SPLIT_REMOVE") {
     const sessions = { ...state.sessions };
     delete sessions[action.sessionId];
-    return { ...state, sessions };
+    const located = locateSessionAcrossLayouts(state, action.sessionId);
+    if (!located || !located.leafId) {
+      return { ...state, sessions };
+    }
+    const { worktreePath, tabId, leafId } = located;
+    const targetLayout = worktreePath === null ? state.layout : state.worktreeLayouts?.[worktreePath];
+    if (!targetLayout) {
+      return { ...state, sessions };
+    }
+    const tabLayout = targetLayout.layoutsByTabId?.[tabId];
+    if (!tabLayout || tabLayout.root.type === "leaf") {
+      return { ...state, sessions };
+    }
+    let updatedLayout = layoutReducer(targetLayout, { type: "CLOSE_PANE", tabId, leafId });
+    if (updatedLayout === targetLayout) {
+      return { ...state, sessions };
+    }
+    const tab = targetLayout.tabs.find((candidate) => candidate.id === tabId);
+    if (tab && isTerminalTab(tab) && action.sessionId === tab.sessionId) {
+      const remainingLayout = updatedLayout.layoutsByTabId[tabId];
+      const replacementSessionId = Object.values(remainingLayout?.sessionIdsByLeafId ?? {}).find(Boolean);
+      if (replacementSessionId && replacementSessionId !== tab.sessionId) {
+        updatedLayout = {
+          ...updatedLayout,
+          tabs: updatedLayout.tabs.map((candidate) =>
+            candidate.id === tabId && isTerminalTab(candidate)
+              ? { ...candidate, sessionId: replacementSessionId }
+              : candidate,
+          ),
+        };
+      }
+    }
+    if (worktreePath === null) {
+      return { ...state, sessions, layout: updatedLayout };
+    } else {
+      return {
+        ...state,
+        sessions,
+        worktreeLayouts: {
+          ...state.worktreeLayouts,
+          [worktreePath]: updatedLayout,
+        },
+      };
+    }
   }
   switch (action.type) {
     case "RESTORE_WORKSPACE":
@@ -2804,8 +2859,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             {
               ...session,
               lifecycle: action.lifecycle,
-              backendSessionId: action.lifecycle === "exited" ? null : session.backendSessionId,
-              reconnectLifecycle: action.lifecycle === "exited" ? "idle" : session.reconnectLifecycle,
+              backendSessionId: action.lifecycle === "exited" || action.lifecycle === "failed" ? null : session.backendSessionId,
+              reconnectLifecycle: action.lifecycle === "exited" || action.lifecycle === "failed" ? "idle" : session.reconnectLifecycle,
             },
           ];
         }),
@@ -2939,7 +2994,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // restarted around the same PTY); the pane keeps its agent and generation.
       const isSshBackendReplaced = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
       const isPairedBackendReplaced = isPairedWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
-      const shouldClearAgent = isSshBackendReplaced || isPairedBackendReplaced || action.clearAgent === true;
+      const shouldClearAgent =
+        action.clearAgent === true ||
+        (action.clearAgent === undefined && (isSshBackendReplaced || isPairedBackendReplaced));
       const activityBySessionId = { ...state.activityBySessionId };
       if (shouldClearAgent) delete activityBySessionId[action.sessionId];
       return {
@@ -2974,7 +3031,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
                   remoteFailure: null,
                   remoteReplayGap: null,
                 }
-              : {}),
+              : {
+                  ...(session.remoteConnectionState !== undefined ? { remoteConnectionState: undefined } : {}),
+                  ...(session.remoteFailure != null ? { remoteFailure: null } : {}),
+                  ...(session.remoteReplayGap != null ? { remoteReplayGap: null } : {}),
+                }),
           },
         },
       };

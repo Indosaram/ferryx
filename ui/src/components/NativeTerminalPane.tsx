@@ -99,6 +99,7 @@ export interface NativeTerminalPaneProps {
   activity?: TerminalActivity;
   needsAttention?: boolean;
   active?: boolean;
+  onRefreshSessionIdentity?: (sessionId: string) => Promise<TerminalSession | null | void> | void;
   onBackendSessionUnavailable?: (backendSessionId: string, reason: string, bindingKey?: string | null) => void;
 }
 
@@ -543,6 +544,7 @@ export function NativeTerminalPane({
   style,
   needsAttention = false,
   active,
+  onRefreshSessionIdentity,
   onBackendSessionUnavailable,
 }: NativeTerminalPaneProps): ReactElement {
   const sessionRef = useRef(session);
@@ -1469,7 +1471,7 @@ export function NativeTerminalPane({
               }
               recordTerminalInputDrop("quarantined");
               setError(null);
-              onBackendSessionUnavailable?.(currentSessionId, classification.reason);
+              onBackendSessionUnavailable?.(currentSessionId, classification.reason, bindingKey);
               return;
             }
             switchDebug("terminal.surface.input.recover.failed", {
@@ -2483,7 +2485,7 @@ export function NativeTerminalPane({
       return;
     }
 
-    let teardownTuple = getDurableNativeBinding(targetSessionId);
+    let teardownTuple = getDurableNativeBinding(targetSessionId) ?? sessionRef.current?.attachTuple;
     let isSubscribed = true;
     let observer: ResizeObserver | null = null;
     let lastGeometry: GeometryState | null = null;
@@ -2845,7 +2847,34 @@ export function NativeTerminalPane({
       if (!isSubscribed) return;
       cancelRetry();
       lastGeometry = null;
-      void attemptAttach(0, true);
+      void (async () => {
+        if (onRefreshSessionIdentity && paneIdentity) {
+          try {
+            const refreshed = await onRefreshSessionIdentity(paneIdentity);
+            if (!isSubscribed || !attachmentOwnerRef.current?.live || sessionRef.current?.backendSessionId !== targetSessionId) return;
+            if (refreshed && sessionRef.current) {
+              const updatedEpoch = refreshed.daemonEpoch ?? sessionRef.current.daemonEpoch ?? "";
+              const updatedIncarnation = refreshed.incarnation ?? sessionRef.current.incarnation ?? null;
+              sessionRef.current = {
+                ...sessionRef.current,
+                daemonEpoch: updatedEpoch,
+                ...(updatedIncarnation != null ? { incarnation: updatedIncarnation } : {}),
+              };
+              if (targetSessionId) {
+                const refreshedBindingKey = `${targetSessionId}:${updatedEpoch}:${sessionRef.current.remoteGeneration ?? 0}:${sessionRef.current.remoteConnectionState ?? ""}`;
+                attachmentOwnerRef.current = {
+                  sessionId: targetSessionId,
+                  bindingKey: refreshedBindingKey,
+                  live: true,
+                };
+              }
+            }
+          } catch {
+          }
+        }
+        if (!isSubscribed) return;
+        await attemptAttach(0, true);
+      })();
     };
 
     if (typeof ResizeObserver !== "undefined" && !observer) {
@@ -2888,7 +2917,7 @@ export function NativeTerminalPane({
         try {
           await inFlightAttempt;
           while (streamRecoveryRequested) {
-            if (!isSubscribed || attachmentOwnerRef.current !== streamOwner) return;
+            if (!isSubscribed || attachmentOwnerRef.current?.sessionId !== streamOwner?.sessionId) return;
             streamRecoveryRequested = false;
             if (streamRecoveries >= maxRetries) {
               setError("Terminal output disconnected. Click to reconnect.");
@@ -2896,6 +2925,31 @@ export function NativeTerminalPane({
             }
             streamRecoveries += 1;
             isAttached = false;
+            if (onRefreshSessionIdentity && paneIdentity) {
+              try {
+                const refreshed = await onRefreshSessionIdentity(paneIdentity);
+                if (!isSubscribed || attachmentOwnerRef.current !== streamOwner || !streamOwner?.live || sessionRef.current?.backendSessionId !== targetSessionId) return;
+                if (refreshed && sessionRef.current) {
+                  const updatedEpoch = refreshed.daemonEpoch ?? sessionRef.current.daemonEpoch ?? "";
+                  const updatedIncarnation = refreshed.incarnation ?? sessionRef.current.incarnation ?? null;
+                  sessionRef.current = {
+                    ...sessionRef.current,
+                    daemonEpoch: updatedEpoch,
+                    ...(updatedIncarnation != null ? { incarnation: updatedIncarnation } : {}),
+                  };
+                  if (targetSessionId) {
+                    const refreshedBindingKey = `${targetSessionId}:${updatedEpoch}:${sessionRef.current.remoteGeneration ?? 0}:${sessionRef.current.remoteConnectionState ?? ""}`;
+                    attachmentOwnerRef.current = {
+                      sessionId: targetSessionId,
+                      bindingKey: refreshedBindingKey,
+                      live: true,
+                    };
+                  }
+                }
+              } catch {
+              }
+            }
+            if (!isSubscribed || attachmentOwnerRef.current?.sessionId !== streamOwner?.sessionId || !attachmentOwnerRef.current?.live) return;
             await attemptAttach(streamRecoveries, true);
           }
         } finally {
@@ -2954,12 +3008,17 @@ export function NativeTerminalPane({
         });
         return;
       }
-      if (!teardownTuple) return;
+      const resolvedTeardownTuple =
+        teardownTuple ??
+        sessionRef.current?.attachTuple ??
+        getDurableNativeBinding(targetSessionId);
       void detachNativeTerminalLifecycle(targetSessionId, () =>
-        invoke("cmd_native_terminal_detach", {
-          sessionId: targetSessionId,
-          attachTuple: teardownTuple,
-        }),
+        resolvedTeardownTuple
+          ? invoke("cmd_native_terminal_detach", {
+              sessionId: targetSessionId,
+              attachTuple: resolvedTeardownTuple,
+            })
+          : Promise.resolve(),
       )
         .then((detached) => {
           if (detached) {

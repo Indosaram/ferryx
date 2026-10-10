@@ -231,6 +231,284 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("invokes onRefreshSessionIdentity and reattaches with refreshed epoch and incarnation on stream-ended event", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+
+    const initialSession = {
+      ...session("stream-ended-epoch"),
+      daemonEpoch: "epoch-v1",
+      incarnation: "inc-v1",
+    };
+
+    const onRefreshSessionIdentity = vi.fn().mockImplementation(async (sessionId: string) => {
+      return {
+        ...initialSession,
+        daemonEpoch: "epoch-v2",
+        incarnation: "inc-v2",
+      };
+    });
+
+    const view = render(
+      <NativeTerminalPane
+        session={initialSession}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
+      />,
+    );
+    await act(async () => {});
+    expect(ended).toBeTypeOf("function");
+
+    // First attach used initial epoch
+    const initialAttach = tauriInvoke.mock.calls.find(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-ended-epoch",
+    );
+    expect(initialAttach).toBeDefined();
+    expect(initialAttach![1].attachTuple.daemonEpoch).toBe("epoch-v1");
+    expect(initialAttach![1].attachTuple.incarnation).toBe("inc-v1");
+
+    // Trigger stream ended
+    await act(async () => {
+      ended!({ payload: { sessionId: "stream-ended-epoch" } });
+    });
+
+    // Authoritative refresh callback was invoked before reattach
+    expect(onRefreshSessionIdentity).toHaveBeenCalledWith(initialSession.id);
+
+    // Reattach used the refreshed epoch and incarnation
+    const attaches = tauriInvoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-ended-epoch",
+    );
+    expect(attaches).toHaveLength(2);
+    expect(attaches[1][1].attachTuple.daemonEpoch).toBe("epoch-v2");
+    expect(attaches[1][1].attachTuple.incarnation).toBe("inc-v2");
+
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("negative control: stale or failing onRefreshSessionIdentity does not spawn new shell or lose session identity", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+
+    const preservedSession = {
+      ...session("stream-stale-callback"),
+      daemonEpoch: "epoch-v1",
+      incarnation: "inc-v1",
+    };
+
+    // Stale/failing callback: backend is dead or daemon unreachable, returns null without respawning
+    const onRefreshSessionIdentity = vi.fn().mockResolvedValue(null);
+
+    const view = render(
+      <NativeTerminalPane
+        session={preservedSession}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
+      />,
+    );
+    await act(async () => {});
+    expect(ended).toBeTypeOf("function");
+
+    // Fire stream ended
+    await act(async () => {
+      ended!({ payload: { sessionId: "stream-stale-callback" } });
+    });
+
+    expect(onRefreshSessionIdentity).toHaveBeenCalledWith(preservedSession.id);
+
+    // Verify session identity was preserved (no new shell spawned, same backend ID attempted)
+    const attaches = tauriInvoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-stale-callback",
+    );
+    expect(attaches).toHaveLength(2);
+    expect(attaches[1][1].attachTuple.daemonEpoch).toBe("epoch-v1");
+    expect(attaches[1][1].attachTuple.backendSessionId).toBe("stream-stale-callback");
+    expect(attaches[1][1].attachTuple.frontendSessionId).toBe(preservedSession.id);
+
+    // Negative control: verify no spawn or shell replacement IPC was ever invoked
+    expect(
+      tauriInvoke.mock.calls.some(([cmd]) => cmd === "cmd_terminal_spawn" || cmd === "cmd_terminal_spawn_detailed"),
+    ).toBe(false);
+
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("negative control: stream-ended event for mismatched backend ignores recovery and skips refresh", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+
+    const onRefreshSessionIdentity = vi.fn();
+    const view = render(
+      <NativeTerminalPane
+        session={session("stream-target")}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
+      />,
+    );
+    await act(async () => {});
+
+    // Mismatched backend session ID
+    await act(async () => {
+      ended!({ payload: { sessionId: "foreign-session-id" } });
+    });
+
+    expect(onRefreshSessionIdentity).not.toHaveBeenCalled();
+    const attaches = tauriInvoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-target",
+    );
+    expect(attaches).toHaveLength(1);
+
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("deferred onRefreshSessionIdentity callback after replacement does not attach old backend and preserves next live recovery", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") ended = handler;
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined,
+    );
+
+    const sessionA = {
+      ...session("stream-deferred-a"),
+      daemonEpoch: "epoch-a1",
+      incarnation: "inc-a1",
+    };
+
+    const sessionB = {
+      ...session("stream-deferred-b"),
+      daemonEpoch: "epoch-b1",
+      incarnation: "inc-b1",
+    };
+
+    const refreshAStarted = deferred<void>();
+    const refreshADeferred = deferred<TerminalSession | null>();
+    const refreshBStarted = deferred<void>();
+
+    const onRefreshSessionIdentity = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === sessionA.id) {
+        refreshAStarted.resolve();
+        return await refreshADeferred.promise;
+      }
+      if (sessionId === sessionB.id) {
+        refreshBStarted.resolve();
+        return {
+          ...sessionB,
+          daemonEpoch: "epoch-b2",
+          incarnation: "inc-b2",
+        };
+      }
+      return null;
+    });
+
+    const view = render(
+      <NativeTerminalPane
+        session={sessionA}
+        onRefreshSessionIdentity={onRefreshSessionIdentity}
+      />,
+    );
+    await act(async () => {});
+    expect(ended).toBeTypeOf("function");
+    const endedA = ended!;
+
+    const initialAttachA = tauriInvoke.mock.calls.find(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-deferred-a",
+    );
+    expect(initialAttachA).toBeDefined();
+    expect(initialAttachA![1].attachTuple.daemonEpoch).toBe("epoch-a1");
+    expect(initialAttachA![1].attachTuple.incarnation).toBe("inc-a1");
+
+    // Trigger stream ended for session A and hold the refresh callback in flight
+    await act(async () => {
+      endedA({ payload: { sessionId: "stream-deferred-a" } });
+    });
+    await act(async () => {
+      await refreshAStarted.promise;
+    });
+    expect(onRefreshSessionIdentity).toHaveBeenCalledWith(sessionA.id);
+
+    // Rerender replacement with a different session and backend while refresh A is still held
+    await act(async () => {
+      view.rerender(
+        <NativeTerminalPane
+          session={sessionB}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+        />,
+      );
+    });
+
+    const initialAttachB = tauriInvoke.mock.calls.find(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-deferred-b",
+    );
+    expect(initialAttachB).toBeDefined();
+    expect(initialAttachB![1].attachTuple.daemonEpoch).toBe("epoch-b1");
+    expect(initialAttachB![1].attachTuple.incarnation).toBe("inc-b1");
+
+    expect(ended).toBeTypeOf("function");
+    const endedB = ended!;
+    expect(endedB).not.toBe(endedA);
+
+    // Resolve the stale callback from session A with refreshed epoch/incarnation
+    await act(async () => {
+      refreshADeferred.resolve({
+        ...sessionA,
+        daemonEpoch: "epoch-a2",
+        incarnation: "inc-a2",
+      });
+    });
+
+    // Guards prevent stale callback from reattaching old backend or clobbering identity
+    const attachesA = tauriInvoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-deferred-a",
+    );
+    expect(attachesA).toHaveLength(1);
+    expect(
+      tauriInvoke.mock.calls.some(
+        ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.attachTuple?.daemonEpoch === "epoch-a2",
+      ),
+    ).toBe(false);
+
+    // Trigger stream ended for session B to prove next live recovery remains usable
+    await act(async () => {
+      endedB({ payload: { sessionId: "stream-deferred-b" } });
+    });
+    await act(async () => {
+      await refreshBStarted.promise;
+    });
+    expect(onRefreshSessionIdentity).toHaveBeenCalledWith(sessionB.id);
+
+    const attachesB = tauriInvoke.mock.calls.filter(
+      ([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "stream-deferred-b",
+    );
+    expect(attachesB).toHaveLength(2);
+    expect(attachesB[1][1].attachTuple.daemonEpoch).toBe("epoch-b2");
+    expect(attachesB[1][1].attachTuple.incarnation).toBe("inc-b2");
+    expect(attachesB[1][1].attachTuple.backendSessionId).toBe("stream-deferred-b");
+
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
   it("held positive bounds cannot present a newer attempt or incarnation", async () => {
     const lifecycle = await import("../lib/nativeTerminalLifecycle");
     const started = deferred();
