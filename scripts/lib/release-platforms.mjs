@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -442,10 +442,13 @@ export function createGitBundles({ repoDir, ghosttyRepoDir, commitSha, ghosttyPi
   if (!existsSync(repoDir)) throw new Error(`Source repo directory not found: ${repoDir}`);
   if (!existsSync(ghosttyRepoDir)) throw new Error(`Ghostty repo directory not found: ${ghosttyRepoDir}`);
 
+  mkdirSync(outDir, { recursive: true });
+
   const sourceBundlePath = join(outDir, "source.bundle");
   const ghosttyBundlePath = join(outDir, "ghostty.bundle");
 
-  const tempRefSource = `refs/heads/bundle-release-${commitSha.slice(0, 8)}`;
+  const uniqueId = randomUUID().replace(/-/g, "").slice(0, 12);
+  const tempRefSource = `refs/heads/bundle-release-${commitSha.slice(0, 8)}-${uniqueId}`;
   try {
     execFileSync("git", ["update-ref", tempRefSource, commitSha], { cwd: repoDir, stdio: "pipe" });
     execFileSync("git", ["bundle", "create", sourceBundlePath, "HEAD", tempRefSource], {
@@ -458,7 +461,7 @@ export function createGitBundles({ repoDir, ghosttyRepoDir, commitSha, ghosttyPi
     } catch {}
   }
 
-  const tempRefGhostty = `refs/heads/bundle-ghostty-${ghosttyPin.slice(0, 8)}`;
+  const tempRefGhostty = `refs/heads/bundle-ghostty-${ghosttyPin.slice(0, 8)}-${uniqueId}`;
   try {
     execFileSync("git", ["update-ref", tempRefGhostty, ghosttyPin], { cwd: ghosttyRepoDir, stdio: "pipe" });
     execFileSync("git", ["bundle", "create", ghosttyBundlePath, "HEAD", tempRefGhostty], {
@@ -974,9 +977,33 @@ export async function buildHost({
   // Ensure bundles exist in runDir/bundles
   const bundlesDir = join(runDir, "bundles");
   mkdirSync(bundlesDir, { recursive: true });
-  const sourceBundlePath = join(bundlesDir, "source.bundle");
-  const ghosttyBundlePath = join(bundlesDir, "ghostty.bundle");
-  if (!existsSync(sourceBundlePath) || !existsSync(ghosttyBundlePath)) {
+  const sharedSourceBundlePath = join(bundlesDir, "source.bundle");
+  const sharedGhosttyBundlePath = join(bundlesDir, "ghostty.bundle");
+  const hostBundlesDir = join(bundlesDir, hostName);
+  const hostSourceBundlePath = join(hostBundlesDir, "source.bundle");
+  const hostGhosttyBundlePath = join(hostBundlesDir, "ghostty.bundle");
+
+  let sourceBundlePath;
+  let ghosttyBundlePath;
+
+  if (
+    existsSync(hostSourceBundlePath) &&
+    existsSync(hostGhosttyBundlePath) &&
+    !existsSync(`${hostSourceBundlePath}.lock`) &&
+    !existsSync(`${hostGhosttyBundlePath}.lock`)
+  ) {
+    sourceBundlePath = hostSourceBundlePath;
+    ghosttyBundlePath = hostGhosttyBundlePath;
+  } else if (
+    existsSync(sharedSourceBundlePath) &&
+    existsSync(sharedGhosttyBundlePath) &&
+    !existsSync(`${sharedSourceBundlePath}.lock`) &&
+    !existsSync(`${sharedGhosttyBundlePath}.lock`)
+  ) {
+    sourceBundlePath = sharedSourceBundlePath;
+    ghosttyBundlePath = sharedGhosttyBundlePath;
+  } else {
+    mkdirSync(hostBundlesDir, { recursive: true });
     // Read ghostty pin from build_ghostty.rs in source repo
     const rsContent = execFileSync("git", ["show", `${plan.commitSha}:src-tauri/native_terminal/build_ghostty.rs`], {
       cwd: config.repository,
@@ -987,13 +1014,15 @@ export async function buildHost({
       throw new Error("Could not extract EXPECTED_GHOSTTY_SHA from build_ghostty.rs");
     }
     const ghosttyPin = pinMatch[1];
-    createGitBundles({
+    const created = createGitBundles({
       repoDir: config.repository,
       ghosttyRepoDir: config.ghosttyRepository,
       commitSha: plan.commitSha,
       ghosttyPin,
-      outDir: bundlesDir,
+      outDir: hostBundlesDir,
     });
+    sourceBundlePath = created.sourceBundlePath;
+    ghosttyBundlePath = created.ghosttyBundlePath;
   }
 
   let toolchains = null;
