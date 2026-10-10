@@ -2602,11 +2602,6 @@ fn is_downloadable_artifact(artifact: &str) -> bool {
 async fn download_cli_artifact_handler(
     axum::extract::Path(artifact): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if !is_downloadable_artifact(&artifact) {
-        return (StatusCode::BAD_REQUEST, "Unknown artifact name").into_response();
-    }
-
     let candidate_dirs = [
         std::env::var("FERRYX_DOWNLOADS_DIR").ok().map(std::path::PathBuf::from),
         std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".ferryx").join("downloads")),
@@ -2614,7 +2609,24 @@ async fn download_cli_artifact_handler(
         Some(std::path::PathBuf::from("/usr/local/bin")),
     ];
 
-    for dir in candidate_dirs.into_iter().flatten() {
+    download_cli_artifact_from_candidate_dirs(
+        &artifact,
+        candidate_dirs.into_iter().flatten(),
+    )
+    .await
+}
+
+/// Internal artifact download implementation searching caller-provided candidate directories.
+async fn download_cli_artifact_from_candidate_dirs(
+    artifact: &str,
+    candidate_dirs: impl IntoIterator<Item = std::path::PathBuf>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_downloadable_artifact(artifact) {
+        return (StatusCode::BAD_REQUEST, "Unknown artifact name").into_response();
+    }
+
+    for dir in candidate_dirs {
         let file_path = dir.join(&artifact);
         if let Ok(meta) = tokio::fs::symlink_metadata(&file_path).await {
             if meta.file_type().is_file() {
@@ -2633,6 +2645,22 @@ async fn download_cli_artifact_handler(
 
     let github_url = format!("https://github.com/Indosaram/ferryx/releases/latest/download/{artifact}");
     axum::response::Redirect::temporary(&github_url).into_response()
+}
+
+#[cfg(test)]
+fn download_artifact_router(
+    candidate_dirs: Vec<std::path::PathBuf>,
+) -> axum::Router {
+    use axum::routing::get;
+    axum::Router::new().route(
+        "/download/{artifact}",
+        get(move |axum::extract::Path(artifact): axum::extract::Path<String>| {
+            let dirs = candidate_dirs.clone();
+            async move {
+                download_cli_artifact_from_candidate_dirs(&artifact, dirs).await
+            }
+        }),
+    )
 }
 
 fn extract_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
@@ -7272,19 +7300,32 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    async fn spawn_test_download_relay_with_dirs(
+        dirs: Vec<std::path::PathBuf>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let router = download_artifact_router(dirs);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("relay server exited unexpectedly");
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn a_symlinked_artifact_is_not_served() {
-        let _guard = DOWNLOAD_DIR_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let state = RelayState::new(vec!["test-machine-token".to_string()]);
-        let (url, _handle) = spawn_test_relay_with_state(state).await;
-        let http_url = url.replace("ws://", "http://");
-
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
-
         let outside_dir = tempfile::tempdir().expect("outside dir");
         let staging = tempfile::tempdir().expect("staging dir");
         let secret_bytes = b"secret-payload-should-not-be-served";
@@ -7294,9 +7335,13 @@ mod tests {
         let symlink_path = staging.path().join("ferryx-cli-linux-amd64");
         std::os::unix::fs::symlink(&target_file, &symlink_path).expect("create symlink");
 
-        unsafe {
-            std::env::set_var("FERRYX_DOWNLOADS_DIR", staging.path());
-        }
+        let (http_url, handle) =
+            spawn_test_download_relay_with_dirs(vec![staging.path().to_path_buf()]).await;
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
 
         let symlink_res = client
             .get(format!("{http_url}/download/ferryx-cli-linux-amd64"))
@@ -7314,13 +7359,19 @@ mod tests {
             "symlink artifact must trigger 307 redirect to GitHub fallback"
         );
 
-        // Remove the symlink and stage a genuine regular file with the same name.
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        // Remove the symlink before writing the regular file so we do not overwrite into the symlink target.
         std::fs::remove_file(&symlink_path).expect("remove symlink");
         let real_artifact_bytes = b"\x7fELF-ferryx-cli-linux-amd64-real-bytes";
         std::fs::write(&symlink_path, real_artifact_bytes).expect("write regular artifact");
 
+        let (real_http_url, real_handle) =
+            spawn_test_download_relay_with_dirs(vec![staging.path().to_path_buf()]).await;
+
         let real_res = client
-            .get(format!("{http_url}/download/ferryx-cli-linux-amd64"))
+            .get(format!("{real_http_url}/download/ferryx-cli-linux-amd64"))
             .send()
             .await
             .expect("download request for regular file");
@@ -7332,9 +7383,42 @@ mod tests {
             "download route must serve genuine regular file bytes"
         );
 
-        unsafe {
-            std::env::remove_var("FERRYX_DOWNLOADS_DIR");
-        }
+        real_handle.abort();
+        assert!(real_handle.await.unwrap_err().is_cancelled());
+
+        // Direct shared function fallback assertion: two owned candidate dirs
+        // (dir 1 has symlink, dir 2 has regular file) proves continuation through candidates.
+        let fallback_symlink_dir = tempfile::tempdir().expect("fallback symlink dir");
+        let fallback_regular_dir = tempfile::tempdir().expect("fallback regular dir");
+        let fallback_secret = fallback_symlink_dir.path().join("secret-target");
+        std::fs::write(&fallback_secret, b"fallback-secret-payload").expect("write secret");
+        let fallback_symlink = fallback_symlink_dir.path().join("ferryx-cli-linux-amd64");
+        std::os::unix::fs::symlink(&fallback_secret, &fallback_symlink).expect("symlink");
+        let fallback_real_file = fallback_regular_dir.path().join("ferryx-cli-linux-amd64");
+        let fallback_real_bytes = b"\x7fELF-fallback-real-binary";
+        std::fs::write(&fallback_real_file, fallback_real_bytes).expect("write regular");
+
+        let fallback_res = download_cli_artifact_from_candidate_dirs(
+            "ferryx-cli-linux-amd64",
+            vec![
+                fallback_symlink_dir.path().to_path_buf(),
+                fallback_regular_dir.path().to_path_buf(),
+            ],
+        )
+        .await;
+        assert_eq!(
+            fallback_res.status(),
+            StatusCode::OK,
+            "must fall through from symlink directory to valid regular file directory"
+        );
+        let fallback_body = axum::body::to_bytes(fallback_res.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        assert_eq!(
+            fallback_body.as_ref(),
+            fallback_real_bytes.as_slice(),
+            "must serve regular file bytes from second candidate directory"
+        );
     }
 
     async fn spawn_test_relay_with_account_state(
