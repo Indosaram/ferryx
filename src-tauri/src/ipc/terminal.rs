@@ -143,7 +143,7 @@ pub(crate) fn is_plausible_session_cwd_text(value: &str) -> bool {
     if value.is_empty() || value.chars().any(char::is_control) || value.contains('|') {
         return false;
     }
-    if Path::new(value).is_absolute() {
+    if Path::new(value).is_absolute() || value.starts_with('/') {
         return true;
     }
     // Windows-style absolute paths are not `is_absolute()` when the host is POSIX.
@@ -6246,8 +6246,10 @@ mod tests {
     fn session_cwd_text_accepts_posix_and_windows_absolute_paths() {
         assert!(is_plausible_session_cwd_text("/home/indo/project"));
         assert!(is_plausible_session_cwd_text("C:\\Users\\sook\\work\\steam"));
+        assert!(is_plausible_session_cwd_text("C:/Users/sook/work/steam"));
         assert!(is_plausible_session_cwd_text("\\\\host\\share"));
         assert!(!is_plausible_session_cwd_text(""));
+        assert!(!is_plausible_session_cwd_text("relative/path"));
         assert!(!is_plausible_session_cwd_text("cwd|rtd info error: No such file or directory"));
         assert!(!is_plausible_session_cwd_text("/tmp/with\nnewline"));
     }

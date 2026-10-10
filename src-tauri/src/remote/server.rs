@@ -8085,8 +8085,9 @@ mod tests {
         let registry = WorkspaceRegistry::new();
         let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
 
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         let (session_id, mut rx) = pty
-            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .spawn(portable_pty::CommandBuilder::new(shell), 80, 24)
             .expect("spawn session");
         hub.register_session(&session_id);
         let session_id_clone = session_id.clone();
@@ -8125,8 +8126,9 @@ mod tests {
         let registry = WorkspaceRegistry::new();
         let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
 
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         let (session_id, mut rx) = pty
-            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .spawn(portable_pty::CommandBuilder::new(shell), 80, 24)
             .expect("spawn session");
         hub.register_session(&session_id);
         let session_id_clone = session_id.clone();

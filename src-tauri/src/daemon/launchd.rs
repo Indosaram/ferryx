@@ -349,13 +349,15 @@ mod tests {
     fn plist_never_writes_agent_output_to_a_shared_directory() {
         let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
         let plist = generate_launchd_plist("/opt/ferryx/bin/ferryx", log_dir);
+        let stdout_path = log_dir.join("daemon.stdout.log");
+        let stderr_path = log_dir.join("daemon.stderr.log");
         assert!(plist.contains(&format!(
-            "<key>StandardOutPath</key>\n    <string>{}/daemon.stdout.log</string>",
-            log_dir.display()
+            "<key>StandardOutPath</key>\n    <string>{}</string>",
+            stdout_path.display()
         )));
         assert!(plist.contains(&format!(
-            "<key>StandardErrorPath</key>\n    <string>{}/daemon.stderr.log</string>",
-            log_dir.display()
+            "<key>StandardErrorPath</key>\n    <string>{}</string>",
+            stderr_path.display()
         )));
         assert!(!plist.contains("/tmp/"), "agent output must not live in /tmp: {plist}");
     }

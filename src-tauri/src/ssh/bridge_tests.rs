@@ -31,7 +31,7 @@ fn helper_binary_path() -> PathBuf {
         "ferryx-remote-helper debug binary must exist at {}",
         debug_path.display()
     );
-    debug_path
+    debug_path.canonicalize().unwrap_or(debug_path)
 }
 
 #[cfg(not(unix))]
@@ -62,9 +62,10 @@ fn sample_env() -> RemoteEnvironment {
 }
 
 #[cfg(not(unix))]
-fn loopback_ssh_available() -> bool {
-    std::process::Command::new("ssh")
+async fn loopback_ssh_available() -> bool {
+    let mut child = match tokio::process::Command::new("ssh")
         .args([
+            "-n",
             "-o",
             "BatchMode=yes",
             "-o",
@@ -74,11 +75,22 @@ fn loopback_ssh_available() -> bool {
             "-o",
             "ConnectTimeout=2",
             "127.0.0.1",
-            "true",
+            "exit 0",
         ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) => status.success(),
+        _ => false,
+    }
 }
 
 struct TestFixture {
@@ -953,10 +965,15 @@ async fn ssh_bridge_live_loopback_openssh_connection() {
     #[cfg(not(unix))]
     {
         assert!(
-            loopback_ssh_available(),
+            loopback_ssh_available().await,
             "Loopback SSH must be available for live OpenSSH bridge test"
         );
-        exercise_live_loopback_bridge(Path::new("")).await;
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            exercise_live_loopback_bridge(Path::new("")),
+        )
+        .await
+        .expect("bounded live loopback test");
     }
 }
 
@@ -1000,16 +1017,69 @@ fn live_loopback_host(fixture: &TestFixture, root: &Path) -> SshHost {
     }
 }
 
+#[cfg(not(unix))]
+async fn diagnose_live_loopback_probe_ab(host: &SshHost) {
+    // Bounded cfg(test) live fixture A/B diagnostic on exact actual encoded PowerShell probe script:
+    // (A) Default bounded_output (no -n) with 4s timeout
+    // (B) Identical plan with only "-n" prepended with 4s timeout
+    let marker = "FERRYX_ENV_V1_diag_live_ab";
+    let ps_script = format!(
+        "if ([Environment]::OSVersion.Platform -ne 'Win32NT') {{ exit 2 }}; \
+         $g='0'; if (Get-Command git -ErrorAction SilentlyContinue) {{ $g='1' }}; \
+         $ds=''; $k=Get-ItemProperty 'HKLM:\\SOFTWARE\\OpenSSH' -ErrorAction SilentlyContinue; \
+         if ($k -and $k.DefaultShell) {{ $ds=[string]$k.DefaultShell }}; \
+         [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,$ds,'' -join [char]0))"
+    );
+    let cmd = RemoteExecutor::Powershell.command(&ps_script);
+    if let Ok(plan_default) = crate::ssh::direct::ssh_plan(host, cmd, false) {
+        let mut plan_with_n = plan_default.clone();
+        plan_with_n.args.insert(0, "-n".to_string());
+
+        let res_default =
+            crate::ssh::direct::bounded_output(&plan_default, Duration::from_secs(4)).await;
+        let res_with_n =
+            crate::ssh::direct::bounded_output(&plan_with_n, Duration::from_secs(4)).await;
+
+        eprintln!(
+            "[DIAGNOSTIC live-loopback A/B default] outcome: err={:?}, stdout_len={}",
+            res_default.as_ref().err(),
+            res_default.as_ref().map(|o| o.len()).unwrap_or(0),
+        );
+        eprintln!(
+            "[DIAGNOSTIC live-loopback A/B with-n] outcome: err={:?}, stdout_len={}",
+            res_with_n.as_ref().err(),
+            res_with_n.as_ref().map(|o| o.len()).unwrap_or(0),
+        );
+    }
+}
+
 /// The child half of the live loopback SSH test: connects the bridge client over real OpenSSH.
 async fn exercise_live_loopback_bridge(root: &Path) {
     // Use owned daemon fixture; ensure_started preserves the already-live owned daemon,
     // avoiding detached process spawning or unowned daemon lifetimes.
     let fixture = TestFixture::new("live-loopback");
     let host = live_loopback_host(&fixture, root);
+    #[cfg(unix)]
     let env = sample_env();
+    #[cfg(not(unix))]
+    diagnose_live_loopback_probe_ab(&host).await;
+    #[cfg(not(unix))]
+    let env = crate::ssh::runtime::detect(&host)
+        .await
+        .expect("detect live loopback environment");
+    #[cfg(windows)]
+    let normalize_path = |p: &Path| -> String {
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let s = canonical.to_string_lossy();
+        let stripped = s.strip_prefix(r#"\\?\"#).unwrap_or(&s);
+        stripped.replace('\\', "/")
+    };
+    #[cfg(not(windows))]
+    let normalize_path = |p: &Path| -> String { p.to_str().unwrap().to_string() };
+
     let location = HelperLocation {
-        executable: fixture.helper_bin.to_str().unwrap().to_string(),
-        root: fixture.root.to_str().unwrap().to_string(),
+        executable: normalize_path(&fixture.helper_bin),
+        root: normalize_path(&fixture.root),
     };
 
     let client = SshBridgeClient::connect(&host, &env, &location)
@@ -1023,7 +1093,7 @@ async fn exercise_live_loopback_bridge(root: &Path) {
 
     // Register project over SSH bridge
     client
-        .project_register("proj-ssh", fixture.project_dir.to_str().unwrap())
+        .project_register("proj-ssh", &normalize_path(&fixture.project_dir))
         .await
         .expect("register project over SSH");
 

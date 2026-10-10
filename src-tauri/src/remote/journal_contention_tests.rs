@@ -80,6 +80,52 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut writer = None;
     let outcome = std::panic::AssertUnwindSafe(async {
+        let ready_nonce = uuid::Uuid::new_v4().simple().to_string();
+        let ready_prefix = format!("JOURNAL_READY_{}", &ready_nonce[..8]);
+        let ready_suffix = &ready_nonce[8..];
+        let ready_sentinel = format!("{ready_prefix}{ready_suffix}");
+
+        #[cfg(windows)]
+        let (program, args) = {
+            use base64::Engine as _;
+            let has_pwsh = std::env::var_os("PATH").is_some_and(|paths| {
+                std::env::split_paths(&paths).any(|dir| {
+                    dir.join("pwsh.exe").is_file() || dir.join("pwsh").is_file()
+                })
+            });
+            let program = if has_pwsh { "pwsh.exe" } else { "powershell.exe" };
+            let ready_cmd = format!(
+                "[Console]::WriteLine('{ready_prefix}' + '{ready_suffix}'); while($null -ne ($line=[Console]::ReadLine())){{[Console]::WriteLine($line)}}"
+            );
+            let utf16_bytes: Vec<u8> = ready_cmd
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            let encoded_cmd = base64::engine::general_purpose::STANDARD.encode(&utf16_bytes);
+            (
+                program,
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-EncodedCommand".to_string(),
+                    encoded_cmd,
+                ],
+            )
+        };
+        #[cfg(not(windows))]
+        let (program, args) = {
+            let script = format!(
+                "printf '%s%s\\n' '{ready_prefix}' '{ready_suffix}'; while IFS= read -r line; do printf '%s\\n' \"$line\"; done"
+            );
+            ("sh", vec!["-c".to_string(), script])
+        };
+        let mut fixture_cmd = portable_pty::CommandBuilder::new(program);
+        for arg in args {
+            fixture_cmd.arg(arg);
+        }
+        owner.session_service().set_test_shell_command(fixture_cmd);
+
         let created = client.post(format!("http://{address}/api/v1/sessions")).bearer_auth(&token)
             .body(json!({"requestId":uuid::Uuid::new_v4().to_string(),"workspaceId":workspace,"cols":80,"rows":24,
                 "worktree":null,"inheritFromSessionId":null,"cwdRelative":null,"startup":{"kind":"shell"}}).to_string())
@@ -114,10 +160,38 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         let attached: Value = serde_json::from_str(attached.to_text().unwrap()).unwrap();
         assert_eq!(attached["type"], "attached");
         assert_eq!(attached["target"], session["target"]);
+        let mut ready_output = Vec::new();
+        let mut dsr_answered = false;
+        let ready_result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = frame {
+                    ready_output.extend_from_slice(crate::remote::terminal_wire::decode_frame(&bytes).unwrap().terminal_bytes);
+                    if !dsr_answered && ready_output.windows(4).any(|w| w == b"\x1b[6n") {
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                b"\x1b[1;1R".to_vec().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        dsr_answered = true;
+                    }
+                    if ready_output.windows(ready_sentinel.len()).any(|p| p == ready_sentinel.as_bytes()) {
+                        break;
+                    }
+                }
+            }
+        }).await;
+        if ready_result.is_err() {
+            panic!(
+                "shell fixture failed to emit READY sentinel within 5s; buffered ready_output={:?}",
+                String::from_utf8_lossy(&ready_output)
+            );
+        }
         let marker = format!("JOURNAL_SOCKET_{}", uuid::Uuid::new_v4().simple());
-        socket.send(tokio_tungstenite::tungstenite::Message::Binary(format!("{marker}\r").into_bytes().into())).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut output = Vec::new();
+        socket.send(tokio_tungstenite::tungstenite::Message::Binary(format!("{marker}\r\n").into_bytes().into())).await.unwrap();
+        let mut output = Vec::new();
+        let echo_result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let frame = socket.next().await.unwrap().unwrap();
                 if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = frame {
@@ -125,7 +199,13 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
                     if output.windows(marker.len()).any(|part| part == marker.as_bytes()) { break; }
                 }
             }
-        }).await.expect("journal writer blocked real PTY echo");
+        }).await;
+        if echo_result.is_err() {
+            panic!(
+                "journal writer blocked real PTY echo within 5s; buffered output={:?}",
+                String::from_utf8_lossy(&output)
+            );
+        }
         assert!(client.get(format!("http://{address}/health")).send().await.unwrap().status().is_success());
         socket.close(None).await.unwrap();
         assert!(owner.terminal_service().get_session(id).is_some());

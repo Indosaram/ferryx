@@ -1675,6 +1675,209 @@ mod tests {
         assert!(attachment.snapshot.history.windows(b"hello live import".len()).any(|w| w == b"hello live import"));
     }
 
+    #[cfg(windows)]
+    fn canonical_powershell_path() -> String {
+        let sys_root = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("SYSTEMROOT"))
+            .unwrap_or_else(|_| "C:\\Windows".to_string());
+        format!("{sys_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+    }
+
+    fn spawn_cat_child() -> tokio::process::Child {
+        #[cfg(unix)]
+        {
+            tokio::process::Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        }
+        #[cfg(windows)]
+        {
+            let exe = canonical_powershell_path();
+            tokio::process::Command::new(exe)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "$in = [Console]::OpenStandardInput(); $out = [Console]::OpenStandardOutput(); $buf = New-Object byte[] 4096; while(($n = $in.Read($buf, 0, 4096)) -gt 0) { $out.Write($buf, 0, $n); $out.Flush() }; (New-Object System.Threading.ManualResetEvent($false)).WaitOne()",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    #[cfg(windows)]
+    struct OwnedProcessGuard {
+        pid: u32,
+        handle: *mut std::ffi::c_void,
+        expected_exe_path: String,
+        verified: bool,
+    }
+
+    #[cfg(windows)]
+    impl OwnedProcessGuard {
+        fn from_child(child: &tokio::process::Child, expected_exe_path: String) -> Self {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+                fn QueryFullProcessImageNameW(
+                    process: *mut std::ffi::c_void,
+                    flags: u32,
+                    exe_name: *mut u16,
+                    size: *mut u32,
+                ) -> i32;
+            }
+            const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+            const PROCESS_TERMINATE: u32 = 0x0001;
+            const SYNCHRONIZE: u32 = 0x00100000;
+
+            let pid = child.id().expect("child pid");
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                    0,
+                    pid,
+                )
+            };
+            assert!(!handle.is_null(), "OpenProcess failed for PID {pid}");
+
+            let mut guard = Self {
+                pid,
+                handle,
+                expected_exe_path,
+                verified: false,
+            };
+
+            let mut buf = [0u16; 1024];
+            let mut size = buf.len() as u32;
+            let ok = unsafe { QueryFullProcessImageNameW(guard.handle, 0, buf.as_mut_ptr(), &mut size) };
+            assert_ne!(ok, 0, "QueryFullProcessImageNameW failed for PID {pid}");
+            let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+            assert!(
+                image_name.eq_ignore_ascii_case(&guard.expected_exe_path),
+                "Process image path mismatch: expected '{}', got '{image_name}'",
+                guard.expected_exe_path
+            );
+
+            guard.verified = true;
+            guard
+        }
+
+        fn assert_still_alive(&self) {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetExitCodeProcess(process: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+            }
+            const STILL_ACTIVE: u32 = 259;
+            let mut exit_code = 0u32;
+            let ok = unsafe { GetExitCodeProcess(self.handle, &mut exit_code) };
+            assert_ne!(ok, 0, "GetExitCodeProcess failed for PID {}", self.pid);
+            assert_eq!(
+                exit_code, STILL_ACTIVE,
+                "Process {} exited prematurely with code {exit_code}",
+                self.pid
+            );
+        }
+
+        fn terminate_and_wait(mut self) {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+                fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+                fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+                fn QueryFullProcessImageNameW(
+                    process: *mut std::ffi::c_void,
+                    flags: u32,
+                    exe_name: *mut u16,
+                    size: *mut u32,
+                ) -> i32;
+            }
+            const WAIT_OBJECT_0: u32 = 0;
+
+            if self.handle.is_null() {
+                return;
+            }
+
+            let mut buf = [0u16; 1024];
+            let mut size = buf.len() as u32;
+            let ok = unsafe { QueryFullProcessImageNameW(self.handle, 0, buf.as_mut_ptr(), &mut size) };
+            assert_ne!(ok, 0, "QueryFullProcessImageNameW failed before terminate for PID {}", self.pid);
+            let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+            assert!(
+                image_name.eq_ignore_ascii_case(&self.expected_exe_path),
+                "Process image mismatch before terminate: expected '{}', got '{image_name}'",
+                self.expected_exe_path
+            );
+
+            let term_ok = unsafe { TerminateProcess(self.handle, 1) };
+            assert_ne!(term_ok, 0, "TerminateProcess failed for PID {}", self.pid);
+            let wait_res = unsafe { WaitForSingleObject(self.handle, 5000) };
+            assert_eq!(wait_res, WAIT_OBJECT_0, "WaitForSingleObject timed out (result: {wait_res}) for PID {}", self.pid);
+            let close_ok = unsafe { CloseHandle(self.handle) };
+            assert_ne!(close_ok, 0, "CloseHandle failed for PID {}", self.pid);
+            self.handle = std::ptr::null_mut();
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for OwnedProcessGuard {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+                    fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+                    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+                    fn QueryFullProcessImageNameW(
+                        process: *mut std::ffi::c_void,
+                        flags: u32,
+                        exe_name: *mut u16,
+                        size: *mut u32,
+                    ) -> i32;
+                }
+                const WAIT_OBJECT_0: u32 = 0;
+
+                if self.verified {
+                    let mut buf = [0u16; 1024];
+                    let mut size = buf.len() as u32;
+                    let ok = unsafe { QueryFullProcessImageNameW(self.handle, 0, buf.as_mut_ptr(), &mut size) };
+                    if ok == 0 {
+                        eprintln!("[OwnedProcessGuard::drop] QueryFullProcessImageNameW failed for PID {}", self.pid);
+                    } else {
+                        let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+                        if !image_name.eq_ignore_ascii_case(&self.expected_exe_path) {
+                            eprintln!(
+                                "[OwnedProcessGuard::drop] Image mismatch for PID {}: expected '{}', got '{}'",
+                                self.pid, self.expected_exe_path, image_name
+                            );
+                        } else {
+                            let term_ok = unsafe { TerminateProcess(self.handle, 1) };
+                            if term_ok == 0 {
+                                eprintln!("[OwnedProcessGuard::drop] TerminateProcess failed for PID {}", self.pid);
+                            } else {
+                                let wait_res = unsafe { WaitForSingleObject(self.handle, 5000) };
+                                if wait_res != WAIT_OBJECT_0 {
+                                    eprintln!(
+                                        "[OwnedProcessGuard::drop] WaitForSingleObject wait timeout/failure (result {wait_res}) for PID {}",
+                                        self.pid
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                let close_ok = unsafe { CloseHandle(self.handle) };
+                if close_ok == 0 {
+                    eprintln!("[OwnedProcessGuard::drop] CloseHandle failed for PID {}", self.pid);
+                }
+                self.handle = std::ptr::null_mut();
+            }
+        }
+    }
     #[tokio::test]
     async fn test_remote_runtime_poisoned_bridge_export_rejected() {
         let hub = Arc::new(TerminalOutputHub::default());
@@ -1683,19 +1886,12 @@ mod tests {
         });
         let runtime = RemoteRuntime::with_connector(hub.clone(), dialer.clone());
 
-        // Spawn a real cat child and create an SshBridgeClient
-        let child1 = tokio::process::Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let child2 = tokio::process::Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child1 = spawn_cat_child();
+        let child2 = spawn_cat_child();
+        #[cfg(windows)]
+        let guard1 = OwnedProcessGuard::from_child(&child1, canonical_powershell_path());
+        #[cfg(windows)]
+        let guard2 = OwnedProcessGuard::from_child(&child2, canonical_powershell_path());
 
         let mut ctrl = BridgeConnection::from_child(child1).unwrap();
         let rdr = BridgeConnection::from_child(child2).unwrap();
@@ -1730,8 +1926,17 @@ mod tests {
         }
 
         // Export must fail because connection is poisoned
-        let err = runtime.export_for_transfer("sess-poisoned").await.unwrap_err();
+        let err = match runtime.export_for_transfer("sess-poisoned").await {
+            Err(e) => e,
+            Ok(_) => panic!("Expected export_for_transfer to fail on poisoned connection, but it succeeded"),
+        };
         assert_eq!(err.kind, RemoteFailureKind::Protocol);
+
+        #[cfg(windows)]
+        {
+            guard1.terminate_and_wait();
+            guard2.terminate_and_wait();
+        }
     }
 
     #[tokio::test]
@@ -1742,21 +1947,19 @@ mod tests {
         });
         let runtime = RemoteRuntime::with_connector(hub.clone(), dialer.clone());
 
-        let child1 = tokio::process::Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let child2 = tokio::process::Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child1 = spawn_cat_child();
+        let child2 = spawn_cat_child();
+        #[cfg(windows)]
+        let guard1 = OwnedProcessGuard::from_child(&child1, canonical_powershell_path());
+        #[cfg(windows)]
+        let guard2 = OwnedProcessGuard::from_child(&child2, canonical_powershell_path());
 
         let pid1 = child1.id().unwrap();
         let pid2 = child2.id().unwrap();
+        #[cfg(windows)]
+        {
+            let _ = (pid1, pid2);
+        }
 
         let ctrl = BridgeConnection::from_child(child1).unwrap();
         let rdr = BridgeConnection::from_child(child2).unwrap();
@@ -1793,9 +1996,6 @@ mod tests {
         // Drop runtime
         drop(runtime);
 
-        // Wait a short duration
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         // Both children must STILL be alive
         #[cfg(unix)]
         {
@@ -1806,9 +2006,15 @@ mod tests {
                 libc::kill(pid2 as i32, libc::SIGKILL);
             }
         }
+        #[cfg(windows)]
+        {
+            guard1.assert_still_alive();
+            guard2.assert_still_alive();
+            guard1.terminate_and_wait();
+            guard2.terminate_and_wait();
+        }
     }
 }
-
 async fn queue_worker(
     mut rx: mpsc::UnboundedReceiver<RemoteCommand>,
     entry_weak: Weak<Entry>,

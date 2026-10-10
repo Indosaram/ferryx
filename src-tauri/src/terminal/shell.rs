@@ -849,10 +849,17 @@ mod tests {
 
         let without_env =
             resolve_shell_command_pure(None, TargetPlatform::Linux, |_| false, |_| None);
+        let expected_program = if std::path::Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else if std::path::Path::new("/bin/sh").exists() {
+            "/bin/sh"
+        } else {
+            "sh"
+        };
         assert_eq!(
             without_env,
             ShellCommandPlan {
-                program: "/bin/bash".to_string(),
+                program: expected_program.to_string(),
                 args: vec!["-l".to_string()],
             }
         );

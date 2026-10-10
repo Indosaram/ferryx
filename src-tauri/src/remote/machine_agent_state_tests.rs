@@ -137,6 +137,13 @@ impl Fixture {
     }
 
     async fn close(mut self) {
+        let sessions = self.host.terminal_service().list_sessions();
+        for session_id in sessions {
+            match self.host.terminal_service().close_session(&session_id).await {
+                Ok(()) | Err(crate::terminal::PtyError::SessionNotFound(_)) => {}
+                Err(err) => panic!("fixture session close failed for {session_id}: {err:?}"),
+            }
+        }
         self.tasks.shutdown().await;
     }
 }
@@ -347,6 +354,25 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             "rotated-provider-id-99"
         );
 
+        let close_req = m::CloseSessionRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            daemon_epoch: target.daemon_epoch,
+        };
+        let close_res = machine_client
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::CloseSession {
+                        session_id: target.session_id.clone(),
+                        request: close_req,
+                    },
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("CloseSession error: {:?}", e))?;
+        assert!(matches!(close_res.result, OperationResult::CloseSession(())));
         proxy.detach().await.map_err(|e| anyhow::anyhow!("detach error: {:?}", e))?;
         Ok::<_, anyhow::Error>(())
     }

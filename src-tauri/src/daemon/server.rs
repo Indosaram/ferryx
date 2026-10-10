@@ -2291,6 +2291,8 @@ impl DaemonServer {
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
             provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
             desktop_geometries: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            test_shell_command: parking_lot::Mutex::new(None),
         });
         #[cfg(test)]
         let remote_state = Arc::new(RemoteGatewayState::new_with_paths_and_service(
@@ -2496,6 +2498,21 @@ impl DaemonServer {
     /// [`agent_state_socket_path`] instead.
     pub fn agent_state_endpoint(&self) -> Option<(u16, String)> {
         self.agent_state_endpoint.lock().clone()
+    }
+
+    /// Bearer token every connection must present before a request is dispatched on
+    /// loopback transports (Windows). Returns None on Unix where filesystem permissions
+    /// enforce ownership.
+    #[cfg(test)]
+    pub(crate) fn transport_token(&self) -> Option<&str> {
+        #[cfg(not(unix))]
+        {
+            Some(&self.transport_token)
+        }
+        #[cfg(unix)]
+        {
+            None
+        }
     }
 
     /// True once this boot's agent-state ingress was observed to fail, so an absent endpoint is

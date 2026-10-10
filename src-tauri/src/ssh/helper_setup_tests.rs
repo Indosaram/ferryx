@@ -619,12 +619,59 @@ fn ssh_helper_setup_posix_upload_script_execution_test() {
     assert_eq!(std::fs::read(&exe_path).unwrap(), payload);
 }
 
+fn resolve_test_bash() -> std::path::PathBuf {
+    if cfg!(windows) {
+        for path in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let p = std::path::PathBuf::from(path);
+            if p.is_file() {
+                return p;
+            }
+        }
+        if let Some(git) = std::env::var_os("PATH").and_then(|val| {
+            std::env::split_paths(&val)
+                .map(|dir| dir.join("git.exe"))
+                .find(|path| path.is_file())
+        }) {
+            let mut cursor = git.parent();
+            while let Some(dir) = cursor {
+                let c1 = dir.join("bin").join("bash.exe");
+                if c1.is_file() {
+                    return c1;
+                }
+                let c2 = dir.join("usr").join("bin").join("bash.exe");
+                if c2.is_file() {
+                    return c2;
+                }
+                cursor = dir.parent();
+            }
+        }
+        std::path::PathBuf::from("bash.exe")
+    } else {
+        std::path::PathBuf::from("sh")
+    }
+}
+
 fn process_alive(pid: u32) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("kill -0 {pid}")])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    if cfg!(windows) {
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"),
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        Command::new("sh")
+            .args(["-c", &format!("kill -0 {pid}")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 #[test]
@@ -637,11 +684,19 @@ fn posix_upload_script_skips_kill_for_foreign_process() {
     ));
     std::fs::create_dir_all(base.join("bin")).unwrap();
     std::fs::create_dir_all(base.join("helper")).unwrap();
-    let sleeper = Command::new("sleep")
-        .arg("30")
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    let sleeper = if cfg!(windows) {
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    } else {
+        Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
     let pid = sleeper.id();
     let _guard = ChildGuard(Some(sleeper));
 
@@ -654,11 +709,12 @@ fn posix_upload_script_skips_kill_for_foreign_process() {
         executable: base
             .join("bin/ferryx-remote-helper")
             .to_string_lossy()
-            .to_string(),
-        root: base.join("helper").to_string_lossy().to_string(),
+            .replace('\\', "/"),
+        root: base.join("helper").to_string_lossy().replace('\\', "/"),
     };
     let script = build_posix_upload_script(&loc, b"PAYLOAD");
-    let mut child = Command::new("sh")
+    let bash = resolve_test_bash();
+    let mut child = Command::new(&bash)
         .args(["-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
