@@ -441,6 +441,8 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     child.once('error', rejectPromise);
   });
   expect(Number.isInteger(grandchildPid)).toBe(true);
+  // Both descendants inherit stdout; leader exit alone does not settle their handles.
+  const stdoutClosed = new Promise(resolvePromise => { child.stdout.once('close', () => resolvePromise(true)); });
   let reaped = false;
   try {
     const receipts = await registry.cleanup();
@@ -448,6 +450,8 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     expect(receipt.escalated).toBe(true); // SIGTERM was ignored: the force step ran
     expect(receipt.exited).toBe(true);
     expect(receipt.descendants.map(d => d.pid)).toContain(grandchildPid);
+    const closed = await withDeadline(stdoutClosed, 5000, 'force-reaped-stdout-close');
+    expect(closed.timedOut).toBe(false);
     reaped = true;
   } finally {
     // Fixture-owned fallback so a broken escalation cannot leak an orphan.
