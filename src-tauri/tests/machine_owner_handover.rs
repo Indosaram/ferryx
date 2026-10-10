@@ -1,6 +1,8 @@
 #![cfg(unix)]
 #[path = "support/machine_owner_socket.rs"]
 mod socket;
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 use ferryx_lib::{daemon::server::DaemonServer, remote::server::create_remote_router};
 use futures_util::FutureExt;
 use serde_json::{json, Value};
@@ -18,6 +20,7 @@ async fn reply(request: reqwest::RequestBuilder, status: u16) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_target_remains_running_when_gateway_hands_over() {
+    if supervisor::run("original_target_remains_running_when_gateway_hands_over").await { return; }
     // Given: all process-global library state resolves below a private supervisor root.
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("private HOME"));
     assert!(home.parent().and_then(|p| p.file_name()).and_then(|p| p.to_str()).is_some_and(|name| name.starts_with("a10-owner-")), "run using the private supervisor");
@@ -77,6 +80,16 @@ async fn original_target_remains_running_when_gateway_hands_over() {
         let new = tokio::task::spawn_blocking(move || Arc::new(DaemonServer::new_with_paths(Some(path.join("config")), Some(path.join("auth"))))).await.expect("new owner");
         let owner_epoch = session["target"]["daemonEpoch"].as_str().expect("epoch").parse::<u64>().expect("numeric epoch");
         new.remote_state().daemon_epoch.store(owner_epoch + 1, std::sync::atomic::Ordering::Release);
+        let manifest_path = ferryx_lib::daemon::manifest::get_manifest_path();
+        assert!(manifest_path.exists(), "handover routes manifest {} must exist after commit_handover_v4", manifest_path.display());
+        let manifest = ferryx_lib::daemon::manifest::HandoverManifest::load_from_path(&manifest_path);
+        assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy), "manifest must contain legacy route for {}", legacy.display());
+        let legacy_client = ferryx_lib::daemon::client::DaemonClient::new_with_socket(legacy.clone());
+        let listed_sessions: Vec<String> = legacy_client.list_sessions().await.expect("direct list_sessions probe on legacy socket must succeed");
+        assert!(listed_sessions.contains(&id.to_string()), "legacy daemon must report session {id}, got {listed_sessions:?}");
+        let direct_peer = ferryx_lib::daemon::proxy::LegacyPeer::new(legacy.clone(), vec![id.to_string()]);
+        let peer_sessions = direct_peer.list_sessions().await.expect("direct LegacyPeer::list_sessions probe must succeed");
+        assert!(peer_sessions.contains(&id.to_string()), "direct LegacyPeer must report session {id}, got {peer_sessions:?}");
         new.session_router.adopt_routes_from_manifest().await.expect("adopt actual handover route");
         assert_eq!(new.session_router.find_legacy_peer_for_session(id).expect("adopted peer").socket_path(), legacy);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("new gateway");

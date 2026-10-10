@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SettingsDialog } from "./SettingsDialog";
 import type { UpdateStatus } from "../lib/updater";
 
 const checkForUpdate = vi.fn(async () => {});
@@ -33,7 +34,6 @@ vi.mock("../lib/updater", async (importOriginal) => {
 });
 
 async function renderGeneralSection() {
-  const { SettingsDialog } = await import("./SettingsDialog");
   return render(<SettingsDialog open onClose={() => {}} />);
 }
 
@@ -45,6 +45,10 @@ function getSoftwareUpdateCard() {
 }
 
 describe("Settings > General software update control", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     cleanup();
     currentStatus = { state: "idle" };

@@ -316,21 +316,15 @@ mod deletion_repair_tests {
             .and_then(|t| tempfile::tempdir_in(t).ok())
             .or_else(|| tempfile::tempdir_in(&target_dir).ok())
             .unwrap_or_else(|| tempfile::tempdir().unwrap());
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
-        run_git(
-            dir.path(),
-            &[
-                "clone",
-                "--no-hardlinks",
-                "--no-checkout",
-                source.to_str().unwrap(),
-                "repo",
-            ],
-        )
-        .unwrap();
         let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]).unwrap();
+        run_git(&repo, &["config", "user.name", "Deletion fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        run_git(&repo, &["commit", "--allow-empty", "-m", "base"]).unwrap();
+        std::fs::write(repo.join("target.txt"), b"unmerged change").unwrap();
+        run_git(&repo, &["add", "target.txt"]).unwrap();
+        run_git(&repo, &["commit", "-m", "target"]).unwrap();
         let tip = run_git(&repo, &["rev-parse", "HEAD"]).unwrap();
         run_git(&repo, &["checkout", "--detach", "HEAD~1"]).unwrap();
         let registry = WorkspaceRegistry::new();

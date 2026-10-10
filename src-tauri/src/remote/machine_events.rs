@@ -134,6 +134,7 @@ pub(crate) async fn serve(
     let mut watcher: Option<crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch> =
         None;
     let mut reason = "subscribe";
+    let mut stale_sequence = None;
     let mut metadata_forwarders = tokio::task::JoinSet::new();
     let mut forwarded_targets =
         std::collections::HashMap::<String, tokio::sync::watch::Receiver<bool>>::new();
@@ -141,7 +142,7 @@ pub(crate) async fn serve(
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
         // is therefore replayed, never discarded as already in this boundary.
-        let sequence = events.sequence();
+        let sequence = stale_sequence.take().unwrap_or_else(|| events.sequence());
         let workspaces = services.workspaces.clone();
         let sessions = services.sessions.clone();
         let epoch = crate::scoped_contracts::Epoch(
@@ -305,6 +306,7 @@ pub(crate) async fn serve(
         };
         if payload["error"] == "STALE_REVISION" {
             watcher = Some(watch);
+            stale_sequence = Some(sequence);
             reason = "concurrentCommit";
             continue;
         }

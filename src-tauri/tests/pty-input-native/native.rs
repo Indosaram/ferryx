@@ -1,24 +1,50 @@
-#![cfg(windows)]
-// Compile the exact production session, not a replica. Only unrelated metrics
-// and its enclosing error enum are supplied by this small platform harness.
+// Canonical Windows proof run: cargo run --manifest-path src-tauri/tests/pty-input-native/Cargo.toml --bin native
+#[path = "../../src/terminal/suspension.rs"]
+pub mod suspension;
+#[path = "../../src/terminal/output_hub.rs"]
+pub mod output_hub;
+#[path = "../../src/terminal/session.rs"]
+pub mod session;
+
+pub use suspension::{ActuationReceipt, StopGuarantee, SuspensionSource, SuspensionTarget};
+
 pub mod terminal {
     #[derive(Debug)]
     pub enum PtyError { IoError(String), ResizeError(String), KillError(String), Other(String) }
     pub mod metrics { pub fn record_pty_read(_: &str, _: usize) {} }
-    pub use crate::session::*;
+    pub use crate::output_hub;
+    pub use crate::{session, ActuationReceipt, StopGuarantee, SuspensionSource, SuspensionTarget};
 }
-#[path = "../../src/terminal/session.rs"]
-mod session;
+
+#[cfg(not(windows))]
+fn main() { panic!("native input proof requires Windows"); }
+
+#[cfg(windows)]
+fn main() {
+    if std::env::var_os("A10_NATIVE_CONTROL").is_some() {
+        child();
+        return;
+    }
+    let runtime=Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(native_saturation_drop_and_deadline());
+}
+
+#[cfg(windows)]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+#[cfg(windows)]
 use std::{io::{Read,Write},time::Duration};
+#[cfg(windows)]
+use tokio::runtime::Builder;
+#[cfg(windows)]
 use futures_util::FutureExt;
 
+#[cfg(windows)]
 #[link(name="kernel32")]
 extern "system" { fn GetStdHandle(n:u32)->*mut std::ffi::c_void; fn SetConsoleMode(h:*mut std::ffi::c_void,mode:u32)->i32; }
 
-#[test]
+#[cfg(windows)]
 fn child() {
-    let Ok(addr)=std::env::var("A10_NATIVE_CONTROL") else{return};
+    let addr=std::env::var("A10_NATIVE_CONTROL").expect("child control endpoint");
     let mut control=std::net::TcpStream::connect(addr).unwrap();
     unsafe { assert_ne!(SetConsoleMode(GetStdHandle(-10i32 as u32),0),0); }
     control.write_all(&std::process::id().to_le_bytes()).unwrap();
@@ -30,7 +56,7 @@ fn child() {
     let _ = control.read(&mut go).unwrap();
 }
 
-#[tokio::test]
+#[cfg(windows)]
 async fn native_saturation_drop_and_deadline() {
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -40,13 +66,14 @@ async fn native_saturation_drop_and_deadline() {
     let writer=pair.master.take_writer().unwrap();
     let cursor=session::windows_input::WindowsInput(pair.master.try_clone_input_handle().unwrap());
     let reader=pair.master.try_clone_reader().unwrap();
+    let reader_interrupt=pair.master.interrupt_handle();
     let mut command=CommandBuilder::new(std::env::current_exe().unwrap());
-    command.args(["--exact","child","--nocapture"]);
     command.env("A10_NATIVE_CONTROL",listener.local_addr().unwrap().to_string());
     command.cwd(std::env::var("HOME").unwrap());
+    command.args(["/C", "more"]);
     let child=pair.slave.spawn_command(command).unwrap();drop(pair.slave);
     let (tx,mut rx)=tokio::sync::mpsc::channel(1024);
-    let pty=std::sync::Arc::new(session::PtySession::new(session::PtySessionConfig{id:"private-proof".into(),input,master:pair.master,child,writer,reader,cols:80,rows:24,tx,worktree_path:None}));
+    let pty=std::sync::Arc::new(session::PtySession::new(session::PtySessionConfig{id:"private-proof".into(),incarnation:Some(uuid::Uuid::new_v4().to_string()),input,master:pair.master,reader_interrupt,child,writer,reader,cols:80,rows:24,tx,worktree_path:None,close_grace:std::sync::Arc::new(parking_lot::Mutex::new(None))}));
     pty.mark_running();
     let drain=tokio::spawn(async move{while let Some(bytes)=rx.recv().await{
         println!("PTY_OUTPUT {:?}",String::from_utf8_lossy(&bytes));

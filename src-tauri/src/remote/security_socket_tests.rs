@@ -347,6 +347,10 @@ async fn ssh_reconnect_safety_web_grid_gap_order() {
         ServerWebSocketFrame::Text(_)
     ));
     backend.hub.publish("session", b"OLD".to_vec()).unwrap();
+    let ServerWebSocketFrame::Text(old) = frame(&mut socket).await else {
+        panic!("old grid frame")
+    };
+    assert!(old.contains("OLD"));
     backend.hub.publish_gap("session").unwrap();
     backend
         .hub

@@ -206,9 +206,15 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
         device_scale_factor: 1.0,
         ..Default::default()
     };
-    let mask = font
-        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false)
-        .into_buffer();
+    let glyph = font
+        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false);
+    let bpp = if glyph.is_subpixel() || glyph.is_color() { 4 } else { 1 };
+    let mask = glyph.into_buffer();
+    let mask_coverages: Vec<f32> = if bpp == 1 {
+        mask.iter().map(|&b| b as f32 / 255.0).collect()
+    } else {
+        mask.chunks_exact(4).map(|chunk| chunk[3] as f32 / 255.0).collect()
+    };
 
     // When: the real WGPU renderer draws that glyph.
     let mut renderer = NativeTerminalRenderer::new(config).expect("renderer creation");
@@ -219,12 +225,16 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
     // Then: covered pixels blend exactly once and uncovered pixels stay the cell background.
     let bg = [background.r, background.g, background.b];
     let fg = [foreground.r, foreground.g, foreground.b];
+    assert_eq!(
+        mask_coverages.len(),
+        frame.pixels.len() / 4,
+        "glyph coverage mask count must exactly match rendered frame pixel count"
+    );
     let mut covered = 0;
     let mut uncovered = 0;
     let mut partial_gain = 0.0f32;
     let mut partial_count = 0;
-    for (mask_pixel, frame_pixel) in mask.chunks_exact(4).zip(frame.pixels.chunks_exact(4)) {
-        let raw = mask_pixel[3] as f32 / 255.0;
+    for (raw, frame_pixel) in mask_coverages.into_iter().zip(frame.pixels.chunks_exact(4)) {
         let coverage = raw.powf(TEXT_COVERAGE_EXPONENT);
         for channel in 0..3 {
             let expected = bg[channel] as f32 * (1.0 - coverage) + fg[channel] as f32 * coverage;
@@ -235,7 +245,8 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
             );
         }
         assert_eq!(frame_pixel[3], 255, "opaque cell remains opaque");
-        match mask_pixel[3] {
+        let raw_byte = (raw * 255.0).round() as u8;
+        match raw_byte {
             0 => uncovered += 1,
             255 => covered += 1,
             _ => {

@@ -994,7 +994,7 @@ impl DaemonSessionService {
         self.terminal_service.get_session(id)
     }
 
-    pub(crate) async fn wait_machine_lifecycle(&self, id: &str) -> Result<(), String> {
+    pub async fn wait_machine_lifecycle(&self, id: &str) -> Result<(), String> {
         let receiver = self.machine_lifecycles.lock().get(id).cloned();
         if let Some(mut receiver) = receiver {
             tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(|done| *done))

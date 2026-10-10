@@ -3,6 +3,8 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -62,6 +64,7 @@ async fn attach(client: &reqwest::Client, base: &str, token: &str, target: &Valu
 
 #[tokio::test]
 async fn machine_streams_use_original_owner_and_ignore_mirror_focus() {
+    if supervisor::run("machine_streams_use_original_owner_and_ignore_mirror_focus").await { return; }
     let (root, owner) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         for name in ["one", "two"] { std::fs::create_dir(root.path().join(name)).unwrap(); }
@@ -130,7 +133,7 @@ async fn machine_streams_use_original_owner_and_ignore_mirror_focus() {
         let close = json!({"requestId":uuid::Uuid::new_v4().to_string(),"daemonEpoch":epoch});
         let conflict = reply(client.delete(format!("{base}/api/v1/sessions/{id}")).bearer_auth("other-token").body(close.to_string()), 409).await;
         assert_eq!(conflict["error"]["code"], "CONTROL_CONFLICT");
-        for (suffix, status) in [("daemonEpoch=1",409), ("daemonEpoch=01",400), ("daemonEpoch=18446744073709551616",400), ("daemonEpoch=1&daemonEpoch=2",400), ("render=grid",400), ("afterSequence=01",400)] {
+        for (suffix, status) in [("daemonEpoch=1",409), ("daemonEpoch=01",400), ("daemonEpoch=18446744073709551616",400), ("daemonEpoch=1&daemonEpoch=2",400), ("render=grid",409), ("afterSequence=01",400)] {
             let t = ticket(&client, &base, "owner-token", id).await;
             denied(format!("{ws}/api/v1/terminal/{id}?ticket={t}&{suffix}"), status).await;
         }

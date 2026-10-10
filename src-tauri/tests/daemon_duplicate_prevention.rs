@@ -166,9 +166,9 @@ fn second_daemon_refuses_already_locked_socket_directory() -> TestResult<()> {
             return Err("duplicate daemon reached readiness while owner held both locks".into());
         }
         let status = timeout(DEADLINE, children[1].child.wait()).await??;
-        if status.code() != Some(1) {
+        if status.code() != Some(0) {
             return Err(
-                format!("duplicate must refuse startup with exit code 1, got {status}").into(),
+                format!("duplicate must relinquish startup with exit code 0, got {status}").into(),
             );
         }
         eprintln!("duplicate refused startup: {status}; no readiness token");

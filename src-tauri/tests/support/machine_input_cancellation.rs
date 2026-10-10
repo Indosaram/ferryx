@@ -35,7 +35,11 @@ async fn scenario(cancellation: Cancellation) {
         match cancellation {
             Cancellation::Disconnect => socket.close(None).await.unwrap(),
             Cancellation::Revoke => {
-                fixture.state.auth_manager.revoke_device(&fixture.device);
+                fixture
+                    .state
+                    .auth_manager
+                    .revoke_device(&fixture.device)
+                    .expect("action device revocation must succeed");
             }
             Cancellation::Replace => {
                 let replacement = fixture.attach(&session).await;
@@ -150,7 +154,11 @@ async fn sibling_pty_is_responsive_when_first_input_is_saturated() {
         .await
         .expect("sibling PTY must not serialize behind saturated machine input");
         eprintln!("A10 sibling original_pid={pid} executed while first saturated");
-        fixture.state.auth_manager.revoke_device(&fixture.device);
+        fixture
+            .state
+            .auth_manager
+            .revoke_device(&fixture.device)
+            .expect("action device revocation must succeed");
         tokio::time::timeout(DEADLINE, observation.0.wait_for(|p| p.dropped))
             .await
             .unwrap()

@@ -780,9 +780,21 @@ fn project_inventory(
     let mut projects = Vec::new();
     let mut completeness = Completeness::Complete;
     let mut failed = std::collections::BTreeSet::new();
+    let mut probed = std::collections::HashMap::<std::path::PathBuf, Result<Project, String>>::new();
     for (id, row) in &c.workspaces {
-        match project(id, &row.repo_root, c.revision, context) {
-            Ok(p) => projects.push(p),
+        let probe = match probed.get(&row.repo_root) {
+            Some(cached) => cached.clone(),
+            None => {
+                let res = project(id, &row.repo_root, c.revision, context);
+                probed.insert(row.repo_root.clone(), res.clone());
+                res
+            }
+        };
+        match probe {
+            Ok(mut p) => {
+                p.workspace_id = id.clone();
+                projects.push(p);
+            }
             Err(error) => {
                 context.check()?;
                 tracing::warn!(%error, "Project inventory probe incomplete");

@@ -82,7 +82,18 @@ pub async fn assert_retained_owner(old: Arc<DaemonServer>, root: &Path, session:
     let mut forwarder_count = successor.remote_state().machine_services.as_ref().expect("authority").workspaces.machine_events.forwarder_count();
     let mut owner_count = old.remote_state().machine_services.as_ref().expect("authority").workspaces.machine_events.owner_stream_count();
     let boundary = super::next_kind(&mut live, "inventoryInvalidated").await;
+    eprintln!(
+        "[handover initial boundary] seq={} rev={} reason={:?} completeness={:?} error={:?} sessions_title={:?}",
+        boundary["sequence"],
+        boundary["revision"],
+        boundary["reason"],
+        boundary["payload"]["completeness"],
+        boundary["payload"]["error"],
+        boundary["payload"]["sessions"]["sessions"][0]["title"]
+    );
     assert_eq!(boundary["revision"], boundary["sequence"]);
+    tokio::time::timeout(Duration::from_secs(5), forwarder_count.wait_for(|n| *n == 1)).await.expect("one forwarder").expect("count");
+    tokio::time::timeout(Duration::from_secs(5), owner_count.wait_for(|n| *n == 1)).await.expect("one owner stream").expect("count");
     old.terminal_service()
         .write_input(id, b"printf '\\033]2;A12-successor-live\\007'\n")
         .expect("predecessor live change");
@@ -99,8 +110,6 @@ pub async fn assert_retained_owner(old: Arc<DaemonServer>, root: &Path, session:
     })
     .await
     .expect("predecessor change reaches successor WS");
-    tokio::time::timeout(Duration::from_secs(5), forwarder_count.wait_for(|n| *n == 1)).await.expect("one forwarder").expect("count");
-    tokio::time::timeout(Duration::from_secs(5), owner_count.wait_for(|n| *n == 1)).await.expect("one owner stream").expect("count");
     let (drained, drain) = tokio::sync::oneshot::channel();
     let started = std::time::Instant::now();
     disconnect.send(drained).await.expect("force actual owner IPC close");

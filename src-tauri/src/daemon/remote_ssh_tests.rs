@@ -281,33 +281,50 @@ async fn direct_ssh_real_transport_registration_and_pty() {
     let path = std::env::var_os("PATH").unwrap();
     let mut paths = vec![dir.path().to_path_buf()];
     paths.extend(std::env::split_paths(&path));
-    let output = tokio::time::timeout(
-        Duration::from_secs(45),
-        tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty",
-                "--nocapture",
-            ])
-            .env(CHILD, dir.path())
-            // The daemon supervises its SSH transport by re-entering this test binary's ignored
-            // `ssh_bridge_transport_supervisor_entry`; without the marker the bridge refuses to
-            // supervise at all. The real app dispatches `--ferryx-ssh-supervisor` from its own
-            // main instead, so this env belongs to the child process only.
-            .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
-            .env("PATH", std::env::join_paths(paths).unwrap())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .expect("bounded child test")
-    .unwrap();
-    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    let child_stdout_file = std::fs::File::create(dir.path().join("child_stdout.log")).unwrap();
+    let child_stderr_file = std::fs::File::create(dir.path().join("child_stderr.log")).unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty",
+            "--nocapture",
+        ])
+        .env(CHILD, dir.path())
+        // The daemon supervises its SSH transport by re-entering this test binary's ignored
+        // `ssh_bridge_transport_supervisor_entry`; without the marker the bridge refuses to
+        // supervise at all. The real app dispatches `--ferryx-ssh-supervisor` from its own
+        // main instead, so this env belongs to the child process only.
+        .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .stdout(child_stdout_file)
+        .stderr(child_stderr_file)
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn child test process");
+    let child_pid = child.id();
+    let wait_res = tokio::time::timeout(Duration::from_secs(45), child.wait()).await;
+    let status = match wait_res {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => panic!("failed waiting for child test {child_pid:?}: {e}"),
+        Err(_) => {
+            child.kill().await.expect("kill timed-out child test process");
+            let _ = child.wait().await.expect("reap timed-out child test process");
+            let child_stdout = std::fs::read_to_string(dir.path().join("child_stdout.log")).unwrap();
+            let child_stderr = std::fs::read_to_string(dir.path().join("child_stderr.log")).unwrap();
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            panic!(
+                "bounded child test timeout (45s) for PID {child_pid:?}\nchild stdout:\n{child_stdout}\nchild stderr:\n{child_stderr}\nsshd:\n{log}"
+            );
+        }
+    };
+    let child_stdout = std::fs::read_to_string(dir.path().join("child_stdout.log")).unwrap();
+    let child_stderr = std::fs::read_to_string(dir.path().join("child_stderr.log")).unwrap();
+    let log = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        output.status.success(),
+        status.success(),
         "child stdout:\n{}\nchild stderr:\n{}\nsshd:\n{log}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        child_stdout,
+        child_stderr
     );
     // Exercise the same external-machine seam on the deterministic loopback fixture.
     let user = std::process::Command::new("id")
@@ -419,6 +436,13 @@ async fn install_test_helper(host: &SshHost, home: &Path) -> OwnedTestHelper {
 }
 
 async fn exercise_child(root: &Path) {
+    let phase_started = std::time::Instant::now();
+    macro_rules! phase {
+        ($($arg:tt)*) => {
+            eprintln!("[exercise_child +{:?}] {}", phase_started.elapsed(), format_args!($($arg)*));
+        };
+    }
+    phase!("Phase 1: Reading loopback SSH port and user info");
     let port = std::fs::read_to_string(root.join("port"))
         .unwrap()
         .parse()
@@ -446,6 +470,7 @@ async fn exercise_child(root: &Path) {
     std::fs::create_dir(&repository).unwrap();
     let alias = root.join("alias");
     std::os::unix::fs::symlink(&repository, &alias).unwrap();
+    phase!("Phase 2: Registering remote project (pre-git init)");
     let response = register_remote_project(
         host_store.clone(),
         RegisterRemoteProjectRequest {
@@ -473,6 +498,7 @@ async fn exercise_child(root: &Path) {
         .unwrap()
         .status
         .success());
+    phase!("Phase 3: Registering remote project (post-git init)");
     let repeated = register_remote_project(
         host_store.clone(),
         RegisterRemoteProjectRequest {
@@ -491,6 +517,7 @@ async fn exercise_child(root: &Path) {
         Some(root.join("gateway.json")),
         Some(root.join("auth.json")),
     );
+    phase!("Phase 4: Installing test helper");
     let _helper = install_test_helper(&host, root).await;
     assert!(daemon
         .handle_register_workspace(&response.workspace_id, &response.repo_root)
@@ -505,6 +532,7 @@ async fn exercise_child(root: &Path) {
     assert!(wire.get("program").is_none());
     let mut retained = None;
     for request_id in ["new-tab", "split-restore"] {
+        phase!("Phase 5: Spawning session request={request_id}");
         let spawn_cwd = if request_id == "new-tab" {
             Some(response.repo_root.clone())
         } else {
@@ -526,6 +554,7 @@ async fn exercise_child(root: &Path) {
         let (mut history, mut events) = daemon.terminal_service.attach(&id).unwrap();
         // Subscribe before writing; octal marker is absent from PTY input echo.
         wait_remote_connected(&daemon, &id).await;
+        phase!("Phase 5a: Connected session id={id}, writing input");
         daemon
             .write_session_input(
                 &id,
@@ -545,6 +574,7 @@ async fn exercise_child(root: &Path) {
         })
         .await
         .expect("remote command produced exact root through real SSH PTY");
+        phase!("Phase 5b: Verified PTY output for request={request_id}");
         let DaemonResponse::DescribeSessionOk { session, .. } = daemon.handle_describe_session(&id)
         else {
             panic!("session details")
@@ -556,6 +586,7 @@ async fn exercise_child(root: &Path) {
         );
         assert!(daemon.terminal_service.get_session(&id).is_none());
         if request_id == "new-tab" {
+            phase!("Phase 5c: Exercising gateway_qa");
             gateway_qa::exercise(&daemon, &response.workspace_id, &id, &host_store).await;
             daemon.handle_close(&id).await.unwrap();
         } else {
@@ -566,6 +597,7 @@ async fn exercise_child(root: &Path) {
         .join(".orca-worktrees")
         .join("wt-feature");
     std::fs::create_dir_all(&wt_dir).unwrap();
+    phase!("Phase 6: Remote worktree spawn starting");
     let wt_identity = crate::worktree::WorktreeIdentity {
         ws_id: "agent".into(),
         slug: "feature".into(),
@@ -583,8 +615,10 @@ async fn exercise_child(root: &Path) {
         )
         .await
         .expect("SSH PTY spawn in remote worktree");
+    phase!("Phase 6: Remote worktree spawn complete");
     let (mut wt_history, mut wt_events) = daemon.terminal_service.attach(&wt_session_id).unwrap();
     wait_remote_connected(&daemon, &wt_session_id).await;
+    phase!("Phase 6a: Remote worktree connected, writing input");
     daemon
         .write_session_input(
             &wt_session_id,
@@ -592,6 +626,7 @@ async fn exercise_child(root: &Path) {
         )
         .await
         .unwrap();
+    phase!("Phase 6a1: Remote worktree input write complete");
     let expected_wt = format!("^SSH-OK:{}", wt_dir.to_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         while !String::from_utf8_lossy(&wt_history).contains(&expected_wt) {
@@ -603,7 +638,13 @@ async fn exercise_child(root: &Path) {
         }
     })
     .await
-    .expect("remote command produced exact worktree root through real SSH PTY");
+    .unwrap_or_else(|_| {
+        panic!(
+            "remote command did not produce exact worktree root through real SSH PTY; buffered output: {}",
+            String::from_utf8_lossy(&wt_history)
+        )
+    });
+    phase!("Phase 6b: Remote worktree PTY output verified");
     let DaemonResponse::DescribeSessionOk {
         session: wt_session,
         ..
@@ -615,6 +656,7 @@ async fn exercise_child(root: &Path) {
     assert_eq!(wt_session.worktree.as_ref(), Some(&wt_identity));
     daemon.handle_close(&wt_session_id).await.unwrap();
 
+    phase!("Phase 7: Remote shell override check");
     let shell_err = daemon
         .handle_spawn(
             "remote-shell-override",
@@ -635,16 +677,20 @@ async fn exercise_child(root: &Path) {
         "unexpected error message: {shell_err}"
     );
 
+    phase!("Phase 8: Restart and session persistence restore");
     let retained = retained.unwrap();
     let before = daemon.terminal_service.remote().details(&retained).unwrap();
     assert!(before.pid.is_some());
     let identity_path = daemon.remote_sessions_path.clone();
+    phase!("Phase 8b: Persist starting");
     daemon
         .persist_remote_sessions_at(identity_path.clone())
         .await
         .unwrap();
+    phase!("Phase 8c: Persist complete; dropping daemon");
     let old_runtime = Arc::downgrade(daemon.terminal_service.remote());
     drop(daemon);
+    phase!("Phase 8d: Daemon dropped; checking old runtime");
     assert!(
         old_runtime.upgrade().is_none(),
         "old runtime must be dropped, not retained by watchers"
@@ -653,11 +699,14 @@ async fn exercise_child(root: &Path) {
         Some(root.join("gateway.json")),
         Some(root.join("auth.json")),
     );
+    phase!("Phase 8e: Restore starting");
     daemon
         .restore_remote_sessions_at(identity_path)
         .await
         .unwrap();
+    phase!("Phase 8f: Restore complete; waiting for helper target");
     wait_remote_connected(&daemon, &retained).await;
+    phase!("Phase 8a: Reconnected restored session");
     let after = daemon.terminal_service.remote().details(&retained).unwrap();
     assert_eq!(after.descriptor.target, before.descriptor.target);
     assert_eq!(
@@ -682,6 +731,7 @@ async fn exercise_child(root: &Path) {
     })
     .await
     .expect("restart replays original retained output without rerunning command");
+    phase!("Phase 9: Validating session SSH target and disable host");
     daemon.validate_session_ssh_target(&retained).await.unwrap();
     host.disabled = Some(true);
     write_hosts(&host_store, vec![host]);
@@ -741,6 +791,7 @@ async fn exercise_child(root: &Path) {
             .code,
         crate::ipc::IpcErrorCode::WorkspaceNotFound
     );
+    phase!("Phase 10: Complete");
 }
 
 /// First remote spawn on a host without the version-qualified helper must

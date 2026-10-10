@@ -15,7 +15,7 @@ use std::{
 
 use ferryx_lib::{
     daemon::{
-        protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION},
+        protocol::{DaemonRequest, DaemonResponse},
         server::DaemonServer,
     },
     remote::{
@@ -27,7 +27,7 @@ use ferryx_lib::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, UnixListener, UnixStream},
+    net::{TcpListener, UnixStream},
     time::timeout,
 };
 
@@ -177,43 +177,6 @@ fn pair_cli() -> tokio::process::Command {
     command
 }
 
-// The CLI performs its real handshake and pairing call; only version metadata is
-// supplied here. Forward the pairing request to the production daemon handler.
-async fn serve_one_cli_request(f: &Fixture) -> (Running, tokio::sync::oneshot::Receiver<DaemonResponse>) {
-    let socket = f.env.dir.path().join("runtime/daemon.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let daemon = Arc::clone(&f.daemon);
-    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-    let ipc = Running(tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read, mut write) = stream.into_split();
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        assert!(matches!(serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(), DaemonRequest::Handshake { .. }));
-        let handshake = DaemonResponse::HandshakeOk {
-            version: DAEMON_PROTOCOL_VERSION,
-            pid: std::process::id(),
-            epoch: 1,
-            binary_path: None,
-            binary_mtime_ms: None,
-            daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
-            // Legacy synthetic peer: advertises no capabilities, no admission stamp.
-            capabilities: Vec::new(),
-            admission_time_unix_ms: None,
-        };
-        write.write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
-        line.clear();
-        reader.read_line(&mut line).await.unwrap();
-        let req: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
-        assert!(matches!(req, DaemonRequest::RemoteCreatePairingCode { .. }));
-        let response = request(&daemon, req).await;
-        write.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
-        let _ = observed_tx.send(response);
-    }));
-    (ipc, observed_rx)
-}
 
 #[tokio::test]
 async fn daemon_view_and_control_survive_real_relay_gateway_exchange() {
@@ -228,18 +191,12 @@ async fn daemon_view_and_control_survive_real_relay_gateway_exchange() {
 async fn cli_refusal_exits_without_replacing_owner_and_original_pin_redeems() {
     let f = Fixture::new().await;
     let original_pin = pin(&f.daemon, DevicePermission::Control).await;
-    let (_ipc, observed) = serve_one_cli_request(&f).await;
     let child = pair_cli().env("FERRYX_RELAY_URL", &f.base).spawn().unwrap();
-    let response = timeout(LIMIT, observed).await.unwrap().unwrap();
-    let DaemonResponse::Error { message, .. } = response else { panic!("expected refusal, got {response:?}"); };
-    assert!(message.contains("Ready -> Registering"), "unexpected refusal: {message}");
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
-    assert!(!output.status.success(), "a real refusal must exit unsuccessfully");
+    assert_eq!(output.status.code(), Some(2), "PIN issuance retirement exits status 2");
     assert!(output.stdout.is_empty(), "a refused request must not print a standalone PIN");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("daemon refused this pairing request"), "{stderr}");
-    assert!(stderr.contains("owns this machine's relay identity"), "{stderr}");
-    assert!(!stderr.contains("No running daemon answered"), "{stderr}");
+    assert!(stderr.contains("ACCOUNT_LOGIN_REQUIRED"), "{stderr}");
     // This positive exchange, after the child has exited, proves that the
     // daemon's prior owner generation and its already-issued PIN still work.
     assert_issued_permission(&f, &original_pin, DevicePermission::Control).await;
@@ -248,17 +205,14 @@ async fn cli_refusal_exits_without_replacing_owner_and_original_pin_redeems() {
 #[tokio::test]
 async fn cli_success_uses_daemon_pin_and_leaves_it_redeemable_after_exit() {
     let f = Fixture::new().await;
-    let (_ipc, observed) = serve_one_cli_request(&f).await;
     let child = pair_cli().env("FERRYX_RELAY_URL", &f.base).spawn().unwrap();
-    let response = timeout(LIMIT, observed).await.unwrap().unwrap();
-    let DaemonResponse::RemotePairingCodeOk { code, .. } = response else { panic!("expected PIN, got {response:?}"); };
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let stdout_str = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout_str.lines().any(|line| line.trim() == code));
-    assert!(stdout_str.contains("#pair="));
-    assert!(String::from_utf8(output.stderr).unwrap().contains("Pairing registered by the running daemon"));
-    assert_issued_permission(&f, &code, DevicePermission::Control).await;
+    assert_eq!(output.status.code(), Some(2), "PIN issuance retirement exits status 2");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("ACCOUNT_LOGIN_REQUIRED"), "{stderr}");
+    let token = pin(&f.daemon, DevicePermission::Control).await;
+    assert_issued_permission(&f, &token, DevicePermission::Control).await;
 }
 
 #[tokio::test]
@@ -268,11 +222,10 @@ async fn no_daemon_socket_fails_missing_relay_url_without_spawning_daemon() {
     assert!(!socket.exists());
     let child = pair_cli().env("FERRYX_RELAY_URL", "").spawn().unwrap();
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Pairing requires a configured relay URL"), "{stderr}");
-    assert!(!stderr.contains("Pairing registered by the running daemon"), "{stderr}");
+    assert!(stderr.contains("ACCOUNT_LOGIN_REQUIRED"), "{stderr}");
     assert!(!socket.exists(), "CLI must not create a daemon socket on this path");
     assert_eq!(std::fs::read_dir(env.dir.path().join("runtime")).unwrap().count(), 0,
         "no daemon runtime artifacts may be created on the no-socket path");
@@ -284,8 +237,12 @@ async fn stopped_relay_then_off_allows_real_daemon_local_view_pairing() {
     let _live_pin = pin(&f.daemon, DevicePermission::Control).await;
     f.handle.take().unwrap().stop();
     assert!(f.daemon.remote_state().relay_pairing.read().is_none());
-    f.daemon.handle_remote_configure(RemoteGatewayConfig::default()).await.unwrap();
-    let local_pin = pin(&f.daemon, DevicePermission::View).await;
+    f.daemon.handle_remote_configure(RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Off,
+        relay_url: None,
+        ..Default::default()
+    }).await.unwrap();
+    let local_pin = f.daemon.remote_state().auth_manager.create_pairing_code(DevicePermission::View);
     let (token, device) = f.daemon.remote_state().auth_manager
         .exchange_pairing_code(&local_pin, "local after stop").unwrap();
     assert_eq!(device.permission, DevicePermission::View);

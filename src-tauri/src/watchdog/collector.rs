@@ -274,7 +274,7 @@ fn capture_platform_stack(
             return match std::fs::write(sample_file, timeout_msg) {
                 Ok(()) => (
                     strategy,
-                    "Failed".to_string(),
+                    "Fallback".to_string(),
                     Some(sample_file.to_string_lossy().to_string()),
                     Some(serde_json::json!({ "error": "sample command timed out" })),
                 ),

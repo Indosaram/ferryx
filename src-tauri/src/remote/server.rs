@@ -805,6 +805,12 @@ pub(crate) async fn get_active_running_sessions(
             if sessions.iter().any(|s| s.session_id == session_id) {
                 continue;
             }
+            if let Some(services) = &state.machine_services {
+                match services.sessions.machine_only_async(&session_id).await {
+                    Ok(false) => {}
+                    Ok(true) | Err(_) => continue,
+                }
+            }
             let is_running_or_starting =
                 if let Some(session) = state.terminal_service.get_session(&session_id) {
                     matches!(
@@ -885,7 +891,7 @@ async fn get_workspace_state(
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
     let token =
         extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
+    let device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
@@ -937,6 +943,56 @@ async fn get_workspace_state(
             terminal_tabs: Vec::new(),
         });
 
+    if device.access_scope != DeviceAccessScope::Machine {
+        if let Some(services) = state.machine_services.as_ref() {
+            if let Some(ref sid) = active_context.session_id {
+                if !matches!(services.sessions.machine_only_async(sid).await, Ok(false)) {
+                    active_context.session_id = None;
+                    active_context.tab_id = None;
+                }
+            }
+            let mut filtered_tabs = Vec::new();
+            for tab in active_context.terminal_tabs {
+                let is_desktop = match tab.session_id.as_deref() {
+                    Some(sid) => matches!(services.sessions.machine_only_async(sid).await, Ok(false)),
+                    None => true,
+                };
+                if is_desktop {
+                    filtered_tabs.push(tab);
+                }
+            }
+            active_context.terminal_tabs = filtered_tabs;
+            let svc_for_cat = Arc::clone(services);
+            let machine_catalog = crate::ipc::run_blocking(move || {
+                svc_for_cat
+                    .workspaces
+                    .catalog()
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await;
+            match machine_catalog {
+                Ok(catalog) => {
+                    active_context.attention_inventory.retain(|item| {
+                        !catalog.workspaces.contains_key(&item.workspace_id)
+                    });
+                    if let Some(ref ws) = active_context.workspace_id {
+                        if catalog.workspaces.contains_key(ws) {
+                            active_context.workspace_id = None;
+                            active_context.worktree_slug = None;
+                            active_context.worktree_label = None;
+                        }
+                    }
+                }
+                Err(_) => {
+                    active_context.attention_inventory.clear();
+                    active_context.workspace_id = None;
+                    active_context.worktree_slug = None;
+                    active_context.worktree_label = None;
+                }
+            }
+        }
+    }
+
     if let Some(services) = state.machine_services.as_ref() {
         for tab in active_context.terminal_tabs.iter_mut() {
             if tab.activity_state.is_none() {
@@ -950,7 +1006,33 @@ async fn get_workspace_state(
     }
 
     if state.active_selection.read().is_none() {
-        let backend_sessions = state.session_backend.list_sessions().await;
+        let raw_backend_sessions = state.session_backend.list_sessions().await;
+        let raw_terminal_sessions = state.terminal_service.list_sessions();
+        let raw_backend_empty = raw_backend_sessions.is_empty();
+        let raw_terminal_empty = raw_terminal_sessions.is_empty();
+
+        let mut backend_sessions = Vec::new();
+        for sid in raw_backend_sessions {
+            if device.access_scope != DeviceAccessScope::Machine {
+                if let Some(services) = &state.machine_services {
+                    if !matches!(services.sessions.machine_only_async(&sid).await, Ok(false)) {
+                        continue;
+                    }
+                }
+            }
+            backend_sessions.push(sid);
+        }
+        let mut terminal_sessions = Vec::new();
+        for sid in raw_terminal_sessions {
+            if device.access_scope != DeviceAccessScope::Machine {
+                if let Some(services) = &state.machine_services {
+                    if !matches!(services.sessions.machine_only_async(&sid).await, Ok(false)) {
+                        continue;
+                    }
+                }
+            }
+            terminal_sessions.push(sid);
+        }
         let mut live_session_id = None;
         for sid in &backend_sessions {
             if let Ok(details) = state.session_backend.describe_session(sid).await {
@@ -961,14 +1043,14 @@ async fn get_workspace_state(
             }
         }
         if live_session_id.is_none() {
-            for sid in state.terminal_service.list_sessions() {
+            for sid in &terminal_sessions {
                 if let Some(session) = state.terminal_service.get_session(&sid) {
                     if matches!(
                         session.state(),
                         crate::terminal::PtySessionState::Running
                             | crate::terminal::PtySessionState::Starting
                     ) {
-                        live_session_id = Some(sid);
+                        live_session_id = Some(sid.clone());
                         break;
                     }
                 }
@@ -978,7 +1060,7 @@ async fn get_workspace_state(
             live_session_id = backend_sessions.first().cloned();
         }
         if live_session_id.is_none() {
-            if let Some(sid) = state.terminal_service.list_sessions().first() {
+            if let Some(sid) = terminal_sessions.first() {
                 live_session_id = Some(sid.clone());
             }
         }
@@ -998,7 +1080,7 @@ async fn get_workspace_state(
                     ..Default::default()
                 }];
             }
-        } else if backend_sessions.is_empty() && state.terminal_service.list_sessions().is_empty() {
+        } else if raw_backend_empty && raw_terminal_empty {
             if let Ok((session_id, _)) = state.terminal_service.spawn_shell(80, 24) {
                 tracing::info!(
                     "Auto-spawned default shell session {session_id} for headless remote gateway"
@@ -3884,6 +3966,36 @@ async fn worktree_list_boundary(
         Some(id) if !id.trim().is_empty() => id,
         _ => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
     };
+
+    if let Some(services) = state.machine_services.clone() {
+        let ws_query = workspace_id.clone();
+        let is_machine_ws = crate::ipc::run_blocking(move || {
+            services
+                .workspaces
+                .catalog()
+                .map_err(crate::ipc::IpcError::internal)
+                .map(|catalog| catalog.workspaces.contains_key(&ws_query))
+        })
+        .await;
+        match is_machine_ws {
+            Ok(true) => {
+                return super::workspace_api::worktrees::read(
+                    state,
+                    headers,
+                    uri.query().map(str::to_owned),
+                    false,
+                )
+                .await;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return machine_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "MACHINE_SERVICE_UNAVAILABLE",
+                );
+            }
+        }
+    }
 
     if let Ok(manager) = state.workspace_registry.manager(&workspace_id) {
         let manager_clone = manager.clone();

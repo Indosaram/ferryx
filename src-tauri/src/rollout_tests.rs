@@ -9,7 +9,7 @@ async fn a24_rollback_waits_for_drain_and_preserves_unrelated_owner() {
         Arc,
     };
     use std::time::Duration;
-    let root = tempfile::tempdir_in(std::env::var_os("TMPDIR").expect("isolated TMPDIR")).unwrap();
+    let root = tempfile::tempdir().unwrap();
     let old = Arc::new(HandoverManager::new(root.path().join("old.sock")));
     let unrelated = HandoverManager::new(root.path().join("unrelated.sock"));
     let terminals = Arc::new(terminal::TerminalService::default());

@@ -415,6 +415,7 @@ test('pass-6 cleanup: a still-held root keeps cleanupGate.ok=false and names the
 
 test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group', async () => {
   if (process.platform === 'win32') return; // taskkill /T /F covers the tree there
+  const { spawnSync } = await import('node:child_process');
   const registry = new ResourceRegistry();
   const grandchildSrc = "process.on('SIGTERM', () => {}); process.stdout.write('READY:' + process.pid + '\\n'); setInterval(() => {}, 1000);";
   const leaderSrc = [
@@ -459,7 +460,14 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
   expect(() => process.kill(-child.pid, 0)).toThrow();
-  expect(() => process.kill(grandchildPid, 0)).toThrow();
+  // macOS may retain a killed orphan as a zombie until launchd reaps it; kill(pid, 0)
+  // reports that PID as present even though it cannot execute or hold resources.
+  const grandchildState = spawnSync('ps', ['-o', 'stat=', '-p', String(grandchildPid)], { encoding: 'utf8' });
+  const state = grandchildState.stdout.trim();
+  expect(
+    (grandchildState.status === 0 && state.startsWith('Z')) ||
+    (grandchildState.status === 1 && state === '' && grandchildState.stderr === ''),
+  ).toBe(true);
   expect(reaped).toBe(true);
 });
 
