@@ -416,14 +416,13 @@ test('pass-6 cleanup: a still-held root keeps cleanupGate.ok=false and names the
 test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group', async () => {
   if (process.platform === 'win32') return; // taskkill /T /F covers the tree there
   const registry = new ResourceRegistry();
-  const grandchildSrc = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  const grandchildSrc = "process.on('SIGTERM', () => {}); process.stdout.write('READY:' + process.pid + '\\n'); setInterval(() => {}, 1000);";
   const leaderSrc = [
     "process.on('SIGTERM', () => {});",
     `const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSrc)}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
-    "process.stdout.write('READY:' + c.pid + '\\n');",
     'setInterval(() => {}, 1000);',
   ].join(' ');
-  const child = spawnOwned(registry, process.execPath, ['-e', leaderSrc]);
+  const child = spawnOwned(registry, 'node', ['-e', leaderSrc]);
   const grandchildPid = await new Promise((resolvePromise, rejectPromise) => {
     let buffer = '';
     const onData = chunk => {
