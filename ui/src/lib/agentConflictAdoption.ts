@@ -138,6 +138,7 @@ export function withAgentConflictAdoption(
             cols: described.cols,
             rows: described.rows,
             running: described.running,
+            incarnation: described.incarnation ?? null,
           },
         };
 

@@ -22,6 +22,9 @@ pub struct DaemonWorkspaceService {
     pub(crate) mutation_gate: parking_lot::Mutex<()>,
     pub(crate) catalog: parking_lot::Mutex<Result<Catalog, String>>,
     pub(crate) catalog_path: PathBuf,
+    workspace_queues: parking_lot::Mutex<
+        std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
     worktree_gates: parking_lot::Mutex<
         std::collections::HashMap<String, std::sync::Weak<parking_lot::Mutex<()>>>,
     >,
@@ -36,6 +39,17 @@ pub struct DaemonWorkspaceService {
 }
 
 impl DaemonWorkspaceService {
+    pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut queues = self.workspace_queues.lock();
+        queues.retain(|_, queue| queue.strong_count() > 0);
+        if let Some(queue) = queues.get(workspace).and_then(std::sync::Weak::upgrade) {
+            return queue;
+        }
+        let queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        queues.insert(workspace.to_owned(), std::sync::Arc::downgrade(&queue));
+        queue
+    }
+
     pub(crate) fn new(registry: WorkspaceRegistry, catalog_path: PathBuf) -> Self {
         let mut catalog = workspace_catalog::load(&catalog_path);
         let journal = crate::remote::machine_operation_journal::MachineOperationJournal::open(
@@ -96,6 +110,7 @@ impl DaemonWorkspaceService {
             mutation_gate: parking_lot::Mutex::new(()),
             catalog: parking_lot::Mutex::new(catalog),
             catalog_path,
+            workspace_queues: parking_lot::Mutex::new(Default::default()),
             worktree_gates: parking_lot::Mutex::new(Default::default()),
         }
     }
@@ -209,6 +224,8 @@ impl DaemonWorkspaceService {
     }
 
     pub fn register(&self, workspace_id: &str, repo_root: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(probe) = self.transaction_probe.read().clone() { probe("registerWorkspace"); }
         let workspace_gate = self.worktree_gate(workspace_id);
         let _workspace_gate = workspace_gate.lock();
         let _gate = self.mutation_gate.lock();

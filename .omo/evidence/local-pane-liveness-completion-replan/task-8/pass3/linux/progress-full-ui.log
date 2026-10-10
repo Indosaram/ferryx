@@ -1,0 +1,13 @@
+{"at":"2026-10-04T06:38:30.813Z","bytes":4846,"lastFile":null}
+{"at":"2026-10-04T06:39:00.814Z","bytes":4846,"lastFile":null}
+{"at":"2026-10-04T06:39:30.817Z","bytes":4846,"lastFile":null}
+{"at":"2026-10-04T06:40:00.818Z","bytes":124995,"lastFile":"✓ src/remote/RemoteTerminal.contract.test.tsx (69 tests) 665ms"}
+{"at":"2026-10-04T06:40:30.824Z","bytes":313518,"lastFile":"× App paired desktop shell > switches to paired project and preserves pending worktree when selected from another project 0ms"}
+{"at":"2026-10-04T06:41:00.826Z","bytes":384073,"lastFile":"✓ src/components/onboarding/WelcomeWizard.test.tsx (18 tests) 170ms"}
+{"at":"2026-10-04T06:41:30.826Z","bytes":474784,"lastFile":"× browser tab restore per worktree with scroll positions > skips stale tabs whose worktree was deleted or whose URL is unnavigable 0ms"}
+{"at":"2026-10-04T06:42:00.835Z","bytes":534054,"lastFile":"✓ Settings > General software update control > shows running version, renders exactly two update buttons, and checks for updates on demand  686ms"}
+{"at":"2026-10-04T06:42:30.839Z","bytes":557804,"lastFile":"✓ src/remote/RemoteApp.accountAttach.test.tsx (3 tests) 227ms"}
+{"at":"2026-10-04T06:43:00.839Z","bytes":582075,"lastFile":"✓ src/lib/sshRegistrationHeal.test.ts (5 tests) 6ms"}
+{"at":"2026-10-04T06:43:30.846Z","bytes":595376,"lastFile":"✓ src/lib/uuid.test.ts (7 tests) 9ms"}
+{"at":"2026-10-04T06:44:00.851Z","bytes":608251,"lastFile":"✓ src/components/CommandPalette.test.tsx (2 tests) 139ms"}
+{"at":"2026-10-04T06:44:30.856Z","bytes":614303,"lastFile":"✓ src/lib/ipcErrors.test.ts (2 tests) 2ms"}

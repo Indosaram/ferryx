@@ -1,0 +1,57 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonRollout.test.ts
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/lib/pairedDaemonRollout.test.ts [2m([22m[2m5 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 19[2mms[22m[39m
+   [32m✓[39m new local accepts an older epoch with fewer capabilities but never dispatches unsupported operations[32m 5[2mms[22m[39m
+   [32m✓[39m failed renegotiation revokes prior admission: {"apiVersion":0,"daemonEpoch":"1","capabilities":[]}[32m 2[2mms[22m[39m
+[31m   [31m×[31m failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]}[39m[32m 9[2mms[22m[39m
+[31m     → promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting[39m
+   [32m✓[39m failed renegotiation revokes prior admission: {"accessScope":"mirror"}[32m 1[2mms[22m[39m
+   [32m✓[39m failed renegotiation revokes prior admission: {"machineId":"other-machine"}[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/lib/pairedDaemonRollout.test.ts[2m > [22mfailed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]}
+[31m[1mAssertionError[22m: promise resolved "{ apiVersion: 1, …(7) }" instead of rejecting[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Error {[39m
+[32m-   "message": "rejected promise",[39m
+[31m+ {[39m
+[31m+   "accessScope": "machine",[39m
+[31m+   "apiVersion": 1,[39m
+[31m+   "capabilities": [[39m
+[31m+     "directoryBrowseV1",[39m
+[31m+     "futureV9",[39m
+[31m+   ],[39m
+[31m+   "daemonEpoch": "9",[39m
+[31m+   "limits": {[39m
+[31m+     "directoryEntries": 100,[39m
+[31m+     "terminalSessions": 10,[39m
+[31m+   },[39m
+[31m+   "machineId": "machine-a",[39m
+[31m+   "permission": "control",[39m
+[31m+   "platform": "linux",[39m
+[2m  }[22m
+
+[36m [2m❯[22m src/lib/pairedDaemonRollout.test.ts:[2m35:40[22m[39m
+    [90m 33| [39m  await expect(f.adapter.directories()).resolves.toMatchObject({ path:…
+    [90m 34| [39m  f[33m.[39m[34mpeer[39m(peer)[33m;[39m
+    [90m 35| [39m  await expect(f.adapter.capabilities()).rejects.toMatchObject({ code …
+    [90m   | [39m                                       [31m^[39m
+    [90m 36| [39m  [35mconst[39m count [33m=[39m f[33m.[39minvoke[33m.[39mmock[33m.[39mcalls[33m.[39mlength[33m;[39m
+    [90m 37| [39m  await expect(f.adapter.directories()).rejects.toMatchObject({ code: …
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m4 passed[39m[22m[90m (5)[39m
+[2m   Start at [22m 10:08:17
+[2m   Duration [22m 1.28s[2m (transform 81ms, setup 246ms, collect 59ms, tests 19ms, environment 452ms, prepare 81ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

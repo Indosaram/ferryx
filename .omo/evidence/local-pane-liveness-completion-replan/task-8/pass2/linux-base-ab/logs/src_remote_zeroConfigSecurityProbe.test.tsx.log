@@ -1,0 +1,387 @@
+$ vitest run --maxWorkers=1 src/remote/zeroConfigSecurityProbe.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039523) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 123456 and persists exchange metadata in the host inventory
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 00112233445566778899aabbccddeeff and persists exchange metadata in the host inventory
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > processes a new pairing link while a host is active and upserts rather than duplicates
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > retains the machine prefix, ticket and grid geometry in the real terminal socket URL
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > never discloses credentials to an unverified direct candidate and stays on relay
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+stderr | src/remote/zeroConfigSecurityProbe.test.tsx > never places the device token in an HTTP or WebSocket request URL
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+Error: Uncaught [TypeError: Cannot read properties of undefined (reading 'getItem')]
+    at reportException (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at HTMLUnknownElement.EventTarget.dispatchEvent (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/test/setup.ts:119:26)
+    at Object.invokeGuardedCallbackDev (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at beginWork$1 (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/node_modules/react-dom/cjs/react-dom.development.js:27490:7) TypeError: Cannot read properties of undefined (reading 'getItem')
+    at getStoredAccountSessionToken [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/accountSession.ts:122:70[90m)[39m
+    at [90m/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:448:47
+    at mountState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16167:20[90m)[39m
+    at Object.useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:16880:16[90m)[39m
+    at useState [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact[24m/cjs/react.development.js:1622:21[90m)[39m
+    at RemoteHostConnection [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39msrc/remote/RemoteApp.tsx:447:57[90m)[39m
+    at renderWithHooks [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:15486:18[90m)[39m
+    at mountIndeterminateComponent [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:20103:13[90m)[39m
+    at beginWork [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:21626:16[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+The above error occurred in the <RemoteHostConnection> component:
+
+    at RemoteHostConnection (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:261:33)
+    at RemoteApp (/home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui/src/remote/RemoteApp.tsx:225:63)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+
+ ❯ src/remote/zeroConfigSecurityProbe.test.tsx (7 tests | 7 failed) 63ms
+   × parses pairing capability 123456 and persists exchange metadata in the host inventory 32ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × parses pairing capability 00112233445566778899aabbccddeeff and persists exchange metadata in the host inventory 4ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × processes a new pairing link while a host is active and upserts rather than duplicates 5ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × retains the machine prefix, ticket and grid geometry in the real terminal socket URL 4ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × never discloses credentials to an unverified direct candidate and stays on relay 4ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × never places the device token in an HTTP or WebSocket request URL 3ms
+     → Cannot read properties of undefined (reading 'getItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × attaches the direct terminal socket with a single-use ticket, not the device token 11ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 123456 and persists exchange metadata in the host inventory
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 00112233445566778899aabbccddeeff and persists exchange metadata in the host inventory
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > processes a new pairing link while a host is active and upserts rather than duplicates
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > retains the machine prefix, ticket and grid geometry in the real terminal socket URL
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > never discloses credentials to an unverified direct candidate and stays on relay
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > never places the device token in an HTTP or WebSocket request URL
+TypeError: Cannot read properties of undefined (reading 'getItem')
+ ❯ getStoredAccountSessionToken src/remote/accountSession.ts:122:70
+    120| 
+    121| export function getStoredAccountSessionToken(origin: string = getConfi…
+    122|   const issuer = typeof window !== "undefined" ? window.localStorage.g…
+       |                                                                      ^
+    123|   if (issuer !== cleanOrigin(origin)) return null;
+    124|   return getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
+ ❯ src/remote/RemoteApp.tsx:448:47
+ ❯ mountState node_modules/react-dom/cjs/react-dom.development.js:16167:20
+ ❯ Object.useState node_modules/react-dom/cjs/react-dom.development.js:16880:16
+ ❯ useState node_modules/react/cjs/react.development.js:1622:21
+ ❯ RemoteHostConnection src/remote/RemoteApp.tsx:447:57
+ ❯ renderWithHooks node_modules/react-dom/cjs/react-dom.development.js:15486:18
+ ❯ mountIndeterminateComponent node_modules/react-dom/cjs/react-dom.development.js:20103:13
+ ❯ beginWork node_modules/react-dom/cjs/react-dom.development.js:21626:16
+ ❯ beginWork$1 node_modules/react-dom/cjs/react-dom.development.js:27465:14
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/13]⎯
+
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 123456 and persists exchange metadata in the host inventory
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > parses pairing capability 00112233445566778899aabbccddeeff and persists exchange metadata in the host inventory
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > processes a new pairing link while a host is active and upserts rather than duplicates
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > retains the machine prefix, ticket and grid geometry in the real terminal socket URL
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > never discloses credentials to an unverified direct candidate and stays on relay
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > never places the device token in an HTTP or WebSocket request URL
+ FAIL  src/remote/zeroConfigSecurityProbe.test.tsx > attaches the direct terminal socket with a single-use ticket, not the device token
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/zeroConfigSecurityProbe.test.tsx:63:16
+     61|   cleanup();
+     62|   remoteHostStore.reset();
+     63|   localStorage.clear();
+       |                ^
+     64|   window.history.replaceState(null, "", "/");
+     65|   Socket.instances = [];
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/13]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  10:10:07
+   Duration  1.56s (transform 312ms, setup 107ms, collect 746ms, tests 63ms, environment 231ms, prepare 49ms)
+
+error: script "test" exited with code 1

@@ -82,6 +82,14 @@ const hosts = hostArg === "both" ? ["modal", "standalone"] : [hostArg];
 mkdirSync(evidenceDir, { recursive: true });
 
 function resolvePlaywrightCore() {
+  const override = process.env.PLAYWRIGHT_CORE_PATH;
+  if (override) {
+    try {
+      return { pw: createRequire(join(repo, "package.json"))(override), source: override };
+    } catch {
+      /* fall through */
+    }
+  }
   try {
     return { pw: createRequire(join(repo, "package.json"))("playwright-core"), source: "repo node_modules" };
   } catch {
@@ -1885,7 +1893,8 @@ let browser = null;
 let browserSource = "unknown";
 let browserPids = [];
 const runnerActions = [];
-const chromeBin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const chromeBin =
+  process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 try {
   try {
@@ -1893,7 +1902,7 @@ try {
     browserSource = "channel:chrome (real Google Chrome, headless)";
   } catch (channelError) {
     if (!existsSync(chromeBin)) {
-      fail(1, `Google Chrome channel unavailable and ${chromeBin} missing: ${String(channelError)}`);
+      fail(1, `Google Chrome channel unavailable and no Chrome binary at ${chromeBin} (set CHROME_BIN to point at one): ${String(channelError)}`);
     }
     browser = await pw.chromium.launch({ headless: true, executablePath: chromeBin });
     browserSource = `executablePath:${chromeBin} (headless)`;

@@ -78,28 +78,73 @@ describe("useAccountWorktrees hook", () => {
     mockTunnel1 = {
       transport: {
         fetchLike: vi.fn(async (path: string) => {
-          if (path === "/api/v1/workspace/state") {
-            const state = {
+          if (path === "/api/v1/workspace/projects") {
+            const projects = {
+              revision: 1,
+              completeness: "complete",
               projects: [
                 {
                   workspaceId: "ferryx-repo",
                   repoRoot: "/Users/dev/ferryx",
-                  worktrees: [
-                    { slug: "main", label: "main" },
-                    { slug: "feature-ui", label: "feature-ui" },
-                  ],
+                  availability: "ready",
+                  revision: 1,
                 },
               ],
-              activeContext: {
-                workspaceId: "ferryx-repo",
-                worktreeSlug: "main",
-                worktreeLabel: "main",
-              },
+              unavailableWorkspaceIds: [],
             };
             return {
               status: 200,
               headers: { "content-type": "application/json" },
-              body: new TextEncoder().encode(JSON.stringify(state)),
+              body: new TextEncoder().encode(JSON.stringify(projects)),
+            };
+          }
+          if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=ferryx-repo")) {
+            const worktrees = {
+              revision: 1,
+              worktrees: [
+                {
+                  workspaceId: "ferryx-repo",
+                  identity: { wsId: "ferryx-repo", slug: "main" },
+                  path: "/Users/dev/ferryx",
+                  head: "head1",
+                  branch: "refs/heads/main",
+                  bare: false,
+                  detached: false,
+                  locked: null,
+                  prunable: null,
+                  managed: false,
+                },
+                {
+                  workspaceId: "ferryx-repo",
+                  identity: { wsId: "ferryx-repo", slug: "feature-ui" },
+                  path: "/Users/dev/ferryx-feature-ui",
+                  head: "head2",
+                  branch: "refs/heads/feature-ui",
+                  bare: false,
+                  detached: false,
+                  locked: null,
+                  prunable: null,
+                  managed: true,
+                },
+              ],
+            };
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(JSON.stringify(worktrees)),
+            };
+          }
+          if (path === "/api/v1/sessions") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(
+                JSON.stringify({
+                  revision: "1",
+                  completeness: "complete",
+                  sessions: [],
+                }),
+              ),
             };
           }
           return { status: 404, headers: {}, body: new Uint8Array(0) };
@@ -111,25 +156,61 @@ describe("useAccountWorktrees hook", () => {
     mockTunnel2 = {
       transport: {
         fetchLike: vi.fn(async (path: string) => {
-          if (path === "/api/v1/workspace/state") {
-            const state = {
+          if (path === "/api/v1/workspace/projects") {
+            const projects = {
+              revision: 1,
+              completeness: "complete",
               projects: [
                 {
                   workspaceId: "cloud-infra",
                   repoRoot: "/srv/infra",
-                  worktrees: [{ slug: "prod", label: "production" }],
+                  availability: "ready",
+                  revision: 1,
                 },
               ],
-              activeContext: {
-                workspaceId: "cloud-infra",
-                worktreeSlug: "prod",
-                worktreeLabel: "production",
-              },
+              unavailableWorkspaceIds: [],
             };
             return {
               status: 200,
               headers: { "content-type": "application/json" },
-              body: new TextEncoder().encode(JSON.stringify(state)),
+              body: new TextEncoder().encode(JSON.stringify(projects)),
+            };
+          }
+          if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=cloud-infra")) {
+            const worktrees = {
+              revision: 1,
+              worktrees: [
+                {
+                  workspaceId: "cloud-infra",
+                  identity: { wsId: "cloud-infra", slug: "prod" },
+                  path: "/srv/infra/prod",
+                  head: "head3",
+                  branch: "refs/heads/prod",
+                  bare: false,
+                  detached: false,
+                  locked: null,
+                  prunable: null,
+                  managed: true,
+                },
+              ],
+            };
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(JSON.stringify(worktrees)),
+            };
+          }
+          if (path === "/api/v1/sessions") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(
+                JSON.stringify({
+                  revision: "1",
+                  completeness: "complete",
+                  sessions: [],
+                }),
+              ),
             };
           }
           return { status: 404, headers: {}, body: new Uint8Array(0) };
@@ -199,6 +280,9 @@ describe("useAccountWorktrees hook", () => {
     await act(async () => {});
 
     expect(result.current.accountOptions.length).toBeGreaterThanOrEqual(3);
+    expect(
+      result.current.accountOptions.find((o) => o.workspaceId === "cloud-infra")?.machineId,
+    ).toBe(machine2.machineId);
 
     const grantCalls = grantSpy.mock.calls;
     expect(grantCalls.length).toBe(2);
@@ -207,7 +291,7 @@ describe("useAccountWorktrees hook", () => {
     expect(result.current.machineStatuses[machine3Offline.machineId]?.status).toBe("offline");
 
     expect(mockTunnel1.transport.fetchLike).toHaveBeenCalledWith(
-      "/api/v1/workspace/state",
+      "/api/v1/workspace/projects",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: expect.stringContaining("Bearer device-token-"),
@@ -267,28 +351,73 @@ describe("useAccountWorktrees hook", () => {
     const tunnelServerFields = {
       transport: {
         fetchLike: vi.fn(async (path: string) => {
-          if (path === "/api/v1/workspace/state") {
-            const state = {
+          if (path === "/api/v1/workspace/projects") {
+            const projects = {
+              revision: 1,
+              completeness: "complete",
               projects: [
                 {
                   workspaceId: "ws-canonical",
                   repoRoot: "/srv/repo",
-                  worktrees: [
-                    { worktreeSlug: "main", worktreeLabel: "Production Main" },
-                    { worktreeSlug: "feat-auth", worktreeLabel: "Feature Auth Branch" },
-                  ],
+                  availability: "ready",
+                  revision: 1,
                 },
               ],
-              activeContext: {
-                workspaceId: "unlisted-root",
-                worktreeSlug: null,
-                worktreeLabel: "default worktree",
-              },
+              unavailableWorkspaceIds: [],
             };
             return {
               status: 200,
               headers: { "content-type": "application/json" },
-              body: new TextEncoder().encode(JSON.stringify(state)),
+              body: new TextEncoder().encode(JSON.stringify(projects)),
+            };
+          }
+          if (path.startsWith("/api/v1/workspace/worktrees?workspaceId=ws-canonical")) {
+            const worktrees = {
+              revision: 1,
+              worktrees: [
+                {
+                  workspaceId: "ws-canonical",
+                  identity: { wsId: "ws-canonical", slug: "main" },
+                  path: "/srv/repo",
+                  head: "h1",
+                  branch: "refs/heads/main",
+                  bare: false,
+                  detached: false,
+                  locked: null,
+                  prunable: null,
+                  managed: false,
+                },
+                {
+                  workspaceId: "ws-canonical",
+                  identity: { wsId: "ws-canonical", slug: "feat-auth" },
+                  path: "/srv/repo-feat",
+                  head: "h2",
+                  branch: "refs/heads/feat-auth",
+                  bare: false,
+                  detached: false,
+                  locked: null,
+                  prunable: null,
+                  managed: true,
+                },
+              ],
+            };
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(JSON.stringify(worktrees)),
+            };
+          }
+          if (path === "/api/v1/sessions") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: new TextEncoder().encode(
+                JSON.stringify({
+                  revision: "1",
+                  completeness: "complete",
+                  sessions: [],
+                }),
+              ),
             };
           }
           return { status: 404, headers: {}, body: new Uint8Array(0) };

@@ -1081,9 +1081,9 @@ export async function buildHost({
         },
       );
 
-      // Ensure all workspace binaries (e.g. ferryx-cli, ferryx-relay) are universal lipo'd
+      // Ensure all workspace binaries used by the app bundle are universal lipo'd.
       mkdirSync(universalRel, { recursive: true });
-      for (const binName of ["ferryx-cli", "ferryx-relay"]) {
+      for (const binName of ["ferryx-cli", "ferryx-account", "ferryx-relay"]) {
         const aarch64Bin = join(aarch64Rel, binName);
         const x86Bin = join(x86Rel, binName);
         const universalBin = join(universalRel, binName);
@@ -1094,7 +1094,7 @@ export async function buildHost({
 
       // Pre-sign universal binaries with hardened runtime so Tauri bundler packages valid signed components
       if (hostConfig.signingIdentity) {
-        for (const binName of ["ferryx", "ferryx-cli", "ferryx-relay"]) {
+        for (const binName of ["ferryx", "ferryx-cli", "ferryx-account", "ferryx-relay"]) {
           const targetBin = join(universalRel, binName);
           if (existsSync(targetBin)) {
             execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, targetBin], {

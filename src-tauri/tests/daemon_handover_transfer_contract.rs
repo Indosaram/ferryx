@@ -115,6 +115,9 @@ impl TestDaemonClient {
                 rows,
                 shell: shell.map(str::to_string),
                 startup: None,
+                // Legacy spawn fixture: no local-split envelope on the wire.
+                local_split: None,
+                session_id: None,
             })
             .await?;
         match resp {
@@ -161,7 +164,7 @@ impl TestDaemonClient {
             })
             .await?;
         match resp {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             other => Err(format!("DescribeSession failed: {other:?}").into()),
         }
     }
@@ -627,6 +630,27 @@ async fn run_v5_handover_case(v5_flag: Option<&'static str>) {
     assert!(
         post_handover.running,
         "the transferred session must still be running after the predecessor exits: {post_handover:?}"
+    );
+    assert_eq!(
+        post_handover.workspace_id.as_deref(),
+        Some(ws_id),
+        "the transferred session must retain its workspace identity"
+    );
+    // The daemon answers `cwd` from the kernel's own view of the child
+    // (`PROC_PIDVNODEPATHINFO`), which resolves symlinks, while this fixture's root lives under
+    // `/tmp` (macOS resolves it to `/private/tmp`). Compare the two as directories, so the
+    // assertion still fails whenever the transferred session is in a different directory.
+    let served_cwd = post_handover
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+    let expected_cwd =
+        std::fs::canonicalize(&canonical_repo).expect("the fixture repo must resolve");
+    assert_eq!(
+        served_cwd,
+        Some(expected_cwd),
+        "the transferred session must retain its working directory"
     );
     assert!(
         process_is_alive(child_pid),

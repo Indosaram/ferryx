@@ -1,0 +1,130 @@
+$ vitest run --maxWorkers=1 src/lib/pairedHostInventory.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036285) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/pairedHostInventory.test.ts (34 tests | 34 failed) 13ms
+   × failed native migrate preserves exact legacy bytes and reports pending 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × failed native read preserves exact legacy bytes and reports pending 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × verified migration removes only the exact credential and matching key, retaining other records 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × rejects mismatched or malformed migration receipt {"hostId":"wrong","generation":"9"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × rejects mismatched or malformed migration receipt {"hostId":"https://relay.example/host/fixture","generation":"09"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × rejects mismatched or malformed migration receipt {"hostId":"https://relay.example/host/fixture","generation":"18446744073709551616"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × a mismatched readback cannot authorize cleanup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × never assigns an origin-wide token or ambiguous alias key to a machine 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × does not overwrite concurrent inventory changes during migration 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × does not overwrite concurrent token changes during migration 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × storage write failure retains original and scoped key 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × conflicting host-scoped credential copies are retained for explicit retry 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × inventory readiness enables machine features regardless of the legacy proxy flag 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × refresh failure retains offline rows and unknown local capabilities disable machine features 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × records only the failing inventory command and sanitized code when refresh fails 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × records list failure operation and sanitized code when list rejects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × sanitizes unlisted errors to fixed fallback code without leaking secret details or message 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × records malformed capability parse failure with allowlisted code 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × records list failure and INVALID_HOST_VIEW when views contains malformed generation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × does not emit false failure bootTrace when refresh is superseded/stale 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × recovers paired machine features on window focus after startup missed the daemon 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × out-of-order refresh cannot replace a newer response 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × generation fence cancels in-flight refresh from overwriting newer generation state 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × forget fences pending refresh and host callbacks, re-pair creates a new generation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × re-pair fences a pending migration without deleting original credentials 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × native pair invokes PIN-only command and errors are sanitized 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × subscribes app-wide to native inventory generation/online/auth change events and atomically updates entries 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × R5-N4: authoritative revoke sets a generation barrier and stale lists cannot resurrect paired state 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × preserves structured error {code, message, details, retryable} on pair failure 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × pairing stores canonical custom relayOrigin and persists it across refresh and subsequent connections 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × normalizes relay origin and extracts origin and pin from invite links with #pair= 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × R3-N4: ignores stale revoke events with older generation than current store generation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × R3-N3: pair rejects revision mismatch if intervening change was a revoke even at matching generation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × R4-N1: migrateLegacy cleans legacy storage when native migrate event arrives during the call 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 34 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedHostInventory.test.ts > failed native migrate preserves exact legacy bytes and reports pending
+ FAIL  src/lib/pairedHostInventory.test.ts > failed native read preserves exact legacy bytes and reports pending
+ FAIL  src/lib/pairedHostInventory.test.ts > verified migration removes only the exact credential and matching key, retaining other records
+ FAIL  src/lib/pairedHostInventory.test.ts > rejects mismatched or malformed migration receipt {"hostId":"wrong","generation":"9"}
+ FAIL  src/lib/pairedHostInventory.test.ts > rejects mismatched or malformed migration receipt {"hostId":"https://relay.example/host/fixture","generation":"09"}
+ FAIL  src/lib/pairedHostInventory.test.ts > rejects mismatched or malformed migration receipt {"hostId":"https://relay.example/host/fixture","generation":"18446744073709551616"}
+ FAIL  src/lib/pairedHostInventory.test.ts > a mismatched readback cannot authorize cleanup
+ FAIL  src/lib/pairedHostInventory.test.ts > never assigns an origin-wide token or ambiguous alias key to a machine
+ FAIL  src/lib/pairedHostInventory.test.ts > does not overwrite concurrent inventory changes during migration
+ FAIL  src/lib/pairedHostInventory.test.ts > does not overwrite concurrent token changes during migration
+ FAIL  src/lib/pairedHostInventory.test.ts > storage write failure retains original and scoped key
+ FAIL  src/lib/pairedHostInventory.test.ts > conflicting host-scoped credential copies are retained for explicit retry
+ FAIL  src/lib/pairedHostInventory.test.ts > inventory readiness enables machine features regardless of the legacy proxy flag
+ FAIL  src/lib/pairedHostInventory.test.ts > refresh failure retains offline rows and unknown local capabilities disable machine features
+ FAIL  src/lib/pairedHostInventory.test.ts > records only the failing inventory command and sanitized code when refresh fails
+ FAIL  src/lib/pairedHostInventory.test.ts > records list failure operation and sanitized code when list rejects
+ FAIL  src/lib/pairedHostInventory.test.ts > sanitizes unlisted errors to fixed fallback code without leaking secret details or message
+ FAIL  src/lib/pairedHostInventory.test.ts > records malformed capability parse failure with allowlisted code
+ FAIL  src/lib/pairedHostInventory.test.ts > records list failure and INVALID_HOST_VIEW when views contains malformed generation
+ FAIL  src/lib/pairedHostInventory.test.ts > does not emit false failure bootTrace when refresh is superseded/stale
+ FAIL  src/lib/pairedHostInventory.test.ts > recovers paired machine features on window focus after startup missed the daemon
+ FAIL  src/lib/pairedHostInventory.test.ts > out-of-order refresh cannot replace a newer response
+ FAIL  src/lib/pairedHostInventory.test.ts > generation fence cancels in-flight refresh from overwriting newer generation state
+ FAIL  src/lib/pairedHostInventory.test.ts > forget fences pending refresh and host callbacks, re-pair creates a new generation
+ FAIL  src/lib/pairedHostInventory.test.ts > re-pair fences a pending migration without deleting original credentials
+ FAIL  src/lib/pairedHostInventory.test.ts > native pair invokes PIN-only command and errors are sanitized
+ FAIL  src/lib/pairedHostInventory.test.ts > subscribes app-wide to native inventory generation/online/auth change events and atomically updates entries
+ FAIL  src/lib/pairedHostInventory.test.ts > R5-N4: authoritative revoke sets a generation barrier and stale lists cannot resurrect paired state
+ FAIL  src/lib/pairedHostInventory.test.ts > preserves structured error {code, message, details, retryable} on pair failure
+ FAIL  src/lib/pairedHostInventory.test.ts > pairing stores canonical custom relayOrigin and persists it across refresh and subsequent connections
+ FAIL  src/lib/pairedHostInventory.test.ts > normalizes relay origin and extracts origin and pin from invite links with #pair=
+ FAIL  src/lib/pairedHostInventory.test.ts > R3-N4: ignores stale revoke events with older generation than current store generation
+ FAIL  src/lib/pairedHostInventory.test.ts > R3-N3: pair rejects revision mismatch if intervening change was a revoke even at matching generation
+ FAIL  src/lib/pairedHostInventory.test.ts > R4-N1: migrateLegacy cleans legacy storage when native migrate event arrives during the call
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/pairedHostInventory.test.ts:26:33
+     24|   return original;
+     25| }
+     26| beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); });
+       |                                 ^
+     27| it.each(["migrate", "read"] as const)("failed native %s preserves exac…
+     28|   const original = legacy(); const { commands, inventory, store } = fi…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/34]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  34 failed (34)
+   Start at  10:09:16
+   Duration  639ms (transform 99ms, setup 93ms, collect 69ms, tests 13ms, environment 240ms, prepare 87ms)
+
+error: script "test" exited with code 1

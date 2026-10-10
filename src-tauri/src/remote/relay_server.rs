@@ -67,6 +67,13 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Interval on which the background reaper sweeps the session registry for
 /// entries that have exceeded [`SESSION_PAIRING_TIMEOUT`] without pairing.
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// Idle data channels kept per machine for HTTP keep-alive reuse. Every fresh
+/// channel costs the daemon a notice plus a new TCP/TLS/WebSocket handshake
+/// back through the tunnel, so reuse removes several round trips per request.
+const DATA_POOL_PER_MACHINE: usize = 4;
+/// Shorter than common proxy idle limits (Cloudflare closes idle WebSockets
+/// after ~100s), so a pooled channel is dropped before the path silently dies.
+const DATA_POOL_IDLE: Duration = Duration::from_secs(50);
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
@@ -122,6 +129,14 @@ struct WaitingHalf {
     opaque: bool,
     notify: Option<oneshot::Sender<WebSocket>>,
     active: bool,
+}
+
+/// A data channel whose last HTTP exchange completed cleanly on a keep-alive
+/// connection. It stays bound to the control generation that issued it.
+struct PooledDataSocket {
+    socket: WebSocket,
+    control_generation: u64,
+    idle_since: Instant,
 }
 
 #[derive(Clone)]
@@ -306,6 +321,8 @@ struct RelayInner {
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
+    /// Lock order: always after `control_channels`.
+    data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
 }
@@ -398,6 +415,7 @@ impl RelayState {
                 next_generation: AtomicU64::new(1),
                 pending_sessions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                data_pool: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
             }),
@@ -447,6 +465,7 @@ impl RelayState {
                 pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                data_pool: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
             }),
@@ -763,8 +782,49 @@ impl RelayState {
             .map(|(machine, _)| machine.clone())
             .collect();
         channels.retain(|_, channel| channel.generation != generation);
+        let mut pool = self.inner.data_pool.lock();
         for machine in retired {
             grants.remove(&machine);
+            if let Some(idle) = pool.get_mut(&machine) {
+                idle.retain(|entry| entry.control_generation != generation);
+            }
+        }
+    }
+
+    /// Takes an idle data channel still backed by the machine's live control
+    /// generation (and the caller's expected one, when given).
+    fn take_pooled_data(
+        &self,
+        machine: &str,
+        expected_generation: Option<u64>,
+    ) -> Option<(WebSocket, u64)> {
+        let live = self.inner.control_channels.lock().get(machine)?.generation;
+        if expected_generation.is_some_and(|expected| expected != live) {
+            return None;
+        }
+        let mut pool = self.inner.data_pool.lock();
+        let idle = pool.get_mut(machine)?;
+        while let Some(entry) = idle.pop() {
+            if entry.control_generation == live && entry.idle_since.elapsed() < DATA_POOL_IDLE {
+                return Some((entry.socket, live));
+            }
+        }
+        None
+    }
+
+    fn return_pooled_data(&self, machine: &str, control_generation: u64, socket: WebSocket) {
+        let channels = self.inner.control_channels.lock();
+        if channels.get(machine).map(|channel| channel.generation) != Some(control_generation) {
+            return;
+        }
+        let mut pool = self.inner.data_pool.lock();
+        let idle = pool.entry(machine.to_owned()).or_default();
+        if idle.len() < DATA_POOL_PER_MACHINE {
+            idle.push(PooledDataSocket {
+                socket,
+                control_generation,
+                idle_since: Instant::now(),
+            });
         }
     }
 
@@ -938,6 +998,12 @@ impl RelayState {
         let mut sessions = self.inner.pending_sessions.lock();
         sessions.retain(|_, waiting| {
             waiting.active || waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT
+        });
+        drop(sessions);
+        let mut pool = self.inner.data_pool.lock();
+        pool.retain(|_, idle| {
+            idle.retain(|entry| entry.idle_since.elapsed() < DATA_POOL_IDLE);
+            !idle.is_empty()
         });
     }
 }
@@ -1145,6 +1211,18 @@ impl RelayState {
         machine: &str,
         expected_generation: Option<u64>,
     ) -> Result<(WebSocket, SessionGuard), StatusCode> {
+        self.open_session_channel_at(machine, expected_generation)
+            .await
+            .map(|(socket, guard, _)| (socket, guard))
+    }
+
+    /// Like [`Self::open_session_channel`], also returning the control generation
+    /// the channel was issued under so it can be pooled against that fence.
+    async fn open_session_channel_at(
+        &self,
+        machine: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<(WebSocket, SessionGuard, u64), StatusCode> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
@@ -1154,6 +1232,7 @@ impl RelayState {
             session_id: session_id.clone(),
             generation,
         };
+        let control_generation;
         {
             let channels = self.inner.control_channels.lock();
             let channel = channels.get(machine).ok_or(StatusCode::NOT_FOUND)?;
@@ -1162,6 +1241,7 @@ impl RelayState {
             if expected_generation.is_some_and(|expected| expected != channel.generation) {
                 return Err(StatusCode::GONE);
             }
+            control_generation = channel.generation;
             let mut sessions = self.inner.pending_sessions.lock();
             if sessions.len() >= MAX_PENDING_SESSIONS {
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -1191,7 +1271,7 @@ impl RelayState {
             .await
             .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
-        Ok((socket, guard))
+        Ok((socket, guard, control_generation))
     }
 }
 
@@ -2057,52 +2137,53 @@ async fn proxy_http(
     headers: HeaderMap,
     body: Vec<u8>,
 ) -> Result<Response, StatusCode> {
-    let transfer = async {
-        let (mut socket, _guard) = state
-            .open_session_channel(machine, expected_generation)
-            .await?;
-        let mut raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n", body.len()).into_bytes();
-        for (name, value) in &headers {
-            if name == "host" || name == "content-length" || hop_header(name.as_str(), &headers) {
-                continue;
-            }
-            raw.extend_from_slice(name.as_str().as_bytes());
-            raw.extend_from_slice(b": ");
-            raw.extend_from_slice(value.as_bytes());
-            raw.extend_from_slice(b"\r\n");
+    // HTTP/1.1 defaults to keep-alive, so a cleanly framed response leaves the
+    // data channel reusable for the next request to the same machine.
+    let mut raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n", body.len()).into_bytes();
+    for (name, value) in &headers {
+        if name == "host" || name == "content-length" || hop_header(name.as_str(), &headers) {
+            continue;
         }
+        raw.extend_from_slice(name.as_str().as_bytes());
+        raw.extend_from_slice(b": ");
+        raw.extend_from_slice(value.as_bytes());
         raw.extend_from_slice(b"\r\n");
-        raw.extend(body);
-        for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
-            socket
-                .send(Message::Binary(chunk.to_vec().into()))
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    }
+    raw.extend_from_slice(b"\r\n");
+    raw.extend(body);
+    let head = method == Method::HEAD;
+    let transfer = async {
+        // Only safe methods ride an idle channel: if it turns out to be dead
+        // before any response byte arrives, the request is replayed on a fresh
+        // channel, which must never repeat a mutation.
+        if matches!(method, Method::GET | Method::HEAD) {
+            if let Some((socket, control_generation)) =
+                state.take_pooled_data(machine, expected_generation)
+            {
+                match http_round_trip(socket, &raw, head).await {
+                    Ok((response, reusable)) => {
+                        if let Some(socket) = reusable {
+                            state.return_pooled_data(machine, control_generation, socket);
+                        }
+                        return Ok(response);
+                    }
+                    Err(RoundTripError::Unanswered) => {}
+                    Err(RoundTripError::Failed(status)) => return Err(status),
+                }
+            }
         }
-        let mut response = Vec::new();
-        loop {
-            let eof = match socket.recv().await {
-                Some(Ok(Message::Binary(bytes))) => {
-                    response.extend_from_slice(&bytes);
-                    false
+        let (socket, _guard, control_generation) = state
+            .open_session_channel_at(machine, expected_generation)
+            .await?;
+        match http_round_trip(socket, &raw, head).await {
+            Ok((response, reusable)) => {
+                if let Some(socket) = reusable {
+                    state.return_pooled_data(machine, control_generation, socket);
                 }
-                Some(Ok(Message::Text(text))) => {
-                    response.extend_from_slice(text.as_bytes());
-                    false
-                }
-                Some(Ok(Message::Close(_))) | None => true,
-                Some(Ok(_)) => continue,
-                Some(Err(_)) => return Err(StatusCode::BAD_GATEWAY),
-            };
-            if response.len() > MAX_HTTP_SIZE {
-                return Err(StatusCode::BAD_GATEWAY);
+                Ok(response)
             }
-            if let Some(parsed) = parse_http_response(&response, method == Method::HEAD, eof)? {
-                return Ok(parsed);
-            }
-            if eof {
-                return Err(StatusCode::BAD_GATEWAY);
-            }
+            Err(RoundTripError::Unanswered) => Err(StatusCode::BAD_GATEWAY),
+            Err(RoundTripError::Failed(status)) => Err(status),
         }
     };
     // Machine Git mutations have a 30-second child deadline. Leave time for
@@ -2117,6 +2198,116 @@ async fn proxy_http(
             Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
         }
     }
+}
+
+enum RoundTripError {
+    /// The channel failed before any response byte arrived.
+    Unanswered,
+    Failed(StatusCode),
+}
+
+/// Sends one HTTP request over a data channel and reads exactly one response.
+/// Returns the channel back when it can carry another request.
+async fn http_round_trip(
+    mut socket: WebSocket,
+    raw: &[u8],
+    head: bool,
+) -> Result<(Response, Option<WebSocket>), RoundTripError> {
+    for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
+        socket
+            .send(Message::Binary(chunk.to_vec().into()))
+            .await
+            .map_err(|_| RoundTripError::Unanswered)?;
+    }
+    let mut response = Vec::new();
+    let lost = |response: &Vec<u8>| {
+        if response.is_empty() {
+            RoundTripError::Unanswered
+        } else {
+            RoundTripError::Failed(StatusCode::BAD_GATEWAY)
+        }
+    };
+    loop {
+        let eof = match socket.recv().await {
+            Some(Ok(Message::Binary(bytes))) => {
+                response.extend_from_slice(&bytes);
+                false
+            }
+            Some(Ok(Message::Text(text))) => {
+                response.extend_from_slice(text.as_bytes());
+                false
+            }
+            Some(Ok(Message::Close(_))) | None => true,
+            Some(Ok(_)) => continue,
+            Some(Err(_)) => return Err(lost(&response)),
+        };
+        if response.len() > MAX_HTTP_SIZE {
+            return Err(RoundTripError::Failed(StatusCode::BAD_GATEWAY));
+        }
+        if let Some(parsed) =
+            parse_http_response(&response, head, eof).map_err(RoundTripError::Failed)?
+        {
+            let reusable = !eof && response_is_reusable(&response, head);
+            return Ok((parsed, reusable.then_some(socket)));
+        }
+        if eof {
+            return Err(lost(&response));
+        }
+    }
+}
+
+/// True only when `raw` is exactly one complete HTTP/1.1 keep-alive response
+/// whose length is fixed by its headers, so no stray bytes stay on the channel.
+fn response_is_reusable(raw: &[u8], head: bool) -> bool {
+    let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&raw[..end]) else {
+        return false;
+    };
+    let mut lines = text.split("\r\n");
+    let mut status_line = lines.next().unwrap_or_default().split_whitespace();
+    if status_line.next() != Some("HTTP/1.1") {
+        return false;
+    }
+    let Some(status) = status_line.next().and_then(|s| s.parse::<u16>().ok()) else {
+        return false;
+    };
+    if (100..200).contains(&status) {
+        return false;
+    }
+    let mut length = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        if name.eq_ignore_ascii_case("connection")
+            && value.split(',').any(|v| v.trim().eq_ignore_ascii_case("close"))
+        {
+            return false;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return false;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let Ok(n) = value.parse::<usize>() else {
+                return false;
+            };
+            if length.replace(n).is_some() {
+                return false;
+            }
+        }
+    }
+    let body = if head || status == 204 || status == 304 {
+        0
+    } else {
+        match length {
+            Some(n) => n,
+            None => return false,
+        }
+    };
+    raw.len() == end + 4 + body
 }
 
 /// Decode HTTP framing independently of WebSocket message boundaries.
@@ -3374,6 +3565,114 @@ mod tests {
         }
     }
 
+    type TestDataSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Reads one proxied request off a daemon-side data socket and answers it.
+    async fn answer_one(data: &mut TestDataSocket, expect_prefix: &[u8]) {
+        let bytes = timeout(Duration::from_secs(5), data.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data();
+        assert!(bytes.starts_with(expect_prefix), "{:?}", String::from_utf8_lossy(&bytes));
+        assert!(
+            !String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("connection: close"),
+            "relay must request keep-alive"
+        );
+        data.send(TMessage::Binary(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec().into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn get_via_relay(state: &RelayState, machine: &str, generation: u64) -> StatusCode {
+        proxy_http(state, machine, Some(generation), Method::GET, "/api/v1/capabilities",
+            HeaderMap::new(), Vec::new()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn data_channel_is_reused_across_http_requests() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("pool".into());
+        let first = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n").await;
+            data
+        };
+        let (status, mut data) = tokio::join!(get_via_relay(&state, "pool", generation), first);
+        assert_eq!(status, StatusCode::OK);
+        for _ in 0..3 {
+            let (status, ()) = tokio::join!(
+                get_via_relay(&state, "pool", generation),
+                answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n")
+            );
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert!(notices.try_recv().is_err(), "reused requests must not allocate new data channels");
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        state.unregister_control_channel("pool", generation);
+        assert!(state.inner.data_pool.lock().get("pool").is_none_or(Vec::is_empty));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dead_pooled_channel_falls_back_and_mutations_never_reuse() {
+        async fn fresh(
+            base: &str,
+            notices: &mut mpsc::Receiver<IncomingSessionNotice>,
+            prefix: &[u8],
+        ) -> TestDataSocket {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, prefix).await;
+            data
+        }
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("pool".into());
+        let (status, mut data) = tokio::join!(
+            get_via_relay(&state, "pool", generation),
+            fresh(&base, &mut notices, b"GET /api/v1/capabilities HTTP/1.1\r\n")
+        );
+        assert_eq!(status, StatusCode::OK);
+        // The daemon side of the pooled channel goes away while idle.
+        data.close(None).await.unwrap();
+        let (status, _replacement) = tokio::join!(
+            get_via_relay(&state, "pool", generation),
+            fresh(&base, &mut notices, b"GET /api/v1/capabilities HTTP/1.1\r\n")
+        );
+        assert_eq!(status, StatusCode::OK, "a dead idle channel must be replaced transparently");
+        assert_eq!(state.inner.data_pool.lock()["pool"].len(), 1);
+        // A POST must never be sent on an idle channel it might have to replay.
+        let post = proxy_http(&state, "pool", Some(generation), Method::POST, "/api/v1/sessions",
+            HeaderMap::new(), b"{}".to_vec());
+        let (response, _second) = tokio::join!(post, fresh(&base, &mut notices, b"POST /api/v1/sessions HTTP/1.1\r\n"));
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+        assert_eq!(state.inner.data_pool.lock()["pool"].len(), 2);
+        // A reconnected control generation must not inherit the old channels.
+        let (_newer, _rx, _g) = state.register_control_channel("pool".into());
+        assert!(state.take_pooled_data("pool", None).is_none());
+        server.abort();
+    }
+
+    #[test]
+    fn only_exactly_framed_keep_alive_responses_are_reusable() {
+        assert!(response_is_reusable(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", false));
+        assert!(response_is_reusable(b"HTTP/1.1 204 No Content\r\n\r\n", false));
+        assert!(response_is_reusable(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n", true));
+        assert!(!response_is_reusable(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}", false));
+        assert!(!response_is_reusable(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}", false));
+        assert!(!response_is_reusable(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", false));
+        assert!(!response_is_reusable(b"HTTP/1.1 200 OK\r\n\r\nbody", false));
+        assert!(!response_is_reusable(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}extra", false));
+    }
+
     fn test_state(tokens: Vec<String>) -> RelayState {
         RelayState::with_key_store(tokens, None).unwrap()
     }
@@ -3482,7 +3781,9 @@ mod tests {
         ))
         .await
         .unwrap();
-        let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+        // The relay keeps a keep-alive data channel open for reuse, so the test
+        // daemon hangs up here instead of waiting for the relay to close it.
+        data.close(None).await.unwrap();
     }
 
     fn ticket_query(
@@ -3783,7 +4084,7 @@ mod tests {
             ))
             .await
             .unwrap();
-            let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+            data.close(None).await.unwrap();
         };
         let (response, ()) = timeout(Duration::from_secs(5), async {
             tokio::join!(request, daemon)
@@ -5209,8 +5510,8 @@ mod tests {
                 data.send(TMessage::Binary(body.to_vec().into()))
                     .await
                     .unwrap();
-                // Await relay completion rather than dropping a socket with unread frames.
-                let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+                // The relay keeps the keep-alive channel for reuse; hang up cleanly.
+                data.close(None).await.unwrap();
             };
             let (response, ()) = tokio::join!(request, daemon);
             let response = response.unwrap();
@@ -6281,7 +6582,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             data.send(TMessage::Binary(
-                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     .to_vec()
                     .into(),
             ))
@@ -6331,7 +6632,7 @@ mod tests {
             let raw = String::from_utf8(frame.into_data().to_vec()).unwrap();
             assert!(raw.starts_with("POST /api/v1/pair/exchange HTTP/1.1\r\n"));
             data.send(TMessage::Binary(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\n{\"token\":\"test-device-token\"}"
+                b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\nConnection: close\r\n\r\n{\"token\":\"test-device-token\"}"
                     .to_vec()
                     .into(),
             ))
@@ -7434,5 +7735,115 @@ mod tests {
                 .contains_key("already-reconnected"),
             "grant channel for generation N+1 must survive unregister of generation N"
         );
+    }
+
+    #[tokio::test]
+    async fn test_account_state_liveness_probe_lifecycle_and_channel_tracking() {
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let token = "valid-token";
+        let account =
+            test_account_state(tmp.path(), "user-1", token, "owned-machine", "other-machine");
+
+        // Make owned-machine record stale in store
+        let now = crate::account::store::now_secs();
+        let stale_time = now.saturating_sub(
+            crate::account::service::MACHINE_ONLINE_FRESHNESS_WINDOW_SECS + 300,
+        );
+        account
+            .mutate(|store| {
+                if let Some(m) = store.machines.get_mut("rec-owned") {
+                    m.last_seen_at = stale_time;
+                }
+                Ok(())
+            })
+            .expect("make machine stale");
+
+        // 1. Before setting account state on relay: stale machine has no probe and is offline
+        let rec = crate::account::service::enrolled_machine_by_id(&account, "owned-machine").expect("find owned-machine");
+        let view0 = account.machine_view(&rec, now);
+        assert!(!view0.online, "stale machine without probe must be offline");
+
+        // 2. Set account state on relay: installs liveness probe. Still offline because channel not registered yet.
+        state.set_account_state(account.clone());
+        let view1 = account.machine_view(&rec, now);
+        assert!(!view1.online, "unregistered machine must remain offline");
+
+        // Setting the same Arc again must retain the probe (ptr_eq guard)
+        state.set_account_state(account.clone());
+        let view1_repeat = account.machine_view(&rec, now);
+        assert!(!view1_repeat.online, "probe must still be functional after setting same Arc");
+
+        // 3. Register live direct control channel: becomes online
+        let (gen, rx, _grants) = state.register_control_channel("owned-machine".into());
+        let view2 = account.machine_view(&rec, now);
+        assert!(view2.online, "machine with live direct channel must be online");
+
+        // Repeat set_account_state with same Arc when channel is LIVE: probe must NOT be cleared
+        state.set_account_state(account.clone());
+        let view2_repeat = account.machine_view(&rec, now);
+        assert!(
+            view2_repeat.online,
+            "probe must remain functional and online after re-setting same Arc with live channel"
+        );
+
+        // 4. Closed receiver: channel sender is closed, becomes offline
+        drop(rx);
+        let view3 = account.machine_view(&rec, now);
+        assert!(!view3.online, "machine with closed channel receiver must report offline");
+
+        // 5. Register alias: machine registered under token-alpha, aliased to owned-machine -> online
+        let (gen_alpha, _rx_alpha, _grants_alpha) =
+            state.register_control_channel("token-alpha".into());
+        state.bind_control_alias("token-alpha", "owned-machine".into());
+        let view4 = account.machine_view(&rec, now);
+        assert!(view4.online, "machine with live aliased channel must be online");
+
+        // 6. Generation unregister on token-alpha: removes channel and alias -> offline
+        state.unregister_control_channel("token-alpha", gen_alpha);
+        let view5 = account.machine_view(&rec, now);
+        assert!(!view5.online, "unregistered alias channel must report offline");
+
+        // Clean up the dead gen 1 direct channel as well
+        state.unregister_control_channel("owned-machine", gen);
+
+        // 7. Re-register live channel, then test account replacement detaches old probe
+        let (_gen_live, _rx_live, _grants_live) =
+            state.register_control_channel("owned-machine".into());
+        let view6_live = account.machine_view(&rec, now);
+        assert!(view6_live.online, "re-registered live channel must report online");
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        let account2 =
+            test_account_state(tmp2.path(), "user-2", "token-2", "owned-machine", "other-machine");
+        account2
+            .mutate(|store| {
+                if let Some(m) = store.machines.get_mut("rec-owned") {
+                    m.last_seen_at = stale_time;
+                }
+                Ok(())
+            })
+            .expect("make machine stale in account2");
+        state.set_account_state(account2.clone());
+
+        // Old account must have its probe cleared by replacement and now report offline despite live channel
+        let view_old_after_replace = account.machine_view(&rec, now);
+        assert!(
+            !view_old_after_replace.online,
+            "old account must lose its probe on replacement and report offline despite live channel"
+        );
+
+        // New account received the probe and reports online for the live channel
+        let rec2 = crate::account::service::enrolled_machine_by_id(&account2, "owned-machine").expect("find owned-machine in account2");
+        let view_new = account2.machine_view(&rec2, now);
+        assert!(
+            view_new.online,
+            "new replacement account must receive probe and report online"
+        );
+
+        // 8. Test clear_account_state detaches probe from active account -> offline
+        state.clear_account_state();
+        let view7 = account2.machine_view(&rec2, now);
+        assert!(!view7.online, "detached account must lose probe and report offline");
     }
 }

@@ -1,0 +1,67 @@
+$ vitest run --maxWorkers=1 src/lib/fileOpenTargets.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040377) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/fileOpenTargets.test.ts (13 tests | 13 failed) 9ms
+   × fileOpenTargets > classifyFileOpenCategory > classifies markdown extensions case-insensitively 5ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > classifyFileOpenCategory > classifies image extensions case-insensitively 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > classifyFileOpenCategory > classifies pdf extensions case-insensitively 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > classifyFileOpenCategory > classifies media extensions case-insensitively 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > classifyFileOpenCategory > classifies other files as text 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > classifyFileOpenCategory > handles Windows paths and paths with dots in folder names 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > loadFileOpenTargets > returns defaults with all categories set to in-app when storage is empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > loadFileOpenTargets > returns defaults when stored JSON is invalid or corrupted 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > loadFileOpenTargets > ignores invalid values per key and falls back to defaults for those keys 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > saveFileOpenTargets and round-trip > persists targets and round-trips correctly 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > saveFileOpenTargets and round-trip > persists with injected storage shim 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > fileOpenTargetFor > returns in-app by default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × fileOpenTargets > fileOpenTargetFor > returns external when category is configured as external 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > classifies markdown extensions case-insensitively
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > classifies image extensions case-insensitively
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > classifies pdf extensions case-insensitively
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > classifies media extensions case-insensitively
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > classifies other files as text
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > classifyFileOpenCategory > handles Windows paths and paths with dots in folder names
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > loadFileOpenTargets > returns defaults with all categories set to in-app when storage is empty
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > loadFileOpenTargets > returns defaults when stored JSON is invalid or corrupted
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > loadFileOpenTargets > ignores invalid values per key and falls back to defaults for those keys
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > saveFileOpenTargets and round-trip > persists targets and round-trips correctly
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > saveFileOpenTargets and round-trip > persists with injected storage shim
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > fileOpenTargetFor > returns in-app by default
+ FAIL  src/lib/fileOpenTargets.test.ts > fileOpenTargets > fileOpenTargetFor > returns external when category is configured as external
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/fileOpenTargets.test.ts:13:18
+     11| describe("fileOpenTargets", () => {
+     12|   beforeEach(() => {
+     13|     localStorage.clear();
+       |                  ^
+     14|   });
+     15| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/13]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed (13)
+   Start at  10:10:20
+   Duration  574ms (transform 58ms, setup 106ms, collect 20ms, tests 9ms, environment 247ms, prepare 56ms)
+
+error: script "test" exited with code 1

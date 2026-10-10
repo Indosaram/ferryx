@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "revision": "1",
+  "workspaces": {
+    "qa-fixture": {
+      "repoRoot": "\\\\?\\C:\\Users\\sook\\ferryx-pane-completion\\task9-91d447e1\\runtime\\split-attach-stall\\barriers\\fixture-workspace",
+      "mirrorExposed": true,
+      "availability": "ready"
+    }
+  }
+}

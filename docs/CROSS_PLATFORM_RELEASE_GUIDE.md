@@ -3,15 +3,15 @@
 Ferryx releases are produced only by the operator-controlled local multi-host workflow. Pushing
 a tag or manually dispatching GitHub Actions must not build, sign, or publish release artifacts.
 Use the [canonical local release runbook](releases/LOCAL_RELEASE_RUNBOOK.md) for exact commands,
-approval gates, recovery, and the current implementation-validation hold. Pull-request checks and
-Pages deployment remain in GitHub Actions.
+approval gates and recovery. Pull-request checks remain in GitHub Actions; the site deploys
+separately to Cloudflare Workers (see [site migration](SITE_DOMAIN_MIGRATION.md)).
 
 ## Platforms and channels
 
 | Platform | Build host | Release artifact | Distribution |
 | --- | --- | --- | --- |
-| macOS arm64 + x86_64 | `macbook` | `Ferryx_universal.app.tar.gz` updater and `Ferryx_universal.dmg` | GitHub Releases/direct updater |
-| Linux x86_64 | `omaki` | `Ferryx_amd64.AppImage` updater and `Ferryx_amd64.deb` | GitHub Releases/direct download |
+| macOS arm64 + x86_64 | `macbook` | `Ferryx_universal.app.tar.gz` updater, `Ferryx_universal.dmg`, and `ferryx-cli-darwin-universal` | GitHub Releases/direct updater/CLI installer |
+| Linux x86_64 | `omaki` | `Ferryx_amd64.AppImage` updater, `Ferryx_amd64.deb`, and `ferryx-cli-linux-amd64` | GitHub Releases/direct download/CLI installer |
 | Windows x64 | `maho-win` | `Ferryx_x64.msix` | Microsoft Store package; Store submission is manual |
 | Windows x64 migration | `maho-win` | `Ferryx_x64-setup.exe` NSIS updater | GitHub Releases only when `--nsis-migration` is selected |
 
@@ -50,8 +50,11 @@ separately approved operations; a GitHub asset is not a Store submission.
 The canonical stable aliases are:
 
 - `Ferryx_universal.dmg`
+- `Ferryx_universal.app.tar.gz`
 - `Ferryx_amd64.AppImage`
 - `Ferryx_amd64.deb`
+- `ferryx-cli-linux-amd64`
+- `ferryx-cli-darwin-universal`
 - `Ferryx_x64.msix`
 - `Ferryx_x64-setup.exe` only for an explicit NSIS migration release
 - `latest.json` and `SHA256SUMS.txt`

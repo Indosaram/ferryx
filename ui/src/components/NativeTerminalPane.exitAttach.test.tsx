@@ -15,6 +15,15 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: tauriCoreMocks.isTauri,
 }));
 
+vi.mock("../lib/localSplitLifecycle", async (original) => ({
+  ...await original<typeof import("../lib/localSplitLifecycle")>(),
+  persistNativeBinding: async (owner: TerminalSession) => {
+    await Promise.resolve();
+    persistedBindings.set(owner.id, structuredClone(owner));
+  },
+}));
+const persistedBindings = new Map<string, TerminalSession>();
+
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onDragDropEvent: async () => () => undefined,
@@ -60,6 +69,7 @@ function createSession(
 
 describe("NativeTerminalPane abnormal exit attach handling", () => {
   beforeEach(() => {
+    persistedBindings.clear();
     vi.useFakeTimers();
     vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
@@ -129,13 +139,18 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
   });
 
   it("ignores late attach rejection without surfacing alert badge when session exits during in-flight attach", async () => {
+    let markAttachStarted!: () => void;
+    const attachStarted = new Promise<void>((resolve) => { markAttachStarted = resolve; });
     let rejectAttach: ((err: any) => void) | null = null;
     const attachPromise = new Promise((_resolve, reject) => {
       rejectAttach = reject;
     });
 
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_attach") return attachPromise;
+      if (cmd === "cmd_native_terminal_attach") {
+        markAttachStarted();
+        return attachPromise;
+      }
       if (cmd === "cmd_native_terminal_set_bounds") return PRESENTED;
       return undefined;
     });
@@ -146,7 +161,7 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     );
 
     await act(async () => {
-      await Promise.resolve();
+      await attachStarted;
     });
 
     const exitedSession = createSession("pane-1", "backend-1", "exited");

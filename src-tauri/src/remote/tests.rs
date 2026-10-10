@@ -104,9 +104,12 @@ async fn test_remote_server_health_and_lifecycle() {
         relay_url: None,
     };
 
-    let (handle, addr) = start_remote_server(Arc::clone(&state))
-        .await
-        .expect("start server");
+    let (handle, addr) = start_remote_server_with_resolver(
+        Arc::clone(&state),
+        Arc::new(LoopbackOverlayResolver),
+    )
+    .await
+    .expect("start server");
     assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
 
     // Health endpoint
@@ -3839,6 +3842,23 @@ async fn test_concurrent_cold_snapshot_requests_coalesce_to_one_git_discovery() 
     assert_eq!(state.snapshot_build_count(), 1);
 }
 
+/// Resolves the Tailscale overlay to loopback.
+///
+/// The legacy peer test needs a running gateway, not an external listener, so resolving the
+/// overlay to loopback keeps the test off the workstation's real Tailscale interface and binds
+/// no address that a fresh CI VM does not own.
+struct LoopbackOverlayResolver;
+
+impl crate::remote::state::InterfaceResolver for LoopbackOverlayResolver {
+    fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        Err("no local network interface".into())
+    }
+
+    fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        Ok(std::net::Ipv4Addr::LOCALHOST)
+    }
+}
+
 #[tokio::test]
 async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() {
     use crate::daemon::protocol::{
@@ -3887,6 +3907,9 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy remote fixture does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             })
             .unwrap()
                 + "\n";
@@ -3936,6 +3959,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                         }
                         DaemonRequest::DescribeSession { session_id } => {
                             let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                daemon_epoch: None,
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-ws".into()),
@@ -3948,6 +3972,11 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
+                                    incarnation: None, // Legacy remote fixture.
                                 },
                             })
                             .unwrap()
@@ -4054,9 +4083,12 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         .exchange_pairing_code(&pairing_code, "LegacyPeerTestDevice")
         .expect("pair device");
 
-    let (server_handle, addr) = start_remote_server(Arc::clone(&state))
-        .await
-        .expect("start remote server");
+    let (server_handle, addr) = start_remote_server_with_resolver(
+        Arc::clone(&state),
+        Arc::new(LoopbackOverlayResolver),
+    )
+    .await
+    .expect("start remote server");
 
     // Set active desktop selection to legacy session
     state.set_active_selection(RemoteActiveDesktopSelection {
@@ -4205,6 +4237,9 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy handover fixture does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             })
             .unwrap()
                 + "\n";
@@ -4251,6 +4286,7 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                         }
                         DaemonRequest::DescribeSession { session_id } => {
                             let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                daemon_epoch: None,
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-handover-ws".into()),
@@ -4263,6 +4299,11 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                     end_sequence: Some(1),
                                     last_output_age_ms: None,
                                     suspended: false,
+                                    reader_paused: None,
+                                    kernel_stopped: None,
+                                    registry_suspended: None,
+                                    suspension_source: None,
+                                    incarnation: None, // Legacy handover fixture.
                                 },
                             })
                             .unwrap()
@@ -4352,9 +4393,12 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
         .exchange_pairing_code(&pairing_code, "HandoverTestDevice")
         .expect("pair device");
 
-    let (server_handle, addr) = start_remote_server(Arc::clone(&state))
-        .await
-        .expect("start remote server");
+    let (server_handle, addr) = start_remote_server_with_resolver(
+        Arc::clone(&state),
+        Arc::new(LoopbackOverlayResolver),
+    )
+    .await
+    .expect("start remote server");
 
     // CRITICAL: Ensure NO desktop selection is active (headless handover state)
     assert!(state.active_selection.read().is_none());

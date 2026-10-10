@@ -1,0 +1,49 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.dnd.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039750) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.dnd.test.tsx (7 tests | 7 failed) 6ms
+   × Sidebar drag reorder > uses the five-pixel pointer threshold and keyboard sensor 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > calls onReorderProjects with project ids moved to the drop position 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > keeps project select and accordion toggle clicks usable after a non-dragging pointer press 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > persists a worktree drop and reapplies its path order after remount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > appends a newly appearing worktree after the stored paths in incoming order 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > ignores a deleted stored path and prunes it on the next completed drop 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar drag reorder > does not render separate reorder grip handles and makes rows directly draggable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > uses the five-pixel pointer threshold and keyboard sensor
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > calls onReorderProjects with project ids moved to the drop position
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > keeps project select and accordion toggle clicks usable after a non-dragging pointer press
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > persists a worktree drop and reapplies its path order after remount
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > appends a newly appearing worktree after the stored paths in incoming order
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > ignores a deleted stored path and prunes it on the next completed drop
+ FAIL  src/components/Sidebar.dnd.test.tsx > Sidebar drag reorder > does not render separate reorder grip handles and makes rows directly draggable
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.dnd.test.tsx:110:16
+    108| 
+    109| beforeEach(() => {
+    110|   localStorage.clear();
+       |                ^
+    111|   dndHarness.sensors.length = 0;
+    112|   localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.st…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  10:10:11
+   Duration  1.14s (transform 234ms, setup 102ms, collect 637ms, tests 6ms, environment 226ms, prepare 50ms)
+
+error: script "test" exited with code 1

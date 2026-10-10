@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-happy",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-happy",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-91d447e1\\evidence\\split-happy",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-91d447e1\\runtime\\split-happy"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "b7e41eae405984f48d31618fa1bd11a392ba0491ffccdef9d15a94e24fcb4cbe",
+  "runId": "qa-run-d257a272-e9d9-44de-98d5-d6794f746c6e",
+  "operationId": "qa-op-9b847b66-622e-49e1-983d-d23bdaf2806a",
+  "verdict": "FAIL",
+  "nativeEvidence": null,
+  "error": {
+    "code": "NATIVE_AUTOMATION_UNSUPPORTED",
+    "message": "NATIVE_AUTOMATION_UNSUPPORTED: powershell exited 1: SPLIT_RIGHT_NOT_UNIQUE\r\n��ġ ��:1 ����:501\r\n+ ... nd); if ($items.Count -ne 1) { throw \"SPLIT_RIGHT_NOT_UNIQUE\" } if (- ...\r\n+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : OperationStopped: (SPLIT_RIGHT_NOT_UNIQUE:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : SPLIT_RIGHT_NOT_UNIQUE"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false,
+    "gateFailed": true
+  },
+  "barriers": []
+}

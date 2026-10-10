@@ -1,0 +1,86 @@
+{
+  "transferNativeExit": 0,
+  "monitor": "mon_8Y3FKD7SBRCEZJRH",
+  "gates": [
+    {
+      "host": "mac",
+      "gate": "local_split_reliability_-list",
+      "localLog": "mac-rust-logs/local_split_reliability_-list.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "local_split_reliability_",
+      "localLog": "mac-rust-logs/local_split_reliability_.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "pane_liveness_-list",
+      "localLog": "mac-rust-logs/pane_liveness_-list.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "pane_liveness_",
+      "localLog": "mac-rust-logs/pane_liveness_.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "qa_barrier-list",
+      "localLog": "mac-rust-logs/qa_barrier-list.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 76 previous errors; 54 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "qa_barrier",
+      "localLog": "mac-rust-logs/qa_barrier.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 76 previous errors; 54 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "handover-list",
+      "localLog": "mac-rust-logs/handover-list.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib) due to 10 previous errors; 32 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "handover",
+      "localLog": "mac-rust-logs/handover.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib) due to 10 previous errors; 32 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "all-targets",
+      "localLog": "mac-rust-logs/all-targets.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    },
+    {
+      "host": "mac",
+      "gate": "full-lib",
+      "localLog": "mac-rust-logs/full-lib.log",
+      "compileAssertion": "error: could not compile `ferryx` (lib test) due to 72 previous errors; 52 warnings emitted",
+      "selection": "UNKNOWN_COMPILE_FAILED",
+      "testBodyExecuted": false
+    }
+  ]
+}

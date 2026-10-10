@@ -173,6 +173,7 @@ impl DaemonSessionService {
                 cwd: cwd.clone(),
                 provider_claim: None,
                 spawn_fingerprint: crate::daemon::session_service::SpawnRequestFingerprint {
+                    requested_session_id: Some(session_id.clone()),
                     workspace_id,
                     worktree,
                     cwd: Some(cwd.to_string_lossy().into_owned()),

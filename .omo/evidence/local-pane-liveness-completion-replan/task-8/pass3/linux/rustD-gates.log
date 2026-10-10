@@ -1,0 +1,8 @@
+RGATE_DONE linux qa_barrier native=0 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 2673 filtered out; finished in 0.07s
+RGATE_DONE linux daemon_handover_contract native=0 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.43s
+RGATE_DONE linux daemon_persistence_contract native=101 test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.98s
+RGATE_DONE linux unix-suspension native=0 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 2661 filtered out; finished in 0.04s
+RGATE_DONE linux zero_config_gen4_audit native=0 test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+RGATE_DONE linux zero_config_gen5_regression native=101 test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.10s
+RGATE_DONE linux ipc_hardening_contract native=101 
+ALL_RUSTD_DONE linux

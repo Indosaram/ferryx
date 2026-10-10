@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ✓ src/App.pairedDaemon.test.tsx (8 tests) 850ms
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  10:43:46
+   Duration  15.70s (transform 2.70s, setup 1.29s, collect 9.63s, tests 850ms, environment 2.33s, prepare 180ms)
+

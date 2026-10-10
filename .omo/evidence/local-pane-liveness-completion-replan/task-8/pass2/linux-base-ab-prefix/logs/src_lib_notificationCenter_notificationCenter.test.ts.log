@@ -1,0 +1,139 @@
+$ vitest run --maxWorkers=1 src/lib/notificationCenter/notificationCenter.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037630) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/notificationCenter/notificationCenter.test.ts (37 tests | 37 failed) 11ms
+   × notification inbox occurrences > records working -> waiting 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > records working -> done 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > records waiting -> done 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > records done -> waiting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > records idle -> waiting 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > records idle -> done 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"previousState":"done","state":"done"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"previousState":"waiting","state":"waiting"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"state":"done"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"previousState":"working","state":"working"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"previousState":"done","state":"idle"} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects no-op/baseline observations {"notificationSuppressed":true} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > coalesces repeats, refreshes metadata, and recomputes seen rev1 to unread rev2 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > rejects duplicate edges without notifying or modifying a snapshot 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > deduplicates identical timestamped edges without an explicit occurrence ID 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > coalesces accepted bells with activity by session and rejects duplicate bells 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification inbox occurrences > keeps collision-safe identities across workspaces 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > revision guard skips a stale read ack after a newer occurrence 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > marks all read, dismisses, and clears without changing order or no-op snapshots 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > caps 199 rows, evicting oldest seen before oldest unread 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > caps 200 rows, evicting oldest seen before oldest unread 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > caps 201 rows, evicting oldest seen before oldest unread 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × read acknowledgements and retention > evicts the oldest unread when none are seen, using update order not wall time 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > debounces and round-trips unread history before any subscription 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > flushes pending writes on pagehide 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > flushes pending writes on visibilitychange 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > explicit flush and dispose persist the latest state and detach listeners 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > restores empty for corrupt payload {broken 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > restores empty for corrupt payload null 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > restores empty for corrupt payload [] 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > restores empty for corrupt payload {"version":2,"entries":[]} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > restores empty for corrupt payload {"version":1,"entries":{}} 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > validates, deduplicates, sorts, normalizes counters, and caps restored entries 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > migrates orca history through the storage-key convention 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > migrates rorca history through the storage-key convention 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > retains in-memory state on quota failure, reports once, and can retry flush 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × notification persistence > reports storage access failure once and keeps recording 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 37 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records working -> waiting
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records working -> done
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records waiting -> done
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records done -> waiting
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records idle -> waiting
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > records idle -> done
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"previousState":"done","state":"done"}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"previousState":"waiting","state":"waiting"}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"state":"done"}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"previousState":"working","state":"working"}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"previousState":"done","state":"idle"}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects no-op/baseline observations {"notificationSuppressed":true}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > coalesces repeats, refreshes metadata, and recomputes seen rev1 to unread rev2
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > rejects duplicate edges without notifying or modifying a snapshot
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > deduplicates identical timestamped edges without an explicit occurrence ID
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > coalesces accepted bells with activity by session and rejects duplicate bells
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification inbox occurrences > keeps collision-safe identities across workspaces
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > revision guard skips a stale read ack after a newer occurrence
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > marks all read, dismisses, and clears without changing order or no-op snapshots
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > caps 199 rows, evicting oldest seen before oldest unread
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > caps 200 rows, evicting oldest seen before oldest unread
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > caps 201 rows, evicting oldest seen before oldest unread
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > read acknowledgements and retention > evicts the oldest unread when none are seen, using update order not wall time
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > debounces and round-trips unread history before any subscription
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > flushes pending writes on pagehide
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > flushes pending writes on visibilitychange
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > explicit flush and dispose persist the latest state and detach listeners
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > restores empty for corrupt payload {broken
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > restores empty for corrupt payload null
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > restores empty for corrupt payload []
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > restores empty for corrupt payload {"version":2,"entries":[]}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > restores empty for corrupt payload {"version":1,"entries":{}}
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > validates, deduplicates, sorts, normalizes counters, and caps restored entries
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > migrates orca history through the storage-key convention
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > migrates rorca history through the storage-key convention
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > retains in-memory state on quota failure, reports once, and can retry flush
+ FAIL  src/lib/notificationCenter/notificationCenter.test.ts > notification persistence > reports storage access failure once and keeps recording
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/notificationCenter/notificationCenter.test.ts:23:33
+     21| }
+     22| 
+     23| beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); vi.setSys…
+       |                                 ^
+     24| afterEach(() => { stores.splice(0).forEach((store) => store.dispose())…
+     25| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/37]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  37 failed (37)
+   Start at  10:09:41
+   Duration  558ms (transform 82ms, setup 115ms, collect 40ms, tests 11ms, environment 226ms, prepare 45ms)
+
+error: script "test" exited with code 1

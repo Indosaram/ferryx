@@ -369,10 +369,6 @@ mod tests {
             alt: true,
             ..KeyModifiers::default()
         };
-        let super_key = KeyModifiers {
-            super_key: true,
-            ..KeyModifiers::default()
-        };
 
         assert_eq!(
             natural_text_editing_bytes(&event(KeyCode::Backspace, alt, KeyAction::Press), true),

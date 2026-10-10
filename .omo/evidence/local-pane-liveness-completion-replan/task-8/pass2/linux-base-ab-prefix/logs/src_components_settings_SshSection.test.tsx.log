@@ -1,0 +1,132 @@
+$ vitest run --maxWorkers=1 src/components/settings/SshSection.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1033936) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/SshSection.test.tsx (31 tests | 31 failed) 12ms
+   × SshSection Settings Component > opens a project on the chosen enabled host without installing integration 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > shows the detected runtime and prepares integration only on explicit action 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > renders empty state when no SSH machines are configured 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > disables connection tests and integration preparation while editing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > ignores a late connection success after the host configuration changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > ignores a late connection failure after the host configuration changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > ignores a late integration success after the host configuration changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > ignores a late integration failure after the host configuration changes 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > renders mounted inventory with badges, endpoints, and status 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > validates form input when adding a machine manually 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > saves a new machine, disables duplicate submit while pending, and mounts it into inventory 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > edits an existing machine and updates the inventory 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > toggles enabled/disabled state via switch with async busy guard 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > deletes a machine from the inventory with async guard 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > imports pasted SSH configuration and updates inventory 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > tests host connection and renders visible success and error results 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when saving a machine fails with structured IPC error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when importing config fails with structured IPC error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when deleting a machine fails with structured IPC error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when toggling a machine fails with structured IPC error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when testing connection rejects with structured IPC error 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > surfaces system config read failures and allows retrying 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > loads and displays discovered hosts from ~/.ssh/config and allows importing them 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > reads hosts from a user-selected config file instead of the default path 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > restores the previously selected config file on remount and can revert to the default 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not render the Choose File button when running outside Tauri desktop (web/remote mode) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders distinct Connection, Agent Integration, and Terminal Helper evidence when connection is verified 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not claim Terminal Helper is Ready from git alone without helper evidence 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders Setup needed when helper probe state is missing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders additive 업데이트 가능 state and invokes cmd_ssh_provision_helper when remote helper is stale 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not offer a downgrade when the remote helper is newer than the bundle 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 31 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > opens a project on the chosen enabled host without installing integration
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > shows the detected runtime and prepares integration only on explicit action
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > renders empty state when no SSH machines are configured
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > disables connection tests and integration preparation while editing
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > ignores a late connection success after the host configuration changes
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > ignores a late connection failure after the host configuration changes
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > ignores a late integration success after the host configuration changes
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > ignores a late integration failure after the host configuration changes
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > renders mounted inventory with badges, endpoints, and status
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > validates form input when adding a machine manually
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > saves a new machine, disables duplicate submit while pending, and mounts it into inventory
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > edits an existing machine and updates the inventory
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > toggles enabled/disabled state via switch with async busy guard
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > deletes a machine from the inventory with async guard
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > imports pasted SSH configuration and updates inventory
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > tests host connection and renders visible success and error results
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/SshSection.test.tsx:58:18
+     56|     vi.clearAllMocks();
+     57|     resetSshHostsCache();
+     58|     localStorage.clear();
+       |                  ^
+     59|     isTauriMock.mockReturnValue(true);
+     60|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/31]⎯
+
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when saving a machine fails with structured IPC error
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when importing config fails with structured IPC error
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when deleting a machine fails with structured IPC error
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when toggling a machine fails with structured IPC error
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > Structured IPC mutation error surfacing > surfaces backend error message when testing connection rejects with structured IPC error
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > surfaces system config read failures and allows retrying
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > loads and displays discovered hosts from ~/.ssh/config and allows importing them
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > reads hosts from a user-selected config file instead of the default path
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > restores the previously selected config file on remount and can revert to the default
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not render the Choose File button when running outside Tauri desktop (web/remote mode)
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders distinct Connection, Agent Integration, and Terminal Helper evidence when connection is verified
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not claim Terminal Helper is Ready from git alone without helper evidence
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders Setup needed when helper probe state is missing
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > renders additive 업데이트 가능 state and invokes cmd_ssh_provision_helper when remote helper is stale
+ FAIL  src/components/settings/SshSection.test.tsx > SshSection Settings Component > System SSH Config Auto-Discovery and Viewer > does not offer a downgrade when the remote helper is newer than the bundle
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/SshSection.test.tsx:58:18
+     56|     vi.clearAllMocks();
+     57|     resetSshHostsCache();
+     58|     localStorage.clear();
+       |                  ^
+     59|     isTauriMock.mockReturnValue(true);
+     60|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/31]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  31 failed (31)
+   Start at  10:08:59
+   Duration  1.11s (transform 187ms, setup 95ms, collect 591ms, tests 12ms, environment 230ms, prepare 50ms)
+
+error: script "test" exited with code 1

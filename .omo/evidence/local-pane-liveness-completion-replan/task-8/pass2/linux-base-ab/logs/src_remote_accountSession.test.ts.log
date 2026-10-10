@@ -1,0 +1,191 @@
+$ vitest run --maxWorkers=1 src/remote/accountSession.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1034028) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/accountSession.test.ts (27 tests | 27 failed) 21ms
+   × accountSession client module > requestLogin sends POST to /api/account/v1/login/request with email body 7ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > requestLogin throws AccountSessionError with INVALID_RESPONSE when response lacks loginHandle 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > pollLogin sends POST to /api/account/v1/login/poll and returns status pending 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > pollLogin returns status approved with session token for approved handle 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > pollLogin throws typed AccountSessionError on unknown login handle 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > consumeLogin sends POST to /api/account/v1/login/consume and stores session token 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > consumeLogin throws typed AccountSessionError on invalid code 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > listMachines sends GET to /api/account/v1/machines with bearer token 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > listMachines throws typed AccountSessionError on 401 unauthorized 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > requestGrant sends POST to /api/account/v1/machines/{id}/grant with camelCase body 1ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > requestGrant throws typed MACHINE_NOT_FOUND when machine returns 404 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > allocateSession sends POST to /api/v1/attach/session returning sessionId 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > allocateSession throws typed MACHINE_OFFLINE when machine is offline 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > allocateSession throws typed ALLOCATE_SESSION_NOT_FOUND on 404 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > openTunnel delegates to openAccountTunnel with correct socketUrl and parameters 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > redeemInTunnel sends POST /api/v1/pair/exchange inside tunnel and receives device token 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > pairing token, account session token, and login handle never appear in any request URL 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > resolveAccountOrigin keeps the page origin when its account health probe succeeds 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe is 404 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > resolveAccountOrigin retains candidate origin when the health probe fails on the network 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > requestLogin targets the origin resolved for the page instead of the raw page origin 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > opens an events socket and a terminal socket on the same connection and asserts BOTH stay usable 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > stops and reports exact error if daemon or relay refuses second concurrent session 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > openAccountWebSocket allocates a dedicated session, opens a tunnel and returns an upgraded socket 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > account origin configuration > defaults to DEFAULT_RELAY_ORIGIN when no origin is configured 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > account origin configuration > stores, retrieves, and clears configured account origin 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+   × accountSession client module > account origin configuration > does not expose a session issued by one account origin to another 0ms
+     → Cannot read properties of undefined (reading 'removeItem')
+     → Cannot read properties of undefined (reading 'removeItem')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 27 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin sends POST to /api/account/v1/login/request with email body
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin throws AccountSessionError with INVALID_RESPONSE when response lacks loginHandle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin sends POST to /api/account/v1/login/poll and returns status pending
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin returns status approved with session token for approved handle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin throws typed AccountSessionError on unknown login handle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > consumeLogin sends POST to /api/account/v1/login/consume and stores session token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > consumeLogin throws typed AccountSessionError on invalid code
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > listMachines sends GET to /api/account/v1/machines with bearer token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > listMachines throws typed AccountSessionError on 401 unauthorized
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestGrant sends POST to /api/account/v1/machines/{id}/grant with camelCase body
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestGrant throws typed MACHINE_NOT_FOUND when machine returns 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession sends POST to /api/v1/attach/session returning sessionId
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession throws typed MACHINE_OFFLINE when machine is offline
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession throws typed ALLOCATE_SESSION_NOT_FOUND on 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > openTunnel delegates to openAccountTunnel with correct socketUrl and parameters
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > redeemInTunnel sends POST /api/v1/pair/exchange inside tunnel and receives device token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pairing token, account session token, and login handle never appear in any request URL
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin keeps the page origin when its account health probe succeeds
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe is 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin retains candidate origin when the health probe fails on the network
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin targets the origin resolved for the page instead of the raw page origin
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > opens an events socket and a terminal socket on the same connection and asserts BOTH stay usable
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > stops and reports exact error if daemon or relay refuses second concurrent session
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > openAccountWebSocket allocates a dedicated session, opens a tunnel and returns an upgraded socket
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > defaults to DEFAULT_RELAY_ORIGIN when no origin is configured
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > stores, retrieves, and clears configured account origin
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > does not expose a session issued by one account origin to another
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/accountSession.test.ts:49:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/54]⎯
+
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin sends POST to /api/account/v1/login/request with email body
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin throws AccountSessionError with INVALID_RESPONSE when response lacks loginHandle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin sends POST to /api/account/v1/login/poll and returns status pending
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin returns status approved with session token for approved handle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pollLogin throws typed AccountSessionError on unknown login handle
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > consumeLogin sends POST to /api/account/v1/login/consume and stores session token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > consumeLogin throws typed AccountSessionError on invalid code
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > listMachines sends GET to /api/account/v1/machines with bearer token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > listMachines throws typed AccountSessionError on 401 unauthorized
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestGrant sends POST to /api/account/v1/machines/{id}/grant with camelCase body
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestGrant throws typed MACHINE_NOT_FOUND when machine returns 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession sends POST to /api/v1/attach/session returning sessionId
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession throws typed MACHINE_OFFLINE when machine is offline
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > allocateSession throws typed ALLOCATE_SESSION_NOT_FOUND on 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > openTunnel delegates to openAccountTunnel with correct socketUrl and parameters
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > redeemInTunnel sends POST /api/v1/pair/exchange inside tunnel and receives device token
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > pairing token, account session token, and login handle never appear in any request URL
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin keeps the page origin when its account health probe succeeds
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe is 404
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > resolveAccountOrigin retains candidate origin when the health probe fails on the network
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > requestLogin targets the origin resolved for the page instead of the raw page origin
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > opens an events socket and a terminal socket on the same connection and asserts BOTH stay usable
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > stops and reports exact error if daemon or relay refuses second concurrent session
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > openAccountWebSocket allocates a dedicated session, opens a tunnel and returns an upgraded socket
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/accountSession.test.ts:180:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/54]⎯
+
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > defaults to DEFAULT_RELAY_ORIGIN when no origin is configured
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > stores, retrieves, and clears configured account origin
+ FAIL  src/remote/accountSession.test.ts > accountSession client module > account origin configuration > does not expose a session issued by one account origin to another
+TypeError: Cannot read properties of undefined (reading 'removeItem')
+ ❯ clearRemoteAuthToken src/lib/remoteClient.ts:56:18
+     54| export function clearRemoteAuthToken(hostId?: string) {
+     55|   if (hostId !== undefined) {
+     56|     localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+       |                  ^
+     57|     return;
+     58|   }
+ ❯ clearStoredAccountSessionToken src/remote/accountSession.ts:133:3
+ ❯ src/remote/accountSession.test.ts:180:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/54]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  27 failed (27)
+   Start at  10:09:01
+   Duration  685ms (transform 177ms, setup 100ms, collect 177ms, tests 21ms, environment 224ms, prepare 46ms)
+
+error: script "test" exited with code 1

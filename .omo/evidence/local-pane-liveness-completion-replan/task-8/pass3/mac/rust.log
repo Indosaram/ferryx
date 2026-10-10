@@ -1,0 +1,12 @@
+RGATE_DONE mac local_split_reliability_-list native=0 count=15 status=RAN_PASSED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 06s
+RGATE_DONE mac local_split_reliability_ native=101 count=null status=RAN_FAILED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.69s
+running 15 tests
+test result: FAILED. 12 passed; 3 failed; 0 ignored; 0 measured; 2675 filtered out; finished in 0.24s
+error: test failed, to rerun pass `--lib`
+RGATE_DONE mac pane_liveness_ native=101 count=null status=RAN_FAILED
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.13s
+running 47 tests
+test result: FAILED. 46 passed; 1 failed; 0 ignored; 0 measured; 2643 filtered out; finished in 66.06s
+error: test failed, to rerun pass `--lib`

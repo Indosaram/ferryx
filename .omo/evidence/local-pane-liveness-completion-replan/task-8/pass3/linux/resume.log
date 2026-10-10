@@ -1,0 +1,35 @@
+GATE_DONE linux local_split_reliability_-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 47 warnings emitted
+GATE_NOT_RUN_BLOCKED linux local_split_reliability_ cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED linux pane_liveness_ cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED linux all-targets cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_NOT_RUN_BLOCKED linux full-lib cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/local_split_reliability_-list.log
+GATE_DONE linux qa_barrier-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 49 warnings emitted
+GATE_NOT_RUN_BLOCKED linux qa_barrier cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/qa_barrier-list.log
+GATE_DONE linux handover-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib) due to 1 previous error; 25 warnings emitted
+GATE_NOT_RUN_BLOCKED linux handover cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/handover-list.log
+GATE_DONE linux unix-suspension-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 47 warnings emitted
+GATE_NOT_RUN_BLOCKED linux unix-suspension cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/unix-suspension-list.log
+GATE_DONE linux journal-list native=101 count=null status=RAN_FAILED
+error[E0505]: cannot move out of `completion_window` because it is borrowed
+error: could not compile `ferryx` (lib test) due to 1 previous error; 47 warnings emitted
+GATE_NOT_RUN_BLOCKED linux journal cause=/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/journal-list.log
+GATE_DONE linux full-ui native=1 count=6521 status=RAN_FAILED
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+Error: [2mexpect([22m[31melement[39m[2m).toHaveClass([22m[32m[32m"h-3"[32m[39m[2m)[22m
+Error: [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"data-needs-attention"[32m[39m[2m, [22m[32m[32m"false"[32m[39m[2m) // element.getAttribute("data-needs-attention") === "false"[22m
+Error: [2mexpect([22m[31melement[39m[2m).toBeDisabled()[22m
+ Test Files  99 failed | 273 passed (372)
+      Tests  1224 failed | 5297 passed (6521)
+error: script "test" exited with code 1
+ALL_GATES_DONE linux

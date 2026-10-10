@@ -1,0 +1,1111 @@
+$ vitest run --maxWorkers=1 src/remote/AccountLoginPage.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037243) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/AccountLoginPage.test.tsx (10 tests | 5 failed) 5094ms
+   × AccountLoginPage > consumes login code from URL query parameter ?code=<hex> 1031ms
+     → expected "spy" to be called with arguments: [ 'jwt-session-token-123', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   × AccountLoginPage > consumes login code from URL hash #code=<hex> 1008ms
+     → expected "spy" to be called with arguments: [ 'jwt-session-token-456', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   × AccountLoginPage > preserves backward compatibility with legacy #login= and ?login= parameters 1008ms
+     → expected "spy" to be called with arguments: [ 'jwt-session-token-789', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   × AccountLoginPage > preserves backward compatibility with legacy ?account_token= parameter 1005ms
+     → expected "spy" to be called with arguments: [ 'jwt-session-token-000', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   × AccountLoginPage > consumes magic link code exactly once under StrictMode and invokes latest onLoginSuccess across rerenders while consume promise is pending 1007ms
+     → expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   ✓ AccountLoginPage > does not render the legacy device PIN pairing button 3ms
+   ✓ AccountLoginPage > magic link auto sign-in polling > CASE C: auto signs in when magic link is approved and stops polling 14ms
+   ✓ AccountLoginPage > magic link auto sign-in polling > CASE C: stops polling and displays expiry error when TTL expires 8ms
+   ✓ AccountLoginPage > magic link auto sign-in polling > CASE D: cleans up polling interval on unmount without leaking timer 5ms
+   ✓ AccountLoginPage > magic link auto sign-in polling > keeps account-code-input absent by default after requestLogin resolves pending and polling still logs in 5ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/AccountLoginPage.test.tsx > AccountLoginPage > consumes login code from URL query parameter ?code=<hex>
+AssertionError: expected "spy" to be called with arguments: [ 'jwt-session-token-123', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/remote/AccountLoginPage.test.tsx:73:30
+     71|       expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
+     72|       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, hexCode);
+     73|       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-1…
+       |                              ^
+     74|     });
+     75|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  src/remote/AccountLoginPage.test.tsx > AccountLoginPage > consumes login code from URL hash #code=<hex>
+AssertionError: expected "spy" to be called with arguments: [ 'jwt-session-token-456', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/remote/AccountLoginPage.test.tsx:106:30
+    104|       expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
+    105|       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, hexCode);
+    106|       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-4…
+       |                              ^
+    107|     });
+    108|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  src/remote/AccountLoginPage.test.tsx > AccountLoginPage > preserves backward compatibility with legacy #login= and ?login= parameters
+AssertionError: expected "spy" to be called with arguments: [ 'jwt-session-token-789', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/remote/AccountLoginPage.test.tsx:139:30
+    137|       expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
+    138|       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyCode);
+    139|       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-7…
+       |                              ^
+    140|     });
+    141|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  src/remote/AccountLoginPage.test.tsx > AccountLoginPage > preserves backward compatibility with legacy ?account_token= parameter
+AssertionError: expected "spy" to be called with arguments: [ 'jwt-session-token-000', …(1) ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/remote/AccountLoginPage.test.tsx:172:30
+    170|       expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
+    171|       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyToken);
+    172|       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-0…
+       |                              ^
+    173|     });
+    174|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ FAIL  src/remote/AccountLoginPage.test.tsx > AccountLoginPage > consumes magic link code exactly once under StrictMode and invokes latest onLoginSuccess across rerenders while consume promise is pending
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"grid grid-rows-[1fr_auto] min-h-dvh w-full p-4 sm:p-6 lg:p-8 bg-background text-foreground"[39m
+      [36m>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex items-center justify-center py-6 sm:py-8"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"w-full max-w-sm space-y-6"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"bg-card border border-border rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex flex-col items-center text-center space-y-3"[39m
+              [36m>[39m
+                [36m<img[39m
+                  [33malt[39m=[32m"Ferryx"[39m
+                  [33mclass[39m=[32m"size-16 rounded-2xl object-contain shadow-md"[39m
+                  [33mheight[39m=[32m"64"[39m
+                  [33msrc[39m=[32m"/icon-192.png"[39m
+                  [33mwidth[39m=[32m"64"[39m
+                [36m/>[39m
+                [36m<div>[39m
+                  [36m<h1[39m
+                    [33mclass[39m=[32m"text-[28px] font-semibold tracking-tight text-foreground leading-tight"[39m
+                  [36m>[39m
+                    [0mSign In to Ferryx[0m
+                  [36m</h1>[39m
+                  [36m<p[39m
+                    [33mclass[39m=[32m"text-sm text-muted-foreground mt-2 leading-relaxed"[39m
+                  [36m>[39m
+                    [0mAccess and control your remote machines securely over the encrypted tunnel.[0m
+                  [36m</p>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"p-3.5 text-xs text-destructive bg-destructive/10 rounded-lg leading-relaxed"[39m
+                [33mdata-testid[39m=[32m"account-login-error"[39m
+                [33mrole[39m=[32m"alert"[39m
+              [36m>[39m
+                [0mCannot read properties of undefined (reading 'setItem')[0m
+              [36m</div>[39m
+              [36m<form[39m
+                [33mclass[39m=[32m"space-y-5"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"space-y-2"[39m
+                [36m>[39m
+                  [36m<label[39m
+                    [33mclass[39m=[32m"block text-xs font-medium text-foreground tracking-wide"[39m
+                    [33mfor[39m=[32m"account-email-input"[39m
+                  [36m>[39m
+                    [0mEmail Address[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mautocapitalize[39m=[32m"none"[39m
+                    [33mautocomplete[39m=[32m"email"[39m
+                    [33mclass[39m=[32m"w-full h-11 px-3.5 py-2.5 text-base bg-background border border-input rounded-lg text-foreground placeholder:text-muted-foreground transition-colors focus:border-border focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"[39m
+                    [33mdata-testid[39m=[32m"account-email-input"[39m
+                    [33mid[39m=[32m"account-email-input"[39m
+                    [33mplaceholder[39m=[32m"name@example.com"[39m
+                    [33mrequired[39m=[32m""[39m
+                    [33mspellcheck[39m=[32m"false"[39m
+                    [33mtype[39m=[32m"email"[39m
+                    [33mvalue[39m=[32m""[39m
+                  [36m/>[39m
+                [36m</div>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"w-full h-11 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:pointer-events-none shadow-sm flex items-center justify-center font-sans"[39m
+                  [33mdata-testid[39m=[32m"request-magic-link-btn"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtype[39m=[32m"submit"[39m
+                [36m>[39m
+                  [0mSend Magic Link[0m
+                [36m</button>[39m
+              [36m</form>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"flex items-center justify-center pb-2 sm:pb-4"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground tracking-wide"[39m
+          [36m>[39m
+            [0mFerryx Remote Access[0m
+          [36m</p>[39m
+        [36m</footer>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/remote/AccountLoginPage.test.tsx:239:37
+    237|       expect(consumeSpy).toHaveBeenCalledTimes(1);
+    238|       expect(onLoginSuccessInitial).not.toHaveBeenCalled();
+    239|       expect(onLoginSuccessUpdated).toHaveBeenCalledTimes(1);
+       |                                     ^
+    240|       expect(onLoginSuccessUpdated).toHaveBeenCalledWith("jwt-session-…
+    241|     });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 5 passed (10)
+   Start at  10:09:31
+   Duration  6.14s (transform 177ms, setup 103ms, collect 541ms, tests 5.09s, environment 235ms, prepare 48ms)
+
+error: script "test" exited with code 1

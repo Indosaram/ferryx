@@ -1,0 +1,31 @@
+$ vitest run --maxWorkers=1 src/components/settings/BrowserSection.silentFailures.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1045253) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/settings/BrowserSection.silentFailures.test.tsx (1 test | 1 failed) 5ms
+   × BrowserSection silent failure surfacing > shows a rejected Focus action as an alert inside that browser's row 4ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/BrowserSection.silentFailures.test.tsx > BrowserSection silent failure surfacing > shows a rejected Focus action as an alert inside that browser's row
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/settings/BrowserSection.silentFailures.test.tsx:37:23
+     35| 
+     36| beforeEach(() => {
+     37|   window.localStorage.clear();
+       |                       ^
+     38|   browserMocks.focusBrowser.mockReset();
+     39|   browserMocks.listBrowsers.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  10:11:27
+   Duration  1.02s (transform 133ms, setup 103ms, collect 528ms, tests 5ms, environment 223ms, prepare 45ms)
+
+error: script "test" exited with code 1

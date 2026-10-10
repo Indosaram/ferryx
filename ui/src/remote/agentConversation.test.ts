@@ -4,9 +4,12 @@ import {
   type ConversationMessage,
   capRetainedMessages,
   MAX_RETAINED_CHAT_MESSAGES,
+  fetchAgentConversation,
+  ConversationFetchError,
 } from "./agentConversation";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ToolCallCardProps } from "./chat/MobileChatComponents";
+import type { TunnelResponse, TunnelTransport } from "./attachTunnel";
 
 describe("mapAgentConversation tool calls and thinking", () => {
   it("pairs each tool call with its result and keeps reasoning in order", () => {
@@ -807,5 +810,153 @@ describe("mapAgentConversation tool calls and thinking", () => {
     expect(exactResult.truncated).toBe(false);
     expect(exactResult.messages).toHaveLength(MAX_RETAINED_CHAT_MESSAGES);
     expect(exactResult.messages).toEqual(exactMessages);
+  });
+});
+
+describe("fetchAgentConversation with tunnel transport", () => {
+  it("sends relative agent-history path with Authorization token via tunnel transport and never calls global fetch", async () => {
+    const globalFetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const samplePage = {
+      sessionId: "session-abc-123",
+      items: [
+        { ordinal: 0, role: "user", text: "hello via tunnel" },
+        { ordinal: 1, role: "assistant", text: "FERRYX_REMOTE_CHAT_OK_20260930" },
+      ],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(samplePage));
+
+    const tunnelOkResponse: TunnelResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: bodyBytes,
+    };
+
+    const mockFetchLike = vi.fn().mockResolvedValue(tunnelOkResponse);
+
+    const transport: Pick<TunnelTransport, "fetchLike"> = {
+      fetchLike: mockFetchLike,
+    };
+
+    const result = await fetchAgentConversation({
+      baseUrl: "https://relay.ferryx.dev",
+      sessionId: "session-abc-123",
+      token: "secret-token-777",
+      transport,
+    });
+
+    expect(globalFetchSpy).not.toHaveBeenCalled();
+    expect(mockFetchLike).toHaveBeenCalledTimes(1);
+    expect(mockFetchLike).toHaveBeenCalledWith(
+      "/api/v1/agent-history/session-abc-123?limit=200",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer secret-token-777" },
+      }),
+    );
+    expect(result.sessionId).toBe("session-abc-123");
+    expect(result.items).toHaveLength(2);
+    expect(result.items[0].text).toBe("hello via tunnel");
+    expect(result.items[1].text).toBe("FERRYX_REMOTE_CHAT_OK_20260930");
+
+    globalFetchSpy.mockRestore();
+  });
+
+  it("handles HTTP errors from tunnel response correctly", async () => {
+    const notFoundResponse: TunnelResponse = {
+      status: 404,
+      headers: { "content-type": "application/json" },
+      body: new TextEncoder().encode(JSON.stringify({ error: "TRANSCRIPT_NOT_FOUND" })),
+    };
+
+    const transport: Pick<TunnelTransport, "fetchLike"> = {
+      fetchLike: vi.fn().mockResolvedValue(notFoundResponse),
+    };
+
+    await expect(
+      fetchAgentConversation({
+        baseUrl: "https://relay.ferryx.dev",
+        sessionId: "session-missing",
+        token: "token-1",
+        transport,
+      }),
+    ).rejects.toThrow(ConversationFetchError);
+
+    try {
+      await fetchAgentConversation({
+        baseUrl: "https://relay.ferryx.dev",
+        sessionId: "session-missing",
+        token: "token-1",
+        transport,
+      });
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ConversationFetchError);
+      expect(e.code).toBe("TRANSCRIPT_NOT_FOUND");
+    }
+  });
+
+  it("throws immediately when signal is already aborted before tunnel fetchLike", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const mockFetchLike = vi.fn();
+    const transport: Pick<TunnelTransport, "fetchLike"> = {
+      fetchLike: mockFetchLike,
+    };
+
+    await expect(
+      fetchAgentConversation({
+        baseUrl: "https://relay.ferryx.dev",
+        sessionId: "sess-aborted-pre",
+        token: "token-1",
+        signal: controller.signal,
+        transport,
+      }),
+    ).rejects.toThrow();
+
+    expect(mockFetchLike).not.toHaveBeenCalled();
+  });
+
+  it("discards fulfilled response and throws when signal aborts during in-flight fetchLike await", async () => {
+    const controller = new AbortController();
+
+    const samplePage = {
+      sessionId: "sess-aborted-mid",
+      items: [{ ordinal: 0, role: "assistant", text: "stale message" }],
+      nextCursor: null,
+      partial: false,
+      warnings: [],
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(samplePage));
+
+    const abortedResponse: TunnelResponse = {
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: bodyBytes,
+    };
+
+    const mockFetchLike = vi.fn().mockImplementation(async () => {
+      // simulate in-flight abort
+      controller.abort();
+      return abortedResponse;
+    });
+
+    const transport: Pick<TunnelTransport, "fetchLike"> = {
+      fetchLike: mockFetchLike,
+    };
+
+    await expect(
+      fetchAgentConversation({
+        baseUrl: "https://relay.ferryx.dev",
+        sessionId: "sess-aborted-mid",
+        token: "token-1",
+        signal: controller.signal,
+        transport,
+      }),
+    ).rejects.toThrow();
+
+    expect(mockFetchLike).toHaveBeenCalledTimes(1);
   });
 });

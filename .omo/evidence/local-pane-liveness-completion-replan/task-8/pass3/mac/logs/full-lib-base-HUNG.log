@@ -1,0 +1,2227 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling version_check v0.9.5
+   Compiling parking_lot_core v0.9.12
+   Compiling log v0.4.33
+   Compiling cc v1.4.3
+   Compiling memchr v2.8.3
+   Compiling scopeguard v1.2.0
+   Compiling bytes v1.12.1
+   Compiling lock_api v0.4.14
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling thiserror v2.0.20
+   Compiling utf8_iter v1.0.4
+   Compiling siphasher v1.0.3
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling zmij v1.0.23
+   Compiling phf_shared v0.13.1
+   Compiling autocfg v1.5.1
+   Compiling objc2-encode v4.1.0
+   Compiling fastrand v2.5.0
+   Compiling objc2-exception-helper v0.1.1
+   Compiling phf_generator v0.13.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling once_cell v1.21.4
+   Compiling http v1.5.0
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling objc2 v0.6.4
+   Compiling equivalent v1.0.2
+   Compiling serde v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling getrandom v0.2.17
+   Compiling time-core v0.1.9
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling num-conv v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling winnow v1.0.4
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling base64 v0.22.1
+   Compiling phf_codegen v0.13.1
+   Compiling thiserror v1.0.69
+   Compiling serde_json v1.0.151
+   Compiling semver v1.0.28
+   Compiling ident_case v1.0.1
+   Compiling typeid v1.0.3
+   Compiling strsim v0.11.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling erased-serde v0.4.10
+   Compiling bitflags v2.13.1
+   Compiling byteorder v1.5.0
+   Compiling aho-corasick v1.1.5
+   Compiling regex-syntax v0.8.11
+   Compiling unic-common v0.9.0
+   Compiling fnv v1.0.7
+   Compiling unic-char-range v0.9.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling unic-ucd-version v0.9.0
+   Compiling unic-char-property v0.9.0
+   Compiling string_cache_codegen v0.6.1
+   Compiling getrandom v0.4.3
+   Compiling anyhow v1.0.104
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling precomputed-hash v0.1.1
+   Compiling alloc-stdlib v0.2.4
+   Compiling parking_lot v0.12.5
+   Compiling unic-ucd-ident v0.9.0
+   Compiling serde_spanned v1.1.1
+   Compiling web_atoms v0.2.6
+   Compiling quick-xml v0.41.0
+   Compiling block2 v0.6.2
+   Compiling same-file v1.0.6
+   Compiling string_cache v0.9.0
+   Compiling walkdir v2.5.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling dispatch2 v0.3.1
+   Compiling dunce v1.0.5
+   Compiling percent-encoding v2.3.2
+   Compiling rustc-hash v2.1.3
+   Compiling ctor-proc-macro v0.0.7
+   Compiling regex-automata v0.4.18
+   Compiling dtoa v1.0.11
+   Compiling pin-project-lite v0.2.17
+   Compiling objc2-core-foundation v0.3.2
+   Compiling brotli v8.0.4
+   Compiling ctor v0.8.0
+   Compiling dtoa-short v0.3.5
+   Compiling form_urlencoded v1.2.2
+   Compiling uuid v1.26.0
+   Compiling tendril v0.5.1
+   Compiling selectors v0.36.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling rand_core v0.6.4
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.23.0
+   Compiling indexmap v1.9.3
+   Compiling glob v0.3.4
+   Compiling camino v1.2.5
+   Compiling subtle v2.6.1
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling servo_arc v0.4.3
+   Compiling hashbrown v0.17.1
+   Compiling schemars v0.8.22
+   Compiling deranged v0.5.8
+   Compiling bit-vec v0.8.0
+   Compiling serde_derive v1.0.229
+   Compiling zerovec-derive v0.11.5
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling phf_macros v0.13.1
+   Compiling thiserror-impl v1.0.69
+   Compiling objc2-foundation v0.3.2
+   Compiling regex v1.13.1
+   Compiling zeroize_derive v1.5.0
+   Compiling phf v0.13.1
+   Compiling cssparser-macros v0.6.1
+   Compiling derive_more-impl v2.1.1
+   Compiling bytemuck_derive v1.12.0
+   Compiling zerofrom v0.1.8
+   Compiling hashbrown v0.12.3
+   Compiling yoke v0.8.3
+   Compiling zeroize v1.9.0
+   Compiling darling_macro v0.23.0
+   Compiling cssparser v0.36.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling derive_more v2.1.1
+   Compiling markup5ever v0.38.0
+   Compiling time v0.3.55
+   Compiling schemars_derive v0.8.22
+   Compiling darling v0.23.0
+   Compiling html5ever v0.38.0
+   Compiling bytemuck v1.25.2
+   Compiling indexmap v2.14.0
+   Compiling bit-set v0.8.0
+   Compiling serde_with_macros v3.22.0
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling cfb v0.7.3
+   Compiling icu_collections v2.3.0
+   Compiling cargo-platform v0.1.9
+   Compiling icu_locale_core v2.3.0
+   Compiling swift-rs v1.0.8
+   Compiling jsonptr v0.6.3
+   Compiling rustc_version v0.4.1
+   Compiling errno v0.3.14
+   Compiling base64 v0.21.7
+   Compiling bitflags v1.3.2
+   Compiling dyn-clone v1.0.20
+   Compiling foldhash v0.2.0
+   Compiling infer v0.19.0
+   Compiling serde-untagged v0.1.9
+   Compiling json-patch v3.0.1
+   Compiling dom_query v0.27.0
+   Compiling cargo_metadata v0.19.2
+   Compiling serde_with v3.22.0
+   Compiling crypto-common v0.1.7
+   Compiling plist v1.10.0
+   Compiling block-buffer v0.10.4
+   Compiling cfg_aliases v0.2.2
+   Compiling socket2 v0.6.5
+   Compiling icu_provider v2.3.0
+   Compiling zerocopy v0.8.56
+   Compiling option-ext v0.2.0
+   Compiling libm v0.2.16
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling zerocopy-derive v0.8.56
+   Compiling tokio-macros v2.7.2
+   Compiling mio v1.2.2
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.10.1
+   Compiling idna_adapter v1.2.2
+   Compiling tokio v1.53.1
+   Compiling arrayvec v0.7.8
+   Compiling idna v1.1.0
+   Compiling winnow v0.7.15
+   Compiling raw-window-handle v0.6.2
+   Compiling core-foundation-sys v0.8.7
+   Compiling url v2.5.8
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling futures-core v0.3.34
+   Compiling dirs-sys v0.5.0
+   Compiling embed-resource v3.0.11
+   Compiling urlpattern v0.3.0
+   Compiling time-macros v0.2.32
+   Compiling tracing-core v0.1.36
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ring v0.17.14
+   Compiling heck v0.5.0
+   Compiling tauri-winres v0.3.6
+   Compiling tauri-utils v2.9.3
+   Compiling dirs v6.0.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling crc32fast v1.5.0
+   Compiling simd-adler32 v0.3.10
+   Compiling cargo_toml v0.22.3
+   Compiling tracing-attributes v0.1.31
+   Compiling lazy_static v1.5.0
+   Compiling adler2 v2.0.1
+   Compiling untrusted v0.9.0
+   Compiling miniz_oxide v0.8.9
+   Compiling getrandom v0.3.4
+   Compiling fdeflate v0.3.7
+   Compiling core-foundation v0.10.1
+   Compiling flate2 v1.1.9
+   Compiling tracing v0.1.44
+   Compiling rustls v0.23.43
+   Compiling symphonia-core v0.5.5
+   Compiling digest v0.10.7
+   Compiling dpi v0.1.2
+   Compiling foreign-types-macros v0.2.4
+   Compiling slab v0.4.12
+   Compiling crossbeam-utils v0.8.22
+   Compiling foreign-types-shared v0.3.1
+   Compiling http-body v1.1.0
+   Compiling cpufeatures v0.2.17
+   Compiling cookie v0.18.2
+   Compiling httparse v1.10.1
+   Compiling futures-sink v0.3.34
+   Compiling foreign-types v0.5.0
+   Compiling futures-macro v0.3.34
+   Compiling encoding_rs v0.8.35
+   Compiling futures-task v0.3.34
+   Compiling tower-service v0.3.3
+   Compiling futures-util v0.3.34
+   Compiling crossbeam-channel v0.5.16
+   Compiling png v0.17.16
+   Compiling core-graphics-types v0.2.0
+   Compiling symphonia-metadata v0.5.5
+   Compiling objc2-app-kit v0.3.2
+   Compiling block-padding v0.3.3
+   Compiling tauri-runtime v2.11.3
+   Compiling mime v0.3.17
+   Compiling wry v0.55.1
+   Compiling sha2 v0.10.9
+   Compiling inout v0.1.4
+   Compiling ico v0.5.0
+   Compiling core-graphics v0.25.0
+   Compiling png v0.18.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rustc-hash v1.1.0
+   Compiling try-lock v0.2.5
+   Compiling tauri-plugin v2.6.3
+   Compiling tauri-build v2.6.3
+   Compiling unicode-segmentation v1.13.3
+   Compiling tauri-runtime-wry v2.11.4
+   Compiling pxfm v0.1.30
+   Compiling tower-layer v0.3.3
+   Compiling keyboard-types v0.7.0
+   Compiling rustls-webpki v0.103.15
+   Compiling want v0.3.1
+   Compiling tauri-codegen v2.6.3
+   Compiling naga-types v30.0.1
+   Compiling cipher v0.4.4
+   Compiling webpki-roots v1.0.9
+   Compiling futures-channel v0.3.34
+   Compiling sync_wrapper v1.0.2
+   Compiling naga v30.0.1
+   Compiling serialize-to-javascript-impl v0.1.2
+   Compiling httpdate v1.0.3
+   Compiling atomic-waker v1.1.2
+   Compiling bit-vec v0.9.1
+   Compiling byteorder-lite v0.1.0
+   Compiling unicode-width v0.1.14
+   Compiling objc-sys v0.3.5
+   Compiling serialize-to-javascript v0.1.2
+   Compiling bit-set v0.10.0
+   Compiling codespan-reporting v0.13.1
+   Compiling hyper v1.11.0
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling objc2-metal v0.3.2
+   Compiling rand_core v0.9.5
+   Compiling half v2.7.1
+   Compiling universal-hash v0.5.1
+   Compiling objc2-core-graphics v0.3.2
+   Compiling serde_repr v0.1.21
+   Compiling opaque-debug v0.3.1
+   Compiling ipnet v2.12.1
+   Compiling static_assertions v1.1.0
+   Compiling embed_plist v1.2.2
+   Compiling rustix v1.1.4
+   Compiling wgpu-types v30.0.1
+   Compiling hyper-util v0.1.20
+   Compiling rand_chacha v0.9.0
+   Compiling moxcms v0.8.1
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling objc2-web-kit v0.3.2
+   Compiling tao v0.35.3
+   Compiling window-vibrancy v0.6.0
+   Compiling muda v0.19.3
+   Compiling objc2-quartz-core v0.3.2
+   Compiling tauri v2.11.5
+   Compiling tauri-macros v2.6.3
+   Compiling tauri-plugin-fs v2.5.1
+   Compiling http-body-util v0.1.5
+   Compiling wgpu-hal v30.0.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling objc2-core-audio-types v0.3.2
+   Compiling ahash v0.8.12
+   Compiling image v0.25.10
+   Compiling objc2-core-audio v0.3.2
+   Compiling raw-window-metal v1.1.0
+   Compiling objc2 v0.5.2
+   Compiling rand v0.9.5
+   Compiling security-framework-sys v2.17.0
+   Compiling mac-notification-sys v0.6.15
+   Compiling libloading v0.8.9
+   Compiling profiling v1.0.18
+   Compiling cfg_aliases v0.1.1
+   Compiling pkg-config v0.3.34
+   Compiling vcpkg v0.2.15
+   Compiling nix v0.28.0
+   Compiling security-framework v3.7.0
+   Compiling objc2-audio-toolbox v0.3.2
+   Compiling block2 v0.5.1
+   Compiling libsqlite3-sys v0.30.1
+   Compiling tauri-plugin-notification v2.3.3
+   Compiling tauri-plugin-dialog v2.7.2
+   Compiling tauri-plugin-updater v2.10.1
+   Compiling tauri-plugin-process v2.3.1
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.9
+   Compiling polyval v0.6.2
+   Compiling tokio-util v0.7.19
+   Compiling sha1 v0.10.7
+   Compiling num-integer v0.1.47
+   Compiling core-foundation v0.9.4
+   Compiling chacha20 v0.10.1
+   Compiling quinn-udp v0.5.15
+   Compiling wgpu-core v30.0.1
+   Compiling aead v0.5.2
+   Compiling extended v0.1.0
+   Compiling cpal v0.17.3
+   Compiling litrs v1.0.0
+   Compiling dispatch v0.2.0
+   Compiling rfd v0.16.0
+   Compiling unicase v2.9.0
+   Compiling ryu v1.0.23
+   Compiling data-encoding v2.11.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling mime_guess v2.0.5
+   Compiling tungstenite v0.29.0
+   Compiling tinyvec v1.12.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling document-features v0.2.12
+   Compiling objc2-foundation v0.2.2
+   Compiling symphonia-format-riff v0.5.5
+   Compiling core-graphics-types v0.1.3
+   Compiling rand v0.10.2
+   Compiling num-bigint v0.4.8
+   Compiling ghash v0.5.1
+   Compiling wgpu-core-deps-apple v30.0.1
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling coreaudio-rs v0.14.2
+   Compiling xattr v1.6.1
+   Compiling hashbrown v0.14.5
+   Compiling objc2-osa-kit v0.3.2
+   Compiling poly1305 v0.8.0
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling chacha20 v0.9.1
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling webpki-roots v0.26.11
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling rand_pcg v0.10.2
+   Compiling quinn v0.11.11
+   Compiling wgpu v30.0.1
+   Compiling winit v0.30.13
+   Compiling snow v0.9.6
+   Compiling mach2 v0.5.0
+   Compiling filetime v0.2.29
+   Compiling signature v2.2.0
+   Compiling dasp_sample v0.11.0
+   Compiling lru-slab v0.1.2
+   Compiling ed25519 v2.2.3
+   Compiling tar v0.4.46
+   Compiling tempfile v3.27.0
+   Compiling quinn-proto v0.11.17
+   Compiling objc2-app-kit v0.2.2
+   Compiling symphonia v0.5.5
+   Compiling aes-gcm v0.10.3
+   Compiling tokio-tungstenite v0.29.0
+   Compiling chacha20poly1305 v0.10.1
+   Compiling hashlink v0.9.1
+   Compiling osakit v0.3.1
+   Compiling num-rational v0.4.2
+   Compiling reqwest v0.13.4
+   Compiling core-graphics v0.23.2
+   Compiling axum-core v0.5.6
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-base/src-tauri)
+   Compiling rand_chacha v0.3.1
+   Compiling tokio-stream v0.1.19
+   Compiling blake2 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling yasna v0.6.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-log v0.2.0
+   Compiling filedescriptor v0.8.3
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling fsevent-sys v4.1.0
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling downcast-rs v1.2.1
+   Compiling matchit v0.8.4
+   Compiling shell-words v1.1.1
+   Compiling cursor-icon v1.2.0
+   Compiling minisign-verify v0.2.5
+   Compiling smol_str v0.2.2
+   Compiling fallible-iterator v0.3.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling axum v0.8.9
+   Compiling portable-pty v0.9.0 (/Users/I552267/ferryx-pane-completion/source-base/src-tauri/vendor/portable-pty)
+   Compiling tracing-subscriber v0.3.23
+   Compiling rusqlite v0.32.1
+   Compiling notify v8.2.0
+   Compiling notify-rust v4.18.0
+   Compiling rcgen v0.14.10
+   Compiling tokio-test v0.4.5
+   Compiling pbkdf2 v0.12.2
+   Compiling rand v0.8.7
+   Compiling rodio v0.22.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling reqwest v0.12.28
+   Compiling x25519-dalek v2.0.1
+   Compiling cbc v0.1.2
+   Compiling tower-http v0.7.1
+   Compiling objc2-user-notifications v0.3.2
+   Compiling objc2-core-text v0.3.2
+   Compiling base64 v0.23.1
+   Compiling pollster v1.0.1
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:442:9
+    |
+442 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src/remote/machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncBufReadExt`
+    --> src/ssh/bridge_tests.rs:1968:9
+     |
+1968 |     use tokio::io::AsyncBufReadExt;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:316:9
+    |
+316 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1099:27
+     |
+1099 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:1564:17
+     |
+1564 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:529:9
+    |
+529 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:543:26
+    |
+543 |         let mut cursor = 0usize;
+    |                          ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:569:14
+    |
+569 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:594:22
+    |
+594 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:591:41
+    |
+591 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:372:13
+    |
+372 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:5512:13
+     |
+5512 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:5563:13
+     |
+5563 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src/native_terminal/surface_host.rs:8238:13
+     |
+8238 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src/native_terminal/surface_host.rs:8248:13
+     |
+8248 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1333:9
+     |
+1333 |     let mut child = spawn_cat_child();
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1347:9
+     |
+1347 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1364:9
+     |
+1364 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |             let mut desired_size: Option<(u16, u16)> = None;
+     |                                                        ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1159:13
+     |
+1159 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: type `DaemonLockFiles` is more private than the item `handover_socket::adopt_authority`
+   --> src/daemon/handover_socket.rs:227:1
+    |
+227 | / pub fn adopt_authority(
+228 | |     authority: TransferredAuthority,
+229 | | ) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
+    | |_____________________________________________________________________________________^ function `handover_socket::adopt_authority` is reachable at visibility `pub`
+    |
+note: but type `DaemonLockFiles` is only usable at visibility `pub(crate)`
+   --> src/daemon/server.rs:733:1
+    |
+733 | pub(crate) struct DaemonLockFiles {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `daemon::agent_state::AgentState` is more private than the item `session_service::DaemonSessionService::publish_agent_state_for_test`
+   --> src/daemon/session_service.rs:364:5
+    |
+364 |     pub fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `session_service::DaemonSessionService::publish_agent_state_for_test` is reachable at visibility `pub`
+    |
+note: but type `daemon::agent_state::AgentState` is only usable at visibility `pub(crate)`
+   --> src/daemon/agent_state.rs:8:1
+    |
+  8 | pub(crate) struct AgentState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src/terminal/output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src/terminal/machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src/terminal/paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemon::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src/terminal/paired_runtime.rs:289:5
+    |
+289 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src/terminal/paired_runtime.rs:711:5
+    |
+711 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src/terminal/paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::live_import`
+   --> src/terminal/remote.rs:819:5
+    |
+819 | /     pub fn live_import(
+820 | |         &self,
+821 | |         state: RemoteExportState,
+822 | |         transport: Option<Arc<dyn Transport>>,
+823 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::import_transferred`
+   --> src/terminal/remote.rs:840:5
+    |
+840 | /     pub fn import_transferred(
+841 | |         &self,
+842 | |         state: RemoteExportState,
+843 | |         transport: Option<Arc<dyn Transport>>,
+844 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sink`
+   --> src/terminal/service.rs:45:5
+    |
+ 45 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `idle_upgrade_requested` is never used
+  --> src/daemon/handover.rs:33:15
+   |
+33 | pub(crate) fn idle_upgrade_requested() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:719:19
+    |
+358 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+719 |     pub(crate) fn machine_sessions(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: function `desktop_application_dirs` is never used
+   --> src/ipc/file_open_with.rs:103:15
+    |
+103 | pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src/ipc/file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/ipc/file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:29:5
+   |
+28 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+29 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: field `0` is never read
+    --> src/remote/auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: struct `Held` is never constructed
+   --> src/remote/../../tests/support/machine_input_fixture.rs:152:12
+    |
+152 | pub struct Held {
+    |            ^^^^
+
+warning: associated items `start` and `drain` are never used
+   --> src/remote/../../tests/support/machine_input_fixture.rs:159:18
+    |
+158 | impl Held {
+    | --------- associated items in this implementation
+159 |     pub async fn start(fixture: &Fixture, session: &Value, socket: &mut Socket) -> Self {
+    |                  ^^^^^
+...
+210 |     pub async fn drain(mut self) {
+    |                  ^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:6487:12
+     |
+6487 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: function `test_persist_count` is never used
+   --> src/terminal/paired_runtime.rs:101:15
+    |
+101 | pub(crate) fn test_persist_count() -> usize {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `test_adopted_process_liveness_observation` is never used
+    --> src/terminal/session.rs:1368:8
+     |
+1368 |     fn test_adopted_process_liveness_observation() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> src/daemon/a03_owner_cli_fixture.rs:126:5
+    |
+126 | /     auth.register_scoped_pairing_capability(
+127 | |         &token,
+128 | |         crate::remote::auth::DevicePermission::Control,
+129 | |         expected,
+130 | |     );
+    | |_____^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+126 |     let _ = auth.register_scoped_pairing_capability(
+    |     +++++++
+
+warning: unused `std::result::Result` that must be used
+  --> src/remote/../../tests/support/machine_input_cancellation.rs:38:17
+   |
+38 |                 fixture.state.auth_manager.revoke_device(&fixture.device);
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+   |
+38 |                 let _ = fixture.state.auth_manager.revoke_device(&fixture.device);
+   |                 +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> src/remote/../../tests/support/machine_input_cancellation.rs:153:9
+    |
+153 |         fixture.state.auth_manager.revoke_device(&fixture.device);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+153 |         let _ = fixture.state.auth_manager.revoke_device(&fixture.device);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> src/remote/../../tests/support/machine_input_fixture.rs:119:9
+    |
+119 |         self.state.auth_manager.revoke_device(&self.device);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+119 |         let _ = self.state.auth_manager.revoke_device(&self.device);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src/remote/server.rs:6106:9
+     |
+6106 |         state.auth_manager.revoke_device(&device.id);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+6106 |         let _ = state.auth_manager.revoke_device(&device.id);
+     |         +++++++
+
+warning: `ferryx` (lib test) generated 79 warnings (1 duplicate) (run `cargo fix --lib -p ferryx --tests` to apply 30 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 09s
+     Running unittests src/lib.rs (target/debug/deps/ferryx_lib-25259416ed141a28)
+
+running 2609 tests
+test account::enroll_client::tests::account_enrollment_record_round_trips_beside_identity ... ok
+test account::enroll_client::tests::enrollment_leaves_existing_device_tokens_alone ... ok
+test account::enroll_client::tests::stored_machine_identity_signs_and_verifies ... ok
+test account::mailer::tests::create_production_mailer_falls_back_to_file_mailer ... ok
+test account::mailer::tests::file_mailer_writes_link ... ok
+test account::mailer::tests::file_mailer_writes_link_env_dir ... ok
+test account::mailer::tests::file_mailer_writes_link_failing_double_creates_no_session ... ok
+test account::mailer::tests::file_mailer_writes_link_missing_parent_returns_mail_failed ... ok
+test account::mailer::tests::resend_payload_generation ... ok
+test account::mailer::tests::webhook_payload_generation ... ok
+test account::offer_sink::tests::applied_offer_registers_a_usable_capability ... ok
+test account::offer_sink::tests::envelope_for_this_machine_uses_the_enrollment_record ... ok
+test account::offer_sink::tests::mirror_scope_stays_mirror ... ok
+test account::offer_sink::tests::offers_for_another_machine_epoch_or_time_are_refused ... ok
+test account::origin::tests::account_data_dir_falls_back_to_userprofile_without_home ... ok
+test account::origin::tests::account_origin_unset_fails_closed ... ok
+test account::origin::tests::explicit_cli_origin_rejects_insecure_and_embedded_credentials ... ok
+test account::service::tests::account_signing_key_is_stable_across_restarts ... ok
+test account::service::tests::delivery_failure_relay_refuses_or_unreachable_yields_502 ... ok
+test account::service::tests::device_flow_lifecycle_request_poll_approve ... ok
+test account::service::tests::device_request_rejects_invalid_email ... ok
+test account::service::tests::grant_request_delivers_verifiable_submission_to_relay ... ok
+test account::service::tests::health_endpoint_reports_ok_and_unknown_path_is_404 ... ok
+test account::service::tests::login_poll_returns_pending_until_the_browser_consumes_the_code ... ok
+test account::service::tests::machine_online_status_freshness_and_liveness_probe ... ok
+test account::service::tests::public_key_endpoint_corrupt_key_returns_500_without_panicking ... ok
+test account::service::tests::public_key_endpoint_returns_base64_pinned_key ... ok
+test account::store::tests::account_signing_key_record_debug_redacts_private_key ... ok
+test account::store::tests::account_store_round_trips_without_secrets ... ok
+test agent_detect::independent_probe::probe_bare_shell_prompt_empty_title_returns_none ... ok
+test agent_detect::independent_probe::probe_build_log_with_waiting_does_not_return_blocked ... ok
+test agent_detect::independent_probe::probe_dev_server_stop_hint_does_not_fabricate_working ... ok
+test agent_detect::independent_probe::probe_generic_selection_and_esc_cancel_do_not_fabricate_copilot ... ok
+test agent_detect::independent_probe::probe_git_log_mentioning_prompt_words_does_not_fabricate_blocked ... ok
+test agent_detect::independent_probe::probe_git_log_with_quoted_prompt_words_returns_none ... ok
+test agent_detect::independent_probe::probe_measured_bare_titles_alone_do_not_fabricate_state ... ok
+test agent_detect::independent_probe::probe_omo_real_permission_choices_reach_blocked ... ok
+test agent_detect::independent_probe::probe_ordinary_shell_output_does_not_fabricate_working ... ok
+test agent_detect::independent_probe::probe_permission_screen_reaches_blocked ... ok
+test agent_detect::independent_probe::probe_plain_ls_la_output_returns_none ... ok
+test agent_detect::independent_probe::probe_quoted_waiting_for_answer_without_question_box_is_not_blocked ... ok
+test agent_detect::independent_probe::probe_senpi_ask_user_question_reaches_blocked ... ok
+test agent_detect::independent_probe::probe_senpi_idle_footer_settles_a_pane_last_seen_working ... ok
+test agent_detect::independent_probe::probe_senpi_live_working_line_above_footer_stays_working ... ok
+test agent_detect::independent_probe::probe_working_screen_reaches_working_for_agents_with_no_status_title ... ok
+test agent_detect::independent_probe::probe_working_then_unclassifiable_screen_holds_working ... ok
+test agent_detect::tests::test_every_shipped_manifest_loads_and_validates ... ok
+test agent_detect::tests::test_nested_any_all_composition ... ok
+test agent_detect::tests::test_no_match_holds_previous_state ... ok
+test agent_detect::tests::test_not_veto_suppresses_match ... ok
+test agent_detect::tests::test_per_agent_realistic_screens ... ok
+test agent_detect::tests::test_priority_ordering_higher_priority_wins ... ok
+test agent_detect::tests::test_region_scoping_bottom_lines ... ok
+test agent_detect::tests::test_skip_state_update_holds_previous_state ... ok
+test agent_history::hardening_tests::claude_active_branch_excludes_abandoned_sibling ... ok
+test agent_history::hardening_tests::paging_append_corrupt_partial_deleted_and_unsupported ... ok
+test agent_history::hardening_tests::symlink_roots_and_files_are_rejected ... ok
+test agent_history::hardening_tests::symlinked_file_inside_root_is_not_searched ... ok
+test agent_history::tests::older_message_search_and_exact_identity ... ok
+test agent_history::tests::selected_session_exact_typed_resume_and_duplicate_fence ... ok
+test agent_transcript::tests::remote_transcript_over_ssh ... ignored, requires a live paired host
+test agent_transcript::tests::test_conversation_message_timestamp_passthrough_and_tolerance ... ok
+test agent_transcript::tests::test_display_false_excluded ... ok
+test agent_transcript::tests::test_latest_transcript_for_cwd ... ok
+test agent_transcript::tests::test_limit_tail_and_paging ... ok
+test agent_transcript::tests::test_multi_part_content_concatenation ... ok
+test agent_transcript::tests::test_path_traversal_rejection ... ok
+test agent_transcript::tests::test_read_conversation_from_bytes_parses_remote_output ... ok
+test agent_transcript::tests::test_remote_target_refuses_a_record_missing_its_host_or_path ... ok
+test agent_transcript::tests::test_remote_target_resolves_from_a_real_store_record ... ok
+test agent_transcript::tests::test_remote_transcript_dir_matches_the_paired_host_layout ... ok
+test agent_transcript::tests::test_remote_transcript_dir_refuses_hosts_whose_layout_is_unverified ... ok
+test agent_transcript::tests::test_slug_for_cwd ... ok
+test agent_transcript::tests::test_split_remote_size_line_parses_and_fails_closed ... ok
+test agent_transcript::tests::test_synthetic_transcript_and_filtering ... ok
+test agent_transcript::tests::test_tool_call_and_tool_result_formatting ... ok
+test agent_transcript::tests::test_transcript_path_discovery ... ok
+test agent_transcript::tests::test_valid_session_id_security ... ok
+test browser::adoption::tests::adoption_ack_reaches_the_registered_waiter ... ok
+test browser::adoption::tests::adoption_ack_times_out_before_any_answer_and_drops_the_waiter ... ok
+test browser::adoption::tests::await_ack_returns_the_delivered_verdict ... ok
+test browser::adoption::tests::browser_adoption_serializes_camel_case_and_keeps_unknown_as_null ... ok
+test browser::adoption::tests::opened_response_carries_the_adoption_verdict_on_the_wire ... ok
+test browser::adoption::tests::resolve_reports_when_nobody_was_waiting ... ok
+test browser::chromium_cookie_source::tests::test_cookie_import_error_formatting ... ok
+test browser::chromium_cookie_source::tests::test_failure_reason_as_str ... ok
+test browser::chromium_cookie_source::tests::test_filter_google_cookies_in_installed_import ... ok
+test browser::chromium_cookie_source::tests::test_import_empty_cookie_db_returns_no_cookies ... ok
+test browser::chromium_cookie_source::tests::test_import_missing_cookie_db_returns_no_profile ... ok
+test browser::chromium_cookie_source::tests::test_import_nonexistent_profile_returns_no_profile ... ok
+test browser::chromium_cookie_source::tests::test_platform_refusal_on_windows_or_synthetic_key ... ok
+test browser::chromium_cookies::tests::test_chrome_time_to_unix ... ok
+test browser::chromium_cookies::tests::test_copy_cookie_db_to_temp_sidecar_handling ... ok
+test browser::chromium_cookies::tests::test_decrypt_bad_padding_returns_structured_error ... ok
+test browser::chromium_cookies::tests::test_decrypt_unsupported_prefix_returns_structured_error ... ok
+test browser::chromium_cookies::tests::test_decrypt_v10_v11_roundtrip ... ok
+test browser::chromium_cookies::tests::test_decrypt_v24_host_key_hash_verification ... ok
+test browser::chromium_cookies::tests::test_pbkdf2_derivation_deterministic ... ok
+test browser::chromium_cookies::tests::test_read_chromium_cookie_db_fixture ... ok
+test browser::chromium_cookies::tests::test_read_chromium_cookie_db_without_key_counts_unsupported_v11 ... ok
+test browser::cookies::tests::test_filter_google_cookies ... ok
+test browser::cookies::tests::test_is_google_cookie_exclusion ... ok
+test browser::cookies::tests::test_parse_installed_profile_cookie_content_excludes_google ... ok
+test browser::cookies::tests::test_parse_installed_profile_cookie_content_rejects_only_google ... ok
+test browser::download::tests::test_download_registry_bounded_progress_thresholds ... ok
+test browser::download::tests::test_download_registry_cancellation ... ok
+test browser::download::tests::test_download_registry_cancellation_emits_cancelled_event ... ok
+test browser::download::tests::test_download_registry_failure ... ok
+test browser::download::tests::test_download_registry_failure_emits_failed_event ... ok
+test browser::download::tests::test_download_registry_lifecycle ... ok
+test browser::download::tests::test_download_registry_lifecycle_broadcast_events ... ok
+test browser::download::tests::test_download_registry_no_deadlock_on_rapid_transitions ... ok
+test browser::download::tests::test_download_serde_roundtrip ... ok
+test browser::download::tests::test_download_url_rejects_about_blank ... ok
+test browser::find::tests::find_script_counts_with_the_same_engine_that_highlights ... ok
+test browser::find::tests::find_script_json_encodes_query_and_direction ... ok
+test browser::find::tests::find_script_restores_selection_and_scroll_before_searching ... ok
+test browser::find::tests::parses_tauri_find_callback_payload ... ok
+test browser::guest::tests::bridge_script_captures_nonce_carrying_builtins_at_document_start ... ok
+test browser::guest::tests::guest_bridge_console_entry_emits_only_at_ms_camel_case ... ok
+test browser::guest::tests::guest_bridge_covers_popup_download_shortcuts_and_url_drop ... ok
+test browser::guest::tests::guest_bridge_installs_the_opener_proxy_only_in_popup_tabs ... ok
+test browser::guest::tests::guest_bridge_is_trusted_handles_wkwebview_instance_unforgeable_property ... ok
+test browser::guest::tests::guest_bridge_never_swallows_a_failure_silently ... ok
+test browser::guest::tests::guest_bridge_routes_popup_handles_and_real_closed_state ... ok
+test browser::guest::tests::guest_control_urls_require_matching_nonce ... ok
+test browser::guest::tests::guest_control_urls_require_matching_nonce_for_popup_hosts ... ok
+test browser::guest::tests::parses_bridge_actions_and_ignores_normal_navigation ... ok
+test browser::guest::tests::parses_popup_open_navigate_and_opener_message_actions ... ok
+test browser::guest::tests::test_console_drain_script_and_parser ... ok
+test browser::guest::tests::test_dialog_scripts_and_parser ... ok
+test browser::hard_reload::tests::hard_reload_support_is_reload_from_origin_on_macos ... ok
+test browser::hard_reload::tests::hard_reload_support_matches_the_compiled_target ... ok
+test browser::hard_reload::tests::hard_reload_supported_is_false_only_without_a_native_path ... ok
+test browser::manager::tests::creation_sequence_increases_with_every_registered_session ... ok
+test browser::manager::tests::list_sessions_follows_creation_order_not_hash_order ... ok
+test browser::manager::tests::list_sessions_is_stable_across_repeated_calls ... ok
+test browser::manager::tests::order_sessions_by_creation_sorts_an_arbitrary_sequence_set ... ok
+test browser::model::tests::test_automation_actions_serde_roundtrip ... ok
+test browser::model::tests::test_dialog_entry_serde_roundtrip ... ok
+test browser::model::tests::test_import_installed_browser_cookies_dto_serde ... ok
+test browser::model::tests::test_r5_15_wait_condition_string_and_tagged_deserialization ... ok
+test browser::model::tests::test_r6_13_wait_condition_with_timeout_serde_roundtrip ... ok
+test browser::picker::tests::element_pick_report_crops_png_into_design_snapshot ... ok
+test browser::picker::tests::element_pick_report_rejects_empty_rect ... ok
+test browser::picker::tests::element_pick_report_scales_crop_by_device_pixel_ratio ... ok
+test browser::picker::tests::element_pick_to_design_snapshot_stores_cropped_png_and_rect ... ok
+test browser::picker::tests::parses_element_pick_fields ... ok
+test browser::picker::tests::picker_script_can_be_removed_and_reports_device_pixels ... ok
+test browser::picker::tests::rejects_element_pick_without_html ... ok
+test browser::picker::tests::test_browser_highlight_script_encodes_selector_and_duration ... ok
+test browser::picker::tests::test_browser_highlight_script_has_safe_error_reporting ... ok
+test browser::picker::tests::test_clear_highlight_script_contract ... ok
+test browser::picker::tests::test_parse_browser_highlight_callback_invalid_selector ... ok
+test browser::picker::tests::test_parse_browser_highlight_callback_not_found ... ok
+test browser::picker::tests::test_parse_browser_highlight_callback_success ... ok
+test browser::picker::tests::test_parse_browser_highlight_callback_unwraps_quoted_json ... ok
+test browser::picker::tests::unwraps_eval_quoted_element_pick ... ok
+test browser::popup::tests::opener_message_script_carries_the_recorded_origin_and_escapes_hostile_data ... ok
+test browser::popup::tests::origin_of_reads_the_recorded_url_origin ... ok
+test browser::popup::tests::page_warning_script_reports_instead_of_dropping ... ok
+test browser::popup::tests::parse_opener_message_reads_data_and_target_origin ... ok
+test browser::popup::tests::pending_close_prevents_late_linking_and_handles_race ... ok
+test browser::popup::tests::popup_closed_script_calls_the_handle_hook ... ok
+test browser::popup::tests::popup_message_rejected_script_warns_on_target_origin_mismatch ... ok
+test browser::popup::tests::popup_message_script_embeds_opener_origin_and_binds_opener_source ... ok
+test browser::popup::tests::registry_links_looks_up_and_unlinks ... ok
+test browser::popup::tests::target_origin_mismatch_is_refused_with_a_visible_warning ... ok
+test browser::remote_bridge_protocol::tests::test_16b_binary_envelope_codec ... ok
+test browser::remote_bridge_protocol::tests::test_binary_envelope_validation_rejects_corrupt ... ok
+test browser::remote_bridge_protocol::tests::test_framed_ipc_codec ... ok
+test browser::remote_bridge_protocol::tests::test_r4_5_bridge_sharing_state_dto ... ok
+test browser::remote_bridge_protocol::tests::test_r4_9_bridge_snapshot_catalogue_dto ... ok
+test browser::remote_driver::tests::test_driver_lease_claim_and_expiry ... ok
+test browser::remote_driver::tests::test_driver_lease_desktop_reclaim ... ok
+test browser::remote_driver::tests::test_driver_lease_heartbeat_renewal ... ok
+test browser::remote_driver::tests::test_driver_lease_no_auto_takeover ... ok
+test browser::remote_driver::tests::test_driver_lease_release_and_race ... ok
+test browser::remote_driver::tests::test_r6_8_claim_with_epoch_rejects_stale_and_decreasing_epochs ... ok
+test browser::remote_input::tests::test_decode_point_click_result_rejects_malformed_payloads ... ok
+test browser::remote_input::tests::test_decode_point_click_result_typed_outcomes ... ok
+test browser::remote_input::tests::test_eval_64k_cap_and_approval ... ok
+test browser::remote_input::tests::test_keypress_allowlist ... ok
+test browser::remote_input::tests::test_point_click_script_refuses_frames_canvas_and_dialogs ... ok
+test browser::remote_input::tests::test_point_input_mainframe_only ... ok
+test browser::remote_input::tests::test_point_input_refusal_explanations_adversarial ... ok
+test browser::remote_input::tests::test_point_input_rejects_iframe_canvas_dialog ... ok
+test browser::remote_input::tests::test_point_input_rejects_out_of_bounds_and_nan ... ok
+test browser::remote_input::tests::test_r5_6_decode_action_result_rejects_missing_target ... ok
+test browser::remote_input::tests::test_reference_click_and_fill ... ok
+test browser::remote_input::tests::test_refused_explanation_details_wire_shape ... ok
+test browser::remote_input::tests::test_refused_token_messages_match_point_mainframe ... ok
+test browser::remote_service::tests::test_budget_concurrency_limits ... ok
+test browser::remote_service::tests::test_latest_only_frame_admission ... ok
+test browser::remote_service::tests::test_producer_pauses_on_zero_subscribers ... ok
+test browser::remote_service::tests::test_r5_9_producer_ticket_drops_frame_on_instance_replacement ... ok
+test browser::remote_service::tests::test_r6_9_receiver_disconnect_stops_gui_capture ... ok
+test browser::remote_service::tests::test_snapshot_map_revision_check ... ok
+test browser::remote_service::tests::test_stale_rejections_and_identity ... ok
+test browser::remote_service_tests::test_concurrency_budget_max_viewers_and_captured_browsers ... ok
+test browser::remote_service_tests::test_concurrency_budget_single_global_driver ... ok
+test browser::remote_service_tests::test_dom_snapshot_map_revision_url_change_increments_revision ... ok
+test browser::remote_service_tests::test_guard_verification_rejections ... ok
+test browser::remote_service_tests::test_latest_only_frame_admission_and_oversized_drop ... ok
+test browser::remote_service_tests::test_producer_lifecycle_pause_on_zero_subscribers_and_resume ... ok
+test browser::remote_service_tests::test_r1_r2_codec_unification_and_public_protocol_acceptance ... ok
+test browser::remote_service_tests::test_r4_7_producer_frame_sampled_before_generation_bump_is_dropped ... ok
+test browser::remote_service_tests::test_r4_7_producer_visibility_loss_halts_publication ... ok
+test browser::remote_service_tests::test_r7_native_capture_permit_retention_across_producer_restart_on_timeout ... ok
+test browser::remote_service_tests::test_r7_producer_abort_handle_cancellation_and_resubscription ... ok
+test browser::remote_service_tests::test_r9_remote_reference_operations_require_snapshot_and_revision ... ok
+test browser::remote_service_tests::test_real_capture_producer_streaming_and_pause_on_zero_subscribers ... ok
+test browser::remote_service_tests::test_remote_browser_operation_validation_and_legacy_isolation ... ok
+test browser::remote_service_tests::test_remote_snapshot_reference_namespace_isolation ... ok
+test browser::screenshot::tests::test_non_macos_screenshot_validates_path_before_unsupported ... ok
+test browser::screenshot::tests::test_resolve_screenshot_path ... ok
+test browser::screenshot::tests::test_take_browser_screenshot_with_source_png_file_contract ... ok
+test browser::screenshot::tests::test_take_browser_screenshot_with_source_unsupported_propagates ... ok
+test browser::screenshot::tests::test_unsupported_screenshot_error_contract ... ok
+test browser::security::security_contract_tests::test_validate_url_local_file_policy ... ok
+test browser::snapshot_source::tests::test_coordinator_duplicate_and_late_calls ... ok
+test browser::snapshot_source::tests::test_snapshot_bitmap_failure ... ok
+test browser::snapshot_source::tests::test_snapshot_callback_timeout_no_callback ... ok
+test browser::snapshot_source::tests::test_snapshot_close_after_callback ... ok
+test browser::snapshot_source::tests::test_snapshot_duplicate_callback ... ok
+test browser::snapshot_source::tests::test_snapshot_encode_failure ... ok
+test browser::snapshot_source::tests::test_snapshot_jpeg_success ... ok
+test browser::snapshot_source::tests::test_snapshot_late_arrival_after_timeout ... ok
+test browser::snapshot_source::tests::test_snapshot_native_error ... ok
+test browser::snapshot_source::tests::test_snapshot_null_image ... ok
+test browser::snapshot_source::tests::test_snapshot_platform_unsupported ... ok
+test browser::snapshot_source::tests::test_snapshot_png_success ... ok
+test browser::snapshot_source::tests::test_snapshot_webview_missing ... ok
+test browser::snapshot_source::tests::test_unsupported_capability_matches_capture_error_contract ... ok
+test browser::snapshot_source_tests::test_capture_dimension_clamping_and_pixel_limits ... ok
+test browser::snapshot_source_tests::test_coordinator_close_after_callback_safety ... ok
+test browser::snapshot_source_tests::test_coordinator_duplicate_callback_suppression ... ok
+test browser::snapshot_source_tests::test_coordinator_late_callback_arrival_after_timeout ... ok
+test browser::snapshot_source_tests::test_coordinator_late_callback_quarantine_and_permit_release ... ok
+test browser::snapshot_source_tests::test_coordinator_single_use_delivery ... ok
+test browser::snapshot_source_tests::test_platform_unsupported_error_propagation ... ok
+test browser::snapshot_source_tests::test_snapshot_error_bitmap_conversion_failure ... ok
+test browser::snapshot_source_tests::test_snapshot_error_image_encode_failure ... ok
+test browser::snapshot_source_tests::test_snapshot_error_native_capture_failure ... ok
+test browser::snapshot_source_tests::test_snapshot_error_null_image_data ... ok
+test browser::snapshot_source_tests::test_snapshot_error_webview_missing ... ok
+test browser::snapshot_source_tests::test_snapshot_source_jpeg_quality_capture ... ok
+test browser::snapshot_source_tests::test_snapshot_source_png_capture ... ok
+test browser::state_cookies::tests::test_derive_cookie_host_from_url_no_cross_origin_widening ... ok
+test browser::state_cookies::tests::test_derive_cookie_host_from_url_refuses_malformed_and_unsupported ... ok
+test browser::state_cookies::tests::test_derive_cookie_host_from_url_valid_http_and_https ... ok
+test browser::state_cookies::tests::test_legacy_v1_cookie_fallback_to_url_domain ... ok
+test browser::state_cookies::tests::test_legacy_v1_cookie_preserves_explicit_domain_over_url ... ok
+test browser::state_cookies::tests::test_legacy_v1_cookie_refuses_malformed_url_when_domain_absent ... ok
+test browser::state_cookies::tests::test_persisted_cookie_deserialization_defaults_path_to_slash ... ok
+test browser::state_cookies::tests::test_persisted_cookie_from_to_cookie_round_trip ... ok
+test browser::state_cookies::tests::test_persisted_cookie_red_mutation_check_attributes ... ok
+test browser::tests::engine_history_flags_win_over_the_shadow_vector ... ok
+test browser::tests::history_stack_truncates_forward_entries_after_new_navigation ... ok
+test browser::tests::named_profile_ids_round_trip_as_strings ... ok
+test browser::tests::native_history_invalidates_same_url_snapshot ... ok
+test browser::tests::restored_browser_id_and_zoom_are_preserved_by_manager ... ok
+test browser::tests::test_browser_automation_target_rejects_stale_generation ... ok
+test browser::tests::test_browser_automation_target_requires_current_snapshot_reference ... ok
+test browser::tests::test_browser_manager_get_bounds_and_visibility ... ok
+test browser::tests::test_browser_manager_lifecycle ... ok
+test browser::tests::test_cmd_browser_navigate_returns_webview_not_found_when_webview_missing ... ok
+test browser::tests::test_cmd_browser_set_bounds_returns_webview_not_found_when_webview_missing ... ok
+test browser::tests::test_cmd_browser_set_visible_returns_webview_not_found_when_webview_missing ... ok
+test browser::tests::test_default_desktop_user_agent ... ok
+test browser::tests::test_history_navigation_marks_loading_without_overwriting_url ... ok
+test browser::tests::test_imported_cookie_converts_to_tauri_cookie ... ok
+test browser::tests::test_page_load_url_change_invalidates_automation_targets ... ok
+test browser::tests::test_register_session_falls_back_to_generated_id_for_unsafe_browser_ids ... ok
+test browser::tests::test_validate_url ... ok
+test browser::tests::test_validate_url_rejects_embedded_credentials_and_overlong_urls ... ok
+test browser::tests::test_webview_not_found_ipc_error_mapping ... ok
+test cli::direct_trust::tests::identity_prints_only_public_fields_and_is_stable ... ok
+test cli::direct_trust::tests::parses_every_subcommand_and_rejects_bad_shapes ... ok
+test cli::direct_trust::tests::provision_pins_conflicts_replaces_and_revokes ... ok
+test cli::tests::account_enroll_cli_parses_code_and_optional_origin ... ok
+test cli::tests::account_login_cli_parses_email_and_optional_origin ... ok
+test cli::tests::browser_cli_request_mapping_for_tabs_and_state ... ok
+test cli::tests::browser_cli_request_mappings ... ok
+test cli::tests::browser_cli_request_mappings_phase3 ... ok
+test cli::tests::browser_cli_unknown_subcommand_and_usage ... ok
+test cli::tests::browser_click_cli_preserves_generation_and_reference ... ok
+test cli::tests::browser_close_cli_happy_and_missing ... ok
+test cli::tests::browser_console_and_errors_cli_parsing ... ok
+test cli::tests::browser_cookie_header_from_session_cookies ... ok
+test cli::tests::browser_cookies_cli_parsing ... ok
+test cli::tests::browser_dialog_cli_parsing_and_mapping ... ok
+test cli::tests::browser_dom_action_cli_parsing_and_mapping ... ok
+test cli::tests::browser_dom_action_cli_requires_generation_and_reference ... ok
+test cli::tests::browser_download_cli_parsing_and_mapping ... ok
+test cli::tests::browser_eval_cli_parsing ... ok
+test cli::tests::browser_fill_cli_preserves_generation_reference_and_value ... ok
+test cli::tests::browser_find_cli_error_handling ... ok
+test cli::tests::browser_find_cli_parsing ... ok
+test cli::tests::browser_find_script_builder_deterministic ... ok
+test cli::tests::browser_focus_cli_parsing ... ok
+test cli::tests::browser_formatter_prints_new_response_shapes ... ok
+test cli::tests::browser_formatter_prints_only_url_or_title_from_snapshot ... ok
+test cli::tests::browser_get_and_is_cli_error_handling ... ok
+test cli::tests::browser_get_cli_parsing ... ok
+test cli::tests::browser_highlight_cli_parsing_and_mapping ... ok
+test cli::tests::browser_identify_cli_happy ... ok
+test cli::tests::browser_is_cli_parsing ... ok
+test cli::tests::browser_keypress_cli_preserves_generation_and_key ... ok
+test cli::tests::browser_list_cli_parses_without_browser_id ... ok
+test cli::tests::browser_nav_history_and_reload_cli_parsing ... ok
+test cli::tests::browser_navigate_cli_happy_and_missing ... ok
+test cli::tests::browser_open_cli_env_var_defaults ... ok
+test cli::tests::browser_open_cli_happy_path ... ok
+test cli::tests::browser_open_cli_missing_options ... ok
+test cli::tests::browser_screenshot_cli_parsing ... ok
+test cli::tests::browser_snapshot_cli_requires_browser_id ... ok
+test cli::tests::browser_state_cli_parsing_coverage ... ok
+test cli::tests::browser_storage_cli_extended_and_adversarial ... ok
+test cli::tests::browser_storage_cli_parsing ... ok
+test cli::tests::browser_tab_cli_parsing_coverage ... ok
+test cli::tests::browser_title_cli_happy_and_missing ... ok
+test cli::tests::browser_url_cli_happy_and_missing ... ok
+test cli::tests::browser_wait_cli_parsing ... ok
+test cli::tests::handover_from_rejects_a_missing_or_option_like_value ... ok
+test cli::tests::headless_logging_child ... ok
+test cli::tests::headless_primary_service_survives_logging_failures ... ok
+test cli::tests::headless_release_reasons_reach_private_bounded_sink ... ok
+test cli::tests::open_cli_directory_errors_with_file_not_found ... ok
+test cli::tests::open_cli_missing_arg_errors_with_usage ... ok
+test cli::tests::open_cli_missing_file_errors_with_file_not_found ... ok
+test cli::tests::open_cli_parses_absolute_file ... ok
+test cli::tests::open_cli_parses_file_with_line ... ok
+test cli::tests::open_cli_parses_file_with_line_and_col ... ok
+test cli::tests::open_cli_resolves_relative_path_against_cwd ... ok
+test cli::tests::open_cli_target_suffix_parsing_rules ... ok
+test cli::tests::pair_generate_requires_account ... ok
+test cli::tests::test_parse_launch_mode_default_is_gui ... ok
+test cli::tests::test_parse_launch_mode_detects_daemon_flag ... ok
+test cli::tests::test_parse_launch_mode_ignores_other_flags ... ok
+test clipboard_image::tests::an_empty_pasteboard_payload_never_becomes_a_clipboard_image ... ok
+test clipboard_image::tests::bottom_up_24bpp_dib_is_flipped_and_converted_to_rgba ... ok
+test clipboard_image::tests::detection_errors_never_fall_back_to_local_save ... ok
+test clipboard_image::tests::manual_ssh_replaced_during_upload_fails ... ok
+test clipboard_image::tests::manual_ssh_returns_remote_path_when_owner_is_unchanged ... ok
+test clipboard_image::tests::real_alpha_channel_survives ... ok
+test clipboard_image::tests::sanitize_and_validate_drop_file_name_handles_unicode_and_reserved_names ... ok
+test clipboard_image::tests::save_paste_chunk_in_dir_assembles_multi_part_upload ... ok
+test clipboard_image::tests::save_paste_chunk_v2_assembles_out_of_order_and_is_idempotent ... ok
+test clipboard_image::tests::save_paste_chunk_v2_rejects_payload_above_limit_and_inconsistent_meta ... ok
+test clipboard_image::tests::save_paste_file_in_dir_writes_file_and_prunes_stale_files ... ok
+test clipboard_image::tests::save_paste_file_rejects_path_traversal_and_invalid_names ... ok
+test clipboard_image::tests::ssh_started_during_local_save_fails ... ok
+test clipboard_image::tests::structured_detection_codes_map_to_unsupported ... ok
+test clipboard_image::tests::top_down_dib_keeps_row_order ... ok
+test clipboard_image::tests::unsupported_and_truncated_bitmaps_are_rejected ... ok
+test clipboard_image::tests::zeroed_alpha_channel_is_treated_as_opaque ... ok
+test daemon::agent_extension::p09_tests::userprofile_only_installs_existing_agent_extensions ... ok
+test daemon::agent_extension::tests::bundled_extension_derives_provider_session_from_session_manager ... ok
+test daemon::agent_extension::tests::bundled_extension_ignores_questions_the_agent_keeps_working_through ... ok
+test daemon::agent_extension::tests::bundled_extension_listens_to_the_events_senpi_actually_emits ... ok
+test daemon::agent_extension::tests::bundled_extension_publishes_a_rotated_provider_session ... ok
+test daemon::agent_extension::tests::bundled_extension_reports_only_known_states ... ok
+test daemon::agent_extension::tests::bundled_extension_sends_the_blocked_detail ... ok
+test daemon::agent_extension::tests::install_skips_absent_directory ... ok
+test daemon::agent_extension::tests::install_writes_then_becomes_idempotent ... ok
+test daemon::agent_state::tests::a_new_agent_process_re_arms_a_released_session ... ok
+test daemon::agent_state::tests::agent_to_shell_transition_releases_state ... ok
+test daemon::agent_state::tests::canonical_report_wins_over_stale_and_duplicate_legacy_reports ... ok
+test daemon::agent_state::tests::lag_recovery_reads_retained_current_state ... ok
+test daemon::agent_state::tests::lag_resynchronization_discards_queued_states_older_than_snapshot ... ok
+test daemon::agent_state::tests::legacy_working_blocked_idle_edges_are_not_coalesced ... ok
+test daemon::agent_state::tests::local_working_blocked_idle_edges_are_not_coalesced ... ok
+test daemon::agent_state::tests::manual_reset_clears_state_and_recovers_on_next_transition ... ok
+test daemon::agent_state::tests::predecessor_backlog_is_a_quiet_baseline_not_a_new_completion ... ok
+test daemon::agent_state::tests::predecessor_snapshot_does_not_overwrite_newer_predecessor_transition ... ok
+test daemon::agent_state::tests::quiet_agent_with_no_output_and_live_process_is_not_released ... ok
+test daemon::agent_state::tests::released_state_is_distinguishable_from_an_agents_own_idle_report ... ok
+test daemon::agent_state::tests::removing_session_clears_retained_snapshot ... ok
+test daemon::client::local_control_isolation_tests::public_local_control_bypasses_busy_general_and_shared_interactive_connections ... ok
+test daemon::client::local_control_isolation_tests::remote_generation_fence_rejects_unversioned_write_and_preserves_local_slot ... ok
+test daemon::client::local_control_isolation_tests::two_session_contention_session_b_proceeds_while_session_a_classification_withheld ... ok
+test daemon::client::paired_host_compatibility_tests::old_daemon_unknown_capability_never_receives_upgrade_or_secret ... ok
+test daemon::client::tasklist_identity_tests::a_daemon_that_could_not_be_terminated_keeps_its_endpoint_files ... ok
+test daemon::client::tasklist_identity_tests::a_probe_that_could_not_answer_is_unknown_never_absent ... ok
+test daemon::client::tasklist_identity_tests::a_successful_probe_without_the_pid_is_absent ... ok
+test daemon::client::tasklist_identity_tests::csv_fields_keep_commas_inside_quotes_and_empty_fields ... ok
+test daemon::client::tasklist_identity_tests::image_name_is_read_from_the_exact_pid_column ... ok
+test daemon::client::tasklist_identity_tests::liveness_is_alive_only_when_a_successful_probe_lists_the_pid ... ok
+test daemon::client::tasklist_identity_tests::missing_process_and_filter_info_line_report_no_process ... ok
+test daemon::client::tasklist_identity_tests::only_the_running_ferryx_image_matches ... ok
+test daemon::client::tasklist_identity_tests::pid_inside_another_rows_fields_is_not_the_requested_process ... ok
+test daemon::client::tasklist_identity_tests::unknown_executable_name_never_matches ... ok
+test daemon::client::tests::a_busy_daemon_that_kills_exported_sessions_is_never_handed_over ... ok
+test daemon::client::tests::an_older_binary_never_requests_an_upgrade_from_a_newer_daemon ... ok
+test daemon::client::tests::an_unparseable_version_never_requests_a_downgrade ... ok
+test daemon::client::tests::local_input_socket_sessions_do_not_block_each_other ... ok
+test daemon::client::tests::local_resize_session_does_not_block_on_stalled_write_session ... ok
+test daemon::client::tests::p08_upgrade_rpc_inherits_admission ... ok
+test daemon::client::tests::remote_input_socket_sessions_do_not_block_each_other ... ok
+test daemon::client::tests::ssh_reconnect_safety_desktop_encoded_input_retains_generation_and_typed_failure ... ok
+test daemon::client::tests::ssh_reconnect_safety_desktop_missing_generation_never_uses_legacy_write ... ok
+test daemon::client::tests::ssh_reconnect_safety_desktop_remote_control_is_not_queued ... ok
+test daemon::client::tests::test_attach_arbitrary_error_not_session_not_found ... ok
+test daemon::client::tests::test_attach_malformed_overlapping_not_found_message_does_not_panic ... ok
+test daemon::client::tests::test_attach_session_not_found_exact_match ... ok
+test daemon::client::tests::test_attach_session_not_found_wrong_id ... ok
+test daemon::client::tests::test_client_attach_retains_write_half_until_abort ... ok
+test daemon::client::tests::test_client_dedicated_attach_stream_does_not_monopolize_control_connection ... FAILED
+test daemon::client::tests::test_client_handshake_read_times_out ... ok
+test daemon::client::tests::test_client_reconnects_transparently_when_socket_dropped ... ok
+test daemon::client::tests::test_client_rejects_symlinked_socket_before_connecting ... ok
+test daemon::client::tests::test_client_rejects_wrong_uid_runtime_dir_before_connecting ... ok
+test daemon::client::tests::test_client_reuses_persistent_connection_without_rehandshaking ... ok
+test daemon::client::tests::test_client_spawn_describe_attach_write_cycle ... ok
+test daemon::client::tests::test_client_workspace_registration_and_remote_apis ... ok
+test daemon::client::tests::test_daemon_client_has_spawn_lock_for_single_flight ... ok
+test daemon::client::tests::test_daemon_readiness_fails_immediately_when_daemon_process_dies ... ok
+test daemon::client::tests::test_daemon_readiness_requires_exact_stdout_token_without_polling ... ok
+test daemon::client::tests::test_daemon_ready_budget_covers_first_launch_signature_validation ... ok
+test daemon::client::tests::test_mutating_request_is_not_retried_after_ambiguous_delivery ... ok
+test daemon::client::tests::test_p07_attach_error_with_structured_session_not_found_ignores_divergent_message ... ok
+test daemon::client::tests::test_p09_outer_budget_covers_all_underlying_phase_budgets ... ok
+test daemon::client::tests::test_p09_paired_host_request_timeout_budget_and_ambiguity ... ok
+test daemon::client::tests::test_protocol_mismatch_uses_stable_typed_code_and_versions ... ok
+test daemon::client::tests::test_remote_set_active_selection_is_retry_safe ... ok
+test daemon::client::tests::test_retry_safe_read_is_retried_after_ambiguous_delivery ... ok
+test daemon::client::tests::test_should_request_upgrade_all_branches ... ok
+test daemon::client::tests::test_subscribe_dag_releases_idle_transport_when_receiver_dropped ... ok
+test daemon::client::tests::worktree_mutations_are_never_blindly_resent ... ok
+test daemon::client::transport_pair_tests::a_rejected_credential_is_reread_and_no_other_error_is ... ok
+test daemon::client::transport_pair_tests::an_absent_or_empty_token_is_not_a_credential ... ok
+test daemon::dag_service::tests::test_resolve_dag_runs_dir_variants ... ok
+test daemon::dag_service::tests::test_scan_project_inventory_empty_on_missing ... ok
+test daemon::handover::tests::cancelled_gateway_retains_close_operation_until_it_drains ... ok
+test daemon::handover::tests::handover_commit_does_not_unlink_the_replacement_listener ... ok
+test daemon::handover::tests::handover_commit_persists_legacy_route_before_releasing_ownership ... ok
+test daemon::handover::tests::handover_commit_preserves_ownership_when_route_persistence_fails ... ok
+test daemon::handover::tests::handover_v5_commit_retires_immediately_without_routes_or_socket_unlink ... ok
+test daemon::handover::upgrade_action_tests::absent_flag_enables_v5_ownership_transfer ... ok
+test daemon::handover::upgrade_action_tests::explicit_affirmative_values_enable_v5_ownership_transfer ... ok
+test daemon::handover::upgrade_action_tests::explicit_zero_or_false_opts_out_to_legacy_routing ... ok
+test daemon::handover::upgrade_action_tests::flag_guard_restores_the_previous_value ... ok
+test daemon::handover::upgrade_action_tests::idle_restart_is_opt_in_only ... ok
+test daemon::handover::upgrade_action_tests::only_declared_successors_wait_for_the_instance_lock ... ok
+test daemon::handover::upgrade_action_tests::platform_without_session_transfer_may_proceed_when_no_session_is_live ... ok
+test daemon::handover::upgrade_action_tests::platform_without_session_transfer_must_refuse_while_sessions_are_live ... ok
+test daemon::handover::upgrade_action_tests::unix_session_transfer_keeps_proceeding_with_live_sessions ... ok
+test daemon::handover_socket::tests::test_authority_frame_roundtrip ... ok
+test daemon::handover_socket::tests::test_handover_listener_client_roundtrip ... ok
+test daemon::handover_transaction::tests::test_commit_nonce_validation ... ok
+test daemon::handover_transaction::tests::test_duplicate_frame_detected_and_prior_ack_replayed ... ok
+test daemon::handover_transaction::tests::test_every_invalid_transition_rejected ... ok
+test daemon::handover_transaction::tests::test_expected_fd_roles_tracking ... ok
+test daemon::handover_transaction::tests::test_fingerprint_conflict_rejected ... ok
+test daemon::handover_transaction::tests::test_frame_conflict_different_content_rejected ... ok
+test daemon::handover_transaction::tests::test_frame_out_of_order_rejected ... ok
+test daemon::handover_transaction::tests::test_frame_rejected_when_not_in_transferring_state ... ok
+test daemon::handover_transaction::tests::test_frame_transfer_id_mismatch_rejected ... ok
+test daemon::handover_transaction::tests::test_happy_lifecycle_through_every_state ... ok
+test daemon::handover_transaction::tests::test_idempotent_retry_replays_result ... ok
+test daemon::handover_transaction::tests::test_pre_commit_rollback_to_active_from_every_pre_commit_state ... ok
+test daemon::handover_transaction::tests::test_rollback_from_active_rejected ... ok
+test daemon::handover_transaction::tests::test_rollback_from_retired_rejected ... ok
+test daemon::handover_transaction::tests::test_serde_json_roundtrip ... ok
+test daemon::handover_wire::tests::bad_transfer_id_is_rejected_on_decode ... ok
+test daemon::handover_wire::tests::closed_peer_yields_closed_error ... ok
+test daemon::handover_wire::tests::fd_count_mismatch_is_rejected ... ok
+test daemon::handover_wire::tests::oversize_payload_is_rejected ... ok
+test daemon::handover_wire::tests::peer_credentials_match_self ... ok
+test daemon::handover_wire::tests::reserved_flags_are_rejected ... ok
+test daemon::handover_wire::tests::roundtrip_with_fds ... ok
+test daemon::handover_wire::tests::roundtrip_zero_fds ... ok
+test daemon::handover_wire::tests::truncated_control_is_rejected ... ok
+test daemon::launchd::tests::test_generate_plist_contains_required_fields ... ok
+test daemon::launchd::tests::test_uninstall_surfaces_launchctl_failure ... ok
+test daemon::logging::tests::full_log_discards_old_records_before_appending ... ok
+test daemon::logging::tests::panic_record_bounds_an_oversized_payload ... ok
+test daemon::logging::tests::panic_record_carries_location_thread_and_payload ... ok
+test daemon::manifest::tests::handover_manifest_update_excludes_other_file_handles ... ok
+test daemon::manifest::tests::handover_manifest_update_preserves_unreadable_route_data ... ok
+test daemon::manifest::tests::test_handover_manifest_remove_multiple_unreachable_routes ... ok
+test daemon::manifest::tests::test_handover_manifest_save_load_prune ... ok
+test daemon::protocol::tests::agent_state_origin_defaults_to_self_reported_and_survives_the_wire ... ok
+test daemon::protocol::tests::agent_state_report_treats_malformed_provider_session_as_absent ... ok
+test daemon::protocol::tests::agent_state_snapshot_flag_is_backward_compatible ... ok
+test daemon::protocol::tests::agent_state_snapshot_flag_survives_wire_roundtrip ... ok
+test daemon::protocol::tests::agent_state_stream_serializes_authoritative_provider_session ... ok
+test daemon::protocol::tests::describe_details_decode_without_last_output_age_ms ... ok
+test daemon::protocol::tests::test_daemon_request_write_and_response_attach_base64 ... ok
+test daemon::protocol::tests::test_daemon_stream_message_compact_base64_encoding ... ok
+test daemon::protocol::tests::test_daemon_stream_message_gap_roundtrip ... ok
+test daemon::protocol::tests::test_daemon_stream_message_lagged_replay_is_delta_wire_states ... ok
+test daemon::protocol::tests::test_daemon_stream_message_lagged_with_replay_gap_roundtrip ... ok
+test daemon::protocol::tests::test_dag_streaming_protocol_serde ... ok
+test daemon::protocol::tests::test_describe_session_and_spawn_v2_serde ... ok
+test daemon::protocol::tests::test_handover_protocol_serde_roundtrip ... ok
+test daemon::protocol::tests::test_handshake_token_wire_shape_and_backward_compatibility ... ok
+test daemon::protocol::tests::test_legacy_lagged_payload_without_marker_parses_as_absent ... ok
+test daemon::protocol::tests::test_protocol_mismatch_response_is_typed ... ok
+test daemon::protocol::tests::test_protocol_v4_handshake_and_list_sessions_epoch ... ok
+test daemon::protocol::tests::test_register_workspace_and_remote_commands_serde ... ok
+test daemon::protocol::tests::test_spawn_shell_field_roundtrip_and_backward_compatibility ... ok
+test daemon::protocol::tests::test_spawn_with_agent_resume_startup_roundtrip ... ok
+test daemon::protocol::tests::test_upgrade_binary_protocol_serde_roundtrip ... ok
+test daemon::protocol::tests::upload_clipboard_image_protocol_round_trip ... ok
+test daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface ... FAILED
+test daemon::server::a04_shared_services_tests::a04_cleanup_failure_paths ... 
+running 1 test
+A04 AUTHORITY session=0x11525f1d0 workspace=0x1152608e0 backend=Pointer { addr: 0x11525f1d0, metadata: DynMetadata(0x10d328c98) }
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=IpcSetup errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.00s
+
+
+running 1 test
+A04 AUTHORITY session=0x11176b1d0 workspace=0x11176c8e0 backend=Pointer { addr: 0x11176b1d0, metadata: DynMetadata(0x109818c98) }
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=HttpSetup errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.00s
+
+
+running 1 test
+A04 AUTHORITY session=0x115a7f4c0 workspace=0x115a80b50 backend=Pointer { addr: 0x115a7f4c0, metadata: DynMetadata(0x10dad4c98) }
+A04 OWNED owner_pid=65897 session=363955af-cbc9-4d55-a24b-b812c036c609 pty_pid=65989 root=/private/tmp/a04-ZpglUb
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=363955af-cbc9-4d55-a24b-b812c036c609 pty_pid=Some(65989) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Scenario errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 2.38s
+
+
+running 1 test
+A04 AUTHORITY session=0x77e4c44010 workspace=0x1130a4290 backend=Pointer { addr: 0x77e4c44010, metadata: DynMetadata(0x10b19cc98) }
+A04 OWNED owner_pid=65992 session=ed3884bc-b230-41ec-8675-ba9cf15be815 pty_pid=66019 root=/private/tmp/a04-uIQrMS
+A04 OWNED owner_pid=65992 session=ca4bab4d-b31d-4f74-8254-13b91dcb2285 pty_pid=Some(66020) root=/private/tmp/a04-uIQrMS
+A04 LIVE owner_pid=65992 pty_pid=66019 ipc=/private/tmp/a04-uIQrMS/fixture.sock http=127.0.0.1:55452 metadata={"session":{"cols":80,"cwd":"/private/tmp/a04-uIQrMS/project","endSequence":null,"lastOutputAgeMs":null,"rows":24,"running":true,"sessionId":"ed3884bc-b230-41ec-8675-ba9cf15be815","startSequence":null,"suspended":false,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/private/tmp/a04-uIQrMS/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"ca4bab4d-b31d-4f74-8254-13b91dcb2285","title":"Terminal","workspaceId":"a04","worktreeLabel":"project"},{"running":true,"sessionId":"ed3884bc-b230-41ec-8675-ba9cf15be815","title":"Terminal","workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=ed3884bc-b230-41ec-8675-ba9cf15be815 pty_pid=Some(66019) reaped=true
+A04 CLEANUP session=ca4bab4d-b31d-4f74-8254-13b91dcb2285 pty_pid=Some(66020) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=2 injection=Cleanup errors=["close ed3884bc-b230-41ec-8675-ba9cf15be815: General error: injected close failure"]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 2.39s
+
+
+running 1 test
+A04 AUTHORITY session=0x1151e8620 workspace=0x1151e8180 backend=Pointer { addr: 0x1151e8620, metadata: DynMetadata(0x10d308c98) }
+A04 OWNED owner_pid=66147 session=47b8adb5-bb9a-4573-af96-a8aeede93cfc pty_pid=66181 root=/private/tmp/a04-K5PNxD
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=47b8adb5-bb9a-4573-af96-a8aeede93cfc pty_pid=Some(66181) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Cancel errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.28s
+
+
+running 1 test
+A04 AUTHORITY session=0x1135e3e50 workspace=0x1135e44d0 backend=Pointer { addr: 0x1135e3e50, metadata: DynMetadata(0x10b55cc98) }
+A04 OWNED owner_pid=66184 session=02b7b7d1-a465-4804-b83f-f9a6249ceeaf pty_pid=66213 root=/private/tmp/a04-08muzW
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=02b7b7d1-a465-4804-b83f-f9a6249ceeaf pty_pid=Some(66213) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Deadline errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.24s
+
+ok
+test daemon::server::a04_shared_services_tests::a04_legacy_constructors_have_no_machine_authority ... ok
+test daemon::server::a04_shared_services_tests::a04_services_have_no_strong_owner_cycle ... ok
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... 
+running 1 test
+A04 AUTHORITY session=0x110f0b1d0 workspace=0x110f0c8e0 backend=Pointer { addr: 0x110f0b1d0, metadata: DynMetadata(0x108e98c98) }
+A04 OWNED owner_pid=66214 session=a662bef0-eed4-4e62-9685-ecacb8c74ded pty_pid=66243 root=/private/tmp/a04-94cWiD
+A04 LIVE owner_pid=66214 pty_pid=66243 ipc=/private/tmp/a04-94cWiD/fixture.sock http=127.0.0.1:55468 metadata={"session":{"cols":80,"cwd":"/private/tmp/a04-94cWiD/project","endSequence":null,"lastOutputAgeMs":null,"rows":24,"running":true,"sessionId":"a662bef0-eed4-4e62-9685-ecacb8c74ded","startSequence":null,"suspended":false,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/private/tmp/a04-94cWiD/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"a662bef0-eed4-4e62-9685-ecacb8c74ded","title":"Terminal","workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=a662bef0-eed4-4e62-9685-ecacb8c74ded pty_pid=Some(66243) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=None errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 1.31s
+
+ok
+test daemon::server::a05_compatibility_tests::catalog_constructor_child ... ok
+test daemon::server::a05_compatibility_tests::catalog_constructor_isolation ... 
+running 1 test
+CONSTRUCTOR cleanup first=/var/folders/4n/zmf346td0739p04w6llfcl0r0000gn/T/.tmpXWylWO/.tmpFmk2vf second=/var/folders/4n/zmf346td0739p04w6llfcl0r0000gn/T/.tmpXWylWO/.tmpz7zczs absent=true sentinel_unchanged=true
+test daemon::server::a05_compatibility_tests::catalog_constructor_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.27s
+
+ok
+test daemon::server::a05_compatibility_tests::catalog_ssh_unregister_compatibility ... ok
+test daemon::server::agent_state_transport_tests::a_bound_ingress_is_not_recorded_as_unavailable ... ok
+test daemon::server::agent_state_transport_tests::a_failed_rendezvous_publish_leaves_no_endpoint_to_report ... ok
+test daemon::server::agent_state_transport_tests::agent_state_endpoint_is_absent_until_the_ingress_binds ... ok
+test daemon::server::agent_state_transport_tests::agent_state_rendezvous_record_sits_beside_the_socket ... ok
+test daemon::server::agent_state_transport_tests::readiness_is_released_only_after_the_ingress_failure_is_recorded ... ok
+test daemon::server::agent_state_transport_tests::rendezvous_publish_writes_the_port_and_the_token_as_one_file ... ok
+test daemon::server::agent_state_transport_tests::the_port_is_published_only_after_the_token_that_authenticates_it ... ok
+test daemon::server::agent_state_transport_tests::transport_token_is_read_from_the_request_line ... ok
+test daemon::server::agent_state_transport_tests::transport_token_matches_only_the_exact_credential ... ok
+test daemon::server::instance_lock_deadline_tests::expired_wait_window_never_attempts_or_acquires_instance_lock ... ok
+test daemon::server::instance_lock_deadline_tests::test_daemon_request_resize_records_desktop_geometry ... ok
+test daemon::server::instance_lock_deadline_tests::test_desktop_geometry_restore_lifecycle ... ok
+test daemon::server::live_relay_apply_tests::invalid_relay_apply_preserves_config_publication_and_listener ... ok
+test daemon::server::live_relay_apply_tests::same_port_relay_apply_preserves_listener_and_auth ... ok
+test daemon::server::machine_gateway::tests::idle_connection_expires_when_peer_sends_no_request ... ok
+test daemon::server::paired_host_native_tests::native_daemon_relay_inventory_roundtrip ... ok
+test daemon::server::paired_host_operation_tests::native_operations_force_relay_equal_paths_restart ... ok
+test daemon::server::paired_host_process_tests::paired_host_process_child ... ok
+test daemon::server::paired_host_process_tests::paired_host_separate_process_restart ... ok
+test daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty ... FAILED
+test daemon::server::remote_ssh_tests::remote_persistence_migrates_out_of_volatile_runtime_dir ... ok
+test daemon::server::remote_ssh_tests::remote_persistence_migration_child ... ok
+test daemon::server::remote_ssh_tests::remote_persistence_migration_recovers_from_partial_durable_file ... ok
+test daemon::server::remote_ssh_tests::remote_ssh_first_spawn_provisions_qualified_helper_automatically ... FAILED
+test daemon::server::remote_ssh_tests::remote_ssh_first_spawn_provisions_qualified_helper_child ... ok
+test daemon::server::session_path_tests::session_path_dev_uses_isolated_path_without_override ... ok
+test daemon::server::session_path_tests::session_path_override_wins_for_dev ... ok
+test daemon::server::session_path_tests::session_path_override_wins_for_release ... ok
+test daemon::server::session_path_tests::session_path_release_preserves_existing_path_without_override ... ok
+test daemon::server::ssh_survival_tests::ssh_daemon_restart_restores_identity_without_local_pty ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_persistence_keeps_predecessor_owned_records ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_persistence_read_failure_preserves_snapshot ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_predecessor_retire_keeps_successor_records ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_remote_details_fall_back_when_peer_lacks_session ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_remote_details_forward_unrelated_errors_verbatim ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_remote_details_route_to_legacy_peer_instead_of_null ... ok
+test daemon::server::ssh_survival_tests::ssh_handover_retry_routes_to_owner_runtime ... ok
+test daemon::server::ssh_survival_tests::ssh_reconnect_safety_atomic_attach_remote_generation_consistency ... ok
+test daemon::server::ssh_survival_tests::ssh_reconnect_safety_gap_precedes_recovered_output ... ok
+test daemon::server::ssh_survival_tests::ssh_reconnect_safety_proxy_preserves_gap_marker ... ok
+test daemon::server::ssh_survival_tests::ssh_reconnect_safety_retry_is_additive_protocol ... ok
+test daemon::server::ssh_survival_tests::test_transfer_sessions_excludes_remote_sessions_from_handover ... ok
+test daemon::server::tests::a_short_delivery_aborts_the_handover_instead_of_committing ... ok
+test daemon::server::tests::agent_state_report_reaches_only_its_own_session_stream ... ok
+test daemon::server::tests::agent_state_reports_are_parsed_and_filtered ... ok
+test daemon::server::tests::attach_resynchronizes_agent_state_reported_before_subscription ... ok
+test daemon::server::tests::handover_effective_owned_credits_only_an_old_predecessor ... ok
+test daemon::server::tests::handover_restorable_unexported_credits_only_listed_unexported_durable_ids ... ok
+test daemon::server::tests::p08_remote_cwd_aliases_preserve_relative_path ... ok
+test daemon::server::tests::resolve_upgrade_target_exe_only_resolves_paths_that_exist ... ok
+test daemon::server::tests::sessions_that_failed_to_export_also_abort_the_handover ... ok
+test daemon::server::tests::test_agent_resume_competing_claim_conflicts_and_releases ... ok
+test daemon::server::tests::test_agent_resume_failed_spawn_does_not_leak_claim ... ok
+test daemon::server::tests::test_agent_resume_idempotency_fingerprint_includes_full_startup_payload ... ok
+test daemon::server::tests::test_agent_resume_identical_request_is_one_spawn ... ok
+test daemon::server::tests::test_agent_resume_production_spawn_path_fences_duplicates_and_conflicts ... ok
+test daemon::server::tests::test_binary_identity_helper_pure_and_injection ... ok
+test daemon::server::tests::test_clear_cloexec_and_fd_inheritance_across_exec ... ok
+test daemon::server::tests::test_daemon_exclusive_lock_semantics_rejects_duplicates_and_releases_on_drop ... ok
+test daemon::server::tests::test_daemon_production_configure_gated_status_projection ... ok
+test daemon::server::tests::test_daemon_remote_gateway_lifecycle_and_commands ... ok
+test daemon::server::tests::test_handle_client_upload_clipboard_image ... ok
+test daemon::server::tests::test_handle_upgrade_binary_idempotent_when_not_needed ... ok
+test daemon::server::tests::test_idle_stream_client_disconnect_terminates_pump ... ok
+test daemon::server::tests::test_idle_stream_handle_client_attach_disconnect_terminates ... ok
+test daemon::server::tests::test_legacy_peer_attach_and_stream_client_eof_drops_legacy_connection ... ok
+test daemon::server::tests::test_legacy_peer_attach_session_receiver_drop_terminates_reader ... ok
+test daemon::server::tests::test_normalize_process_cwd_windows_verbatim_paths ... ok
+test daemon::server::tests::test_omo_resume_cwd_cannot_escape_workspace ... ok
+test daemon::server::tests::test_p14_daemon_wires_paired_host_inventory_event_sink ... ok
+test daemon::server::tests::test_persistent_daemon_lock_creates_only_dedicated_secure_directory ... ok
+test daemon::server::tests::test_persistent_daemon_lock_survives_legacy_tmp_lock_replacement ... ok
+test daemon::server::tests::test_persistent_lock_filename_is_profile_aware ... ok
+test daemon::server::tests::test_pump_stream_compact_framing_and_exit ... ok
+test daemon::server::tests::test_remote_create_pairing_code_fresh_off_auto_configures_relay ... ok
+test daemon::server::tests::test_remote_create_pairing_code_local_mode_creates_local_pin ... ok
+test daemon::server::tests::test_remote_create_pairing_code_relay_unreachable_returns_error ... ok
+test daemon::server::tests::test_remote_create_pairing_code_with_relay_returns_effective_relay_url ... ok
+test daemon::server::tests::test_remote_select_request_reaches_a_subscribed_desktop_client ... ok
+test daemon::server::tests::test_runtime_dir_and_socket_symlink_protection ... ok
+test daemon::server::tests::test_runtime_node_modes_are_enforced ... ok
+test daemon::server::tests::test_runtime_paths_are_profile_aware ... ok
+test daemon::server::tests::test_serve_dag_stream_inventory_and_unsubscribe ... ok
+test daemon::server::tests::test_server_attach_with_after_sequence_and_snapshot ... ok
+test daemon::server::tests::test_server_describe_nonexistent_session ... ok
+test daemon::server::tests::test_server_epoch_in_handshake_and_list ... ok
+test daemon::server::tests::test_server_handshake_version_mismatch ... ok
+test daemon::server::tests::test_server_register_workspace_and_spawn_isolation ... ok
+test daemon::server::tests::test_server_reset_agent_state_request ... ok
+test daemon::server::tests::test_server_spawn_cwd_validation ... ok
+test daemon::server::tests::test_server_spawn_idempotency_cache ... ok
+test daemon::server::tests::test_server_unregister_workspace_is_idempotent_and_revokes_registration ... ok
+test daemon::server::tests::test_stream_lagged_replay_gap_full_recovery ... ok
+test daemon::server::tests::test_subscribe_remote_events_streams_desktop_directed_events ... ok
+test daemon::session_lifecycle::tests::idle_timeout_is_not_reached_early ... ok
+test daemon::session_lifecycle::tests::lifecycle_transitions_standby_running_hibernated ... ok
+test daemon::session_lifecycle::tests::only_background_running_idle_sessions_become_candidates ... ok
+test daemon::session_service::machine_tests::crash::actual_owner_crash_reconciles_without_respawn ... 
+running 1 test
+
+running 1 test
+FAILED
+test daemon::session_service::machine_tests::crash::child ... ok
+test daemon::session_service::machine_tests::dropped_http_reply_replays_original_process_and_controller_fences_close ... ok
+test daemon::session_service::machine_tests::interrupted_spawn_never_repeats_preallocated_intent ... ok
+test daemon::session_service::machine_tests::machine_mutation_slots_are_shared_and_bounded ... ok
+test daemon::session_service::machine_tests::machine_session_capacity_limit_is_configurable ... ok
+test daemon::session_service::machine_tests::provider_resume_child ... ok
+test daemon::session_service::machine_tests::provider_resume_uses_only_remote_validated_identity ... 
+running 1 test
+A09 provider: remote executable fixture consumed --session/existing-provider-id; transcript CWD verified; cross-device claim conflict; typed key rejected; no generated provider ID
+test daemon::session_service::machine_tests::provider_resume_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2608 filtered out; finished in 0.58s
+
+ok
+test daemon::session_service::machine_tests::queued_revocation_rechecks_before_journal_or_pty ... ok
+test daemon::session_service::machine_tests::served_session_cwd_falls_back_when_the_stored_value_is_probe_output ... ok
+test daemon::session_service::machine_tests::sixty_four_live_machine_sessions_are_the_admission_limit ... FAILED
+test daemon::workspace_service::catalog_tests::post_rename_sync_failure_fences_publication ... ok
+test daemon::workspace_service::catalog_tests::unrelated_workspace_registration_progresses_while_workspace_fenced ... ok
+test daemon::workspace_service::workspace_watcher::tests::parent_watch_promoted_to_project_observes_nested_file ... ok
+test dag::journal_tests::test_list_run_summaries_from_testdata_dir ... ok
+test dag::journal_tests::test_parse_events_jsonl_stream ... ok
+test dag::journal_tests::test_parse_run_checkpoint_081e_real_fixture ... ok
+test dag::journal_tests::test_parse_run_checkpoint_f107_real_fixture ... ok
+test dag::journal_tests::test_parse_run_checkpoint_full_information_fields ... ok
+test dag::journal_tests::test_state_tolerance_fallback_variant ... ok
+test dag::journal_tests::test_waves_unknown_node_id_fails_with_typed_error ... ok
+test dag::watcher::tests::dag_live_tail ... ignored
+test dag::watcher::tests::test_dag_scan_runs_off_async_worker ... ok
+test dag::watcher::tests::test_dag_watcher_detects_checkpoint_changes ... ok
+test dag::watcher::tests::test_dag_watcher_exits_when_idle_sink_closes ... ok
+test dag::watcher::tests::test_dag_watcher_recovers_after_silent_watch_loss ... ok
+test dag::watcher::tests::test_dag_watcher_reports_journal_created_after_start ... ok
+test file_descriptor_limit_tests::a_finite_hard_limit_bounds_the_target ... ok
+test file_descriptor_limit_tests::a_generous_limit_is_left_alone ... ok
+test file_descriptor_limit_tests::launchd_default_is_raised_to_the_cap ... ok
+test ipc::agent_history::tests::history_errors_map_to_ipc_error_codes ... ok
+test ipc::agent_history::tests::history_page_serializes_with_camel_case_wire_keys ... ok
+test ipc::agent_history::tests::provider_history_roots_maps_claude_and_codex_to_home_dirs ... ok
+test ipc::agents::p09_tests::unix_requires_executable_permission ... ok
+test ipc::agents::p09_tests::windows_pathext_order_case_and_explicit_extension ... ok
+test ipc::agents::reset_event_tests::rejection_preserves_native_activity_and_emits_no_idle ... ok
+test ipc::agents::reset_event_tests::success_resets_native_activity_and_emits_idle ... ok
+test ipc::agents::tests::args_match_agent_recognizes_supported_commands ... ok
+test ipc::agents::tests::cursor_agent_alias_extracts_cursor_chat_session_id ... ok
+test ipc::agents::tests::descendant_agent_pid_finds_omo_beneath_shell_chain ... ok
+test ipc::agents::tests::opencode_session_id_validation ... ok
+test ipc::agents::tests::opencode_session_list_json_parser_matches_cwd ... ok
+test ipc::agents::tests::parse_powershell_process_json_accepts_array_and_single_object ... ok
+test ipc::agents::tests::parse_powershell_process_json_rejects_non_tables ... ok
+test ipc::agents::tests::parse_ps_entries_preserves_long_args ... ok
+test ipc::agents::tests::session_discovery_extracts_gjc_short_hex_ids ... ok
+test ipc::agents::tests::session_discovery_extracts_pi_session_path ... ok
+test ipc::agents::tests::session_discovery_extracts_supported_paths_only ... ok
+test ipc::agents::tests::session_id_from_env_output_reads_pi_session_file ... ok
+test ipc::agents::tests::test_agent_detection_serde_camel_case ... ok
+test ipc::agents::tests::test_agents_detect_does_not_spawn_which ... ok
+test ipc::agents::tests::test_agents_detect_existing_and_nonexistent_binaries ... ok
+test ipc::agents::tests::test_agents_detect_rejects_path_shaped_names ... ok
+test ipc::agents::tests::test_antigravity_last_conversations_parser ... ok
+test ipc::agents::tests::test_encode_pi_safe_path ... ok
+test ipc::agents::tests::uuid_from_session_path_extracts_timestamped_omo_session_id ... ok
+test ipc::blocking_contract_tests::blocking_ipc_helper_runs_operation_off_async_caller_thread ... ok
+test ipc::browser::automation_tests::click_requires_snapshot_selector ... ok
+test ipc::browser::automation_tests::extended_automation_actions_require_snapshot_selector ... ok
+test ipc::browser::automation_tests::extended_automation_actions_script_generation ... ok
+test ipc::browser::automation_tests::fill_script_encodes_untrusted_values_as_json_strings ... ok
+test ipc::browser::automation_tests::keypress_script_encodes_modifiers_and_events ... ok
+test ipc::browser::automation_tests::keypress_script_rejects_invalid_inputs ... ok
+test ipc::browser::automation_tests::macos_keypress_spec_preserves_navigation_editing_and_modifiers ... ok
+test ipc::browser::automation_tests::parse_keypress_valid_combinations ... ok
+test ipc::browser::devtools_tests::browser_sessions_enable_devtools ... ok
+test ipc::browser::popup_handle_tests::test_popup_handle_close_race_records_pending_close_and_discards_late_creation ... ok
+test ipc::browser::popup_handle_tests::test_popup_handle_close_targets_linked_popup_not_opener ... ok
+test ipc::browser::r6_fill_tests::test_r6_10_fill_active_and_css_skip_snapshot_work ... ok
+test ipc::browser::r6_fill_tests::test_r6_11_fill_mutation_boundary_revision_check ... ok
+test ipc::browser::r6_fill_tests::test_r6_5_cmd_browser_remote_reclaim_rejects_missing_transport_in_daemon_mode ... ok
+test ipc::browser::r6_fill_tests::test_r6_5_daemon_reclaim_transport_routes_authoritatively ... ok
+test ipc::browser::r6_fill_tests::test_r6_5_pure_gui_mode_allows_local_fallback ... ok
+test ipc::browser::tests::external_open_preserves_target_without_shell ... ok
+test ipc::browser::tests::external_open_propagates_failure ... ok
+test ipc::browser::tests::file_link_expands_bare_home ... ok
+test ipc::browser::tests::file_link_expands_profile_relative_path ... ok
+test ipc::browser::tests::keep_or_discard_fresh_webview_covers_both_branches ... ok
+test ipc::browser::tests::linux_keypress_returns_typed_unsupported ... ok
+test ipc::browser::tests::test_browser_dump_state_script_contains_no_document_cookie ... ok
+test ipc::browser::tests::test_browser_highlight_script_structure ... ok
+test ipc::browser::tests::test_browser_persistent_state_backward_compatibility ... ok
+test ipc::browser::tests::test_browser_persistent_state_round_trip ... ok
+test ipc::browser::tests::test_build_wait_condition_script ... ok
+test ipc::browser::tests::test_build_wait_condition_script_load_and_domcontentloaded_states ... ok
+test ipc::browser::tests::test_cmd_open_file_path_rejects_nonexistent_file ... ok
+test ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd ... ok
+test ipc::browser::tests::test_cookie_parse_and_script ... ok
+test ipc::browser::tests::test_old_v1_load_domain_fallback ... ok
+test ipc::browser::tests::test_old_v1_load_malformed_url_refusal ... ok
+test ipc::browser::tests::test_old_v1_load_preserves_explicit_domain_and_attributes ... ok
+test ipc::browser::tests::test_persisted_cookie_from_to_cookie_preserves_httponly_and_attributes ... ok
+test ipc::browser::tests::test_save_browser_state_fails_on_unwritable_parent ... ok
+test ipc::browser::tests::test_storage_script ... ok
+test ipc::browser::tests::test_storage_script_extended_all_and_scope ... ok
+test ipc::browser::tests::test_storage_script_extended_rejects_key_with_all ... ok
+test ipc::browser::tests::test_truncate_eval_result ... ok
+test ipc::browser::tests::webview2_private_profile_minimum_matches_the_documented_runtime ... ok
+test ipc::browser::tests::windows_keypress_returns_typed_unsupported ... ok
+test ipc::browser_cli::tests::browser_cli_server_starts_without_tokio_reactor ... ok
+test ipc::browser_cli::tests::browser_cli_tokens_match_only_on_exact_equality ... ok
+test ipc::browser_cli::tests::p12_tcp_accepts_the_capability_token ... ok
+test ipc::browser_cli::tests::p12_tcp_rejects_forged_credential ... ok
+test ipc::browser_cli::tests::p12_tcp_rejects_unauthenticated_commands ... ok
+test ipc::browser_cli::tests::tab_switch_reports_a_failed_focus_instead_of_a_silent_success ... ok
+test ipc::browser_cli::tests::tab_switch_reports_an_out_of_range_index ... ok
+test ipc::browser_cli::tests::test_browser_cli_close_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_error_code_matches_ipc_wire_format ... ok
+test ipc::browser_cli::tests::test_browser_cli_focus_returns_structured_errors ... ok
+test ipc::browser_cli::tests::test_browser_cli_identify_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_list_request_serialization ... ok
+test ipc::browser_cli::tests::test_browser_cli_list_response_serialization ... ok
+test ipc::browser_cli::tests::test_browser_cli_list_round_trip_unix_stream ... ok
+test ipc::browser_cli::tests::test_browser_cli_navigate_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_open_file_request_serialization ... ok
+test ipc::browser_cli::tests::test_browser_cli_open_rejects_file_scheme ... ok
+test ipc::browser_cli::tests::test_browser_cli_open_rejects_javascript_scheme ... ok
+test ipc::browser_cli::tests::test_browser_cli_open_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_oversized_request_gets_too_large_error ... ok
+test ipc::browser_cli::tests::test_browser_cli_phase3_registered_missing_webview_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_phase3_wire_serialization ... ok
+test ipc::browser_cli::tests::test_browser_cli_send_over_stream_round_trip ... ok
+test ipc::browser_cli::tests::test_browser_cli_send_request_missing_token_file_fails ... ok
+test ipc::browser_cli::tests::test_browser_cli_tab_and_state_requests_serialization ... ok
+test ipc::browser_cli::tests::test_phase4_owner_reclaim_invalidates_remote_driver ... ok
+test ipc::browser_cli::tests::test_phase4_remote_attach_handshake_and_framed_mode ... ok
+test ipc::browser_cli::tests::test_r4_click_consumes_authoritative_geometry_and_snapshot_returns_catalogue ... ok
+test ipc::browser_cli::tests::test_r4_framed_ipc_eliminates_legacy_fallback_and_rejects_legacy_commands ... ok
+test ipc::browser_cli::tests::test_r5_15_eval_wait_lease_approval_and_normalization ... ok
+test ipc::browser_cli::tests::test_r6_1_gui_framed_subscription_forwards_frames_and_cleans_up ... ok
+test ipc::browser_cli::tests::test_r6_2_execute_envelope_routes_all_commands_and_fences_writes ... ok
+test ipc::browser_cli::tests::test_r6_6_execute_preserves_typed_target_not_found_and_stale_frame ... ok
+test ipc::browser_cli::tests::test_r8_r9_click_frame_metadata_fencing_and_decimal_string_conversion ... ok
+test ipc::browser_cli::tests::test_r9_remote_reference_requires_valid_snapshot_and_rejects_legacy_targets ... ok
+test ipc::browser_cli::tests::test_read_and_write_port_file_round_trip ... ok
+test ipc::browser_cli::tests::test_read_limited_line_rejects_oversized_request_line ... ok
+test ipc::browser_cli::tests::test_read_port_from_file_malformed_returns_unavailable ... ok
+test ipc::browser_cli::tests::test_read_port_from_file_missing_returns_unavailable ... ok
+test ipc::browser_cli::tests::test_secondary_wait_function_condition_consent_and_size_limit ... ok
+test ipc::browser_cli::tests::test_write_port_file_replaces_existing_file ... ok
+test ipc::cli_install::tests::test_cli_install_error_mapping_to_ipc_error ... ok
+test ipc::cli_install::tests::test_cli_launcher_status_dto_camel_case_contract ... ok
+test ipc::cli_install::tests::test_install_creates_parent_directory_and_symlink ... ok
+test ipc::cli_install::tests::test_install_refreshes_existing_symlink ... ok
+test ipc::cli_install::tests::test_install_rejects_directory_collision ... ok
+test ipc::cli_install::tests::test_install_rejects_regular_file_collision ... ok
+test ipc::cli_install::tests::test_install_rejects_symlinked_grandparent_directory ... ok
+test ipc::cli_install::tests::test_install_rejects_symlinked_parent_directory ... ok
+test ipc::cli_install::tests::test_resolve_launcher_status_non_unix_preserves_active_exe ... ok
+test ipc::cli_install::tests::test_resolve_launcher_status_non_unix_without_home_returns_unsupported ... ok
+test ipc::cli_install::tests::test_resolve_launcher_status_unix_requires_home ... ok
+test ipc::cli_install::tests::test_resolve_launcher_status_unix_with_home ... ok
+test ipc::cli_install::tests::test_status_detection_various_scenarios ... ok
+test ipc::dag::tests::dag_run_snapshot_forwards_checkpoint_session_ids ... ok
+test ipc::dag::tests::test_classify_ssh_ipc_and_bridge_errors ... ok
+test ipc::dag::tests::test_dag_discover_watch_roots_finds_sibling_dag_repos ... ok
+test ipc::dag::tests::test_dag_list_and_get_runs_success ... ok
+test ipc::dag::tests::test_dag_list_runs_empty_for_missing_dir ... ok
+test ipc::dag::tests::test_dag_read_node_artifact_security_and_success ... ok
+test ipc::dag::tests::test_dag_unwatch_cancels_active_watcher_and_syncs_roots ... ok
+test ipc::dag::tests::test_dag_watch_project_canonical_key_and_dedup ... ok
+test ipc::dag::tests::test_paired_failed_subscribe_classification_preserves_codes ... ok
+test ipc::dag::tests::test_paired_watch_budget_survives_successful_host_lookups ... ok
+test ipc::dag::tests::test_paired_watch_classifies_and_bounds_terminal_and_transport_failures ... ok
+test ipc::dag::tests::test_ssh_capability_retry_wait_backs_off_and_doubles_delay ... ok
+test ipc::dag::tests::test_ssh_capability_retry_wait_cancels_if_already_signaled ... ok
+test ipc::dag::tests::test_ssh_capability_retry_wait_cancels_in_flight ... ok
+test ipc::dag::tests::test_ssh_watch_decision_cancellation_still_wins ... ok
+test ipc::dag::tests::test_ssh_watch_decision_capability_missing_is_terminal ... ok
+test ipc::dag::tests::test_ssh_watch_decision_helper_missing_becomes_terminal_after_budget ... ok
+test ipc::dag::tests::test_ssh_watch_decision_plain_transport_failure_is_not_terminal ... ok
+test ipc::debug::tests::debug_builds_always_trace ... ok
+test ipc::debug::tests::invalid_sink_root_returns_error ... ok
+test ipc::debug::tests::parsed_entries_append_to_injected_portable_root ... ok
+test ipc::debug::tests::release_builds_ignore_any_other_flag_value ... ok
+test ipc::debug::tests::release_builds_stay_silent_by_default ... ok
+test ipc::debug::tests::release_builds_trace_when_opted_in ... ok
+test ipc::design_feedback::tests::capture_route_follows_the_workspace_id_prefix ... ok
+test ipc::design_feedback::tests::design_feedback_png_path_uses_timestamp_nonce_and_png_extension ... ok
+test ipc::design_feedback::tests::design_feedback_prompt_carries_memo_element_and_screenshot_path ... ok
+test ipc::design_feedback::tests::design_feedback_prompt_degrades_without_element_or_memo ... ok
+test ipc::design_feedback::tests::design_feedback_prompt_flattens_control_characters ... ok
+test ipc::design_feedback::tests::design_feedback_prompt_flattens_element_fields ... ok
+test ipc::design_feedback::tests::remote_prompt_carries_the_host_path_verbatim ... ok
+test ipc::design_feedback::tests::write_capture_never_reuses_an_existing_name ... ok
+test ipc::diagnostics::tests::appends_structured_lines ... ok
+test ipc::diagnostics::tests::skips_append_past_size_cap ... ok
+test ipc::error::tests::test_browser_error_conversion_maps_to_recovery_codes ... ok
+test ipc::error::tests::test_browser_structured_recovery_error_codes ... ok
+test ipc::error::tests::test_ipc_error_code_custom_roundtrip ... ok
+test ipc::file_link::bundled_cli_platform_tests::bundled_cli_paths_stay_macos_only ... ok
+test ipc::file_link::file_link_tests::absolute_detection_covers_windows_drives_and_unc_on_every_host ... ok
+test ipc::file_link::file_link_tests::command_rejects_missing_paths_remote_specs_and_unknown_editors ... ok
+test ipc::file_link::file_link_tests::editor_argument_parses_supported_values_and_rejects_others ... ok
+test ipc::file_link::file_link_tests::editor_cli_plans_pass_position_through_argv_without_shell_interpretation ... ok
+test ipc::file_link::file_link_tests::editor_url_fallback_encodes_paths_and_refuses_unc ... ok
+test ipc::file_link::file_link_tests::editor_without_cli_falls_back_to_documented_url_scheme ... ok
+test ipc::file_link::file_link_tests::existing_file_relative_to_terminal_cwd_resolves_to_an_editor_plan ... ok
+test ipc::file_link::file_link_tests::failing_editor_exit_is_reported ... ok
+test ipc::file_link::file_link_tests::file_link_resolution_expands_home_joins_cwd_and_preserves_absolute_paths ... ok
+test ipc::file_link::file_link_tests::missing_files_produce_structured_errors_instead_of_a_silent_false ... ok
+test ipc::file_link::file_link_tests::path_lookup_expands_windows_pathext_and_reports_absence ... ok
+test ipc::file_link::file_link_tests::path_token_is_trimmed_and_empty_or_nul_tokens_are_rejected ... ok
+test ipc::file_link::file_link_tests::position_validation_requires_one_based_line_before_column ... ok
+test ipc::file_link::file_link_tests::remote_host_paths_are_refused_and_local_at_signs_are_kept ... ok
+test ipc::file_link::file_link_tests::resolve_file_link_relative_normalizes_slashes_to_native_separators ... ok
+test ipc::file_link::file_link_tests::session_guard_returns_local_cwd_and_refuses_remote_sessions ... ok
+test ipc::file_link::file_link_tests::session_id_resolves_the_live_local_terminal_cwd ... FAILED
+test ipc::file_link::file_link_tests::unlaunchable_editor_binary_maps_to_a_structured_io_error ... ok
+test ipc::file_open_with::tests::test_desktop_entry_for_mime_matches_semicolon_list ... ok
+test ipc::file_open_with::tests::test_desktop_entry_for_mime_rejects_nodisplay_true ... ok
+test ipc::file_open_with::tests::test_desktop_entry_for_mime_rejects_other_mimes ... ok
+test ipc::file_open_with::tests::test_desktop_entry_for_mime_returns_name ... ok
+test ipc::file_open_with::tests::test_is_valid_desktop_id ... ok
+test ipc::file_open_with::tests::test_validate_local_file_accepts_tempfile ... ok
+test ipc::file_open_with::tests::test_validate_local_file_rejects_directory ... ok
+test ipc::file_open_with::tests::test_validate_local_file_rejects_missing_path ... ok
+test ipc::file_open_with::tests::test_validate_local_file_rejects_relative_path ... ok
+test ipc::file_preview::file_preview_tests::a_child_symlink_escaping_the_document_directory_is_refused ... ok
+test ipc::file_preview::file_preview_tests::a_refused_session_resolution_maps_to_remote_unsupported ... ok
+test ipc::file_preview::file_preview_tests::a_replaced_path_never_redirects_the_retained_handle ... ok
+test ipc::file_preview::file_preview_tests::a_zero_length_file_serves_an_empty_200_and_refuses_ranges ... ok
+test ipc::file_preview::file_preview_tests::allowed_origins_never_include_a_wildcard ... ok
+test ipc::file_preview::file_preview_tests::caret_target_is_one_based_and_clamped_to_unicode_scalars ... ok
+test ipc::file_preview::file_preview_tests::child_handles_are_capped_per_document ... ok
+test ipc::file_preview::file_preview_tests::close_is_idempotent_and_scoped_to_the_owning_window ... ok
+test ipc::file_preview::file_preview_tests::closing_mid_stream_stops_delivery_at_the_next_chunk ... ok
+test ipc::file_preview::file_preview_tests::concurrent_disjoint_ranges_on_same_document_stream_exact_bytes ... ok
+test ipc::file_preview::file_preview_tests::concurrent_media_requests_are_capped_with_429 ... ok
+test ipc::file_preview::file_preview_tests::destroying_a_window_revokes_every_capability_it_owns ... ok
+test ipc::file_preview::file_preview_tests::distinct_owners_keep_capabilities_until_their_own_close ... ok
+test ipc::file_preview::file_preview_tests::expired_handles_report_the_machine_reason ... ok
+test ipc::file_preview::file_preview_tests::file_changed_since_evaluates_changes_and_deletion ... ok
+test ipc::file_preview::file_preview_tests::full_get_returns_the_exact_body_and_frozen_headers ... ok
+test ipc::file_preview::file_preview_tests::head_has_no_body_but_advertises_the_full_length ... ok
+test ipc::file_preview::file_preview_tests::host_and_origin_are_checked_and_cors_is_never_wildcarded ... ok
+test ipc::file_preview::file_preview_tests::image_dimensions_come_from_real_signatures_not_extensions ... ok
+test ipc::file_preview::file_preview_tests::image_exceeding_per_axis_bound_is_rejected ... ok
+test ipc::file_preview::file_preview_tests::image_open_checks_signature_and_pixel_bounds_before_the_client_decodes ... ok
+test ipc::file_preview::file_preview_tests::is_binary_plist_identifies_signature ... ok
+test ipc::file_preview::file_preview_tests::late_open_completion_does_not_revoke_newer_preview ... ok
+test ipc::file_preview::file_preview_tests::line_counting_ignores_a_single_trailing_newline ... ok
+test ipc::file_preview::file_preview_tests::markdown_children_resolve_only_under_the_document_directory ... ok
+test ipc::file_preview::file_preview_tests::markdown_document_links_navigate_only_inside_the_parent_boundary ... ok
+test ipc::file_preview::file_preview_tests::only_get_and_head_are_routed_and_unknown_handles_404 ... ok
+test ipc::file_preview::file_preview_tests::only_the_desktop_root_window_may_hold_capabilities ... ok
+test ipc::file_preview::file_preview_tests::open_decodes_bounded_text_without_a_media_capability ... ok
+test ipc::file_preview::file_preview_tests::open_offloads_file_io_off_the_async_reactor ... ok
+test ipc::file_preview::file_preview_tests::open_refuses_non_regular_and_missing_paths ... ok
+test ipc::file_preview::file_preview_tests::open_refuses_remote_specs_urls_and_nul_bytes ... ok
+test ipc::file_preview::file_preview_tests::opening_b_revokes_a_for_the_same_window ... ok
+test ipc::file_preview::file_preview_tests::preview_kind_and_media_type_follow_the_frozen_extension_allowlist ... ok
+test ipc::file_preview::file_preview_tests::range_header_parses_the_three_supported_single_forms ... ok
+test ipc::file_preview::file_preview_tests::range_header_rejects_multi_malformed_and_unsatisfiable_forms ... ok
+test ipc::file_preview::file_preview_tests::resolve_preview_target_directory ... ok
+test ipc::file_preview::file_preview_tests::resolve_preview_target_missing_file ... ok
+test ipc::file_preview::file_preview_tests::resolve_preview_target_relative_and_canonical ... ok
+test ipc::file_preview::file_preview_tests::single_ranges_return_206_with_exact_bytes ... ok
+test ipc::file_preview::file_preview_tests::sniff_kind_identifies_image_and_pdf_signatures ... ok
+test ipc::file_preview::file_preview_tests::text_bounds_report_too_large_without_truncating ... ok
+test ipc::file_preview::file_preview_tests::text_decoder_is_strict_and_bom_aware ... ok
+test ipc::file_preview::file_preview_tests::truncating_the_open_inode_requires_an_explicit_reload ... ok
+test ipc::file_preview::file_preview_tests::undecodable_text_reports_unsupported_encoding ... ok
+test ipc::file_preview::file_preview_tests::unknown_extension_reclassifies_image_and_pdf_and_rejects_binary_plist ... ok
+test ipc::file_preview::file_preview_tests::unsatisfiable_and_multi_ranges_return_416_with_the_length ... ok
+test ipc::file_preview::file_preview_tests::video_open_exposes_a_streaming_capability_not_a_body ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::child_asset_serializes_camel_case_keys ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::every_kind_has_a_lowercase_wire_value ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::frozen_limits_match_the_plan ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::payload_round_trips_through_the_wire_shape ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::payload_serializes_camel_case_keys ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::preview_error_carries_machine_reason_and_extra_details ... ok
+test ipc::file_preview_contract::file_preview_contract_tests::reason_wire_spellings_match_as_str ... ok
+test ipc::native_menu::tests::entries_deserialize_separator_and_submenu ... ok
+test ipc::native_menu::tests::item_spec_deserializes_with_defaults ... ok
+test ipc::native_menu::tests::resolve_agent_icons_and_decode_custom_icon ... ok
+test ipc::native_menu::tests::resolve_native_icon_maps_only_supported_names ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_replaces_frontend_renderer_size ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_scales_logical_position_to_physical_pixels ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_uses_rendered_physical_size_and_cell_metrics ... ok
+test ipc::native_terminal::tests::bounds_receipt_serializes_actual_presentation_status ... ok
+test ipc::native_terminal::tests::deferred_presentation_status_survives_the_ipc_boundary ... ok
+test ipc::native_terminal::tests::native_reconnect_attach_settles_when_daemon_never_answers_handshake ... ok
+test ipc::native_terminal::tests::post_write_receipt_failure_retains_input_written_true_without_fabricated_bounds ... ok
+test ipc::native_terminal::tests::pty_resize_queue_coalesces_updates_arriving_during_an_inflight_request ... ok
+test ipc::native_terminal::tests::pty_resize_queue_keeps_latest_size_for_each_pane ... ok
+test ipc::native_terminal::tests::rejected_native_input_reports_that_no_pty_write_occurred ... ok
+test ipc::native_terminal::tests::resident_replay_watermark_overrides_stale_explicit_cursor ... ok
+test ipc::native_terminal::tests::ssh_reconnect_safety_desktop_native_command_generation_contract ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_empty_when_no_text_and_empty_types ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_image_when_image_uti_or_non_empty_types ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_prefers_non_empty_text ... ok
+test ipc::native_terminal::tests::test_classify_linux_clipboard_image_only_for_image_types ... ok
+test ipc::native_terminal::tests::test_classify_linux_clipboard_image_wins_when_only_image_types_advertised ... ok
+test ipc::native_terminal::tests::test_classify_linux_clipboard_prefers_text_over_image_types ... ok
+test ipc::native_terminal::tests::test_classify_windows_clipboard_empty_when_no_text_or_image ... ok
+test ipc::native_terminal::tests::test_classify_windows_clipboard_image_when_bitmap_dib_hdrop_or_custom_image ... ok
+test ipc::native_terminal::tests::test_classify_windows_clipboard_prefers_text ... ok
+test ipc::native_terminal::tests::test_clipboard_content_serde_tagged_format ... ok
+test ipc::native_terminal::tests::test_decode_linux_clipboard_descriptors_drops_blank_lines ... ok
+test ipc::native_terminal::tests::test_decode_linux_clipboard_text_never_panics_on_invalid_utf8 ... ok
+test ipc::native_terminal::tests::test_decode_windows_clipboard_utf16 ... ok
+test ipc::native_terminal::tests::test_encode_windows_clipboard_utf16 ... ok
+test ipc::native_terminal::tests::test_is_linux_image_clipboard_type ... ok
+test ipc::native_terminal::tests::test_is_windows_image_or_file_format ... ok
+test ipc::native_terminal::tests::test_linux_clipboard_advertises_text ... ok
+test ipc::native_terminal::tests::test_linux_clipboard_backend_probe_arguments_match_each_family ... ok
+test ipc::native_terminal::tests::test_native_terminal_drag_selection_written_to_unique_pasteboard ... ok
+test ipc::native_terminal::tests::test_select_linux_clipboard_backend_keeps_the_answering_backend ... ok
+test ipc::native_terminal::tests::test_write_linux_clipboard_with_runner ... ok
+test ipc::native_terminal::tests::wire_receipt_reports_effective_presentation_scale ... ok
+test ipc::notifications::tests::dispatch_command_payload_matches_the_frontend_contract ... ok
+test ipc::notifications::tests::dispatch_result_round_trips_across_the_ipc_boundary ... ok
+test ipc::notifications::tests::open_system_settings_command_returns_a_structured_result ... ok
+test ipc::notifications::tests::permission_request_result_round_trips_across_the_ipc_boundary ... ok
+test ipc::notifications::tests::permission_status_round_trips_across_the_ipc_boundary ... ok
+test ipc::notifications::tests::picked_audio_result_round_trips_including_cancellation ... ok
+test ipc::notifications::tests::picker_filters_only_offer_decodable_formats ... ok
+test ipc::notifications::tests::play_sound_command_rejects_unsupported_formats ... ok
+test ipc::notifications::tests::play_sound_command_reports_missing_file_without_erroring ... ok
+test ipc::notifications::tests::play_sound_command_tolerates_omitted_optional_arguments ... ok
+test ipc::notifications::tests::probe_result_round_trips_across_the_ipc_boundary ... ok
+test ipc::notifications::tests::set_badge_count_command_clears_badge_at_zero ... ok
+test ipc::notifications::tests::set_badge_count_command_returns_structured_result ... ok
+test ipc::notifications::tests::set_badge_count_result_round_trips_across_ipc_boundary ... ok
+test ipc::notifications::tests::take_activations_drains_queued_targets_exactly_once ... ok
+test ipc::notifications::tests::take_activations_on_empty_queue_returns_empty ... ok
+test ipc::project::git_identity_tests::linked_worktree_registration_keeps_execution_root_and_exposes_common_git_directory ... ok
+test ipc::project::git_identity_tests::registration_prefers_upstream_identity_over_fork_origin ... ok
+test ipc::project::git_identity_tests::registration_skips_filesystem_remotes_and_selects_named_hosted_remote ... ok
+test ipc::project::launch_directory_tests::executable_directory_is_not_a_project_root ... ok
+test ipc::project_remote::tests::all_local_git_boundaries_reject_remote_namespace_even_without_loaded_metadata ... ok
+test ipc::project_remote::tests::local_registration_never_canonicalizes_a_remote_id_into_a_local_project ... ok
+test ipc::project_remote::tests::remote_registration_wire_request_rejects_extra_execution_fields ... ok
+test ipc::project_remote::tests::remote_startup_cannot_use_local_shell_resolver ... ok
+test ipc::remote_drop::tests::prevalidation_enforces_the_30_mib_per_file_cap ... ok
+test ipc::remote_drop::tests::prevalidation_enforces_the_aggregate_30_mib_cap_across_files ... ok
+test ipc::remote_drop::tests::prevalidation_rejects_directories_with_a_typed_reason ... ok
+test ipc::remote_drop::tests::prevalidation_rejects_empty_files_before_any_upload ... ok
+test ipc::remote_drop::tests::prevalidation_reports_missing_paths_and_accepts_valid_files ... ok
+test ipc::remote_drop::tests::sanitized_drop_names_keep_readable_names_and_strip_separators ... ok
+test ipc::remote_drop::tests::windows_style_detection_follows_the_remote_shell ... ok
+test ipc::remote_file::tests::test_ensure_within_limit ... ok
+test ipc::remote_file::tests::test_remote_cache_path_deterministic ... ok
+test ipc::remote_file::tests::test_remote_cache_path_differs_per_workspace ... ok
+test ipc::remote_file::tests::test_remote_cache_path_sanitizes_basename ... ok
+test ipc::remote_file::tests::test_remote_cache_path_stays_under_cache_root ... ok
+test ipc::remote_file::tests::test_remote_read_command_quotes_path_with_single_quote ... ok
+test ipc::remote_file::tests::test_remote_target_path_absolute_passthrough ... ok
+test ipc::remote_file::tests::test_remote_target_path_climbing_above_root_rejected ... ok
+test ipc::remote_file::tests::test_remote_target_path_control_char_rejected ... ok
+test ipc::remote_file::tests::test_remote_target_path_dot_dot_normalization_inside_root ... ok
+test ipc::remote_file::tests::test_remote_target_path_empty_rejected ... ok
+test ipc::remote_file::tests::test_remote_target_path_relative_join ... ok
+test ipc::ssh::tests::changed_config_alias_replaces_endpoint_without_duplicate_id ... ok
+test ipc::ssh::tests::default_store_is_empty ... ok
+test ipc::ssh::tests::expand_tilde_path_resolves_home_and_subpaths ... ok
+test ipc::ssh::tests::explicit_config_file_is_read_and_parsed_from_its_own_path ... ok
+test ipc::ssh::tests::explicit_import_restores_a_previously_deleted_config_host ... ok
+test ipc::ssh::tests::import_creates_missing_store ... ok
+test ipc::ssh::tests::import_preserves_corrupt_store_bytes ... ok
+test ipc::ssh::tests::missing_config_file_reports_absence_instead_of_failing ... ok
+test ipc::ssh::tests::repeated_import_preserves_existing_hosts_without_duplicates ... ok
+test ipc::ssh::tests::resilient_store_keeps_latest_duplicate_host_id ... ok
+test ipc::ssh::tests::resilient_store_skips_malformed_host_and_retains_valid ... ok
+test ipc::ssh::tests::save_store_invalidates_memoized_host_store ... ok
+test ipc::ssh::tests::store_round_trips_through_json ... ok
+test ipc::ssh::tests::system_config_result_parses_sample_content ... ok
+test ipc::terminal::tests::existing_requested_cwd_outside_the_worktree_is_rejected ... ok
+test ipc::terminal::tests::p11_reap_keeps_unresolved_cleanup_in_authoritative_and_persisted_state ... ok
+test ipc::terminal::tests::poisoned_requested_cwd_spawns_in_the_worktree_root ... ok
+test ipc::terminal::tests::poisoned_session_cwd_is_never_treated_as_a_path ... ok
+test ipc::terminal::tests::reconnect_attach_settles_when_daemon_never_answers_handshake ... ok
+test ipc::terminal::tests::relative_and_absent_cwds_fall_back_to_the_worktree_root ... ok
+test ipc::terminal::tests::session_cwd_text_accepts_posix_and_windows_absolute_paths ... ok
+test ipc::terminal::tests::test_encode_terminal_output_frame_v1_unchanged ... ok
+test ipc::terminal::tests::test_encode_terminal_output_frame_v2_gap ... ok
+test ipc::terminal::tests::test_p08_client_error_surfaces_as_typed_ipc_error_code_and_not_internal ... ok
+test ipc::terminal::tests::test_p08_client_error_variants_and_passthrough_mapping ... ok
+test ipc::terminal::tests::usable_requested_cwd_is_canonicalized ... ok
+test ipc::tests::agent_resume_startup_cwd_jail_enforcement ... ok
+test ipc::tests::agent_resume_startup_validation_failure_before_pty_spawn ... ok
+test ipc::tests::cmd_path_reveal_rejects_nonexistent_path_with_invalid_path_code ... ok
+test ipc::tests::cmd_project_unregister_removes_registry_entry ... ok
+test ipc::tests::cmd_project_unregister_serializes_camel_case_request ... ok
+test ipc::tests::paired_create_reconcile_policy_covers_lost_responses ... ok
+test ipc::tests::paired_create_retry_policy_covers_lost_responses ... ok
+test ipc::tests::paired_machine_worktree_spawn_target_resolution ... ok
+test ipc::tests::poisoned_requested_cwd_falls_back_to_the_worktree_root ... ok
+test ipc::tests::remote_status_after_reopen_persists_config_mode_until_started ... ok
+test ipc::tests::remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon ... ok
+test ipc::tests::remote_terminal_spawn_rejects_explicit_startup ... ok
+test ipc::tests::tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences ... ok
+test ipc::tests::tauri_mock_terminal_events_use_registered_workspace ... ok
+test ipc::tests::tauri_mock_worktree_commands_use_identity_contract ... ok
+test ipc::tests::terminal_cwd_cache_and_resolution_contract ... ok
+test ipc::tests::terminal_global_events_preserve_raw_bytes_and_lifecycle ... FAILED
+test ipc::tests::terminal_output_batching_coalesces_rapid_bursts ... FAILED
+test ipc::tests::terminal_process_cwd_resolves_accurately ... ok
+test ipc::tests::test_p10_ambiguous_create_session_reconciles_via_journal ... ok
+test ipc::tests::test_p10_background_reconciler_adopts_delayed_completed_session ... ok
+test ipc::tests::test_p10_background_reconciler_closes_cancelled_delayed_completed_session ... ok
+test ipc::tests::test_p10_pending_create_reaper_resolves_still_pending_records ... ok
+test ipc::tests::test_p11_reaper_retains_exhausted_records_in_dead_letter_list ... ok
+test ipc::tests::test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown ... ok
+test ipc::tests::test_p11_start_cleanup_reaper_schedules_background_resolution ... error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `/Users/I552267/ferryx-pane-completion/source-base/target/debug/deps/ferryx_lib-25259416ed141a28 --test-threads=1` (signal: 15, SIGTERM: termination signal)

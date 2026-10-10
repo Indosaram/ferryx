@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-cancel",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-cancel",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-120bc965\\evidence\\split-cancel",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-120bc965\\runtime\\split-cancel"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "5c53505e4b1e6245f19397fd5f52111f2f35d7992c234ad9f3098a369dc25925",
+  "runId": "qa-run-99170f96-75d2-4d64-abb1-e69747bb8abe",
+  "operationId": "qa-op-ef341ee1-439c-4d8c-b4aa-6944aed373f7",
+  "verdict": "FAIL",
+  "nativeEvidence": null,
+  "error": {
+    "code": "SPLIT_RIGHT_NOT_FOUND",
+    "message": "SPLIT_RIGHT_NOT_FOUND: the \"Split pane right\" affordance of the focused pane could not be identified: {\"selector\":\"Split pane right\",\"interactive\":true,\"sessionId\":1,\"mainWindowHandle\":1313834,\"windowVisible\":true,\"focusedFound\":true,\"focusSource\":null,\"scopeDepth\":10,\"scopeIsWindowRoot\":false,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": false,
+    "ok": false,
+    "gateFailed": true
+  },
+  "barriers": []
+}

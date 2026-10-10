@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/state/browserSessionHydration.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039955) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/state/browserSessionHydration.test.ts (6 tests | 6 failed) 7ms
+   × browser session hydration > recreates persisted native webviews with the stored browser id, URL, profile, zoom, and scroll 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser session hydration > excludes private-profile browser tabs from restoration (privacy isolation) 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser session hydration > restores tabs per worktree without mixing into other worktrees 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser session hydration > skips stale tabs whose worktree was deleted or whose URL is unnavigable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser session hydration > prevents double-restore from duplicating browser tabs 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × browser session hydration > does not materialize persisted browser tabs when launch restore is disabled 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > recreates persisted native webviews with the stored browser id, URL, profile, zoom, and scroll
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > excludes private-profile browser tabs from restoration (privacy isolation)
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > restores tabs per worktree without mixing into other worktrees
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > skips stale tabs whose worktree was deleted or whose URL is unnavigable
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > prevents double-restore from duplicating browser tabs
+ FAIL  src/state/browserSessionHydration.test.ts > browser session hydration > does not materialize persisted browser tabs when launch restore is disabled
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/state/browserSessionHydration.test.ts:49:18
+     47| describe("browser session hydration", () => {
+     48|   beforeEach(() => {
+     49|     localStorage.clear();
+       |                  ^
+     50|     browserMocks.ensureBrowser.mockClear();
+     51|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  10:10:15
+   Duration  738ms (transform 203ms, setup 103ms, collect 221ms, tests 7ms, environment 240ms, prepare 48ms)
+
+error: script "test" exited with code 1

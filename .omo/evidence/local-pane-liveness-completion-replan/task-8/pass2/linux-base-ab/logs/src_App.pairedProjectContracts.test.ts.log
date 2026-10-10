@@ -1,0 +1,47 @@
+$ vitest run --maxWorkers=1 src/App.pairedProjectContracts.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1045428) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/App.pairedProjectContracts.test.ts (2 tests | 2 failed) 5ms
+   × retains paired identity when loading the stored project catalog 3ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × retains paired project metadata when reconstructing bootstrap references 1ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedProjectContracts.test.ts > retains paired identity when loading the stored project catalog
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/App.pairedProjectContracts.test.ts:11:16
+      9| 
+     10| it("retains paired identity when loading the stored project catalog", …
+     11|   localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([paired]));
+       |                ^
+     12|   expect(loadProjects()).toEqual([expect.objectContaining(paired)]);
+     13| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/App.pairedProjectContracts.test.ts > retains paired identity when loading the stored project catalog
+ FAIL  src/App.pairedProjectContracts.test.ts > retains paired project metadata when reconstructing bootstrap references
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/App.pairedProjectContracts.test.ts:8:30
+      6| const paired = { workspaceId: `daemon:${"a".repeat(64)}`, repoRoot: "/…
+      7|   target: { kind: "pairedDaemon", hostId: "relay/machine-a" } as const…
+      8| afterEach(() => localStorage.clear());
+       |                              ^
+      9| 
+     10| it("retains paired identity when loading the stored project catalog", …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:11:30
+   Duration  2.51s (transform 1.24s, setup 106ms, collect 2.00s, tests 5ms, environment 227ms, prepare 49ms)
+
+error: script "test" exited with code 1

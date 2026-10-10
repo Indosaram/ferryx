@@ -1,0 +1,35 @@
+   FAIL | test daemon::handover_wire::tests::truncated_control_is_rejected ... FAILED
+   FAIL | test daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface ... FAILED
+   FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2682 filtered out; finished in 0.05s
+   FAIL | test daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty ... FAILED
+   FAIL | test daemon::server::remote_ssh_tests::remote_ssh_first_spawn_provisions_qualified_helper_automatically ... FAILED
+   FAIL | test ipc::worktree::deletion_repair_tests::deletion_repair_missing_record_preview_and_targeted_cleanup ... FAILED
+   FAIL | test ipc::worktree::deletion_repair_tests::deletion_repair_preview_reports_current_dirty_and_unmerged_loss ... FAILED
+   FAIL | test ipc::worktree::deletion_repair_tests::deletion_repair_success_removes_cached_row_and_blocks_stale_worker ... FAILED
+   FAIL | test native_terminal::renderer::font_manager::tests::test_font_manager_derives_nonzero_metrics_and_rasterizes ... FAILED
+   FAIL | test native_terminal::renderer::font_manager::tests::test_glyph_orientation_regression ... FAILED
+   FAIL | test remote::relay_server::tests::a_symlinked_artifact_is_not_served ... FAILED
+   FAIL | test remote::server::machine_input_cancellation_tests::input_is_cancelled_when_grant_is_revoked ... FAILED
+   FAIL | test remote::server::machine_input_cancellation_tests::input_is_cancelled_when_socket_disconnects ... FAILED
+   FAIL | test remote::tests::security::sockets::a10_pending_machine_input_is_dropped_on_disconnect_and_revoke ... FAILED
+   FAIL | test rollout_tests::a24_rollback_waits_for_drain_and_preserves_unrelated_owner ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_dag_subscription_rejects_unregistered_project ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_dag_subscription_released_after_eof_during_blocked_next ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_ownership_ordering_detach_rollback_commit ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_real_pty_large_session_writes_do_not_block_other_session ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns ... FAILED
+   FAIL | test ssh::bridge::tests::ssh_bridge_target_mismatch_on_describe_or_read_is_rejected ... FAILED
+   FAIL | test ssh::bridge::tests::test_ssh_bridge_dag_inventory_and_poll ... FAILED
+   FAIL | test ssh::helper_setup::tests::posix_upload_script_never_kills_live_daemon_and_defers_upgrade ... FAILED
+   FAIL | test daemon::server::remote_ssh_tests::direct_ssh_real_transport_registration_and_pty ... FAILED
+   FAIL | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2682 filtered out; finished in 1.39s
+   FAIL | test result: FAILED. 2646 passed; 31 failed; 6 ignored; 0 measured; 0 filtered out; finished in 457.89s

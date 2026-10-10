@@ -1,0 +1,268 @@
+﻿{
+    "tag":  "c5",
+    "startedAt":  "2026-10-05T04:43:12.8858050+09:00",
+    "stagedRoot":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0",
+    "iso":  "C:\\Users\\sook\\ferryx-pane-completion\\cap12\\c5",
+    "serverPid":  27364,
+    "frontendReady":  true,
+    "appPid":  20584,
+    "ownedWindows":  [
+                         {
+                             "hwnd":  22481948,
+                             "title":  "Ferryx",
+                             "className":  "Tauri Window"
+                         },
+                         {
+                             "hwnd":  15535204,
+                             "title":  "",
+                             "className":  "Tao Thread Event Target"
+                         }
+                     ],
+    "sessionsBefore":  null,
+    "treeBefore":  [
+                       {
+                           "hwnd":  22481948,
+                           "title":  "Ferryx",
+                           "className":  "Tauri Window",
+                           "total":  16,
+                           "named":  2,
+                           "exactNewTerminal":  0,
+                           "hasDocument":  false,
+                           "tabItems":  [
+
+                                        ],
+                           "errorText":  [
+
+                                         ],
+                           "names":  [
+                                         "ControlType.Pane|Ferryx",
+                                         "ControlType.Pane|Ferryx - 웹 콘텐츠"
+                                     ]
+                       },
+                       {
+                           "hwnd":  15535204,
+                           "title":  "",
+                           "className":  "Tao Thread Event Target",
+                           "total":  0,
+                           "named":  0,
+                           "exactNewTerminal":  0,
+                           "hasDocument":  false,
+                           "tabItems":  [
+
+                                        ],
+                           "errorText":  [
+
+                                         ],
+                           "names":  [
+
+                                     ]
+                       }
+                   ],
+    "invoke":  {
+                   "attempted":  true,
+                   "attempts":  1,
+                   "hwnd":  22481948,
+                   "count":  1,
+                   "enabled":  true,
+                   "rect":  "877,683,156,36",
+                   "invoked":  true,
+                   "elapsedMs":  83
+               },
+    "probeErrorBefore":  "",
+    "sessionsAfter":  [
+                          {
+                              "atMs":  0,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  700,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  1400,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  2100,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  2800,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  3500,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  4200,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  4900,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  5600,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  6300,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  7000,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  7700,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  8400,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          },
+                          {
+                              "atMs":  9100,
+                              "count":  1,
+                              "sessions":  [
+                                               "8a84dfc6-84ed-4e2f-b729-494e69ef018f"
+                                           ]
+                          }
+                      ],
+    "treeAfter":  [
+                      {
+                          "hwnd":  22481948,
+                          "title":  "Ferryx",
+                          "className":  "Tauri Window",
+                          "total":  100,
+                          "named":  59,
+                          "exactNewTerminal":  0,
+                          "hasDocument":  true,
+                          "tabItems":  [
+                                           "main Close main"
+                                       ],
+                          "errorText":  [
+
+                                        ],
+                          "names":  [
+                                        "ControlType.Pane|Ferryx",
+                                        "ControlType.Pane|Ferryx - 웹 콘텐츠",
+                                        "ControlType.Document|Ferryx",
+                                        "ControlType.Group|Notifications alt+T",
+                                        "ControlType.ListItem|Ferryx for Windows is moving to the Microsoft StoreThis installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.Got it",
+                                        "ControlType.Button|Close toast",
+                                        "ControlType.Text|Ferryx for Windows is moving to the Microsoft Store",
+                                        "ControlType.Text|This installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.",
+                                        "ControlType.Button|Got it",
+                                        "ControlType.Button|Dismiss all notifications",
+                                        "ControlType.Button|Hide sidebar",
+                                        "ControlType.Button|Add project",
+                                        "ControlType.Button|Inbox",
+                                        "ControlType.Button|Collapse source-21dea3c0",
+                                        "ControlType.Button|source-21dea3c0",
+                                        "ControlType.Button|Past conversations",
+                                        "ControlType.Button|Remove project source-21dea3c0",
+                                        "ControlType.List|source-21dea3c0 worktrees",
+                                        "ControlType.ListItem|source-21dea3c0primary",
+                                        "ControlType.Button|source-21dea3c0 primary",
+                                        "ControlType.Text|1",
+                                        "ControlType.Text| ",
+                                        "ControlType.Text|session",
+                                        "ControlType.Text| watched",
+                                        "ControlType.Button|Settings",
+                                        "ControlType.Separator|Resize sidebar",
+                                        "ControlType.TabItem|main Close main",
+                                        "ControlType.Button|Close main",
+                                        "ControlType.Button|New tab",
+                                        "ControlType.Button|Copy Debug Info Split pane right Split pane down",
+                                        "ControlType.Button|Copy Debug Info",
+                                        "ControlType.Button|Split pane right",
+                                        "ControlType.Button|Split pane down",
+                                        "ControlType.Edit|Native terminal input",
+                                        "ControlType.Window|Welcome to Ferryx",
+                                        "ControlType.Text|Ferryx",
+                                        "ControlType.Text|Setup",
+                                        "ControlType.List|Setup steps",
+                                        "ControlType.ListItem|1Sign in",
+                                        "ControlType.ListItem|Welcome",
+                                        "ControlType.ListItem|3Features",
+                                        "ControlType.ListItem|4Permissions",
+                                        "ControlType.ListItem|Agents",
+                                        "ControlType.ListItem|First project",
+                                        "ControlType.Text|You can reopen this from Settings \u003e Permissions.",
+                                        "ControlType.Text|Step ",
+                                        "ControlType.Text|1",
+                                        "ControlType.Text| of ",
+                                        "ControlType.Text|6",
+                                        "ControlType.Text|Sign in to Ferryx",
+                                        "ControlType.Text|Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.",
+                                        "ControlType.Button|Remind me later",
+                                        "ControlType.Text|Sign in to Ferryx",
+                                        "ControlType.Text|Sign in with your email to view, enroll, and manage remote machines.",
+                                        "ControlType.Text|Email Address",
+                                        "ControlType.Edit|Email Address",
+                                        "ControlType.Button|Send Magic Link",
+                                        "ControlType.Button|Skip setup",
+                                        "ControlType.Button|Continue"
+                                    ]
+                      },
+                      {
+                          "hwnd":  15535204,
+                          "title":  "",
+                          "className":  "Tao Thread Event Target",
+                          "total":  0,
+                          "named":  0,
+                          "exactNewTerminal":  0,
+                          "hasDocument":  false,
+                          "tabItems":  [
+
+                                       ],
+                          "errorText":  [
+
+                                        ],
+                          "names":  [
+
+                                    ]
+                      }
+                  ]
+}

@@ -1,0 +1,2 @@
+# Remote exclusivity observation
+Task8 sole verifier own Mac cargoPID51257 parent3742 target source-172baa87/target. Read-only midpoint diagnostic mon_SDADXCYN1YEV4RPY showed foreign cargoPID41333 parent41330 running cargo test --lib ssh::helper_setup, rustcPID57467 CPU95.3 target /Users/I552267/ferryx-build/cargo-target; own rustc59636/59638 also active. This unrelated command conflicts with requested remote exclusivity but uses separate target; verifier did not launch, stop, or modify it. No target-lock blockage inferred. Record for orchestrator.

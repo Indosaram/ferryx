@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-happy",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-happy",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\ev5c\\r2",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\iso5c\\r2"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "a5cb4d0c81fbf47d431bf8e008151eec94f57a4c54332904cd763dd4a1c366b7",
+  "runId": "qa-run-0fbe4dbf-4413-411c-914d-0f8c1fd66bc7",
+  "operationId": "qa-op-fb766a7c-4ca8-4848-ada4-12f29fe3d542",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "PANE_BINDING_UNBOUND",
+    "message": "PANE_BINDING_UNBOUND: no presentation receipt named a session other than the 1 fixture session(s) within 8000ms, so the UI pane step created no observable pane (receipt: \"C:\\Users\\sook\\ferryx-pane-completion\\iso5c\\r2\\barriers\\presentation.receipt.jsonl\", receipt lines: 0, sessions named by those lines: [], fixture sessions excluded: [\"f64c1598-a98e-48f5-b85f-6a43d42f067a\"], observed pane sessions: [])"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": []
+}

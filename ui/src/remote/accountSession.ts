@@ -133,6 +133,7 @@ export function clearStoredAccountSessionToken(): void {
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+    clearAccountPreferredSessions();
     clearAccountLastSelectedTarget();
   }
 }
@@ -831,6 +832,50 @@ export function createAccountConnection(params: {
   };
 }
 
+function makeAccountPreferredSessionKey(relayUrl: string, machineId: string, workspaceId: string, slug?: string | null): string {
+  return `ferryx.account.preferred_session.${encodeURIComponent(relayUrl)}.${encodeURIComponent(machineId)}.${encodeURIComponent(workspaceId)}.${encodeURIComponent(slug ?? "")}`;
+}
+
+export function getAccountPreferredSessionId(relayUrl: string, machineId: string, workspaceId: string, slug?: string | null): string | null {
+  try {
+    const raw = getMigratedItem(makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug));
+    return raw && raw.trim().length > 0 ? raw.trim() : null;
+  } catch (err) {
+    console.warn("Failed to read account preferred session", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export function setAccountPreferredSessionId(relayUrl: string, machineId: string, workspaceId: string, slug: string | null | undefined, sessionId: string): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug), sessionId);
+    }
+  } catch (err) {
+    console.warn("Failed to set account preferred session", err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function clearAccountPreferredSessions(): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const storage = window.localStorage;
+      const toRemove: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (key && (key.startsWith("ferryx.account.preferred_session.") || key.startsWith("ferryx.account.last_target."))) {
+          toRemove.push(key);
+        }
+      }
+      for (const key of toRemove) {
+        storage.removeItem(key);
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to clear account preferred sessions", err instanceof Error ? err.message : String(err));
+  }
+}
+
 export interface AccountLastSelectedTarget {
   machineId: string;
   workspaceId: string;
@@ -925,3 +970,4 @@ export async function logoutAccountSession(origin: string, token: string): Promi
     if (timer) clearTimeout(timer);
   }
 }
+

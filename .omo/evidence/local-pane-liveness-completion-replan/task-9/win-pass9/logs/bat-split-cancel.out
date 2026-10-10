@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-cancel",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-cancel",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-757f8414\\evidence\\split-cancel",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-757f8414\\runtime\\split-cancel"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "b81ab4bec14892db798cf3c255d5465c1edd818fb3773810a72550305f760b3e",
+  "runId": "qa-run-6885d62d-a2d1-4cbd-bbe8-e343d0c3c0d8",
+  "operationId": "qa-op-ee2ed295-ec16-44b8-a5ba-81e6e60bd62b",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "PANE_AFFORDANCE_NOT_FOUND",
+    "message": "PANE_AFFORDANCE_NOT_FOUND: the \"New Terminal\" affordance could not be identified by its exact accessible name: {\"selectorNames\":[\"New Terminal\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"windowsSearched\":[{\"hwnd\":47122162,\"title\":\"Ferryx\",\"className\":\"Tauri Window\",\"rootOffscreen\":false},{\"hwnd\":3738764,\"title\":\"\",\"className\":\"Tao Thread Event Target\",\"rootOffscreen\":false}],\"windowsSearchedCount\":2,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null,\"warmElements\":16,\"warmAttempts\":33,\"warmElapsedMs\":4053}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": []
+}

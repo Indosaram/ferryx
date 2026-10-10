@@ -1,0 +1,360 @@
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-172baa87/src-tauri)
+error[E0432]: unresolved import `fs2`
+ --> src/daemon/split_journal.rs:1:5
+  |
+1 | use fs2::FileExt;
+  |     ^^^ use of unresolved module or unlinked crate `fs2`
+  |
+  = help: if you wanted to use a crate named `fs2`, use `cargo add fs2` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+    --> src/daemon/server.rs:2704:33
+     |
+2704 | ...                   HandoverManager::recorded_decision(&path).map_err(crate::ipc::IpcError::internal))
+     |                       ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+     |
+help: consider importing this struct through its public re-export
+     |
+   4 + use crate::daemon::HandoverManager;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+    --> src/daemon/server.rs:2726:62
+     |
+2726 | ...                   crate::ipc::run_blocking(move || HandoverManager::recorded_decision(&path)
+     |                                                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+     |
+help: consider importing this struct through its public re-export
+     |
+   4 + use crate::daemon::HandoverManager;
+     |
+
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:22:24
+   |
+22 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src/remote/session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src/remote/server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ffi::OsString`
+ --> src/ssh/../ferryx_scope/ssh/process.rs:5:5
+  |
+5 |     ffi::OsString,
+  |     ^^^^^^^^^^^^^
+
+error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`
+    --> src/daemon/server.rs:3135:59
+     |
+3135 | ...                   code: Some(error.code.to_string()), details: error.details },
+     |                                             ^^^^^^^^^ method cannot be called on `ipc::error::IpcErrorCode` due to unsatisfied trait bounds
+     |
+    ::: src/ipc/error.rs:8:1
+     |
+   8 | pub enum IpcErrorCode {
+     | --------------------- method `to_string` not found for this enum because it doesn't satisfy `ipc::error::IpcErrorCode: ToString` or `ipc::error::IpcErrorCode: std::fmt::Display`
+     |
+     = note: the following trait bounds were not satisfied:
+             `ipc::error::IpcErrorCode: std::fmt::Display`
+             which is required by `ipc::error::IpcErrorCode: ToString`
+note: the trait `std::fmt::Display` must be implemented
+    --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/mod.rs:1007:1
+note: the method `to_string` exists on the type `std::string::String`
+    --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/string.rs:2855:5
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `to_string`, perhaps you need to implement it:
+             candidate #1: `ToString`
+
+error[E0063]: missing field `incarnation` in initializer of `DaemonSessionDetails`
+    --> src/ipc/terminal.rs:2410:22
+     |
+2410 |             session: crate::daemon::protocol::DaemonSessionDetails {
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0283]: type annotations needed
+   --> src/terminal/service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                               ------------            ^^^^
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<std::string::String>` found in the following crates: `core`, `unicase`:
+            - impl<'a> Into<std::string::String> for unicase::UniCase<std::string::String>;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `SessionLifecycleRegistry::mark_running`
+   --> src/daemon/session_lifecycle.rs:58:53
+    |
+ 58 |     pub fn mark_running(&mut self, session_id: impl Into<String>) {
+    |                                                     ^^^^^^^^^^^^ required by this bound in `SessionLifecycleRegistry::mark_running`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+help: consider removing this method call, as the receiver has type `&str` and `&str: Into<std::string::String>` trivially holds
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(session_id);
+    |
+
+error[E0283]: type annotations needed
+   --> src/terminal/service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                                                       ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `axum_core`, `bytes`, `naga`, `reqwest`, `winnow`:
+            - impl std::convert::From<&'static str> for axum::body::Body;
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for reqwest::async_impl::body::Body;
+            - impl std::convert::From<&'static str> for wgpu::naga::front::wgsl::error::DiagnosticAttributeNotSupportedPosition;
+            - impl std::convert::From<&'static str> for winnow::error::StrContextValue;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+
+error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope
+   --> src/daemon/split_journal.rs:172:19
+    |
+172 |         lock_file.lock_exclusive()?;
+    |                   ^^^^^^^^^^^^^^ method not found in `std::fs::File`
+
+error[E0599]: no method named `active_presentation_generation` found for reference `&NativeTerminalSurfaceHost` in the current scope
+   --> src/native_terminal/surface_host.rs:971:38
+    |
+971 | ...                   host.active_presentation_generation() == Some(frame_generation)
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+971 -                                 host.active_presentation_generation() == Some(frame_generation)
+971 +                                 host.active_presentation_geometry() == Some(frame_generation)
+    |
+
+error[E0599]: no method named `active_presentation_epoch` found for reference `&NativeTerminalSurfaceHost` in the current scope
+   --> src/native_terminal/surface_host.rs:972:45
+    |
+972 | ...                   && host.active_presentation_epoch() == Some(frame_epoch)
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+972 -                                     && host.active_presentation_epoch() == Some(frame_epoch)
+972 +                                     && host.active_presentation_geometry() == Some(frame_epoch)
+    |
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:670:41
+    |
+670 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |             let mut desired_size: Option<(u16, u16)> = None;
+     |                                                        ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+Some errors have detailed explanations: E0063, E0283, E0432, E0433, E0599.
+For more information about an error, try `rustc --explain E0063`.
+warning: `ferryx` (lib) generated 32 warnings
+error: could not compile `ferryx` (lib) due to 10 previous errors; 32 warnings emitted

@@ -17,6 +17,30 @@ pub struct TerminalService {
     lifecycle: Arc<Mutex<SessionLifecycleRegistry>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PumpToken(u64);
+
+#[derive(Default)]
+pub(crate) struct PumpTokenFence {
+    next: std::sync::atomic::AtomicU64,
+    active: Mutex<Option<PumpToken>>,
+}
+
+impl PumpTokenFence {
+    pub(crate) fn install(&self) -> PumpToken {
+        let token = PumpToken(self.next.fetch_add(1, std::sync::atomic::Ordering::AcqRel).wrapping_add(1));
+        *self.active.lock() = Some(token);
+        token
+    }
+
+    pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
+
+    pub(crate) fn remove(&self, token: PumpToken) -> bool {
+        let mut active = self.active.lock();
+        if *active == Some(token) { *active = None; true } else { false }
+    }
+}
+
 impl Default for TerminalService {
     fn default() -> Self {
         Self::new(
@@ -29,13 +53,19 @@ impl Default for TerminalService {
 impl TerminalService {
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
         pty_manager.set_output_hub(output_hub.clone());
-        Self {
+        let service = Self {
             remote: Arc::new(super::remote::RemoteRuntime::new(output_hub.clone())),
             paired: Arc::new(super::paired_runtime::Runtime::default()),
             pty_manager,
             output_hub,
             lifecycle: Arc::new(Mutex::new(SessionLifecycleRegistry::default())),
-        }
+        };
+        // The daemon owns the PTYs and their output hub, so the private QA
+        // channel is installed here as well; without the runner env this is a
+        // no-op and the daemon keeps no QA surface.
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        super::qa_liveness::start(service.clone());
+        service
     }
 
     pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> {
@@ -54,6 +84,10 @@ impl TerminalService {
     /// outlive PTY teardown so callers can distinguish suspension from never-spawned state.
     pub fn process_state(&self, session_id: &str) -> Option<SessionProcessState> {
         self.lifecycle.lock().state(session_id)
+    }
+
+    pub fn suspension_receipt(&self, session_id: &str) -> Option<super::ActuationReceipt> {
+        self.get_session(session_id).and_then(|session| session.suspension_receipt())
     }
 
     /// Generation-aware admission. The returned future must be awaited for delivery status.
@@ -141,6 +175,13 @@ impl TerminalService {
         &self.pty_manager
     }
 
+    pub(crate) fn try_acquire_cwd_probe(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pty_manager.try_acquire_cwd_probe(session_id)
+    }
+
     pub fn output_hub(&self) -> &Arc<TerminalOutputHub> {
         &self.output_hub
     }
@@ -185,6 +226,20 @@ impl TerminalService {
             worktree_manager,
             worktree_path,
         )?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
+
+    pub(crate) fn spawn_resolved_with_id(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        context: super::pty::ResolvedSpawnContext,
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
+        let (session_id, pty_rx) = self
+            .pty_manager
+            .spawn_resolved_with_id(session_id, cmd, cols, rows, context)?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 
@@ -481,8 +536,44 @@ impl TerminalService {
                 "Session suspend is supported only for local PTYs".into(),
             ));
         }
-        self.pty_manager.signal(session_id, TerminalSignal::Stop)?;
+        let session = self.get_session(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;
+        let target = crate::ipc::run_blocking(move || {
+            session.suspension_target().map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| PtyError::Other(error.to_string()))?;
+        self.suspend_verified_session(session_id, target).await.map(|_| ())
+    }
+
+    pub async fn suspend_verified_session(&self, session_id: &str, target: super::SuspensionTarget)
+        -> Result<super::ActuationReceipt, PtyError>
+    {
+        let session = self.get_session(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;
+        let receipt = crate::ipc::run_blocking(move || {
+            let actual = session.suspension_target().map_err(crate::ipc::IpcError::internal)?;
+            let receipt = actuate_suspension(&actual, &target, super::stop_for_owned_suspension)
+                .map_err(crate::ipc::IpcError::internal)?;
+            session.set_suspension_receipt(Some(receipt.clone()));
+            Ok(receipt)
+        }).await.map_err(|error| PtyError::Other(error.to_string()))?;
         self.lifecycle.lock().mark_suspended(session_id.to_string());
+        Ok(receipt)
+    }
+
+    pub async fn resume_owned_session(&self, session_id: &str, target: super::SuspensionTarget) -> Result<(), PtyError> {
+        let session = self.get_session(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.into()))?;
+        crate::ipc::run_blocking(move || {
+            let actual = session.suspension_target().map_err(crate::ipc::IpcError::internal)?;
+            if actual != target {
+                return Err(crate::ipc::IpcError::internal(super::SuspensionError::IdentityMismatch { pid: target.pid }));
+            }
+            auto_resume_suspension(&target, super::classify_stop_source, super::resume_owned)
+                .map_err(crate::ipc::IpcError::internal)?;
+            session.set_suspension_receipt(None);
+            Ok(())
+        }).await.map_err(|error| PtyError::Other(error.to_string()))?;
+        self.lifecycle.lock().mark_running(session_id);
         Ok(())
     }
 
@@ -492,8 +583,12 @@ impl TerminalService {
                 "Session resume is supported only for local PTYs".into(),
             ));
         }
-        self.pty_manager
-            .signal(session_id, TerminalSignal::Continue)?;
+        let manager = self.pty_manager.clone();
+        let id = session_id.to_owned();
+        crate::ipc::run_blocking(move || manager.signal(&id, TerminalSignal::Continue)
+            .map_err(crate::ipc::IpcError::internal)).await
+            .map_err(|error| PtyError::Other(error.to_string()))?;
+        if let Some(session) = self.get_session(session_id) { session.set_suspension_receipt(None); }
         self.lifecycle.lock().mark_running(session_id.to_string());
         Ok(())
     }
@@ -520,5 +615,212 @@ impl TerminalService {
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {
         self.pty_manager.get_session(session_id)
+    }
+}
+
+fn actuate_suspension(
+    actual: &super::SuspensionTarget,
+    requested: &super::SuspensionTarget,
+    stop: impl FnOnce(&super::SuspensionTarget) -> Result<super::ActuationReceipt, super::SuspensionError>,
+) -> Result<super::ActuationReceipt, super::SuspensionError> {
+    if actual != requested {
+        return Err(super::SuspensionError::IdentityMismatch { pid: requested.pid });
+    }
+    let receipt = stop(requested)?;
+    if receipt.pid != actual.pid || receipt.incarnation != actual.incarnation
+        || receipt.source != super::SuspensionSource::FerryxOwned
+    {
+        return Err(super::SuspensionError::IdentityMismatch { pid: requested.pid });
+    }
+    Ok(receipt)
+}
+
+pub(crate) fn auto_resume_suspension(
+    target: &super::SuspensionTarget,
+    classify: impl FnOnce(&super::SuspensionTarget) -> Result<super::SuspensionSource, super::SuspensionError>,
+    resume: impl FnOnce(&super::SuspensionTarget) -> Result<(), super::SuspensionError>,
+) -> Result<(), super::SuspensionError> {
+    match classify(target)? {
+        super::SuspensionSource::FerryxOwned => resume(target),
+        super::SuspensionSource::External | super::SuspensionSource::Unknown =>
+            Err(super::SuspensionError::NotOwned { pid: target.pid }),
+    }
+}
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+
+    fn suspension_target() -> super::super::SuspensionTarget {
+        super::super::SuspensionTarget { pid: 42, incarnation: "spawn-incarnation".into(), started_at_unix_ms: Some(100) }
+    }
+
+    #[test]
+    fn pane_liveness_suspension_receipt_only_on_successful_actuation() {
+        let target = suspension_target();
+        let failure = actuate_suspension(&target, &target, |_| Err(super::super::SuspensionError::NotOwned { pid: 42 }));
+        assert!(failure.is_err());
+        let receipt = super::super::ActuationReceipt { pid: 42, incarnation: target.incarnation.clone(),
+            source: super::super::SuspensionSource::FerryxOwned, actuated_at_unix_ms: 200,
+            stop_observed: true, guarantee: super::super::StopGuarantee::IdentityBoundObservedStop };
+        assert_eq!(actuate_suspension(&target, &target, |_| Ok(receipt.clone())).unwrap(), receipt);
+    }
+
+    #[test]
+    fn pane_liveness_suspension_external_stop_never_auto_resumed() {
+        let target = suspension_target();
+        let resumed = std::cell::Cell::new(false);
+        let result = auto_resume_suspension(&target,
+            |_| Ok(super::super::SuspensionSource::External),
+            |_| { resumed.set(true); Ok(()) });
+        assert!(matches!(result, Err(super::super::SuspensionError::NotOwned { .. })));
+        assert!(!resumed.get());
+    }
+
+    #[test]
+    fn pane_liveness_suspension_identity_mismatch_refused_before_actuation() {
+        let actual = suspension_target();
+        let mut requested = actual.clone();
+        requested.incarnation = "replacement".into();
+        let actuated = std::cell::Cell::new(false);
+        let result = actuate_suspension(&actual, &requested, |_| {
+            actuated.set(true);
+            Err(super::super::SuspensionError::NotOwned { pid: 42 })
+        });
+        assert!(matches!(result, Err(super::super::SuspensionError::IdentityMismatch { .. })));
+        assert!(!actuated.get());
+    }
+    #[tokio::test]
+    async fn preparation_resolved_spawn_context_and_probe_permit_lifetime() {
+        let service = TerminalService::default();
+        let spawning = service.clone();
+        let (root, spawned) = crate::ipc::run_blocking(move || {
+            let root = tempfile::tempdir().unwrap();
+            let cwd = root.path().join("nested");
+            std::fs::create_dir(&cwd).unwrap();
+            let mut command = if cfg!(windows) {
+                let mut command = CommandBuilder::new("cmd.exe");
+                command.args(["/D", "/Q", "/K"]);
+                command
+            } else {
+                CommandBuilder::new("/bin/sh")
+            };
+            command.env("FERRYX_WORKSPACE_ID", "foreign-daemon-identity");
+            let context = super::super::pty::ResolvedSpawnContext {
+                root: root.path().to_owned(),
+                cwd,
+                managed_workspace_id: None,
+            };
+            let spawned = spawning.spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                context,
+            );
+            Ok((root, spawned))
+        })
+        .await
+        .unwrap();
+        let (id, _lifecycle) = spawned.unwrap();
+        let permit = service.try_acquire_cwd_probe(&id);
+        let acquired = permit.is_some();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(std::time::Duration::from_secs(5))
+        });
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx).await;
+        let busy = service.try_acquire_cwd_probe(&id).is_none();
+        let ownership = service
+            .get_session(&id)
+            .and_then(|session| session.worktree_path());
+        let close = service.close_session(&id).await;
+        let removed = service.try_acquire_cwd_probe(&id).is_none();
+        let released = release_tx.send(());
+        let joined = worker.await;
+        assert!(close.is_ok(), "{close:?}");
+        assert!(matches!(entered, Ok(Ok(()))));
+        assert!(released.is_ok());
+        assert!(matches!(joined, Ok(Ok(()))));
+        assert!(acquired && busy && removed);
+        assert_eq!(ownership.as_deref(), Some(root.path()));
+        assert!(service.try_acquire_cwd_probe("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn preparation_cold_path_does_not_discover_login_path() {
+        let service = TerminalService::default();
+        let (legacy_entered_tx, legacy_entered_rx) = tokio::sync::oneshot::channel();
+        let (legacy_release_tx, legacy_release_rx) = std::sync::mpsc::channel();
+        let legacy = tokio::task::spawn_blocking(move || {
+            let entered = std::sync::Mutex::new(Some(legacy_entered_tx));
+            let release = std::sync::Mutex::new(legacy_release_rx);
+            super::super::shell::with_path_discovery(
+                Arc::new(move || {
+                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                    release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    Vec::new()
+                }),
+                super::super::shell::legacy_search_paths,
+            )
+        });
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(5), legacy_entered_rx).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let git_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let git_counted = git_calls.clone();
+        let spawning = service.clone();
+        let setup = crate::ipc::run_blocking(move || {
+            let root = tempfile::tempdir().unwrap();
+            let result = super::super::shell::with_path_discovery(
+                Arc::new(move || {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Vec::new()
+                }),
+                || {
+                    crate::worktree::git::with_git_observer(
+                        Arc::new(move |_, _| {
+                            git_counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }),
+                        || {
+                            let command = super::super::shell::resolve_ordinary_shell_command(
+                                Some(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }),
+                            )?;
+                            spawning.spawn_resolved_with_id(
+                                uuid::Uuid::new_v4().to_string(),
+                                command,
+                                80,
+                                24,
+                                super::super::pty::ResolvedSpawnContext {
+                                    root: root.path().to_owned(),
+                                    cwd: root.path().to_owned(),
+                                    managed_workspace_id: None,
+                                },
+                            )
+                        },
+                    )
+                },
+            );
+            Ok((root, result))
+        })
+        .await;
+        let close = match &setup {
+            Ok((_, Ok((id, _)))) => service.close_session(id).await,
+            _ => Ok(()),
+        };
+        let released = legacy_release_tx.send(());
+        let joined = legacy.await;
+        assert!(matches!(entered, Ok(Ok(()))));
+        assert!(released.is_ok() && joined.is_ok());
+        assert!(close.is_ok(), "{close:?}");
+        assert!(matches!(setup, Ok((_, Ok(_)))), "{setup:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(git_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

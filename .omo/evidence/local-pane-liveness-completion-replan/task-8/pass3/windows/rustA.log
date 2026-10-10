@@ -1,0 +1,9 @@
+
+RGATE_DONE DESKTOP-1LAPJMP split-list native=0 listcount=14 
+RGATE_DONE DESKTOP-1LAPJMP split native=0 listcount=0 test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2266 filtered out; finished in 0.23s
+RGATE_DONE DESKTOP-1LAPJMP all-targets native=0 listcount=0 
+RGATE_DONE DESKTOP-1LAPJMP transfer-list native=0 listcount=0 
+RGATE_DONE DESKTOP-1LAPJMP transfer native=0 listcount=0 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+RGATE_DONE DESKTOP-1LAPJMP pane-list native=0 listcount=43 
+RGATE_DONE DESKTOP-1LAPJMP pane native=0 listcount=0 test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 2237 filtered out; finished in 0.28s
+ALL_RUSTA_DONE DESKTOP-1LAPJMP

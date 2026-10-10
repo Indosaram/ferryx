@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scenario": "split-attach-stall",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-attach-stall",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\evidence\\split-attach-stall",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-48b4ed93\\runtime\\split-attach-stall"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "5f1f4f1be536abba5a0379a09745dfc92620ea379316fb9a8a875c4c64afe047",
+  "runId": "qa-run-c4abb519-fd00-403c-a49d-3e3825397411",
+  "operationId": "qa-op-67004b99-738d-470a-8ede-5074417ce0d5",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "PANE_AFFORDANCE_NOT_FOUND",
+    "message": "PANE_AFFORDANCE_NOT_FOUND: the \"New Terminal\" affordance could not be identified by its exact accessible name: {\"selectorNames\":[\"New Terminal\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"windowsSearched\":[{\"hwnd\":15534588,\"title\":\"Ferryx\",\"className\":\"Tauri Window\",\"rootOffscreen\":false},{\"hwnd\":18483864,\"title\":\"\",\"className\":\"Tao Thread Event Target\",\"rootOffscreen\":false}],\"windowsSearchedCount\":2,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": [
+    {
+      "name": "attach-handshake",
+      "armedAt": "2026-10-04T18:14:23.320Z",
+      "heldAt": null,
+      "releasedAt": null,
+      "receiptCount": 0,
+      "plan": "split-attach-stall"
+    }
+  ]
+}

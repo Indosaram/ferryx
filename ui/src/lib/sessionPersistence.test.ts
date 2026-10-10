@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { localSplitIntent, type LocalSplitSession } from "./localSplitLifecycle";
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
-import type { WorkspaceState } from "../state/workspaceStore";
+import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
 import { saveBrowserSettings } from "./browserSettings";
 import { resetSessionLifecycleForTests, restoreSessionRecentScrollback } from "./sessionLifecycle";
 import {
@@ -10,6 +11,22 @@ import {
   sessionPersistenceKey,
   WORKSPACE_SESSION_VERSION,
 } from "./sessionPersistence";
+
+// Use a browser storage fixture rather than the execution host's storage implementation.
+beforeEach(() => {
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => { values.delete(key); },
+    setItem: (key, value) => { values.set(key, String(value)); },
+  };
+  vi.spyOn(window, "localStorage", "get").mockReturnValue(storage);
+  saveBrowserSettings({ restoreTabsOnLaunch: true });
+});
+afterEach(() => { vi.restoreAllMocks(); });
 
 function workspaceState(): WorkspaceState {
   return {
@@ -95,6 +112,105 @@ function workspaceState(): WorkspaceState {
 }
 
 describe("sessionPersistence v3 serialization and migration", () => {
+  it("round trips all seven durable native binding fields", () => {
+    const state = workspaceState();
+    const attachTuple = {
+      backendSessionId: "backend-1", incarnation: "life", daemonEpoch: "7",
+      frontendSessionId: "sess-1", paneIdentity: "sess-1", bindingKey: "backend-1:7:0:", attemptGeneration: 2,
+    };
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], daemonEpoch: "7", incarnation: "life", attachTuple };
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1"]);
+    expect(restored?.sessions["sess-1"].attachTuple).toEqual(attachTuple);
+  });
+  it("accepts a handover epoch only with the same authoritative incarnation", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], daemonEpoch: "7", incarnation: "life", lastOutputSequence: "45" };
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, {
+      authoritative: true, daemonEpoch: "8",
+      sessions: [{ sessionId: "backend-1", daemonEpoch: "8", incarnation: "life", running: true }],
+    });
+    expect(restored?.sessions["sess-1"]).toMatchObject({ backendSessionId: "backend-1", daemonEpoch: "8", lastOutputSequence: null });
+  });
+
+  it("keeps unknown predecessor identity recoverable rather than dead", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"].daemonEpoch = "7";
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, { authoritative: true, daemonEpoch: "8", sessions: [] });
+    expect(restored?.sessions["sess-1"]).toMatchObject({ backendSessionId: "backend-1", daemonEpoch: "7", lifecycle: "working", remoteConnectionState: "reconnecting" });
+  });
+
+  it("stale restoration cannot overwrite the current backend binding", () => {
+    const state = workspaceState();
+    const stale = workspaceState();
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], backendSessionId: "new", incarnation: "new-life" };
+    const restored = workspaceReducer(state, { type: "RESTORE_WORKSPACE", state: stale });
+    expect(restored.sessions["sess-1"].backendSessionId).toBe("new");
+    expect(restored.sessions["sess-1"].incarnation).toBe("new-life");
+  });
+  it("restores a successfully presented split through normal live-session restoration", () => {
+    const state = workspaceState();
+    const ready: LocalSplitSession = {
+      ...state.sessions["sess-1"],
+      spawnIntent: {
+        requestId: "ready",
+        prepared: null,
+        generation: 1,
+        createSent: true,
+        cancelRequested: false,
+        ready: true,
+      },
+    };
+    state.sessions[ready.id] = ready;
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1", "backend-2", "backend-3"]);
+    expect(restored?.sessions[ready.id].backendSessionId).toBe("backend-1");
+    expect(restored?.sessions[ready.id].reconnectLifecycle).toBe("idle");
+    expect(restored && localSplitIntent(restored.sessions[ready.id])).toBeUndefined();
+  });
+
+  it.each([false, true])("round trips hidden prepared intent with cancellation %s and save key", (cancelRequested) => {
+    const state = workspaceState();
+    const before = sessionPersistenceKey(state.sessions);
+    const hidden: LocalSplitSession = {
+      ...state.sessions["sess-1"],
+      id: "hidden",
+      backendSessionId: null,
+      spawnIntent: {
+        requestId: "request",
+        prepared: {
+          identity: { requestId: "request", originEpoch: "7", expiresAtUnixMs: 600_000 },
+          workspaceId: "default",
+          worktree: null,
+          cwd: "/workspace/main",
+          shell: "/bin/sh",
+          cols: 80,
+          rows: 24,
+        },
+        generation: 3,
+        createSent: true,
+        cancelRequested,
+      },
+    };
+    state.sessions.hidden = hidden;
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, []);
+    expect(restored).not.toBeNull();
+    expect(restored && localSplitIntent(restored.sessions.hidden)).toEqual(hidden.spawnIntent);
+    expect(JSON.stringify(restored?.layout)).not.toContain("hidden");
+    expect(sessionPersistenceKey(state.sessions)).not.toBe(before);
+  });
+
+  it("persists and restores incarnation across save and deserialize", () => {
+    const state = workspaceState();
+    (state.sessions["sess-1"] as any).incarnation = "incarnation-uuid-1234";
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    expect(saved.workspaces.default.terminalSessions["sess-1"].incarnation).toBe("incarnation-uuid-1234");
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1"]);
+    expect((restored?.sessions["sess-1"] as any).incarnation).toBe("incarnation-uuid-1234");
+  });
   it("persists recent scrollback captured for hibernated sessions across restore/resave", () => {
     restoreSessionRecentScrollback("sess-1", "recent terminal history");
     const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
@@ -130,6 +246,25 @@ describe("sessionPersistence v3 serialization and migration", () => {
     const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
     const restored = deserializeWorkspaceState("default", saved, { complete: false, sessions: [] })!;
     expect(restored.sessions["sess-1"].backendSessionId).toBe("backend-1");
+  });
+
+  it("a persisted session missing from a non-authoritative live map keeps its backendSessionId and does NOT become 'exited'", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+
+    // Non-authoritative container query
+    const nonAuthContainer = { authoritative: false, sessions: [] };
+    const restoredFromContainer = deserializeWorkspaceState("default", saved, nonAuthContainer)!;
+    expect(restoredFromContainer.sessions["sess-1"].backendSessionId).toBe("backend-1");
+    expect(restoredFromContainer.sessions["sess-1"].lifecycle).not.toBe("exited");
+    expect(restoredFromContainer.sessions["sess-1"].remoteConnectionState).toBe("reconnecting");
+
+    // Non-authoritative Map instance
+    const liveMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
+    (liveMap as any).authoritative = false;
+    const restoredFromMap = deserializeWorkspaceState("default", saved, liveMap)!;
+    expect(restoredFromMap.sessions["sess-1"].backendSessionId).toBe("backend-1");
+    expect(restoredFromMap.sessions["sess-1"].lifecycle).not.toBe("exited");
+    expect(restoredFromMap.sessions["sess-1"].remoteConnectionState).toBe("reconnecting");
   });
 
   it("quarantines an invalid paired workspace without affecting another row", () => {
@@ -888,13 +1023,14 @@ describe("sessionPersistence v3 serialization and migration", () => {
       ...state.sessions["sess-1"],
       daemonEpoch: "epoch-OLD",
       lastOutputSequence: "500",
+      incarnation: "old-pty",
     };
 
     const serialized = serializeWorkspaceState("default", "/workspace/main", state);
 
     // Live daemon restarted with epoch-NEW, even though backend-1 ID appears in live list
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-pty" },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);
@@ -1148,6 +1284,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
       ...state.sessions["sess-1"],
       daemonEpoch: "epoch-OLD",
       lastOutputSequence: "500",
+      incarnation: "old-agent-pty",
       agentType: "claude",
       agentSessionId: "claude-session-uuid-9999",
     };
@@ -1156,7 +1293,7 @@ describe("sessionPersistence v3 serialization and migration", () => {
 
     // Live daemon has a new epoch, causing an epoch mismatch for backend-1
     const liveSessions = [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-agent-pty" },
     ];
 
     const restored = deserializeWorkspaceState("default", serialized, liveSessions);

@@ -1,0 +1,37 @@
+$ tsc && vite build
+fatal: Needed a single revision
+[36mvite v6.4.3 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 2229 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                                 [39m[1m[2m  3.39 kB[22m[1m[22m[2m │ gzip:   1.22 kB[22m
+[2mdist/[22m[32massets/crush-DHElXcRZ.png                  [39m[1m[2m  5.46 kB[22m[1m[22m
+[2mdist/[22m[32massets/droid-BhrKLgQ8.svg                  [39m[1m[2m  6.30 kB[22m[1m[22m[2m │ gzip:   2.88 kB[22m
+[2mdist/[22m[32massets/antigravity-DgAQAdn3.svg            [39m[1m[2m  7.63 kB[22m[1m[22m[2m │ gzip:   1.72 kB[22m
+[2mdist/[22m[32massets/gjc-CmlXGg4z.png                    [39m[1m[2m 22.73 kB[22m[1m[22m
+[2mdist/[22m[32massets/geist-variable-CrgPqtmy.woff2       [39m[1m[2m 69.44 kB[22m[1m[22m
+[2mdist/[22m[32massets/ferryx-icon-OXRkkUvz.png            [39m[1m[2m805.82 kB[22m[1m[22m
+[2mdist/[22m[35massets/App-V8Wj_Bb0.css                    [39m[1m[2m  0.59 kB[22m[1m[22m[2m │ gzip:   0.31 kB[22m
+[2mdist/[22m[35massets/index-DC4Y-Gu7.css                  [39m[1m[2m110.10 kB[22m[1m[22m[2m │ gzip:  19.09 kB[22m
+[2mdist/[22m[36massets/arrow-up-CEz5KcKk.js                [39m[1m[2m  0.91 kB[22m[1m[22m[2m │ gzip:   0.37 kB[22m
+[2mdist/[22m[36massets/WhatsNewDialog-B5gvAoqS.js          [39m[1m[2m  2.77 kB[22m[1m[22m[2m │ gzip:   1.12 kB[22m
+[2mdist/[22m[36massets/AccountSignIn-BleRvd7p.js           [39m[1m[2m  7.20 kB[22m[1m[22m[2m │ gzip:   2.71 kB[22m
+[2mdist/[22m[36massets/pairedHostInventory-DREJhVy3.js     [39m[1m[2m 14.40 kB[22m[1m[22m[2m │ gzip:   4.96 kB[22m
+[2mdist/[22m[36massets/browserProtocol-C3Z3Psyc.js         [39m[1m[2m 16.25 kB[22m[1m[22m[2m │ gzip:   4.08 kB[22m
+[2mdist/[22m[36massets/RemoteTerminal-BhmcVOkZ.js          [39m[1m[2m 29.53 kB[22m[1m[22m[2m │ gzip:  10.41 kB[22m
+[2mdist/[22m[36massets/WelcomeWizard-DuCVmb-b.js           [39m[1m[2m 32.62 kB[22m[1m[22m[2m │ gzip:   9.57 kB[22m
+[2mdist/[22m[36massets/MobileChatWorkspace-BycYEKwg.js     [39m[1m[2m 35.20 kB[22m[1m[22m[2m │ gzip:   9.71 kB[22m
+[2mdist/[22m[36massets/RemoteBrowserWorkspace-BAYUAw4b.js  [39m[1m[2m 46.30 kB[22m[1m[22m[2m │ gzip:  13.09 kB[22m
+[2mdist/[22m[36massets/index-CS_-DzUn.js                   [39m[1m[2m160.40 kB[22m[1m[22m[2m │ gzip:  48.66 kB[22m
+[2mdist/[22m[36massets/index-DqwO2Rax.js                   [39m[1m[2m202.41 kB[22m[1m[22m[2m │ gzip:  64.26 kB[22m
+[2mdist/[22m[36massets/SettingsDialog-CP_0ofYI.js          [39m[1m[2m243.61 kB[22m[1m[22m[2m │ gzip:  69.27 kB[22m
+[2mdist/[22m[36massets/RemoteApp-_Nsx49If.js               [39m[1m[2m244.74 kB[22m[1m[22m[2m │ gzip:  77.93 kB[22m
+[2mdist/[22m[36massets/App-BtQ8uNMt.js                     [39m[1m[33m917.37 kB[39m[22m[2m │ gzip: 266.27 kB[22m
+[33m
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 5.78s[39m
+NATIVE_EXIT=0

@@ -1,0 +1,107 @@
+﻿{
+    "tag":  "c3",
+    "startedAt":  "2026-10-05T04:39:47.4967843+09:00",
+    "stagedRoot":  "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0",
+    "iso":  "C:\\Users\\sook\\ferryx-pane-completion\\cap12\\c3",
+    "serverPid":  7236,
+    "frontendReady":  true,
+    "appPid":  3120,
+    "ownedWindows":  [
+                         {
+                             "hwnd":  5508114,
+                             "title":  "Ferryx",
+                             "className":  "Tauri Window"
+                         },
+                         {
+                             "hwnd":  43256278,
+                             "title":  "",
+                             "className":  "Tao Thread Event Target"
+                         }
+                     ],
+    "sessionsBefore":  null,
+    "treeBefore":  [
+                       {
+                           "hwnd":  5508114,
+                           "title":  "Ferryx",
+                           "className":  "Tauri Window",
+                           "total":  16,
+                           "named":  2,
+                           "exactNewTerminal":  0,
+                           "hasDocument":  false,
+                           "tabItems":  [
+
+                                        ],
+                           "errorText":  [
+
+                                         ],
+                           "names":  [
+                                         "ControlType.Pane|Ferryx",
+                                         "ControlType.Pane|Ferryx - 웹 콘텐츠"
+                                     ]
+                       },
+                       {
+                           "hwnd":  43256278,
+                           "title":  "",
+                           "className":  "Tao Thread Event Target",
+                           "total":  0,
+                           "named":  0,
+                           "exactNewTerminal":  0,
+                           "hasDocument":  false,
+                           "tabItems":  [
+
+                                        ],
+                           "errorText":  [
+
+                                         ],
+                           "names":  [
+
+                                     ]
+                       }
+                   ],
+    "invoke":  {
+                   "attempted":  false
+               },
+    "sessionsAfter":  [
+
+                      ],
+    "treeAfter":  [
+                      {
+                          "hwnd":  5508114,
+                          "title":  "Ferryx",
+                          "className":  "Tauri Window",
+                          "total":  17,
+                          "named":  3,
+                          "exactNewTerminal":  0,
+                          "hasDocument":  true,
+                          "tabItems":  [
+
+                                       ],
+                          "errorText":  [
+
+                                        ],
+                          "names":  [
+                                        "ControlType.Pane|Ferryx",
+                                        "ControlType.Pane|Ferryx - 웹 콘텐츠",
+                                        "ControlType.Document|Ferryx"
+                                    ]
+                      },
+                      {
+                          "hwnd":  43256278,
+                          "title":  "",
+                          "className":  "Tao Thread Event Target",
+                          "total":  0,
+                          "named":  0,
+                          "exactNewTerminal":  0,
+                          "hasDocument":  false,
+                          "tabItems":  [
+
+                                       ],
+                          "errorText":  [
+
+                                        ],
+                          "names":  [
+
+                                    ]
+                      }
+                  ]
+}

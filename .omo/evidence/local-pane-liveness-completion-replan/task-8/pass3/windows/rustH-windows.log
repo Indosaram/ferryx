@@ -1,0 +1,19 @@
+
+HOST=DESKTOP-1LAPJMP HEAD=39e722ce START=2026-10-04T10:16:17.5678259Z
+SECTION step1-compile
+GATE windows all-targets native=0 selected=0 errors=0 | 
+SECTION step2-surface-host-x4
+GATE windows sh-bounds_ipc_presents_when_browser_child_is_open native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2281 filtered out; finished in 0.09s
+GATE windows sh-deferred_bounds_retry_does_not_restore_obsolete_width native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2281 filtered out; finished in 0.12s
+GATE windows sh-synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2281 filtered out; finished in 0.09s
+GATE windows sh-synchronized_output_bounds_ipc_waits_for_actual_presentation native=0 selected=0 errors=0 | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2281 filtered out; finished in 0.10s
+GATE windows pane-list native=0 selected=43 errors=0 | 
+GATE windows pane native=0 selected=0 errors=0 | test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.13s
+SECTION step4-reruns
+GATE windows split-list native=0 selected=14 errors=0 | 
+GATE windows split native=0 selected=0 errors=0 | test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 0.13s
+GATE windows xfer-list native=0 selected=0 errors=0 | 
+GATE windows xfer native=0 selected=0 errors=0 | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+GATE windows hardening native=0 selected=0 errors=0 | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+GATE windows journal native=0 selected=0 errors=0 | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 2275 filtered out; finished in 0.10s
+RUSTH_DONE windows

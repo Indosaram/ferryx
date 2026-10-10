@@ -1,0 +1,62 @@
+﻿{
+    "session":  1,
+    "serverUp":  true,
+    "appPid":  17192,
+    "t12":  {
+                "tag":  "t+12s (first query = the attach)",
+                "totalElements":  16,
+                "namedCount":  2,
+                "hasNewTerminal":  false,
+                "hasSplitPaneRight":  false,
+                "sample":  [
+                               "Ferryx",
+                               "Ferryx - 웹 콘텐츠"
+                           ]
+            },
+    "t18":  {
+                "tag":  "t+18s (second query after the attach)",
+                "totalElements":  93,
+                "namedCount":  56,
+                "hasNewTerminal":  true,
+                "hasSplitPaneRight":  false,
+                "sample":  [
+                               "Ferryx",
+                               "Ferryx - 웹 콘텐츠",
+                               "Ferryx",
+                               "Notifications alt+T",
+                               "Ferryx for Windows is moving to the Microsoft StoreThis installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.Got it",
+                               "Close toast",
+                               "Ferryx for Windows is moving to the Microsoft Store",
+                               "This installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.",
+                               "Got it",
+                               "Dismiss all notifications",
+                               "Hide sidebar",
+                               "Add project",
+                               "Inbox",
+                               "Expand Strawberry"
+                           ]
+            },
+    "t26":  {
+                "tag":  "t+26s (third query)",
+                "totalElements":  93,
+                "namedCount":  56,
+                "hasNewTerminal":  true,
+                "hasSplitPaneRight":  false,
+                "sample":  [
+                               "Ferryx",
+                               "Ferryx - 웹 콘텐츠",
+                               "Ferryx",
+                               "Notifications alt+T",
+                               "Ferryx for Windows is moving to the Microsoft StoreThis installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.Got it",
+                               "Close toast",
+                               "Ferryx for Windows is moving to the Microsoft Store",
+                               "This installer will stop receiving updates. Once the Store version is published, reinstall Ferryx from the Microsoft Store to get automatic updates again.",
+                               "Got it",
+                               "Dismiss all notifications",
+                               "Hide sidebar",
+                               "Add project",
+                               "Inbox",
+                               "Expand Strawberry"
+                           ]
+            }
+}

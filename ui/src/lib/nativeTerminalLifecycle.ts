@@ -1,4 +1,35 @@
 import { switchDebug } from "./switchDebug";
+import type { PaneAttachTuple } from "./types";
+import { createAttemptBudget, matchesAttachTuple, type AttemptBudget } from "./localSplitContract";
+
+const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget | null }>();
+
+export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs = performance.now(), expectedPrevious?: PaneAttachTuple): boolean {
+  const current = durableBindings.get(tuple.backendSessionId);
+  if (expectedPrevious && (!current || !matchesAttachTuple(current.tuple, expectedPrevious) ||
+      tuple.frontendSessionId !== current.tuple.frontendSessionId ||
+      tuple.paneIdentity !== current.tuple.paneIdentity ||
+      tuple.attemptGeneration <= current.tuple.attemptGeneration)) return false;
+  if (current && matchesAttachTuple(current.tuple, tuple)) return true;
+  if (current && !expectedPrevious && (!matchesAttachTuple(
+    { ...current.tuple, attemptGeneration: tuple.attemptGeneration }, tuple,
+  ) || tuple.attemptGeneration <= current.tuple.attemptGeneration)) return false;
+  durableBindings.set(tuple.backendSessionId, { tuple: { ...tuple }, budget: createAttemptBudget(startTimeMs) });
+  return true;
+}
+
+export function getDurableNativeBinding(sessionId: string): PaneAttachTuple | undefined {
+  const binding = durableBindings.get(sessionId);
+  return binding ? { ...binding.tuple } : undefined;
+}
+
+export function nativeBindingRemainingMs(sessionId: string, stageCapMs: number): number {
+  const binding = durableBindings.get(sessionId);
+  if (!binding) return 0;
+  // A presented binding uses a fresh bounded deadline per operation, not the
+  // completed startup deadline. Unready bindings retain their original budget.
+  return binding.budget === null ? Math.max(0, stageCapMs) : binding.budget.stageBudget(stageCapMs);
+}
 
 type NativeTerminalLifecycleOperation<T> = () => Promise<T>;
 
@@ -304,6 +335,8 @@ export type NativeTerminalPresentationReceipt = {
   readonly backendSessionId: string;
   readonly bindingKey: string | null;
   readonly attemptGeneration: number;
+  readonly incarnation?: string | null;
+  readonly daemonEpoch?: string;
 };
 
 /**
@@ -318,6 +351,8 @@ export type NativeTerminalPresentationSubscription = {
   readonly backendSessionId?: string;
   readonly bindingKey?: string | null;
   readonly attemptGeneration?: number;
+  readonly incarnation?: string | null;
+  readonly daemonEpoch?: string;
 };
 
 type NativeTerminalPresentationListener = (
@@ -336,6 +371,8 @@ function presentationMatches(
   subscription: NativeTerminalPresentationSubscription,
   receipt: NativeTerminalPresentationReceipt,
 ): boolean {
+  if (subscription.incarnation !== undefined && subscription.incarnation !== receipt.incarnation) return false;
+  if (subscription.daemonEpoch !== undefined && subscription.daemonEpoch !== receipt.daemonEpoch) return false;
   if (
     subscription.frontendSessionId !== undefined &&
     subscription.frontendSessionId !== receipt.frontendSessionId
@@ -399,8 +436,19 @@ export function subscribeNativeTerminalPresentation(
 export function emitNativeTerminalPresentation(
   receipt: NativeTerminalPresentationReceipt,
 ): number {
+  const binding = durableBindings.get(receipt.backendSessionId);
+  if (binding?.budget && !binding.budget.isExpired() &&
+      receipt.bindingKey !== null && receipt.daemonEpoch !== undefined &&
+      matchesAttachTuple(binding.tuple, {
+        ...receipt, bindingKey: receipt.bindingKey, daemonEpoch: receipt.daemonEpoch,
+      })) {
+    // Only the exact current tuple's accepted presentation completes startup.
+    // A late receipt cannot revive an expired attempt.
+    binding.budget = null;
+  }
   let delivered = 0;
-  for (const [subscriptionId, record] of presentationSubscriptions) {
+  for (const [subscriptionId, record] of [...presentationSubscriptions]) {
+    if (presentationSubscriptions.get(subscriptionId) !== record) continue;
     if (!presentationMatches(record.subscription, receipt)) continue;
     delivered += 1;
     try {
@@ -482,6 +530,7 @@ function enqueueNativeTerminalLifecycle<T>(
 }
 
 export function resetNativeTerminalLifecycleForTest(): void {
+  durableBindings.clear();
   lifecycleTails.clear();
   attachedSessionIds.clear();
   attachments.clear();

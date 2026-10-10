@@ -1,0 +1,109 @@
+$ vitest run --maxWorkers=1 src/remote/accountSessionFollowups.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039232) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/accountSessionFollowups.test.ts (14 tests | 14 failed) 10ms
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > sends POST /api/account/v1/logout with Bearer token and resolves cleanly on 204 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when the server responds with 500 or 401 (best-effort) 1ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when network fetch rejects (best-effort) 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > does nothing if token or origin is empty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping GRANT_FAILED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ALLOCATE_SESSION_FAILED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ENROLLMENT_CODE_FAILED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > stores, retrieves, and clears last selected target under ferryx.account.last_target key 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearAccountLastSelectedTarget removes last_target keys globally or per relayUrl 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > rejects corrupted or non-string object types in storage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearStoredAccountSessionToken removes last_target keys 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 14 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > sends POST /api/account/v1/logout with Bearer token and resolves cleanly on 204
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when the server responds with 500 or 401 (best-effort)
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when network fetch rejects (best-effort)
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > does nothing if token or origin is empty
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping GRANT_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ALLOCATE_SESSION_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ENROLLMENT_CODE_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > stores, retrieves, and clears last selected target under ferryx.account.last_target key
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearAccountLastSelectedTarget removes last_target keys globally or per relayUrl
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > rejects corrupted or non-string object types in storage
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearStoredAccountSessionToken removes last_target keys
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/accountSessionFollowups.test.ts:22:18
+     20| 
+     21|   beforeEach(() => {
+     22|     localStorage.clear();
+       |                  ^
+     23|     sessionStorage.clear();
+     24|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/28]⎯
+
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > sends POST /api/account/v1/logout with Bearer token and resolves cleanly on 204
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when the server responds with 500 or 401 (best-effort)
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > never throws when network fetch rejects (best-effort)
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item A: Server-side sign-out (logoutAccountSession) > does nothing if token or origin is empty
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping GRANT_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > requestGrant: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ALLOCATE_SESSION_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > allocateSession: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ENROLLMENT_CODE_FAILED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item B: Consistent auth classification across grant, allocate, enrollment > issueEnrollmentCode: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > stores, retrieves, and clears last selected target under ferryx.account.last_target key
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearAccountLastSelectedTarget removes last_target keys globally or per relayUrl
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > rejects corrupted or non-string object types in storage
+ FAIL  src/remote/accountSessionFollowups.test.ts > Account Follow-ups: Sign-out, Auth Classification, and Last Target Persistence > Item C: Last selected worktree target storage and clearing > clearStoredAccountSessionToken removes last_target keys
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/accountSessionFollowups.test.ts:29:18
+     27|   afterEach(() => {
+     28|     globalThis.fetch = originalFetch;
+     29|     localStorage.clear();
+       |                  ^
+     30|     sessionStorage.clear();
+     31|     vi.restoreAllMocks();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/28]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  14 failed (14)
+   Start at  10:10:04
+   Duration  677ms (transform 160ms, setup 99ms, collect 143ms, tests 10ms, environment 233ms, prepare 61ms)
+
+error: script "test" exited with code 1

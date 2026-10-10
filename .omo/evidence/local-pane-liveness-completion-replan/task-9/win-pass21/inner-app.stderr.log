@@ -1,0 +1,3 @@
+[cmd_terminal_spawn] request received has_worktree=false has_cwd=true has_client_request_id=true
+
+[app-stdio closed: stderr drained 97 bytes, not truncated; this file is complete]

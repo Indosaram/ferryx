@@ -1,0 +1,123 @@
+$ vitest run --maxWorkers=1 src/components/SettingsDialog.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1035956) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/SettingsDialog.test.tsx (28 tests | 28 failed) 12ms
+   × SettingsDialog > is a full-view original-Orca-style nav/detail surface 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > persists confirm before closing a tab checkbox in General settings 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > moves the Ferryx CLI launcher card into the General section 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > hides the POSIX CLI instructions when the launcher is unsupported on this platform 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > keeps the POSIX CLI instructions when the launcher is supported 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > persists the show-sidebar-on-startup toggle 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > fetches Ghostty preferences and shows the effective terminal value/source 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > persists explicit local terminal overrides above Ghostty 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > labels a font-size-only override as a local override and clears it with Use imported 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > shows the registered shortcuts in the dedicated Keyboard Shortcuts section 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Notifications section and displays toggles, permission status, volume slider, and test button 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > toggles Enable Notifications and updates state and localStorage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > triggers probeNotificationDelivery when clicking Send Test Notification 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > picks custom sound and triggers pickNotificationAudio 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > keeps General free of the duplicate appearance summary 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Appearance section, renders controls, and persists changes to localStorage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Browser section, changes search engine and zoom, and persists to localStorage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Remote Access section, renders paired devices, and revokes device on confirmation 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Browser section and applies zoom to active browsers using setBrowserZoom 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > navigates to Agents section, displays detected agents, configures default agent and overrides 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > persists Appearance through the appearanceSettings API across remount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > describes Default Agent as first in the New Tab list with a Default label, not auto-launch 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > does not expose Quick Commands navigation or section 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > does not offer a Workspace section, which the sidebar already owns 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > renders a non-empty General overview that does not duplicate Appearance controls 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > F-settings-03: deferred hooks when closed > does not invoke useTerminalSettings or register listeners when open=false 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog > F-settings-03: deferred hooks when closed > source structure gates useTerminalSettings behind open check via inner component 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 28 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > is a full-view original-Orca-style nav/detail surface
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > persists confirm before closing a tab checkbox in General settings
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > moves the Ferryx CLI launcher card into the General section
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > hides the POSIX CLI instructions when the launcher is unsupported on this platform
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > keeps the POSIX CLI instructions when the launcher is supported
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > persists the show-sidebar-on-startup toggle
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > fetches Ghostty preferences and shows the effective terminal value/source
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > persists explicit local terminal overrides above Ghostty
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > labels a font-size-only override as a local override and clears it with Use imported
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > shows the registered shortcuts in the dedicated Keyboard Shortcuts section
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Notifications section and displays toggles, permission status, volume slider, and test button
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > toggles Enable Notifications and updates state and localStorage
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > triggers probeNotificationDelivery when clicking Send Test Notification
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > picks custom sound and triggers pickNotificationAudio
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > keeps General free of the duplicate appearance summary
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Appearance section, renders controls, and persists changes to localStorage
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Browser section, changes search engine and zoom, and persists to localStorage
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Remote Access section, renders paired devices, and revokes device on confirmation
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Browser section and applies zoom to active browsers using setBrowserZoom
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Agents section, displays detected agents, configures default agent and overrides
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > persists Appearance through the appearanceSettings API across remount
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > describes Default Agent as first in the New Tab list with a Default label, not auto-launch
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > does not expose Quick Commands navigation or section
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > does not offer a Workspace section, which the sidebar already owns
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > renders a non-empty General overview that does not duplicate Appearance controls
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/SettingsDialog.test.tsx:85:16
+     83| afterEach(cleanup);
+     84| beforeEach(() => {
+     85|   localStorage.clear();
+       |                ^
+     86|   resetTerminalPreferencesCache();
+     87|   native.getTerminalPreferences.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/28]⎯
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > F-settings-03: deferred hooks when closed > does not invoke useTerminalSettings or register listeners when open=false
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > F-settings-03: deferred hooks when closed > source structure gates useTerminalSettings behind open check via inner component
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/SettingsDialog.test.tsx:85:16
+     83| afterEach(cleanup);
+     84| beforeEach(() => {
+     85|   localStorage.clear();
+       |                ^
+     86|   resetTerminalPreferencesCache();
+     87|   native.getTerminalPreferences.mockReset();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/28]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  28 failed (28)
+   Start at  10:09:10
+   Duration  1.54s (transform 488ms, setup 104ms, collect 1.04s, tests 12ms, environment 220ms, prepare 46ms)
+
+error: script "test" exited with code 1

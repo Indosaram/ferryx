@@ -1,0 +1,4 @@
+# Scripts lane reopened
+Linux and Windows exact runners each selected26, native1, 5failed21passed. Verbatim linux-runner.log and windows-final-logs/runner.log; immediate Windows NATIVE_EXIT=1 captured.
+Digest case: ENOENT open scripts/qa/pane-liveness.mjs (cwd remains ui despite config root).
+Four adapter unit tests set platformPreflight=mock, but adapters dispatch every non-win32 value to real Darwin driver; Linux/Windows spawn osascript ENOENT. On Mac this calls focusWindowByPidDarwin and clickSplitRightDarwin with fake PIDs1234/5678/9999. Dispatch prohibits GUI, so exact Mac runner gate NOT_RUN with concrete reason; no filter relaxed or test edited. Owned Mac orchestration parent PID99011 stopped after identity check before gate; its build child exited before safe serial resume. Mac UI build and scoped tests subsequently passed; all10 Mac Rust attempts finished101. Mac full UI remains active.

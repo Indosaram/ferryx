@@ -1,0 +1,4 @@
+# Immutable base transfer recovery
+Mac and Linux compressed retries completed exit0. Local, Mac, Linux baseline archive SHA256 all68d23aa96cabc1e9b90c788b16d188aaf5696015aecef76578abd80f90311ae6 (mon_5JFDAQ20Z8HA5T7B exit0).
+Windows compressed retry completed exit0 (mon_AMRAG6Z6AS7ZTQZY). Baseline tests still not started. Candidate-exit archive subscriptions armed for all3: mon_HF9KV2EP736J99JH Mac, mon_0HH72K46EXGHM4MB Linux, mon_7JHADB69X6VMYJY8 Windows.
+Initial three base archive transfers timed out at120seconds (mon_H4Y5EZ8CVAEKBD8S, mon_SJW6F3JB6VMKGHPD, mon_RH6QH1K94QMCXPP6), native monitor exit1. No base extraction/test began. Local archive211107840bytes; Linux partial132MiB confirmed. Retry uses scp -C with600000ms monitors mon_T90H5Y2TS861DSF4, mon_9QJTN26R80KYFJ41, mon_AMRAG6Z6AS7ZTQZY. Final successful transfer receipts remain pending.

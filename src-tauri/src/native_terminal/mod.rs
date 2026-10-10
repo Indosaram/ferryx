@@ -38,6 +38,7 @@ mod scroll;
 mod search;
 mod selection;
 mod snapshot;
+pub mod snapshot_codec;
 #[cfg(feature = "native-terminal")]
 pub mod snapshot_slot;
 #[cfg(feature = "native-terminal")]
@@ -80,6 +81,13 @@ pub use scroll::{
     ATTENTION_FRAME_THICKNESS_LOGICAL_PX, ATTENTION_HALO_COLOR,
 };
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
+pub use snapshot_codec::{
+    decode_terminal_snapshot, encode_terminal_snapshot, encode_terminal_snapshot_buf,
+    encode_terminal_snapshot_to_writer, validate_snapshot_bounds, validate_snapshot_envelope,
+    DecodedTerminal, IncrementalSnapshotDecoder, SnapshotCodecOptions,
+    DEFAULT_MAX_SNAPSHOT_WIRE_BYTES, KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED, SNAPSHOT_MAGIC,
+    SNAPSHOT_VERSION_CURRENT,
+};
 pub use terminal::NativeTerminal;
 pub use viewport::{ScrollViewport, ScrollbarState};
 #[cfg(feature = "native-terminal")]

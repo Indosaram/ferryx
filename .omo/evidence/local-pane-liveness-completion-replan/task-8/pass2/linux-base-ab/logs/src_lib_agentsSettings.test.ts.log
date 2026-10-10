@@ -1,0 +1,67 @@
+$ vitest run --maxWorkers=1 src/lib/agentsSettings.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1039418) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/agentsSettings.test.ts (13 tests | 13 failed) 7ms
+   × agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > returns default settings when storage is empty 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > loads and saves settings accurately with localStorage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > falls back safely on corrupted or invalid JSON in storage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > dispatches AGENTS_SETTINGS_CHANGED_EVENT on save 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > mergeDetections > defaults enabled to available when no overrides are set 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > mergeDetections > applies command, args, and enabled overrides correctly 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > mergeDetections > resolves registered custom agents alongside built-in candidates 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > custom agent registration > normalizes names to a lowercase dashed slug 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > custom agent registration > rejects empty, reserved, and duplicate names 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > custom agent registration > adds, renames, and removes custom agents while carrying state 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > custom agent registration > drops reserved, malformed, and duplicate custom entries when loading 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > custom agent registration > builds detection targets from resolved commands including custom agents 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × agentsSettings persistence and pure helpers > getLaunchableAgents > returns only agents that are both enabled AND available 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > returns default settings when storage is empty
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > loads and saves settings accurately with localStorage
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > falls back safely on corrupted or invalid JSON in storage
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > loadAgentSettings and saveAgentSettings > dispatches AGENTS_SETTINGS_CHANGED_EVENT on save
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > mergeDetections > defaults enabled to available when no overrides are set
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > mergeDetections > applies command, args, and enabled overrides correctly
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > mergeDetections > resolves registered custom agents alongside built-in candidates
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > custom agent registration > normalizes names to a lowercase dashed slug
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > custom agent registration > rejects empty, reserved, and duplicate names
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > custom agent registration > adds, renames, and removes custom agents while carrying state
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > custom agent registration > drops reserved, malformed, and duplicate custom entries when loading
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > custom agent registration > builds detection targets from resolved commands including custom agents
+ FAIL  src/lib/agentsSettings.test.ts > agentsSettings persistence and pure helpers > getLaunchableAgents > returns only agents that are both enabled AND available
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/lib/agentsSettings.test.ts:22:18
+     20| describe("agentsSettings persistence and pure helpers", () => {
+     21|   beforeEach(() => {
+     22|     localStorage.clear();
+       |                  ^
+     23|   });
+     24| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/13]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed (13)
+   Start at  10:10:06
+   Duration  678ms (transform 58ms, setup 111ms, collect 17ms, tests 7ms, environment 235ms, prepare 44ms)
+
+error: script "test" exited with code 1

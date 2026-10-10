@@ -1,0 +1,479 @@
+   Compiling unicode-ident v1.0.24
+    Checking cfg-if v1.0.4
+    Checking windows-link v0.2.1
+    Checking log v0.4.33
+   Compiling siphasher v1.0.3
+    Checking serde_core v1.0.229
+    Checking once_cell v1.21.4
+    Checking smallvec v1.15.2
+   Compiling semver v1.0.28
+   Compiling num-conv v0.2.2
+    Checking windows-sys v0.61.2
+   Compiling proc-macro2 v1.0.107
+   Compiling phf_shared v0.13.1
+    Checking getrandom v0.2.17
+   Compiling time-core v0.1.9
+   Compiling memchr v2.8.3
+   Compiling litemap v0.8.3
+   Compiling itoa v1.0.18
+   Compiling writeable v0.6.4
+   Compiling utf8_iter v1.0.4
+   Compiling phf_generator v0.13.1
+   Compiling scopeguard v1.2.0
+    Checking bytes v1.12.1
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_properties_data v2.3.0
+   Compiling quote v1.0.47
+   Compiling phf_codegen v0.13.1
+   Compiling icu_normalizer_data v2.3.0
+   Compiling lock_api v0.4.14
+   Compiling winnow v1.0.4
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling string_cache_codegen v0.6.1
+    Checking pin-project-lite v0.2.17
+   Compiling parking_lot v0.12.5
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling zmij v1.0.23
+   Compiling serde_spanned v1.1.1
+    Checking typenum v1.20.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling web_atoms v0.2.6
+   Compiling serde_json v1.0.151
+   Compiling string_cache v0.9.0
+   Compiling getrandom v0.4.3
+    Checking bitflags v2.13.1
+    Checking generic-array v0.14.7
+   Compiling uuid v1.26.0
+   Compiling selectors v0.36.1
+   Compiling aho-corasick v1.1.5
+    Checking rand_core v0.6.4
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling unic-common v0.9.0
+   Compiling unic-char-range v0.9.0
+   Compiling alloc-no-stdlib v2.0.4
+    Checking subtle v2.6.1
+   Compiling byteorder v1.5.0
+   Compiling regex-syntax v0.8.11
+   Compiling alloc-stdlib v0.2.4
+   Compiling unic-char-property v0.9.0
+   Compiling unic-ucd-version v0.9.0
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling winapi-util v0.1.11
+   Compiling typeid v1.0.3
+    Checking stable_deref_trait v1.2.1
+   Compiling fnv v1.0.7
+   Compiling powerfmt v0.2.0
+   Compiling rustc-hash v2.1.3
+   Compiling equivalent v1.0.2
+   Compiling same-file v1.0.6
+   Compiling cfb v0.7.3
+   Compiling time v0.3.55
+   Compiling indexmap v2.14.0
+   Compiling erased-serde v0.4.10
+   Compiling unic-ucd-ident v0.9.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.23.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling quick-xml v0.41.0
+   Compiling rustc_version v0.4.1
+   Compiling regex-automata v0.4.18
+   Compiling base64 v0.22.1
+   Compiling dunce v1.0.5
+   Compiling brotli v8.0.4
+   Compiling serde-untagged v0.1.9
+   Compiling http v1.5.0
+   Compiling zerovec-derive v0.11.5
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling bytemuck_derive v1.12.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling phf_macros v0.13.1
+   Compiling thiserror-impl v1.0.69
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling thiserror v2.0.20
+   Compiling zeroize_derive v1.5.0
+   Compiling darling_macro v0.23.0
+   Compiling phf v0.13.1
+   Compiling zerofrom v0.1.8
+   Compiling derive_more-impl v2.1.1
+   Compiling cssparser-macros v0.6.1
+   Compiling yoke v0.8.3
+   Compiling thiserror v1.0.69
+   Compiling darling v0.23.0
+    Checking bytemuck v1.25.2
+   Compiling regex v1.13.1
+   Compiling cssparser v0.36.0
+    Checking zeroize v1.9.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling serde_with_macros v3.22.0
+   Compiling schemars_derive v0.8.22
+   Compiling infer v0.19.0
+   Compiling walkdir v2.5.0
+    Checking libc v0.2.189
+    Checking crypto-common v0.1.7
+   Compiling derive_more v2.1.1
+   Compiling markup5ever v0.38.0
+   Compiling serde v1.0.229
+   Compiling ctor v0.8.0
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling anyhow v1.0.104
+   Compiling glob v0.3.4
+   Compiling html5ever v0.38.0
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+    Checking tracing-core v0.1.36
+   Compiling indexmap v1.9.3
+   Compiling cargo-platform v0.1.9
+   Compiling jsonptr v0.6.3
+   Compiling serde_with v3.22.0
+   Compiling plist v1.10.0
+   Compiling cargo_metadata v0.19.2
+    Checking foldhash v0.2.0
+    Checking socket2 v0.6.5
+   Compiling dom_query v0.27.0
+   Compiling icu_provider v2.3.0
+   Compiling json-patch v3.0.1
+   Compiling tracing-attributes v0.1.31
+    Checking windows-link v0.1.3
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+    Checking libm v0.2.16
+    Checking mio v1.2.2
+   Compiling zerocopy-derive v0.8.56
+   Compiling tokio-macros v2.7.2
+   Compiling windows_x86_64_msvc v0.52.6
+    Checking percent-encoding v2.3.2
+   Compiling windows-targets v0.52.6
+    Checking hashbrown v0.17.1
+    Checking raw-window-handle v0.6.2
+    Checking num-traits v0.2.19
+   Compiling idna_adapter v1.2.2
+    Checking tokio v1.53.1
+   Compiling windows-sys v0.59.0
+    Checking windows-result v0.3.4
+   Compiling idna v1.1.0
+    Checking tracing v0.1.44
+    Checking windows-strings v0.4.2
+    Checking rand_core v0.10.1
+    Checking arrayvec v0.7.8
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+    Checking windows-core v0.61.2
+    Checking futures-core v0.3.34
+   Compiling url v2.5.8
+   Compiling option-ext v0.2.0
+   Compiling winnow v0.7.15
+    Checking form_urlencoded v1.2.2
+    Checking zerocopy v0.8.56
+   Compiling dirs-sys v0.5.0
+    Checking lazy_static v1.5.0
+   Compiling heck v0.5.0
+   Compiling urlpattern v0.3.0
+   Compiling schemars v0.8.22
+   Compiling dirs v6.0.0
+    Checking windows-threading v0.1.0
+    Checking rustls-pki-types v1.15.1
+    Checking cpufeatures v0.2.17
+    Checking windows-future v0.2.1
+    Checking windows-collections v0.2.0
+    Checking windows-numerics v0.2.0
+    Checking deranged v0.5.8
+   Compiling time-macros v0.2.32
+    Checking untrusted v0.9.0
+   Compiling tauri-utils v2.9.3
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling winreg v0.55.0
+    Checking ring v0.17.14
+    Checking windows v0.61.3
+    Checking bitflags v1.3.2
+   Compiling embed-resource v3.0.11
+    Checking block-buffer v0.10.4
+   Compiling simd-adler32 v0.3.10
+   Compiling cargo_toml v0.22.3
+    Checking digest v0.10.7
+    Checking getrandom v0.3.4
+   Compiling tauri-winres v0.3.6
+    Checking symphonia-core v0.5.5
+    Checking dpi v0.1.2
+    Checking rustls-webpki v0.103.15
+   Compiling webview2-com-sys v0.38.2
+    Checking windows-result v0.4.1
+    Checking windows-version v0.1.7
+    Checking windows-strings v0.5.1
+    Checking slab v0.4.12
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+    Checking windows-core v0.62.2
+    Checking rustls v0.23.43
+   Compiling crc32fast v1.5.0
+    Checking http-body v1.1.0
+    Checking unicode-segmentation v1.13.3
+    Checking futures-sink v0.3.34
+   Compiling flate2 v1.1.9
+    Checking crossbeam-utils v0.8.22
+   Compiling fdeflate v0.3.7
+   Compiling webview2-com-macros v0.8.1
+   Compiling futures-macro v0.3.34
+    Checking encoding_rs v0.8.35
+    Checking tower-service v0.3.3
+    Checking futures-task v0.3.34
+   Compiling png v0.17.16
+    Checking crossbeam-channel v0.5.16
+   Compiling tauri-plugin v2.6.3
+   Compiling tauri-build v2.6.3
+    Checking symphonia-metadata v0.5.5
+    Checking futures-util v0.3.34
+    Checking cookie v0.18.2
+    Checking httparse v1.10.1
+    Checking block-padding v0.3.3
+    Checking windows-threading v0.2.1
+    Checking mime v0.3.17
+    Checking inout v0.1.4
+   Compiling ico v0.5.0
+   Compiling sha2 v0.10.9
+    Checking windows-future v0.3.2
+    Checking windows-collections v0.3.2
+    Checking windows-numerics v0.3.1
+    Checking ppv-lite86 v0.2.21
+    Checking tower-layer v0.3.3
+    Checking rustc-hash v1.1.0
+    Checking try-lock v0.2.5
+    Checking pxfm v0.1.30
+    Checking windows v0.62.2
+    Checking png v0.18.1
+   Compiling tauri-codegen v2.6.3
+    Checking naga-types v30.0.1
+    Checking want v0.3.1
+    Checking cipher v0.4.4
+    Checking keyboard-types v0.7.0
+    Checking webpki-roots v1.0.9
+    Checking futures-channel v0.3.34
+    Checking sync_wrapper v1.0.2
+    Checking softbuffer v0.4.8
+   Compiling serialize-to-javascript-impl v0.1.2
+    Checking libloading v0.8.9
+    Checking byteorder-lite v0.1.0
+    Checking bit-vec v0.9.1
+    Checking httpdate v1.0.3
+    Checking atomic-waker v1.1.2
+    Checking unicode-width v0.1.14
+    Checking bit-set v0.10.0
+    Checking muda v0.19.3
+    Checking hyper v1.11.0
+    Checking serialize-to-javascript v0.1.2
+    Checking codespan-reporting v0.13.1
+    Checking moxcms v0.8.1
+    Checking windows_x86_64_msvc v0.53.1
+    Checking symphonia-utils-xiph v0.5.5
+    Checking tokio-rustls v0.26.4
+    Checking half v2.7.1
+    Checking rand_core v0.9.5
+    Checking universal-hash v0.5.1
+    Checking window-vibrancy v0.6.0
+   Compiling serde_repr v0.1.21
+    Checking spirv v0.4.0+sdk-1.4.341.0
+    Checking opaque-debug v0.3.1
+    Checking allocator-api2 v0.2.21
+    Checking ipnet v2.12.1
+    Checking static_assertions v1.1.0
+    Checking rand_chacha v0.9.0
+    Checking windows-targets v0.53.5
+    Checking hyper-util v0.1.20
+    Checking hashbrown v0.16.1
+    Checking wgpu-types v30.0.1
+    Checking ash v0.38.0+1.3.281
+    Checking tower v0.5.3
+    Checking http-body-util v0.1.5
+    Checking naga v30.0.1
+   Compiling curve25519-dalek v4.1.3
+    Checking presser v0.3.1
+    Checking rand v0.9.5
+    Checking windows-sys v0.60.2
+    Checking glutin_wgl_sys v0.6.1
+    Checking image v0.25.10
+    Checking khronos-egl v6.0.0
+    Checking ordered-float v4.6.0
+   Compiling curve25519-dalek-derive v0.1.1
+    Checking glow v0.17.0
+    Checking range-alloc v0.1.5
+    Checking cpufeatures v0.3.0
+    Checking renderdoc-sys v1.1.0
+    Checking profiling v1.0.18
+    Checking chacha20 v0.10.1
+    Checking hyper-rustls v0.27.9
+    Checking ahash v0.8.12
+    Checking winapi v0.3.9
+    Checking tower-http v0.6.11
+    Checking polyval v0.6.2
+    Checking tokio-util v0.7.19
+    Checking sha1 v0.10.7
+    Checking num-integer v0.1.47
+    Checking aead v0.5.2
+    Checking extended v0.1.0
+    Checking ryu v1.0.23
+    Checking data-encoding v2.11.1
+   Compiling tauri v2.11.5
+   Compiling tauri-macros v2.6.3
+   Compiling tauri-plugin-fs v2.5.1
+   Compiling tauri-plugin-updater v2.10.1
+   Compiling tauri-plugin-dialog v2.7.2
+   Compiling tauri-plugin-notification v2.3.3
+   Compiling tauri-plugin-process v2.3.1
+    Checking tinyvec_macros v0.1.1
+   Compiling unicase v2.9.0
+    Checking tungstenite v0.29.0
+    Checking serde_urlencoded v0.7.1
+    Checking symphonia-format-riff v0.5.5
+    Checking tinyvec v1.12.0
+    Checking num-bigint v0.4.8
+   Compiling mime_guess v2.0.5
+    Checking ghash v0.5.1
+    Checking hashbrown v0.14.5
+    Checking rand v0.10.2
+    Checking poly1305 v0.8.0
+    Checking symphonia-codec-vorbis v0.5.5
+    Checking symphonia-bundle-flac v0.5.5
+    Checking symphonia-format-ogg v0.5.5
+    Checking symphonia-format-isomp4 v0.5.5
+    Checking webpki-roots v0.26.11
+    Checking chacha20 v0.9.1
+    Checking ctr v0.9.2
+    Checking aes v0.8.4
+    Checking symphonia-bundle-mp3 v0.5.5
+    Checking rustls-platform-verifier v0.7.0
+    Checking symphonia-codec-aac v0.5.5
+    Checking symphonia-codec-pcm v0.5.5
+    Checking wgpu-naga-bridge v30.0.1
+    Checking rand_pcg v0.10.2
+   Compiling snow v0.9.6
+    Checking signature v2.2.0
+    Checking dasp_sample v0.11.0
+    Checking fastrand v2.5.0
+    Checking lru-slab v0.1.2
+    Checking reqwest v0.13.4
+    Checking chacha20poly1305 v0.10.1
+    Checking tokio-tungstenite v0.29.0
+    Checking aes-gcm v0.10.3
+    Checking ed25519 v2.2.3
+    Checking quinn-proto v0.11.17
+    Checking tempfile v3.27.0
+    Checking num-rational v0.4.2
+    Checking symphonia v0.5.5
+    Checking hashlink v0.9.1
+    Checking nix v0.28.0
+    Checking libsqlite3-sys v0.30.1
+    Checking quinn-udp v0.5.15
+    Checking rfd v0.16.0
+    Checking winreg v0.10.1
+    Checking filedescriptor v0.8.3
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri)
+    Checking axum-core v0.5.6
+    Checking rand_chacha v0.3.1
+    Checking zip v4.6.1
+    Checking yasna v0.6.0
+    Checking windows-sys v0.52.0
+    Checking hmac v0.12.1
+    Checking blake2 v0.10.6
+    Checking shared_library v0.1.9
+    Checking sharded-slab v0.1.7
+    Checking tracing-log v0.2.0
+    Checking nu-ansi-term v0.50.3
+    Checking serial2 v0.2.38
+    Checking notify-types v2.1.0
+    Checking serde_path_to_error v0.1.20
+    Checking thread_local v1.1.10
+    Checking shell-words v1.1.1
+    Checking cursor-icon v1.2.0
+    Checking smol_str v0.2.2
+    Checking minisign-verify v0.2.5
+    Checking fallible-iterator v0.3.0
+    Checking downcast-rs v1.2.1
+    Checking fallible-streaming-iterator v0.1.9
+    Checking matchit v0.8.4
+    Checking portable-pty v0.9.0 (C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\vendor\portable-pty)
+    Checking tracing-subscriber v0.3.23
+    Checking rusqlite v0.32.1
+    Checking axum v0.8.9
+    Checking quinn v0.11.11
+    Checking notify v8.2.0
+    Checking rcgen v0.14.10
+    Checking rand v0.8.7
+    Checking pbkdf2 v0.12.2
+    Checking ed25519-dalek v2.2.0
+    Checking reqwest v0.12.28
+    Checking x25519-dalek v2.0.1
+    Checking cbc v0.1.2
+    Checking tower-http v0.7.1
+    Checking base64 v0.23.1
+    Checking pollster v1.0.1
+    Checking tokio-stream v0.1.19
+    Checking winit v0.30.13
+    Checking tokio-test v0.4.5
+    Checking tao v0.35.3
+    Checking tauri-winrt-notification v0.7.3
+    Checking notify-rust v4.18.0
+    Checking gpu-allocator v0.28.0
+    Checking cpal v0.17.3
+    Checking wgpu-hal v30.0.1
+    Checking rodio v0.22.2
+    Checking webview2-com v0.38.2
+    Checking wry v0.55.1
+    Checking tauri-runtime v2.11.3
+    Checking tauri-runtime-wry v2.11.4
+    Checking wgpu-core-deps-windows-linux-android v30.0.1
+    Checking wgpu-core v30.0.1
+    Checking wgpu v30.0.1
+error: failed to run custom build command for `ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-6e83ac4b723eb0bc\build-script-build` (exit code: 101)
+  --- stdout
+  cargo:rustc-link-arg-tests=/MANIFEST:EMBED
+  cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'
+  cargo:rustc-link-search=native=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ghostty_vt\lib
+  cargo:rustc-link-lib=static=ghostty-vt-static
+  cargo:include=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ghostty_vt\include
+  cargo:ghostty_lib_dir=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ghostty_vt\lib
+  cargo:ghostty_include_dir=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ghostty_vt\include
+  cargo:ghostty_sha=6a508fd5e34c7e222c052a6d00bb3891ff3feace
+  cargo:ghostty_zig_version=0.16.0
+  cargo:ghostty_target=x86_64-pc-windows-msvc
+  cargo:ghostty_zig_target=x86_64-windows-msvc
+  cargo:ghostty_artifact=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ghostty_vt\lib\ghostty-vt-static.lib
+  cargo:rerun-if-changed=native_terminal/build_ghostty.rs
+  cargo:rerun-if-changed=native_terminal/ghostty_source_lock.json
+  cargo:rerun-if-changed=vendor/ghostty/build.zig
+  cargo:rerun-if-changed=vendor/ghostty/src
+  cargo:rerun-if-changed=vendor/ghostty/include
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=HOST
+  cargo:rerun-if-env-changed=ZIG
+  cargo:rustc-link-arg=/MANIFEST:EMBED
+  cargo:rustc-link-arg=/MANIFESTINPUT:C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\ferryx-app-manifest.xml
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\tauri.conf.json
+  cargo:rerun-if-changed=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\tauri.windows.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=C:\Users\sook\ferryx-pane-completion\source-5464da0d\src-tauri\target\debug\build\ferryx-a491f3423e33523b\out\app-manifest\__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=x86_64-pc-windows-msvc
+
+  --- stderr
+
+  thread 'main' (7916) panicked at build.rs:122:39:
+  tauri build failed: resource path `..\ui\dist` doesn't exist
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+NATIVE_EXIT=101

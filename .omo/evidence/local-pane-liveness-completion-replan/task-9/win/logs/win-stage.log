@@ -1,0 +1,20 @@
+STAGE_HOST DESKTOP-1LAPJMP
+STAGE_ROOT C:\Users\sook\ferryx-pane-completion\source-21dea3c0
+PRE_FREE_GB 29.04
+PRE_STATE_IS_39e722ce True
+EXTRACT_START C:\Users\sook\ferryx-pane-completion\delta-39e722ce-to-c34b90fc.tar.gz
+EXTRACT_EXIT 0
+TOUCHED_AT 2026-10-04T22:53:21.0651308+09:00
+POST_MISSING scripts/
+POST_MISSING scripts/lib/
+POST_MISSING scripts/lib/qa-scenarios/
+POST_MISSING scripts/qa/
+POST_MISSING src-tauri/
+POST_MISSING src-tauri/src/
+POST_MISSING src-tauri/src/daemon/
+POST_MISSING src-tauri/src/ipc/
+POST_MISSING src-tauri/src/native_terminal/
+POST_MISSING src-tauri/src/terminal/
+POST_MISSING src-tauri/tests/
+POST_RESULT checked=32 missing=11 diff=0
+STAGE_DONE

@@ -49,6 +49,29 @@ const REMOTE_TERMINAL_METADATA_TERMINATOR: u8 = 0x07;
 const REMOTE_TERMINAL_HARD_RESET: &[u8] = b"\x1bc";
 const REMOTE_GRID_MAX_COLS: u16 = 512;
 const REMOTE_GRID_MAX_ROWS: u16 = 256;
+pub(crate) const MACHINE_GRID_FRAME_MAX_BYTES: usize = 128 * 1024;
+const WS_HEADER_BYTES: usize = 10;
+
+// Wire budget and resident memory invariant:
+// 1. Wire transmission: Each serialized grid frame is bounded by 128 KiB
+//    including WebSocket frame header overhead (`WS_HEADER_BYTES = 10`). Every
+//    emitted text frame charges its wire size (`text.len() + 10`) against
+//    `MachineReceiver`'s 1 MiB semaphore budget until flushed to the wire.
+// 2. Resident mirror memory: `RemoteTerminalMirror` retains baseline runs in
+//    `last_lines` for differential encoding, strictly bounded by the geometry
+//    ceiling (`REMOTE_GRID_MAX_COLS = 512` x `REMOTE_GRID_MAX_ROWS = 256`), while
+//    `NativeTerminal` internal engine allocations remain bounded by its 32 MiB policy.
+fn machine_grid_text(frame: &RemoteGridFrame) -> Result<String, ()> {
+    let text = serde_json::to_string(frame).map_err(|_| ())?;
+    if text
+        .len()
+        .checked_add(WS_HEADER_BYTES)
+        .map_or(true, |total| total > MACHINE_GRID_FRAME_MAX_BYTES)
+    {
+        return Err(());
+    }
+    Ok(text)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -886,6 +909,7 @@ async fn get_workspace_state(
                     .any(|project| project.workspace_id == id)
         })
     });
+    let active_selection_for_epoch = active_selection.clone();
     let mut projects = cache.projects(active_selection.as_ref());
     projects.extend(ssh_projects.iter().map(|project| RemoteProjectInfo {
         workspace_id: project.workspace_id.clone(),
@@ -1026,9 +1050,53 @@ async fn get_workspace_state(
         }
     }
 
+    let daemon_epoch = if let (Some(selection), Some(services)) =
+        (active_selection_for_epoch.as_ref(), state.machine_services.as_ref())
+    {
+        match (
+            selection.session_id.as_deref(),
+            selection.workspace_id.as_deref(),
+        ) {
+            (Some(session_id), Some(workspace_id))
+                if !session_id.starts_with("standby:")
+                    && state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire) != 0 =>
+            {
+                let epoch = crate::scoped_contracts::Epoch(
+                    state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire),
+                );
+                match services
+                    .sessions
+                    .machine_detail_routed(session_id, epoch)
+                    .await
+                {
+                    Ok(
+                        crate::remote::machine_protocol::SessionDetail::Running { session }
+                        | crate::remote::machine_protocol::SessionDetail::Exited { session, .. },
+                    ) if session.target.session_id == session_id
+                        && session.workspace_id == workspace_id
+                        && session.target.daemon_epoch == epoch
+                        && session.worktree.as_ref().map(|worktree| worktree.slug.as_str())
+                            == selection.worktree_slug.as_deref() =>
+                    {
+                        Some(epoch)
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::debug!(%error, session_id, "No authoritative epoch for active desktop selection");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     Ok(Json(RemoteWorkspaceState {
         projects,
         active_context,
+        daemon_epoch,
         active_workspace_id: active_ws,
         worktrees,
         sessions,
@@ -1216,6 +1284,13 @@ async fn get_agent_history(
                             &home,
                             &target_session_id,
                         )
+                    }).or_else(|| {
+                        // A daemon that took over by handover knows no agent's conversation until
+                        // that agent next changes state; the agent's own process says which it is.
+                        crate::ipc::agents::omo_session_id_for_ferryx_session(&target_session_id)
+                            .and_then(|id| {
+                                crate::agent_transcript::transcript_path_for_session(&home, &id)
+                            })
                     }) {
                         Some(transcript_path) => Some(transcript_path),
                         None => {
@@ -1842,10 +1917,15 @@ async fn machine_terminal_upgrade(
     if device.permission != DevicePermission::Control {
         return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED"));
     }
-    // No host-scope stripping, grid negotiation or query-driven geometry in v1.
-    if id.contains("::") || query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
+    // No host-scope stripping or query-driven geometry in machine socket.
+    if id.contains("::") || query.cols.is_some() || query.rows.is_some() {
         return Err(machine_socket_error("INVALID_REQUEST"));
     }
+    let render_grid = match query.render.as_deref() {
+        None => false,
+        Some("grid") => true,
+        Some(_) => return Err(machine_socket_error("INVALID_REQUEST")),
+    };
     let epoch = query
         .daemon_epoch
         .ok_or_else(|| machine_socket_error("STALE_EPOCH"))?;
@@ -1903,6 +1983,7 @@ async fn machine_terminal_upgrade(
                 device,
                 Arc::clone(&state),
                 Arc::clone(&resized),
+                render_grid,
             );
             tokio::select! {
                 biased;
@@ -1999,6 +2080,7 @@ async fn handle_machine_terminal_socket(
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
     resized: Arc<std::sync::atomic::AtomicBool>,
+    render_grid: bool,
 ) {
     use crate::remote::protocol::MachineTerminalControl;
     use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
@@ -2017,10 +2099,10 @@ async fn handle_machine_terminal_socket(
     let crate::terminal::output_hub::machine_output::MachineAttachment {
         snapshot: charged_snapshot,
         receiver: mut output,
+        history_ranges,
     } = attachment;
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
-
     let gap = snapshot
         .gap
         .as_ref()
@@ -2049,36 +2131,6 @@ async fn handle_machine_terminal_socket(
     {
         return;
     }
-    let replay = |snapshot: &AttachmentSnapshot, reset| {
-        encode_frame(
-            Metadata::Replay {
-                start: snapshot.history_start_sequence,
-                end: snapshot.history_end_sequence,
-                gap: snapshot.gap.as_ref().map(|g| ReplayGap {
-                    requested_after_sequence: g.requested_after_sequence,
-                    available_from_sequence: g.available_from_sequence,
-                }),
-            },
-            &snapshot.history,
-            reset,
-        )
-    };
-    let mut last = snapshot.history_end_sequence;
-    if !snapshot.history.is_empty() || snapshot.gap.is_some() {
-        let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
-            return;
-        };
-        let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
-            return;
-        };
-        if machine_send(&mut sender, frame, &mut termination)
-            .await
-            .is_err()
-        {
-            return;
-        }
-    }
-    drop(charged_snapshot);
 
     // Send initial authoritative agent state snapshot immediately after the boundary
     if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
@@ -2090,10 +2142,119 @@ async fn handle_machine_terminal_socket(
             }
         }
     }
+    let grid_notify = Arc::new(tokio::sync::Notify::new());
+    let mirror: Option<Arc<parking_lot::Mutex<RemoteTerminalMirror>>> = if render_grid {
+        if session.cols == 0
+            || session.rows == 0
+            || session.cols > REMOTE_GRID_MAX_COLS
+            || session.rows > REMOTE_GRID_MAX_ROWS
+        {
+            return;
+        }
+        for range in &history_ranges {
+            if let (Some(cols), Some(rows)) = (range.cols, range.rows) {
+                if cols == 0
+                    || rows == 0
+                    || cols > REMOTE_GRID_MAX_COLS
+                    || rows > REMOTE_GRID_MAX_ROWS
+                {
+                    return;
+                }
+            }
+        }
+        let (initial_frame, mirror_inst) = {
+            let mut m = match RemoteTerminalMirror::new(session.cols, session.rows) {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            if !history_ranges.is_empty() {
+                for range in &history_ranges {
+                    if let (Some(cols), Some(rows)) = (range.cols, range.rows) {
+                        if m.dimensions().ok() != Some((cols, rows)) {
+                            if m.resize(cols, rows).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    let slice = &snapshot.history[range.start..range.end];
+                    if !slice.is_empty() && m.feed(slice).is_err() {
+                        return;
+                    }
+                }
+            } else if !snapshot.history.is_empty() && m.feed(&snapshot.history).is_err() {
+                return;
+            }
+            if m.dimensions().ok() != Some((session.cols, session.rows)) {
+                if m.resize(session.cols, session.rows).is_err() {
+                    return;
+                }
+            }
+            let initial_frame = match m.full_frame() {
+                Ok(frame) => frame,
+                Err(_) => return,
+            };
+            (initial_frame, m)
+        };
+        let initial_text = match machine_grid_text(&initial_frame) {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+        let _permit = match output.try_charge(initial_text.len() + WS_HEADER_BYTES) {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        if machine_send(
+            &mut sender,
+            Message::Text(initial_text.into()),
+            &mut termination,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        drop(_permit);
+        Some(Arc::new(parking_lot::Mutex::new(mirror_inst)))
+    } else {
+        let replay = |snapshot: &AttachmentSnapshot, reset| {
+            encode_frame(
+                Metadata::Replay {
+                    start: snapshot.history_start_sequence,
+                    end: snapshot.history_end_sequence,
+                    gap: snapshot.gap.as_ref().map(|g| ReplayGap {
+                        requested_after_sequence: g.requested_after_sequence,
+                        available_from_sequence: g.available_from_sequence,
+                    }),
+                },
+                &snapshot.history,
+                reset,
+            )
+        };
+        if !snapshot.history.is_empty() || snapshot.gap.is_some() {
+            let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
+                return;
+            };
+            let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
+                return;
+            };
+            if machine_send(&mut sender, frame, &mut termination)
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        None
+    };
+    let mut last = snapshot.history_end_sequence;
+    drop(history_ranges);
+    drop(charged_snapshot);
 
     // Eight queued controls plus one in flight and one being admitted each fit
     // a 1KiB slot, below the hub's permanent 16KiB control reservation.
     let (controls, mut control_rx) = mpsc::channel::<Message>(8);
+    let send_mirror = mirror.clone();
+    let send_grid_notify = Arc::clone(&grid_notify);
     let send = async {
         loop {
             let next = tokio::select! {
@@ -2101,6 +2262,29 @@ async fn handle_machine_terminal_socket(
                 control = control_rx.recv() => {
                     let Some(control) = control else { return; };
                     if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                _ = send_grid_notify.notified(), if send_mirror.is_some() => {
+                    let Some(mirror) = &send_mirror else { continue; };
+                    let frame = {
+                        let mut m = mirror.lock();
+                        match m.full_frame() {
+                            Ok(frame) => frame,
+                            Err(_) => return,
+                        }
+                    };
+                    let text = match machine_grid_text(&frame) {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    let _permit = match output.try_charge(text.len() + WS_HEADER_BYTES) {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    if machine_send(&mut sender, Message::Text(text.into()), &mut termination).await.is_err() {
+                        return;
+                    }
+                    drop(_permit);
                     continue;
                 }
                 agent_update = agent_subscription.receiver.recv() => {
@@ -2146,27 +2330,67 @@ async fn handle_machine_terminal_socket(
                     {
                         continue;
                     }
-                    let Ok(frame) = encode_frame(
-                        Metadata::Output {
-                            sequence: chunk.sequence,
-                            gap: chunk.replay_gap.as_ref().map(|g| ReplayGap {
-                                requested_after_sequence: g.requested_after_sequence,
-                                available_from_sequence: g.available_from_sequence,
-                            }),
-                        },
-                        &chunk.bytes,
-                        false,
-                    ) else {
-                        return;
-                    };
-                    let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else {
-                        return;
-                    };
-                    if machine_send(&mut sender, frame, &mut termination)
-                        .await
-                        .is_err()
-                    {
-                        return;
+                    if let Some(mirror) = &send_mirror {
+                        let frame_res = {
+                            let mut m = mirror.lock();
+                            if chunk.replay_gap.is_some() {
+                                let (cols, rows) = m.dimensions().unwrap_or((session.cols, session.rows));
+                                let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
+                                    Ok(rep) => rep,
+                                    Err(_) => return,
+                                };
+                                if replacement.feed(&chunk.bytes).is_err() {
+                                    return;
+                                }
+                                let full = match replacement.full_frame() {
+                                    Ok(f) => f,
+                                    Err(_) => return,
+                                };
+                                *m = replacement;
+                                Ok(full)
+                            } else {
+                                m.feed(&chunk.bytes)
+                            }
+                        };
+                        let Ok(frame) = frame_res else {
+                            return;
+                        };
+                        let Ok(text) = machine_grid_text(&frame) else {
+                            return;
+                        };
+                        let Ok(_permit) = output.try_charge(text.len() + WS_HEADER_BYTES) else {
+                            return;
+                        };
+                        if machine_send(&mut sender, Message::Text(text.into()), &mut termination)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        drop(_permit);
+                    } else {
+                        let Ok(frame) = encode_frame(
+                            Metadata::Output {
+                                sequence: chunk.sequence,
+                                gap: chunk.replay_gap.as_ref().map(|g| ReplayGap {
+                                    requested_after_sequence: g.requested_after_sequence,
+                                    available_from_sequence: g.available_from_sequence,
+                                }),
+                            },
+                            &chunk.bytes,
+                            false,
+                        ) else {
+                            return;
+                        };
+                        let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else {
+                            return;
+                        };
+                        if machine_send(&mut sender, frame, &mut termination)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     last = Some(chunk.sequence);
                     drop(charged);
@@ -2242,6 +2466,8 @@ async fn handle_machine_terminal_socket(
             }
         }
     };
+    let recv_mirror = mirror.clone();
+    let recv_grid_notify = Arc::clone(&grid_notify);
     let receive = async {
         loop {
             let Some(message) = input_rx.recv().await else {
@@ -2286,16 +2512,23 @@ async fn handle_machine_terminal_socket(
                                 && cols > 0
                                 && rows > 0
                                 && cols <= 1000
-                                && rows <= 1000 =>
+                                && rows <= 1000
+                                && (recv_mirror.is_none()
+                                    || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
-                                let res = state
+                                state
                                     .session_backend
                                     .resize(&target.session_id, cols, rows)
-                                    .await;
-                                if res.is_ok() {
-                                    resized.store(true, std::sync::atomic::Ordering::Release);
+                                    .await?;
+                                resized.store(true, std::sync::atomic::Ordering::Release);
+                                if let Some(mirror) = &recv_mirror {
+                                    {
+                                        let mut m = mirror.lock();
+                                        m.resize(cols, rows).map_err(|e| e.to_string())?;
+                                    }
+                                    recv_grid_notify.notify_one();
                                 }
-                                res
+                                Ok(())
                             }
                             Ok(MachineTerminalControl::Signal {
                                 generation: supplied,
@@ -2314,6 +2547,24 @@ async fn handle_machine_terminal_socket(
                                 controls
                                     .try_send(control)
                                     .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                                Ok(())
+                            }
+                            Ok(MachineTerminalControl::Scroll {
+                                generation: supplied,
+                                rows: scroll_rows,
+                            }) if supplied.0 == generation && recv_mirror.is_some() => {
+                                let Some(mirror) = &recv_mirror else {
+                                    return Err("INVALID_CONTROL_OR_GENERATION".into());
+                                };
+                                let clamped = scroll_rows.clamp(-50, 50);
+                                if clamped == 0 {
+                                    return Err("INVALID_CONTROL".into());
+                                }
+                                {
+                                    let mut m = mirror.lock();
+                                    m.scroll(clamped).map_err(|e| e.to_string())?;
+                                }
+                                recv_grid_notify.notify_one();
                                 Ok(())
                             }
                             _ => Err("INVALID_CONTROL_OR_GENERATION".into()),
@@ -6139,12 +6390,13 @@ impl RemoteServerHandle {
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
-    pub(crate) fn replace_relay(
+    pub fn replace_relay(
         &mut self,
         state: Arc<RemoteGatewayState>,
         client: crate::remote::relay_client::RelayClient,
-    ) {
-        if let Some(task) = self.relay_task.take() {
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let prev_task = self.relay_task.take();
+        if let Some(ref task) = prev_task {
             task.abort();
         }
         let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -6156,6 +6408,7 @@ impl RemoteServerHandle {
         *state.relay_client.write() = Some(client.clone());
         self.published_pairing = Some((state, epoch));
         self.relay_task = Some(tokio::spawn(async move { client.run().await }));
+        prev_task
     }
 
     pub fn is_external_bound(&self) -> bool {
@@ -6166,23 +6419,26 @@ impl RemoteServerHandle {
         self.gate_status.clone()
     }
 
-    pub fn stop(self) {
-        if let Some(task) = self.relay_task {
-            task.abort();
+    pub fn stop(mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let task = self.relay_task.take();
+        if let Some(ref t) = task {
+            t.abort();
         }
         // A stopped relay must not leave a dead coordinator selected for pairing:
         // requests would fail with "Relay registration channel closed" instead of
         // falling back to local pairing. Only clear our own publication.
-        if let Some((state, epoch)) = self.published_pairing {
+        if let Some((state, epoch)) = self.published_pairing.take() {
             let mut slot = state.relay_pairing.write();
             if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
                 *slot = None;
+                *state.relay_client.write() = None;
             }
         }
         let _ = self.shutdown_tx.send(());
         for tx in self._extra_shutdown_txs {
             let _ = tx.send(());
         }
+        task
     }
 }
 
@@ -9610,5 +9866,214 @@ mod tests {
         let _ = stop_tx.send(());
         let _ = server_task.await;
         let _ = std::fs::remove_dir_all(&home);
+    }
+    #[tokio::test]
+    async fn test_remote_server_handle_prepare_and_replace_relay_contract() {
+        use futures_util::{SinkExt, StreamExt};
+
+        // RAII cleanup guard to guarantee all spawned background tasks are aborted even on panic.
+        struct TestCleanupGuard {
+            tasks: Vec<tokio::task::JoinHandle<()>>,
+        }
+        impl Drop for TestCleanupGuard {
+            fn drop(&mut self) {
+                for task in &self.tasks {
+                    task.abort();
+                }
+            }
+        }
+        let mut cleanup_guard = TestCleanupGuard { tasks: Vec::new() };
+
+        let root = tempfile::tempdir().unwrap();
+        let server = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = server.remote_state().clone();
+
+        // 1. Owned loopback mock relay handling both bearer-token and identity-challenge handshakes.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let relay_url = format!("http://{relay_addr}");
+        let gateway_addr: SocketAddr = "127.0.0.1:8899".parse().unwrap();
+
+        let (active_supervision_tx, active_supervision_rx) = tokio::sync::oneshot::channel();
+        let mock_server_task = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let has_auth_header = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let has_auth_header_cb = std::sync::Arc::clone(&has_auth_header);
+                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    if req.headers().contains_key("authorization") {
+                        has_auth_header_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(resp)
+                };
+                if let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                    let is_token = has_auth_header.load(std::sync::atomic::Ordering::SeqCst);
+                    let mut authed = is_token;
+                    if !is_token {
+                        let challenge = serde_json::json!({
+                            "nonce": "test-nonce-12345",
+                            "timestamp": 1_700_000_000u64,
+                        });
+                        if ws.send(tokio_tungstenite::tungstenite::Message::Text(challenge.to_string().into())).await.is_ok() {
+                            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_auth))) = ws.next().await {
+                                let resp = serde_json::json!({
+                                    "success": true,
+                                });
+                                if ws.send(tokio_tungstenite::tungstenite::Message::Text(resp.to_string().into())).await.is_ok() {
+                                    authed = true;
+                                }
+                            }
+                        }
+                    }
+                    if authed {
+                        // Await client post-auth message (RegisterPairingPin) to prove client consumed
+                        // auth success and entered steady-state control supervision.
+                        while let Some(Ok(msg)) = ws.next().await {
+                            if let tokio_tungstenite::tungstenite::Message::Text(txt) = msg {
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                                    let pin = val.get("pin").and_then(|v| v.as_str()).unwrap_or("123456");
+                                    let machine_id = val.get("machineId").and_then(|v| v.as_str()).unwrap_or("m-test");
+                                    let ack = serde_json::json!({
+                                        "generation": 1,
+                                        "pin": pin,
+                                        "machineId": machine_id,
+                                        "status": "registered",
+                                    });
+                                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(ack.to_string().into())).await;
+                                    let _ = active_supervision_tx.send(());
+                                    // Service socket until closed
+                                    while let Some(Ok(_)) = ws.next().await {}
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        cleanup_guard.tasks.push(mock_server_task);
+
+        // 2. prepare_relay validates relay URL, loads identity, and builds client.
+        let client_1 = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some(&relay_url),
+            gateway_addr,
+        )
+        .await
+        .expect("prepare_relay must succeed with owned loopback URL");
+
+        assert_eq!(
+            client_1.pairing_coordinator().state(),
+            crate::remote::PairingState::Created
+        );
+
+        // 3. First registration via replace_relay publishes coordinator and spawns task.
+        let (shutdown_tx, _) = tokio::sync::oneshot::channel();
+        let mut handle = RemoteServerHandle {
+            shutdown_tx,
+            relay_task: None,
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: None,
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        let prev = handle.replace_relay(Arc::clone(&state), client_1.clone());
+        assert!(prev.is_none(), "first replace has no previous task");
+
+        let (c1, epoch_1) = {
+            let pairing = state.relay_pairing.read();
+            let p = pairing.as_ref().expect("pairing coordinator published");
+            (p.coordinator.clone(), p.epoch)
+        };
+        assert!(state.relay_client.read().is_some(), "relay_client published");
+        assert!(handle.relay_task.is_some(), "relay_task active");
+
+        // 4. Trigger pairing generation; prove client consumed auth success, received internal
+        // registration request, and transmitted post-auth message over the control channel.
+        let reg_client = client_1.clone();
+        let reg_task = tokio::spawn(async move {
+            reg_client
+                .pairing_coordinator()
+                .generate_scoped_pairing(
+                    std::time::Duration::from_secs(60),
+                    crate::remote::auth::DevicePermission::Control,
+                    crate::remote::auth::DeviceAccessScope::Machine,
+                )
+                .await
+        });
+        cleanup_guard.tasks.push(tokio::spawn(async move { let _ = reg_task.await; }));
+
+        let supervision_res = tokio::time::timeout(std::time::Duration::from_secs(5), active_supervision_rx).await;
+        assert!(supervision_res.is_ok(), "active supervision post-auth event timed out");
+
+        // 5. Second registration replaces supervisor, aborts active task, advances epoch.
+        let client_2 = RemoteServerHandle::prepare_relay(
+            Arc::clone(&state),
+            Some(&relay_url),
+            gateway_addr,
+        )
+        .await
+        .expect("second prepare_relay succeeds");
+
+        let prev_task = handle.replace_relay(Arc::clone(&state), client_2);
+        assert!(prev_task.is_some(), "second replace returns previous task");
+        let join_res = tokio::time::timeout(std::time::Duration::from_secs(5), prev_task.unwrap()).await;
+        assert!(join_res.is_ok(), "previous task join timed out");
+        let join_err = join_res.unwrap().expect_err("previous task must be aborted");
+        assert!(join_err.is_cancelled(), "previous task was cancelled");
+
+        let epoch_2 = {
+            let pairing = state.relay_pairing.read();
+            let p = pairing.as_ref().expect("pairing coordinator updated");
+            p.epoch
+        };
+        assert!(epoch_2 > epoch_1, "epoch must monotonically advance on replacement");
+
+        // 6. Teardown clears both pairing coordinator and relay_client under epoch ownership.
+        let last_task = handle.stop();
+        if let Some(t) = last_task {
+            let join_res = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
+            assert!(join_res.is_ok(), "last task join timed out");
+            let join_err = join_res.unwrap().expect_err("last task must be aborted");
+            assert!(join_err.is_cancelled(), "last task was cancelled");
+        }
+
+        assert!(state.relay_pairing.read().is_none(), "relay_pairing cleared on stop");
+        assert!(state.relay_client.read().is_none(), "relay_client cleared on stop");
+
+        // 7. Stale epoch isolation: a retired predecessor handle cannot clear newer state.
+        let (stale_shutdown_tx, _) = tokio::sync::oneshot::channel();
+        let stale_handle = RemoteServerHandle {
+            shutdown_tx: stale_shutdown_tx,
+            relay_task: None,
+            _extra_shutdown_txs: Vec::new(),
+            published_pairing: Some((Arc::clone(&state), epoch_1)), // stale epoch!
+            gate_status: DirectGatewayGateStatus::LoopbackOnly,
+        };
+
+        let next_epoch = epoch_2 + 1;
+        *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+            coordinator: c1.clone(),
+            epoch: next_epoch,
+        });
+        *state.relay_client.write() = Some(crate::remote::relay_client::RelayClient::with_gateway(
+            &relay_url, "dummy", gateway_addr.to_string(),
+        ));
+
+        let _ = stale_handle.stop();
+
+        assert!(state.relay_pairing.read().is_some(), "stale handle must not clear newer pairing");
+        assert!(state.relay_client.read().is_some(), "stale handle must not clear newer client");
+
+        *state.relay_pairing.write() = None;
+        *state.relay_client.write() = None;
+
+        // Bounded join of mock server task on success path
+        for task in cleanup_guard.tasks.drain(..) {
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        }
     }
 }

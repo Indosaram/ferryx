@@ -1,4 +1,5 @@
 import { safeRandomUUID } from "./uuid";
+import { switchDebug } from "./switchDebug";
 
 const queueRunId = safeRandomUUID().replace(/-/g, "").slice(0, 8);
 
@@ -72,6 +73,14 @@ export function resetTerminalInputDropCountsForTest(): void {
   dropListeners.clear();
 }
 
+export interface InputIdentityMeta {
+  readonly paneIdentity?: string | null;
+  readonly bindingKey?: string | null;
+  readonly attemptGeneration?: number | null;
+  readonly daemonEpoch?: string | null;
+  readonly incarnation?: string | null;
+}
+
 interface QueuedItem<T = unknown> {
   readonly id: number;
   readonly requestId: string;
@@ -84,11 +93,14 @@ interface QueuedItem<T = unknown> {
   readonly reject: (error: unknown) => void;
   readonly kind?: "input" | "preedit";
   readonly supersededResolvers?: Array<(value: T) => void>;
+  readonly identityMeta?: InputIdentityMeta;
+  dispatchedAt?: number | null;
 }
 
 interface LaneExecutionState {
   runningSince: number | null;
   runningRequestId: string | null;
+  inFlightTimer?: ReturnType<typeof setTimeout> | null;
 }
 
 interface SessionQueueState {
@@ -100,12 +112,15 @@ interface SessionQueueState {
   inputLane: LaneExecutionState;
   preeditLane: LaneExecutionState;
   activeGeneration: number | null;
+  lastHeadBlockedLogAt?: number;
 }
 
 export interface NativeTerminalInputQueueOptions {
   readonly maxQueueBytes?: number;
   readonly maxQueueEntries?: number;
 }
+
+export const SLOW_INPUT_THRESHOLD_MS = 250;
 
 const DEFAULT_MAX_QUEUE_BYTES = 256 * 1024;
 // Mirror the daemon's per-session admission bound (MAX_PENDING_OPERATIONS = 17,
@@ -159,6 +174,18 @@ export class NativeTerminalInputQueueManager {
     const s = this.sessions.get(sessionId);
     if (!s) return null;
     return s.inputLane.runningRequestId ?? s.preeditLane.runningRequestId ?? null;
+  }
+
+  public getQueuedHeadAgeMs(sessionId: string): number | null {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.items.length === 0) return null;
+    return Math.max(0, Date.now() - s.items[0].queuedAt);
+  }
+
+  public getHeadQueuedRequestId(sessionId: string): string | null {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.items.length === 0) return null;
+    return s.items[0].requestId;
   }
 
   public getRunningAgeMs(sessionId: string): number | null {
@@ -244,6 +271,11 @@ export class NativeTerminalInputQueueManager {
     const state = this.sessions.get(sessionId);
     if (!state) return;
 
+    for (const lane of [state.inputLane, state.preeditLane]) {
+      if (lane.inFlightTimer) clearTimeout(lane.inFlightTimer);
+      lane.inFlightTimer = null;
+    }
+
     const items = state.items;
     state.items = [];
 
@@ -270,6 +302,7 @@ export class NativeTerminalInputQueueManager {
     operation: (requestId: string) => Promise<T>,
     customRequestId?: string,
     operationName = "input",
+    identityMeta?: InputIdentityMeta,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -279,6 +312,25 @@ export class NativeTerminalInputQueueManager {
       generation < state.activeGeneration
     ) {
       return Promise.reject(new NativeTerminalStaleGenerationError());
+    }
+
+    if (state.running && state.inputLane.runningSince !== null) {
+      const now = Date.now();
+      const runningAgeMs = now - state.inputLane.runningSince;
+      if (
+        runningAgeMs >= SLOW_INPUT_THRESHOLD_MS &&
+        (!state.lastHeadBlockedLogAt || now - state.lastHeadBlockedLogAt >= 1000)
+      ) {
+        state.lastHeadBlockedLogAt = now;
+        switchDebug("terminal.surface.input.in_flight_slow", {
+          backendSessionId: sessionId,
+          inFlightRequestId: state.inputLane.runningRequestId,
+          runningAgeMs,
+          queuedEntries: state.allocatedEntries,
+          queuedBytes: state.allocatedBytes,
+          trigger: "enqueue_head_blocked",
+        });
+      }
     }
 
     const boundedBytes = Math.max(1, payloadBytes);
@@ -293,7 +345,8 @@ export class NativeTerminalInputQueueManager {
     state.allocatedEntries += 1;
 
     const itemId = this.nextItemId++;
-    const requestId = customRequestId ?? `req-${queueRunId}-${sessionId}-${itemId}`;
+    const runPrefix = queueRunId;
+    const requestId = customRequestId ?? `req-${runPrefix}-${sessionId}-${itemId}`;
 
     return new Promise<T>((resolve, reject) => {
       const item: QueuedItem<T> = {
@@ -307,9 +360,21 @@ export class NativeTerminalInputQueueManager {
         resolve,
         reject,
         kind: "input",
+        identityMeta,
       };
 
       state.items.push(item as QueuedItem);
+      switchDebug("terminal.surface.input.accepted", {
+        operationId: requestId,
+        backendSessionId: sessionId,
+        paneIdentity: identityMeta?.paneIdentity ?? null,
+        bindingKey: identityMeta?.bindingKey ?? null,
+        attemptGeneration: identityMeta?.attemptGeneration ?? generation,
+        daemonEpoch: identityMeta?.daemonEpoch ?? null,
+        incarnation: null,
+        payloadBytes: boundedBytes,
+        queuedAt: item.queuedAt,
+      });
       this.pump(sessionId);
     });
   }
@@ -320,6 +385,7 @@ export class NativeTerminalInputQueueManager {
     payloadBytes: number,
     operation: (requestId: string) => Promise<T>,
     customRequestId?: string,
+    identityMeta?: InputIdentityMeta,
   ): Promise<T> {
     const state = this.getOrCreateState(sessionId);
 
@@ -378,7 +444,8 @@ export class NativeTerminalInputQueueManager {
     state.allocatedEntries += 1;
 
     const itemId = this.nextItemId++;
-    const requestId = customRequestId ?? `req-preedit-${queueRunId}-${sessionId}-${itemId}`;
+    const runPrefix = queueRunId;
+    const requestId = customRequestId ?? `req-preedit-${runPrefix}-${sessionId}-${itemId}`;
 
     return new Promise<T>((resolve, reject) => {
       const item: QueuedItem<T> = {
@@ -393,9 +460,21 @@ export class NativeTerminalInputQueueManager {
         reject,
         kind: "preedit",
         supersededResolvers: supersededResolvers as Array<(value: T) => void>,
+        identityMeta,
       };
 
       state.items.push(item as QueuedItem);
+      switchDebug("terminal.surface.input.accepted", {
+        operationId: requestId,
+        backendSessionId: sessionId,
+        paneIdentity: identityMeta?.paneIdentity ?? null,
+        bindingKey: identityMeta?.bindingKey ?? null,
+        attemptGeneration: identityMeta?.attemptGeneration ?? generation,
+        daemonEpoch: identityMeta?.daemonEpoch ?? null,
+        incarnation: null,
+        payloadBytes: boundedBytes,
+        queuedAt: item.queuedAt,
+      });
       this.pump(sessionId);
     });
   }
@@ -419,6 +498,31 @@ export class NativeTerminalInputQueueManager {
     const startedAt = Date.now();
     lane.runningSince = startedAt;
     lane.runningRequestId = item.requestId;
+    item.dispatchedAt = startedAt;
+    lane.inFlightTimer = setTimeout(() => {
+      if (lane.runningRequestId === item.requestId && (state.running || state.preeditRunning)) {
+        switchDebug("terminal.surface.input.in_flight_slow", {
+          backendSessionId: sessionId,
+          inFlightRequestId: item.requestId,
+          operation: item.operationName,
+          runningAgeMs: Date.now() - startedAt,
+          queuedEntries: state.allocatedEntries,
+          queuedBytes: state.allocatedBytes,
+          phase: "pending_ipc",
+        });
+      }
+    }, SLOW_INPUT_THRESHOLD_MS);
+
+    switchDebug("terminal.surface.input.dispatch", {
+      operationId: item.requestId,
+      backendSessionId: sessionId,
+      paneIdentity: item.identityMeta?.paneIdentity ?? null,
+      bindingKey: item.identityMeta?.bindingKey ?? null,
+      attemptGeneration: item.identityMeta?.attemptGeneration ?? item.generation,
+      daemonEpoch: item.identityMeta?.daemonEpoch ?? null,
+      incarnation: null,
+      dispatchedAt: startedAt,
+    });
 
     void (async () => {
       try {
@@ -440,6 +544,21 @@ export class NativeTerminalInputQueueManager {
           }
         }
       } finally {
+        if (lane.inFlightTimer) {
+          clearTimeout(lane.inFlightTimer);
+          lane.inFlightTimer = null;
+        }
+        const durationMs = Date.now() - startedAt;
+        if (durationMs >= SLOW_INPUT_THRESHOLD_MS) {
+          switchDebug("terminal.surface.input.slow", {
+            backendSessionId: sessionId,
+            requestId: item.requestId,
+            operation: item.operationName,
+            durationMs,
+            queuedEntries: state.allocatedEntries,
+            queuedBytes: state.allocatedBytes,
+          });
+        }
         state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
         state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
         if (isInput) {

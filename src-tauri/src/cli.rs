@@ -2838,6 +2838,24 @@ pub fn run_daemon_headless(
                 }
             });
 
+            // Own the termination signals. Without a handler the default disposition ends this
+            // process instantly and no code of ours runs, which is how a daemon death once left
+            // every PTY gone and nothing at all in the log to explain it.
+            #[cfg(unix)]
+            {
+                let signal_server = Arc::clone(&server);
+                tokio::spawn(async move {
+                    let Some(signal) = crate::daemon::logging::next_shutdown_signal().await else {
+                        return;
+                    };
+                    crate::daemon::logging::append_record(
+                        &crate::daemon::logging::signal_record(signal),
+                    );
+                    signal_server.shutdown_gracefully("termination signal").await;
+                    std::process::exit(0);
+                });
+            }
+
             server_task
         };
 
@@ -2855,11 +2873,29 @@ pub fn run_daemon_headless(
         }
 
         let completed = server_task.await;
-        let result = match completed {
+        let mut result = match completed {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e.into()),
             Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
         };
+
+        // Losing the instance-lock race is not a failure: another process already owns this endpoint
+        // and serves every session behind it. Reporting it as an error would make the supervisor
+        // relaunch a process that can never win, so say why and exit clean.
+        if result.is_err() {
+            if let Some(owner_pid) = crate::daemon::endpoint_owner_pid().await {
+                if owner_pid != std::process::id() {
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            owner_pid,
+                            %error,
+                            "Another daemon already serves this endpoint; exiting without taking over"
+                        );
+                    }
+                    result = Ok(());
+                }
+            }
+        }
         if let Some(logging) = logging {
             if let Err(error) = logging.finish().await {
                 crate::daemon::logging::report_failure(&error);

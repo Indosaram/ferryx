@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "testName": "disposable-mismatch-fixture-apply-check",
+  "timestamp": "2026-10-03T14:49:04.239Z",
+  "candidateWorktree": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation",
+  "fixturePath": "/tmp/disposable-mismatch-fixture-task1-01a10211",
+  "baselineAggregateSha256": "15958392d9dc73885c809786982a543f790ead97b2bef0cc5a66a70e22d79e1f",
+  "afterAggregateSha256": "15958392d9dc73885c809786982a543f790ead97b2bef0cc5a66a70e22d79e1f",
+  "candidateUnchanged": true,
+  "gitApplyCommand": "git apply --check mismatch.patch",
+  "rejectionExitCode": 1,
+  "rejectionOutput": "error: patch failed: src-tauri/Cargo.toml:1\nerror: src-tauri/Cargo.toml: patch does not apply\nEXIT_CODE=1",
+  "teardownProof": {
+    "fixtureDirRemoved": true,
+    "checkedPath": "/tmp/disposable-mismatch-fixture-task1-01a10211"
+  }
+}

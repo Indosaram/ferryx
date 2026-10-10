@@ -176,6 +176,8 @@ async fn observes_cli_daemon_error_starts_competing_relay_owner() {
         let handshake = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION, pid: std::process::id(), epoch: 1,
             binary_path: None, binary_mtime_ms: None, daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
+            // Legacy synthetic peer: advertises no capabilities, no admission stamp.
+            capabilities: Vec::new(), admission_time_unix_ms: None,
         };
         write.write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
         line.clear();

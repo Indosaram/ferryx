@@ -344,7 +344,7 @@ export function parsePlan(value) {
  */
 export function requiredKinds(plan) {
   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix"];
+  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"];
   if (p.channels && p.channels.nsisMigration) {
     kinds.push("nsis");
   }

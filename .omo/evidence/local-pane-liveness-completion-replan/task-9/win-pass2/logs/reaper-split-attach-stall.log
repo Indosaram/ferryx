@@ -1,0 +1,23 @@
+REAP_OWN_FERRYX PID=26856
+성공: PID 724인 프로세스(PID 8760인 자식 프로세스)가 종료되었습니다.
+성공: PID 15760인 프로세스(PID 8760인 자식 프로세스)가 종료되었습니다.
+성공: PID 25532인 프로세스(PID 8760인 자식 프로세스)가 종료되었습니다.
+성공: PID 13672인 프로세스(PID 8760인 자식 프로세스)가 종료되었습니다.
+성공: PID 21576인 프로세스(PID 8760인 자식 프로세스)가 종료되었습니다.
+성공: PID 3508인 프로세스(PID 9372인 자식 프로세스)가 종료되었습니다.
+성공: PID 7564인 프로세스(PID 9372인 자식 프로세스)가 종료되었습니다.
+성공: PID 8760인 프로세스(PID 26856인 자식 프로세스)가 종료되었습니다.
+성공: PID 9372인 프로세스(PID 26856인 자식 프로세스)가 종료되었습니다.
+성공: PID 26856인 프로세스(PID 23232인 자식 프로세스)가 종료되었습니다.
+
+REAP_OWN_FERRYX PID=9372
+taskkill : 오류: 프로세스 "9372"을(를) 찾을 수 없습니다.
+위치 C:\Users\sook\ferryx-pane-completion\win-reaper.ps1:9 문자:83
++ ...  PID=" + $p.ProcessId); taskkill /T /F /PID $p.ProcessId 2>&1 | Out-S ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (오류: 프로세스 "9372"을(를) 찾을 수 없습니다.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+REAP_AT=2026-10-05T00:16:03.9970545+09:00
+REAPER_DONE

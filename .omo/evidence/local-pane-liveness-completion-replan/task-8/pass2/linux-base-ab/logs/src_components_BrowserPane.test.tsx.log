@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/components/BrowserPane.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041214) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserPane.test.tsx (6 tests | 6 failed) 9ms
+   × BrowserPane native webview lifecycle > accepts find only for its DOM target undefined 6ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane native webview lifecycle > accepts find only for its DOM target unrelated 1ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane native webview lifecycle > accepts find only for its DOM target browser-1 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane native webview lifecycle > shows the child webview while mounted and hides it during cleanup 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane native webview lifecycle > keeps an explicitly hidden child webview hidden 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane native webview lifecycle > defensively clamps webview top edge to at or below the toolbar bottom 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > accepts find only for its DOM target undefined
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > accepts find only for its DOM target unrelated
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > accepts find only for its DOM target browser-1
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > shows the child webview while mounted and hides it during cleanup
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > keeps an explicitly hidden child webview hidden
+ FAIL  src/components/BrowserPane.test.tsx > BrowserPane native webview lifecycle > defensively clamps webview top edge to at or below the toolbar bottom
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserPane.test.tsx:75:25
+     73| describe("BrowserPane native webview lifecycle", () => {
+     74|   beforeEach(() => {
+     75|     window.localStorage.clear();
+       |                         ^
+     76|     eventMocks.listen.mockClear();
+     77|     browserMocks.getBrowserState.mockClear();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  10:10:32
+   Duration  1.07s (transform 167ms, setup 100ms, collect 552ms, tests 9ms, environment 229ms, prepare 54ms)
+
+error: script "test" exited with code 1

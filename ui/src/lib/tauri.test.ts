@@ -23,6 +23,7 @@ import {
   getTerminalPreferences,
   getWorktreeStatus,
   listProjectBranches,
+  previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
@@ -43,6 +44,8 @@ import {
   signalTerminal,
   spawnTerminal,
   spawnTerminalDetailed,
+  spawnTerminalSplitOperation,
+  saveSession,
   publishFocusedTerminal,
   onRemoteSelectionRequested,
   normalizeBadgeCount,
@@ -54,6 +57,9 @@ import {
   resizeTerminalRemote,
   onTerminalRemoteStatus,
   describeRejection,
+  getAccountEnrollmentStatus,
+  enrollThisMachine,
+  type AccountEnrollmentStatus,
 } from "./tauri";
 
 describe("describeRejection", () => {
@@ -76,6 +82,25 @@ describe("describeRejection", () => {
 });
 
 describe("Tauri IPC wrapper contract", () => {
+  it("propagates save failure without issuing any terminal close", async () => {
+    const error = { code: "INTERNAL_ERROR", message: "disk full", details: {} };
+    core.invoke.mockRejectedValueOnce(error);
+    await expect(saveSession({ version: 3, timestamp: 0, activeWorkspaceId: "default", workspaces: {} })).rejects.toMatchObject({
+      code: "INTERNAL_ERROR", message: "disk full",
+      details: { command: "cmd_session_save", raw: JSON.stringify(error) },
+    });
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual(["cmd_session_save"]);
+  });
+  it("preserves reliable prepare and attach attempt identity without changing legacy payloads", async () => {
+    core.invoke.mockResolvedValue({});
+    const identity = { requestId: "27be1fd6-7182-4fba-b42c-27c0288fb460", originEpoch: "7", expiresAtUnixMs: 600_000 };
+    const request = { action: "status" as const, identity, remainingMs: 900 };
+    await spawnTerminalSplitOperation(request);
+    expect(core.invoke).toHaveBeenLastCalledWith("cmd_terminal_spawn_operation", { request });
+    const splitAttempt = { identity, frontendSessionId: "front", generation: 2, remainingMs: 800 };
+    await attachTerminal("back", null, splitAttempt);
+    expect(core.invoke).toHaveBeenLastCalledWith("cmd_terminal_attach", { sessionId: "back", afterSequence: null, splitAttempt });
+  });
   it("routes remote status, retry and generation-fenced control without remapping arguments", async () => {
     core.invoke.mockResolvedValue({ type: "retryRemoteSessionOk" });
     await getTerminalRemoteStatus("stable");
@@ -166,6 +191,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: null,
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
@@ -191,6 +219,9 @@ describe("Tauri IPC wrapper contract", () => {
         shell: "pwsh",
         startup: null,
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });
@@ -241,6 +272,9 @@ describe("Tauri IPC wrapper contract", () => {
           providerSession: { key: "session_id", id: "provider-1" },
         },
         inheritFromSessionId: null,
+        createOnly: null,
+        preparedLocalSplit: null,
+        remainingMs: null,
       },
     });
   });
@@ -303,6 +337,25 @@ describe("Tauri IPC wrapper contract", () => {
     await listWorktrees("workspace-main");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_list", { workspaceId: "workspace-main" });
+  });
+
+  it("previews a GitHub issue through a registered workspace identity", async () => {
+    const issue = {
+      number: 12,
+      title: "Parser drops trailing tokens",
+      url: "https://github.com/acme/widgets/issues/12",
+      body: "Steps to reproduce",
+      bodyTruncated: false,
+      repository: "acme/widgets",
+      suggestedSlug: "issue-12-parser-drops-trailing",
+    };
+    core.invoke.mockResolvedValue(issue);
+
+    await expect(previewGitHubIssue({ workspaceId: "workspace-main", issueRef: "#12" })).resolves.toEqual(issue);
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_github_issue_preview", {
+      request: { workspaceId: "workspace-main", issueRef: "#12" },
+    });
   });
 
   it("wraps worktree status, preview, safe delete, and destructive delete commands", async () => {
@@ -788,5 +841,34 @@ describe("dispatchNotification", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_notification_dispatch", {
       request: payload,
     });
+  });
+});
+
+describe("account enrollment API", () => {
+  it("invokes cmd_account_enrollment_status and returns status", async () => {
+    const status: AccountEnrollmentStatus = {
+      enrolled: true,
+      accountOrigin: "https://relay.example.com",
+      enrolledAt: 123456789,
+    };
+    core.invoke.mockResolvedValueOnce(status);
+    const result = await getAccountEnrollmentStatus();
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_enrollment_status", undefined);
+    expect(result).toEqual(status);
+  });
+
+  it("invokes cmd_account_enroll_this_machine with origin and code", async () => {
+    const status: AccountEnrollmentStatus = {
+      enrolled: true,
+      accountOrigin: "https://relay.example.com",
+      enrolledAt: 123456789,
+    };
+    core.invoke.mockResolvedValueOnce(status);
+    const result = await enrollThisMachine("https://relay.example.com", "code-123");
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_enroll_this_machine", {
+      origin: "https://relay.example.com",
+      enrollmentCode: "code-123",
+    });
+    expect(result).toEqual(status);
   });
 });

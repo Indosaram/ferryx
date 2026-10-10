@@ -1,0 +1,5 @@
+XBASE start=2026-10-04T10:58:04Z load=7.79 6.35 6.67
+XBASE side=base native=0 | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.30s
+    test test_v5_ownership_transfer_is_the_default_without_the_flag ... ok
+    test test_v5_zero_session_loss_and_immediate_predecessor_exit ... ok
+XBASE_DONE load=8.06 6.52 6.72

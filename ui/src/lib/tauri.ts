@@ -6,6 +6,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
+import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
 
 export type {
   AttachTerminalRequest,
@@ -16,7 +17,11 @@ export type {
   NativeTerminalAgentStatePayload,
   NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
   TerminalReplayGap,
@@ -41,7 +46,11 @@ import type {
   NativeTerminalScrollbarPayload,
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
+  PreparedLocalSplit,
   SetBadgeCountResult,
+  SplitAttachAttempt,
+  SplitOperationRequest,
+  SplitOperationResponse,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
@@ -74,6 +83,16 @@ export type RegisteredProject = {
 export type LocalBranch = {
   name: string;
   isCurrent: boolean;
+};
+
+export type GitHubIssuePreview = {
+  number: number;
+  title: string;
+  url: string;
+  body: string;
+  bodyTruncated: boolean;
+  repository: string;
+  suggestedSlug: string;
 };
 
 export type TerminalThemeColors = {
@@ -141,6 +160,9 @@ export type SpawnTerminalRequest = {
     hostId: string;
     remoteWorkspaceId: string;
   } | null;
+  createOnly?: boolean | null;
+  preparedLocalSplit?: import("./types").PreparedLocalSplit | null;
+  remainingMs?: number | null;
 };
 
 export type SpawnTerminalResult = {
@@ -154,11 +176,13 @@ export type SpawnTerminalResult = {
     cols: number;
     rows: number;
     running: boolean;
+    incarnation?: string | null;
   };
 };
 
 export type TerminalDescribeResult = {
   sessionId: string;
+  incarnation?: string | null;
   workspaceId?: string | null;
   worktree?: WorktreeIdentity | null;
   cwd?: string | null;
@@ -171,6 +195,10 @@ export type TerminalDescribeResult = {
   lastOutputAgeMs?: number | null;
   /** Daemon-observed process suspension (kernel stop state). Absent on older daemons. */
   suspended?: boolean;
+  readerPaused?: boolean | null;
+  kernelStopped?: boolean | null;
+  registrySuspended?: boolean | null;
+  suspensionSource?: string | null;
 };
 
 export function isTauriRuntime() {
@@ -217,6 +245,17 @@ export async function bootTrace(
 
 export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
+}
+
+/// Reads one GitHub issue through the already authenticated `gh` executable.
+/// The result is inert preview data: Ferryx never runs or submits issue text.
+export async function previewGitHubIssue(request: {
+  workspaceId: string;
+  issueRef: string;
+}) {
+  return invokeCommand<GitHubIssuePreview>("cmd_github_issue_preview", {
+    request: { workspaceId: request.workspaceId, issueRef: request.issueRef },
+  });
 }
 
 export async function getTerminalPreferences(remote?: RemotePreferenceTarget): Promise<TerminalPreferences> {
@@ -470,7 +509,16 @@ function reportUnserializableSpawnRequest(request: SpawnTerminalRequest): void {
   }
 }
 
-export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
+export type LocalSplitCreateOptions = {
+  createOnly?: boolean;
+  preparedLocalSplit?: PreparedLocalSplit | null;
+  remainingMs?: number;
+};
+
+export async function spawnTerminalDetailed(
+  request: SpawnTerminalRequest,
+  options?: LocalSplitCreateOptions,
+): Promise<SpawnTerminalResult> {
   if (!isTauri()) {
     throw {
       code: "INTERNAL_ERROR",
@@ -479,9 +527,18 @@ export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Prom
     } satisfies StructuredIpcError;
   }
   reportUnserializableSpawnRequest(request);
-  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
-    request: sanitizeSpawnRequest(request),
-  });
+  const payload = { request: {
+    ...sanitizeSpawnRequest(request),
+    createOnly: options?.createOnly ?? request.createOnly ?? null,
+    preparedLocalSplit: options?.preparedLocalSplit ?? request.preparedLocalSplit ?? null,
+    remainingMs: options?.remainingMs ?? request.remainingMs ?? null,
+  } };
+  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", payload);
+}
+export async function spawnTerminalSplitOperation(
+  request: SplitOperationRequest,
+): Promise<SplitOperationResponse> {
+  return invokeCommand<SplitOperationResponse>("cmd_terminal_spawn_operation", { request });
 }
 
 export type SpawnTerminalBatchEntry = {
@@ -514,11 +571,12 @@ export async function spawnTerminal(request: SpawnTerminalRequest): Promise<stri
 export async function attachTerminal(
   requestOrSessionId: string | AttachTerminalRequest,
   afterSequence?: string | null,
+  splitAttempt?: SplitAttachAttempt | null,
 ): Promise<AttachTerminalResponse> {
   const req: AttachTerminalRequest =
     typeof requestOrSessionId === "string"
       ? { sessionId: requestOrSessionId, afterSequence: afterSequence ?? null }
-      : { sessionId: requestOrSessionId.sessionId, afterSequence: requestOrSessionId.afterSequence ?? null };
+      : { sessionId: requestOrSessionId.sessionId, afterSequence: requestOrSessionId.afterSequence ?? null, attachTuple: requestOrSessionId.attachTuple ?? null };
 
   if (!isTauri()) {
     return {
@@ -530,10 +588,17 @@ export async function attachTerminal(
       gap: null,
     };
   }
-  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", {
+  const payload: Record<string, unknown> = {
     sessionId: req.sessionId,
     afterSequence: req.afterSequence ?? null,
-  });
+  };
+  if (splitAttempt) {
+    payload.splitAttempt = splitAttempt;
+    if (splitAttempt.attachTuple) payload.attachTuple = splitAttempt.attachTuple;
+  } else if (req.attachTuple) {
+    payload.attachTuple = req.attachTuple;
+  }
+  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", payload);
 }
 
 export async function getTerminalHistorySnapshot(sessionId: string): Promise<string> {
@@ -569,13 +634,15 @@ export async function signalTerminal(request: { sessionId: string; signal: Termi
 
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
-  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
+  const attachTuple = getDurableNativeBinding(sessionId);
+  if (attachTuple) await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 
 export async function hibernateTerminal(sessionId: string) {
   if (!isTauri()) return;
-  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
+  const attachTuple = getDurableNativeBinding(sessionId);
+  if (attachTuple) await invokeCommand<void>("cmd_native_terminal_close", { sessionId, attachTuple });
   await invokeCommand<void>("cmd_terminal_hibernate", { sessionId });
 }
 
@@ -1256,6 +1323,32 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
   return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
 }
 
+export type AccountEnrollmentStatus = {
+  enrolled: boolean;
+  accountOrigin: string | null;
+  enrolledAt: number | null;
+};
+
+export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    return { enrolled: false, accountOrigin: null, enrolledAt: null };
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
+}
+
+export async function enrollThisMachine(
+  origin: string,
+  enrollmentCode: string,
+): Promise<AccountEnrollmentStatus> {
+  if (!isTauri()) {
+    throw new Error("Linking this computer is available only in the desktop app");
+  }
+  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
+    origin,
+    enrollmentCode,
+  });
+}
+
 export type DagRunUpdatedEvent = {
   projectPath: string;
   generation?: number;
@@ -1289,32 +1382,6 @@ export async function listenDagWatchStatus(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<DagWatchStatusEvent>("dag-watch-status", (event) => handler(event.payload));
-}
-
-export type AccountEnrollmentStatus = {
-  enrolled: boolean;
-  accountOrigin: string | null;
-  enrolledAt: number | null;
-};
-
-export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    return { enrolled: false, accountOrigin: null, enrolledAt: null };
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enrollment_status");
-}
-
-export async function enrollThisMachine(
-  origin: string,
-  enrollmentCode: string,
-): Promise<AccountEnrollmentStatus> {
-  if (!isTauri()) {
-    throw new Error("Linking this computer is available only in the desktop app");
-  }
-  return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
-    origin,
-    enrollmentCode,
-  });
 }
 
 export type DagWatchProjectResult = {

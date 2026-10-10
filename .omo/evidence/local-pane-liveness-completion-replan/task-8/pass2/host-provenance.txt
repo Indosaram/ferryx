@@ -1,0 +1,6 @@
+Pass2 candidate172baa874f5e320ef08f4ed1dc5f11b391898477 treea0ac605669047d15f184b395018924f38aaf71b0 clean before staging.
+Mac PROBE_OK, rustc1.92.0/cargo1.92.0; shared Ghostty6a508fd5e34c7e222c052a6d00bb3891ff3feace; Cargo.lock e1ea8bd6875a15fdfc5205ae5f4e1ba21194c0163f6fecf4bfa821a0443fbd53; ui/bun.lock d84cde8a0f35abd85835bf2fa17ebb7945604f7579bfde7d1e14a28155d13137 matched before gates.
+Windows PROBE_OK DESKTOP-1LAPJMP desktop-1lapjmp\sook rustc1.97.0/cargo1.97.0; identical Ghostty/locks validated. CAPTURE_VALIDATION=7,0 immediate LASTEXITCODE; Get-PSDrive C free186.12GB before staging; native staging0. Transferred .ps1 invocation.
+Linux PROBE_OK rustc1.98.0/cargo1.98.0; private checkout from shared read-only ghostty.bundle pin6a508fd5; both lock hashes match before gates.
+Raw monitor transcripts remain associated with mon_G7QHCDM858WCH49Y (initial Mac) and mon_G00FFFEAB5MZ8GB8 (safe resume), mon_VHDQGH6PKH6F05NF Windows, mon_V1TBZG5RKBWNN1ZQ Linux.
+Fresh read-only audit: Mac hostnameCQFQ4P2LXK userI552267, disk available15GiB, owned runnerPID3742; Linux hostnameindo userindo available515GiB, owned runnerPID963470. Match pass1/task1 identities. Monitors mon_AZ44N8H03R4GB44Z and mon_8F3JT9V4S8Y7YVT8 exit0. Evidence-only runner syntax checks node --check passed for runner.mjs, runner-mac-safe.mjs, ab-runner.mjs; no local product build/test.

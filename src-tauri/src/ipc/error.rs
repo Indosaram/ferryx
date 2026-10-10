@@ -70,6 +70,14 @@ pub enum IpcErrorCode {
     InvalidArgument,
     InternalError,
     Unsupported,
+    // Local pane reliable split and liveness capability error codes
+    UnsupportedCapability,
+    SpawnRequestConflict,
+    SpawnRequestExpired,
+    SpawnEpochChanged,
+    SpawnAttemptTimeout,
+    SpawnCancelled,
+    SessionIdConflict,
     // Paired host and machine protocol error codes (P08)
     SessionExpired,
     ParentSessionMismatch,
@@ -105,6 +113,8 @@ pub enum IpcErrorCode {
     InvalidBaseRef,
     InvalidWorktree,
     WorkspaceIdMismatch,
+    #[serde(rename = "GITHUB_ISSUE_REPOSITORY_MISMATCH")]
+    GitHubIssueRepositoryMismatch,
     OutputLimitExceeded,
     RequestConflict,
     StaleRevision,
@@ -114,6 +124,13 @@ pub enum IpcErrorCode {
     MethodNotAllowed,
     #[serde(untagged)]
     Custom(String),
+}
+
+impl std::fmt::Display for IpcErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        f.write_str(value.as_str().ok_or(std::fmt::Error)?)
+    }
 }
 
 impl IpcErrorCode {
@@ -155,6 +172,7 @@ impl IpcErrorCode {
             "INVALID_BASE_REF" => Self::InvalidBaseRef,
             "INVALID_WORKTREE" => Self::InvalidWorktree,
             "WORKSPACE_ID_MISMATCH" => Self::WorkspaceIdMismatch,
+            "GITHUB_ISSUE_REPOSITORY_MISMATCH" => Self::GitHubIssueRepositoryMismatch,
             "WORKTREE_NOT_FOUND" => Self::WorktreeNotFound,
             "WORKTREE_BUSY" => Self::WorktreeBusy,
             "WORKTREE_EXISTS" | "WORKTREE_ALREADY_EXISTS" => Self::WorktreeAlreadyExists,
@@ -174,6 +192,7 @@ impl IpcErrorCode {
             "METHOD_NOT_ALLOWED" => Self::MethodNotAllowed,
             "INTERNAL_ERROR" => Self::InternalError,
             "UNSUPPORTED" => Self::Unsupported,
+            "SESSION_ID_CONFLICT" => Self::SessionIdConflict,
             "INVALID_ARGUMENT" => Self::InvalidArgument,
             "IO_ERROR" => Self::IoError,
             "PARSE_ERROR" => Self::ParseError,
@@ -204,6 +223,12 @@ impl IpcErrorCode {
             "BROWSER_CLI_UNAVAILABLE" => Self::BrowserCliUnavailable,
             "BROWSER_WAIT_TIMEOUT" => Self::BrowserWaitTimeout,
             "BROWSER_SCREENSHOT_FAILED" => Self::BrowserScreenshotFailed,
+            "UNSUPPORTED_CAPABILITY" => Self::UnsupportedCapability,
+            "SPAWN_REQUEST_CONFLICT" => Self::SpawnRequestConflict,
+            "SPAWN_REQUEST_EXPIRED" => Self::SpawnRequestExpired,
+            "SPAWN_EPOCH_CHANGED" => Self::SpawnEpochChanged,
+            "SPAWN_ATTEMPT_TIMEOUT" => Self::SpawnAttemptTimeout,
+            "SPAWN_CANCELLED" => Self::SpawnCancelled,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -232,8 +257,8 @@ impl IpcError {
         self
     }
 
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(IpcErrorCode::InternalError, message)
+    pub fn internal(message: impl std::fmt::Display) -> Self {
+        Self::new(IpcErrorCode::InternalError, message.to_string())
     }
 
     pub fn native_terminal_unsupported() -> Self {
@@ -241,6 +266,30 @@ impl IpcError {
             IpcErrorCode::NativeTerminalUnsupported,
             "Native terminal support is not compiled into this build (cargo feature `native-terminal` is disabled)",
         )
+    }
+
+    pub fn unsupported_capability(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::UnsupportedCapability, message)
+    }
+
+    pub fn spawn_request_conflict(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnRequestConflict, message)
+    }
+
+    pub fn spawn_request_expired(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnRequestExpired, message)
+    }
+
+    pub fn spawn_epoch_changed(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnEpochChanged, message)
+    }
+
+    pub fn spawn_attempt_timeout(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnAttemptTimeout, message)
+    }
+
+    pub fn spawn_cancelled(message: impl Into<String>) -> Self {
+        Self::new(IpcErrorCode::SpawnCancelled, message)
     }
 }
 
@@ -492,6 +541,25 @@ impl std::fmt::Display for IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_split_reliability_typed_error_codes_roundtrip() {
+        let cases = [
+            (IpcErrorCode::UnsupportedCapability, "UNSUPPORTED_CAPABILITY"),
+            (IpcErrorCode::SpawnRequestConflict, "SPAWN_REQUEST_CONFLICT"),
+            (IpcErrorCode::SpawnRequestExpired, "SPAWN_REQUEST_EXPIRED"),
+            (IpcErrorCode::SpawnEpochChanged, "SPAWN_EPOCH_CHANGED"),
+            (IpcErrorCode::SpawnAttemptTimeout, "SPAWN_ATTEMPT_TIMEOUT"),
+            (IpcErrorCode::SpawnCancelled, "SPAWN_CANCELLED"),
+            (IpcErrorCode::SessionIdConflict, "SESSION_ID_CONFLICT"),
+        ];
+        for (code, wire) in cases {
+            let encoded = serde_json::to_value(&code).expect("encode typed error");
+            assert_eq!(encoded, json!(wire));
+            assert_eq!(serde_json::from_value::<IpcErrorCode>(encoded).expect("decode typed error"), code);
+            assert_eq!(IpcErrorCode::from_code_str(wire), code);
+        }
+    }
 
     #[test]
     fn test_ipc_error_code_custom_roundtrip() {

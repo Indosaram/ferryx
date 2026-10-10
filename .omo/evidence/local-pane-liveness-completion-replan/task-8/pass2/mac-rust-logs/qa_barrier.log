@@ -1,0 +1,1000 @@
+   Compiling ferryx v2026.928.7 (/Users/I552267/ferryx-pane-completion/source-172baa87/src-tauri)
+error[E0432]: unresolved import `fs2`
+ --> src/daemon/split_journal.rs:1:5
+  |
+1 | use fs2::FileExt;
+  |     ^^^ use of unresolved module or unlinked crate `fs2`
+  |
+  = help: if you wanted to use a crate named `fs2`, use `cargo add fs2` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+   --> src/daemon/server.rs:102:24
+    |
+102 |             || async { HandoverManager::recorded_decision(&path) }).await;
+    |                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+    |
+help: consider importing this struct through its public re-export
+    |
+ 63 +     use crate::daemon::HandoverManager;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+   --> src/daemon/server.rs:116:24
+    |
+116 |             || async { HandoverManager::recorded_decision(&path) }).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+    |
+help: consider importing this struct through its public re-export
+    |
+ 63 +     use crate::daemon::HandoverManager;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+    --> src/daemon/server.rs:2704:33
+     |
+2704 | ...                   HandoverManager::recorded_decision(&path).map_err(crate::ipc::IpcError::internal))
+     |                       ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+     |
+help: consider importing this struct through its public re-export
+     |
+   4 + use crate::daemon::HandoverManager;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `HandoverManager`
+    --> src/daemon/server.rs:2726:62
+     |
+2726 | ...                   crate::ipc::run_blocking(move || HandoverManager::recorded_decision(&path)
+     |                                                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+     |
+help: consider importing this struct through its public re-export
+     |
+   4 + use crate::daemon::HandoverManager;
+     |
+
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `std::os::fd::IntoRawFd`
+   --> src/daemon/handover_wire.rs:442:9
+    |
+442 |     use std::os::fd::IntoRawFd;
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+    --> src/ipc/native_terminal.rs:3593:13
+     |
+3593 |         use serde_json::Value;
+     |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:3251:13
+     |
+3251 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src/ipc/terminal.rs:3275:13
+     |
+3275 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src/ipc/pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+    --> src/native_terminal/surface_host.rs:9548:13
+     |
+9548 |         use serde_json::Value;
+     |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src/remote/attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src/remote/attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src/remote/machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncBufReadExt`
+    --> src/ssh/bridge_tests.rs:1968:9
+     |
+1968 |     use tokio::io::AsyncBufReadExt;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`
+    --> src/daemon/server.rs:3135:59
+     |
+3135 | ...                   code: Some(error.code.to_string()), details: error.details },
+     |                                             ^^^^^^^^^ method cannot be called on `ipc::error::IpcErrorCode` due to unsatisfied trait bounds
+     |
+    ::: src/ipc/error.rs:8:1
+     |
+   8 | pub enum IpcErrorCode {
+     | --------------------- method `to_string` not found for this enum because it doesn't satisfy `ipc::error::IpcErrorCode: ToString` or `ipc::error::IpcErrorCode: std::fmt::Display`
+     |
+     = note: the following trait bounds were not satisfied:
+             `ipc::error::IpcErrorCode: std::fmt::Display`
+             which is required by `ipc::error::IpcErrorCode: ToString`
+note: the trait `std::fmt::Display` must be implemented
+    --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/mod.rs:1007:1
+note: the method `to_string` exists on the type `std::string::String`
+    --> /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/string.rs:2855:5
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `to_string`, perhaps you need to implement it:
+             candidate #1: `ToString`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+   --> src/ipc/agents_reset_event_tests.rs:103:25
+    |
+103 |         let handshake = DaemonResponse::HandshakeOk {
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+    --> src/ipc/terminal.rs:2410:22
+     |
+2410 |             session: crate::daemon::protocol::DaemonSessionDetails {
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0283]: type annotations needed
+   --> src/terminal/service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                               ------------            ^^^^
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<std::string::String>` found in the following crates: `core`, `unicase`:
+            - impl<'a> Into<std::string::String> for unicase::UniCase<std::string::String>;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `session_lifecycle::SessionLifecycleRegistry::mark_running`
+   --> src/daemon/session_lifecycle.rs:58:53
+    |
+ 58 |     pub fn mark_running(&mut self, session_id: impl Into<String>) {
+    |                                                     ^^^^^^^^^^^^ required by this bound in `SessionLifecycleRegistry::mark_running`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+help: consider removing this method call, as the receiver has type `&str` and `&str: Into<std::string::String>` trivially holds
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(session_id);
+    |
+
+error[E0283]: type annotations needed
+   --> src/terminal/service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                                                       ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `axum_core`, `bytes`, `naga`, `reqwest`, `winnow`:
+            - impl std::convert::From<&'static str> for axum::body::Body;
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for reqwest::async_impl::body::Body;
+            - impl std::convert::From<&'static str> for wgpu::naga::front::wgsl::error::DiagnosticAttributeNotSupportedPosition;
+            - impl std::convert::From<&'static str> for winnow::error::StrContextValue;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4500:37
+     |
+4500 |                     let handshake = DaemonResponse::HandshakeOk {
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4584:37
+     |
+4584 |                     let handshake = DaemonResponse::HandshakeOk {
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4672:37
+     |
+4672 |                     let handshake = DaemonResponse::HandshakeOk {
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4820:25
+     |
+4820 |             let reply = DaemonResponse::HandshakeOk {
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4906:25
+     |
+4906 |             let reply = DaemonResponse::HandshakeOk {
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:4956:29
+     |
+4956 |             let handshake = DaemonResponse::HandshakeOk {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:5098:29
+     |
+5098 |             let handshake = DaemonResponse::HandshakeOk {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:5289:27
+     |
+5289 |             let hs_resp = DaemonResponse::HandshakeOk {
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:5366:27
+     |
+5366 |             let hs_resp = DaemonResponse::HandshakeOk {
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:5701:29
+     |
+5701 |             let handshake = DaemonResponse::HandshakeOk {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/daemon/client.rs:5813:29
+     |
+5813 |             let handshake = DaemonResponse::HandshakeOk {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0027]: pattern does not mention field `local_split`
+    --> src/daemon/protocol.rs:1814:13
+     |
+1814 | /             DaemonRequest::Spawn {
+1815 | |                 client_request_id,
+1816 | |                 workspace_id,
+1817 | |                 worktree,
+...    |
+1822 | |                 startup,
+1823 | |             } => {
+     | |_____________^ missing field `local_split`
+     |
+help: include the missing field in the pattern
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, local_split } => {
+     |
+help: if you don't care about this missing field, you can explicitly ignore it
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, local_split: _ } => {
+     |
+help: or always ignore missing fields here
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, .. } => {
+     |
+
+error[E0282]: type annotations needed
+   --> src/daemon/server.rs:100:13
+    |
+100 |         let result = rollback_transferred_readers(async { Ok(()) },
+    |             ^^^^^^
+...
+103 |         assert!(result.is_err());
+    |                 ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type
+    |
+100 |         let result: /* Type */ = rollback_transferred_readers(async { Ok(()) },
+    |                   ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src/daemon/server.rs:115:9
+    |
+115 | /         rollback_transferred_readers(async { Ok(()) }, || async { Err("lost ACK".into()) },
+116 | |             || async { HandoverManager::recorded_decision(&path) }).await.unwrap();
+    | |_________________________________________________________________________^ cannot infer type
+
+error[E0027]: pattern does not mention fields `capabilities`, `admission_time_unix_ms`
+    --> src/daemon/server.rs:6735:13
+     |
+6735 | /             DaemonResponse::HandshakeOk {
+6736 | |                 version,
+6737 | |                 pid,
+6738 | |                 epoch,
+...    |
+6741 | |                 daemon_version,
+6742 | |             } => {
+     | |_____________^ missing fields `capabilities`, `admission_time_unix_ms`
+     |
+help: include the missing fields in the pattern
+     |
+6741 -                 daemon_version,
+6742 -             } => {
+6741 +                 daemon_version, capabilities, admission_time_unix_ms } => {
+     |
+help: if you don't care about these missing fields, you can explicitly ignore them
+     |
+6741 -                 daemon_version,
+6742 -             } => {
+6741 +                 daemon_version, capabilities: _, admission_time_unix_ms: _ } => {
+     |
+help: or always ignore missing fields here
+     |
+6741 -                 daemon_version,
+6742 -             } => {
+6741 +                 daemon_version, .. } => {
+     |
+
+error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope
+   --> src/daemon/split_journal.rs:172:19
+    |
+172 |         lock_file.lock_exclusive()?;
+    |                   ^^^^^^^^^^^^^^ method not found in `std::fs::File`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+  --> src/ipc/file_link_tests.rs:11:5
+   |
+11 |     DaemonSessionDetails {
+   |     ^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/file_link_tests.rs:554:9
+    |
+554 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:119:9
+    |
+119 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:199:9
+    |
+199 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:261:9
+    |
+261 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:462:9
+    |
+462 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:540:9
+    |
+540 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:600:9
+    |
+600 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:806:9
+    |
+806 |         SpawnTerminalRequest {
+    |         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:850:26
+    |
+850 |     let invalid_id_req = SpawnTerminalRequest {
+    |                          ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:890:25
+    |
+890 |     let wrong_key_req = SpawnTerminalRequest {
+    |                         ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+   --> src/ipc/tests.rs:961:31
+    |
+961 |     let request_outside_cwd = SpawnTerminalRequest {
+    |                               ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:1076:64
+     |
+1076 | ...                   DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+    --> src/ipc/tests.rs:1087:42
+     |
+1087 | ...                   session: DaemonSessionDetails {
+     |                                ^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+    --> src/ipc/tests.rs:1188:19
+     |
+1188 |     let request = SpawnTerminalRequest {
+     |                   ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `create_only`, `prepared_local_split` and `remaining_ms` in initializer of `ipc::terminal::SpawnTerminalRequest`
+    --> src/ipc/tests.rs:1259:19
+     |
+1259 |     let request = SpawnTerminalRequest {
+     |                   ^^^^^^^^^^^^^^^^^^^^ missing `create_only`, `prepared_local_split` and `remaining_ms`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:1434:60
+     |
+1434 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:1594:60
+     |
+1594 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:1770:60
+     |
+1770 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:1922:60
+     |
+1922 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2089:60
+     |
+2089 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2264:60
+     |
+2264 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2436:60
+     |
+2436 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2576:60
+     |
+2576 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2714:60
+     |
+2714 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2847:60
+     |
+2847 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:2958:60
+     |
+2958 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:3105:60
+     |
+3105 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:3264:60
+     |
+3264 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:3425:60
+     |
+3425 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:3558:60
+     |
+3558 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/ipc/tests.rs:3656:60
+     |
+3656 |                         DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+     |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0599]: no method named `schedule_cancellation_receipt` found for reference `&std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src/native_terminal/surface_host.rs:651:13
+    |
+651 |     channel.schedule_cancellation_receipt(
+    |     --------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `schedule_cancellation_receipt` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src/native_terminal/surface_host.rs:706:29
+    |
+706 |                     channel.schedule_cancellation_receipt(
+    |                     --------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `try_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src/native_terminal/surface_host.rs:728:25
+    |
+728 |             if !channel.try_claim(crate::ipc::qa_barrier::PRESENTATION_BARRIER, &session_id, &spec.operation_id) {
+    |                         ^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `release_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src/native_terminal/surface_host.rs:778:31
+    |
+778 |                 channel_clone.release_claim(
+    |                 --------------^^^^^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `active_presentation_generation` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope
+   --> src/native_terminal/surface_host.rs:971:38
+    |
+971 | ...                   host.active_presentation_generation() == Some(frame_generation)
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+971 -                                 host.active_presentation_generation() == Some(frame_generation)
+971 +                                 host.active_presentation_geometry() == Some(frame_generation)
+    |
+
+error[E0599]: no method named `active_presentation_epoch` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope
+   --> src/native_terminal/surface_host.rs:972:45
+    |
+972 | ...                   && host.active_presentation_epoch() == Some(frame_epoch)
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+972 -                                     && host.active_presentation_epoch() == Some(frame_epoch)
+972 +                                     && host.active_presentation_geometry() == Some(frame_epoch)
+    |
+
+error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`
+   --> src/remote/workspace_api/worktree_authority_tests.rs:350:13
+    |
+350 |             DaemonRequest::Spawn {
+    |             ^^^^^^^^^^^^^^^^^^^^ missing `local_split`
+
+error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`
+   --> src/remote/workspace_api/worktree_authority_tests.rs:589:35
+    |
+589 |                     .send_request(DaemonRequest::Spawn {
+    |                                   ^^^^^^^^^^^^^^^^^^^^ missing `local_split`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/remote/tests.rs:3883:50
+     |
+3883 |             let hs_resp = serde_json::to_string(&DaemonResponse::HandshakeOk {
+     |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+    --> src/remote/tests.rs:3939:42
+     |
+3939 | ...                   session: DaemonSessionDetails {
+     |                                ^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0063]: missing fields `admission_time_unix_ms` and `capabilities` in initializer of `daemon::protocol::DaemonResponse`
+    --> src/remote/tests.rs:4205:50
+     |
+4205 |             let hs_resp = serde_json::to_string(&DaemonResponse::HandshakeOk {
+     |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `admission_time_unix_ms` and `capabilities`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+    --> src/remote/tests.rs:4258:42
+     |
+4258 | ...                   session: DaemonSessionDetails {
+     |                                ^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0277]: can't compare `&str` with `std::path::PathBuf`
+   --> src/terminal/pty.rs:192:9
+    |
+192 | /         assert_eq!(
+193 | |             command.get_cwd().unwrap().to_str().unwrap(),
+194 | |             crate::daemon::session_service::normalize_process_cwd(&cwd)
+195 | |         );
+    | |_________^ no implementation for `&str == std::path::PathBuf`
+    |
+    = help: the trait `PartialEq<std::path::PathBuf>` is not implemented for `&str`
+    = note: this error originates in the macro `assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: can't compare `&str` with `std::path::PathBuf`
+   --> src/terminal/pty.rs:196:9
+    |
+196 | /         assert_eq!(
+197 | |             command.get_env("FERRYX_WORKTREE_PATH").unwrap().to_str().unwrap(),
+198 | |             crate::daemon::session_service::normalize_process_cwd(root.path())
+199 | |         );
+    | |_________^ no implementation for `&str == std::path::PathBuf`
+    |
+    = help: the trait `PartialEq<std::path::PathBuf>` is not implemented for `&str`
+    = note: this error originates in the macro `assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `std::io::Write`
+   --> src/daemon/handover_socket.rs:316:9
+    |
+316 |     use std::io::Write;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src/remote/account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1209:27
+     |
+1209 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:2204:17
+     |
+2204 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `header` is never read
+   --> src/daemon/handover_wire.rs:529:9
+    |
+529 |         header = [0u8; HANDOVER_HEADER_BYTES];
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `cursor` is never read
+   --> src/daemon/handover_wire.rs:543:26
+    |
+543 |         let mut cursor = 0usize;
+    |                          ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sender`
+   --> src/daemon/handover_wire.rs:569:14
+    |
+569 |         let (sender, receiver) = socketpair();
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sender`
+
+warning: unused variable: `receiver`
+   --> src/daemon/handover_wire.rs:594:22
+    |
+594 |         let (sender, receiver) = socketpair();
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:670:41
+    |
+670 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:372:13
+    |
+372 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:207:13
+    |
+207 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:6507:13
+     |
+6507 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:6558:13
+     |
+6558 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src/native_terminal/surface_host.rs:9233:13
+     |
+9233 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src/native_terminal/surface_host.rs:9243:13
+     |
+9243 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1333:9
+     |
+1333 |     let mut child = spawn_cat_child();
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1347:9
+     |
+1347 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/ssh/bridge_tests.rs:1364:9
+     |
+1364 |     let mut child = tokio::process::Command::new("/bin/sh")
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `initial_len`
+   --> src/ssh/projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: unused variable: `session`
+   --> src/terminal/pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |             let mut desired_size: Option<(u16, u16)> = None;
+     |                                                        ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1272:13
+     |
+1272 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+error: implementation of `Fn` is not general enough
+   --> src/terminal/shell.rs:647:13
+    |
+647 |             ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Fn` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `Fn<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `Fn<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `FnOnce` is not general enough
+   --> src/terminal/shell.rs:647:13
+    |
+647 |             ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `FnOnce` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `FnOnce<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `FnOnce<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `Fn` is not general enough
+   --> src/terminal/shell.rs:653:13
+    |
+653 |             ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Fn` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `Fn<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `Fn<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `FnOnce` is not general enough
+   --> src/terminal/shell.rs:653:13
+    |
+653 |             ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `FnOnce` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `FnOnce<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `FnOnce<(&'2 str,)>`, for some specific lifetime `'2`
+
+Some errors have detailed explanations: E0027, E0063, E0277, E0282, E0283, E0432, E0433, E0599.
+For more information about an error, try `rustc --explain E0027`.
+warning: `ferryx` (lib test) generated 54 warnings
+error: could not compile `ferryx` (lib test) due to 76 previous errors; 54 warnings emitted

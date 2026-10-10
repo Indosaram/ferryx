@@ -1,0 +1,355 @@
+$ vitest run --maxWorkers=1 src/components/SettingsDialog.test.tsx
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/sook/ferryx-pane-completion/base-pass2-d82b35e4/ui[39m
+
+ [31m❯[39m src/components/SettingsDialog.test.tsx [2m([22m[2m28 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 2692[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mis a full-view original-Orca-style nav/detail surface[32m 211[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mpersists confirm before closing a tab checkbox in General settings[32m 55[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mmoves the Ferryx CLI launcher card into the General section[32m 119[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mhides the POSIX CLI instructions when the launcher is unsupported on this platform[32m 38[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mkeeps the POSIX CLI instructions when the launcher is supported[32m 32[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mpersists the show-sidebar-on-startup toggle[32m 48[2mms[22m[39m
+[31m   [31m×[31m SettingsDialog[2m > [22mfetches Ghostty preferences and shows the effective terminal value/source[39m[32m 46[2mms[22m[39m
+[31m     → Unable to find a label with the text of: macOS Option as Alt
+
+Ignored nodes: comments, script, style
+[36m<body>[31m
+  [36m<div>[31m
+    [36m<div[31m
+      [33maria-label[31m=[32m"Settings"[31m
+      [33maria-modal[31m=[32m"false"[31m
+      [33mclass[31m=[32m"fixed inset-0 z-50 flex overflow-hidden bg-background text-foreground"[31m
+      [33mrole[31m=[32m"dialog"[31m
+    [36m>[31m
+      [36m<aside[31m
+        [33mclass[31m=[32m"flex w-[280px] shrink-0 flex-col border-r border-border bg-background"[31m
+        [33mdata-testid[31m=[32m"settings-nav"[31m
+      [36m>[31m
+        [36m<div[31m
+          [33mclass[31m=[32m"h-titlebar shrink-0"[31m
+          [33mdata-tauri-drag-region[31m=[32m"true"[31m
+        [36m/>[31m
+        [36m<div[31m
+          [33mclass[31m=[32m"px-3 pb-3 pt-2"[31m
+        [36m>[31m
+          [36m<button[31m
+            [33mclass[31m=[32m"no-drag mb-5 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"[31m
+            [33mtype[31m=[32m"button"[31m
+          [36m>[31m
+            [36m<svg[31m
+              [33mclass[31m=[32m"lucide lucide-arrow-left size-3.5"[31m
+              [33mfill[31m=[32m"none"[31m
+              [33mheight[31m=[32m"24"[31m
+              [33mstroke[31m=[32m"currentColor"[31m
+              [33mstroke-linecap[31m=[32m"round"[31m
+              [33mstroke-linejoin[31m=[32m"round"[31m
+              [33mstroke-width[31m=[32m"2"[31m
+              [33mviewBox[31m=[32m"0 0 24 24"[31m
+              [33mwidth[31m=[32m"24"[31m
+              [33mxmlns[31m=[32m"http://www.w3.org/2000/svg"[31m
+            [36m>[31m
+              [36m<path[31m
+                [33md[31m=[32m"m12 19-7-7 7-7"[31m
+              [36m/>[31m
+              [36m<path[31m
+                [33md[31m=[32m"M19 12H5"[31m
+              [36m/>[31m
+            [36m</svg>[31m
+            [0mBack to app[0m
+          [36m</button>[31m
+          [36m<div[31m
+            [33mclass[31m=[32m"mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/55"[31m
+          [36m>[31m
+            [0mSettings[0m
+          [36m</div>[31m
+          [36m<nav[31m
+            [33maria-label[31m=[32m"Settings sections"[31m
+            [33mclass[31m=[32m"space-y-0.5"[31m
+          [36m>[31m
+            [36m<button[31m
+              [33mclass[31m=[32m"no-drag flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors text-muted-foreground hover:bg-accent/60 hover:text-foreground"[31m
+              [33mtype[31m=[32m"button"[31m
+            [36m>[31m
+              [36m<span[31m
+                [33mclass[31m=[32m"[&>svg]:size-3.5"[31m
+              [36m>[31m
+                [36m<svg[31m
+                  [33mclass[31m=[32m"lucide lucide-settings2"[31m
+                  [33mfill[31m=[32m"none"[31m
+                  [33mheight[31m=[32m"24"[31m
+                  [33mstroke[31m=[32m"currentColor"[31m
+                  [33mstroke-linecap[31m=[32m"round"[31m
+                  [33mstroke-linejoin[31m=[32m"round"[31m
+                  [33mstroke-width[31m=[32m"2"[31m
+                  [33mviewBox[31m=[32m"0 0 24 24"[31m
+                  [33mwidth[31m=[32m"24"[31m
+                  [33mxmlns[31m=[32m"http://www.w3.org/2000/svg"[31m
+                [36m>[31m
+                  [36m<path[31m
+                    [33md[31m=[32m"M20 7h-9"[31m
+                  [36m/>[31m
+                  [36m<path[31m
+                    [33md[31m=[32m"M14 17H5"[31m
+                  [36m/>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"17"[31m
+                    [33mcy[31m=[32m"17"[31m
+                    [33mr[31m=[32m"3"[31m
+                  [36m/>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"7"[31m
+                    [33mcy[31m=[32m"7"[31m
+                    [33mr[31m=[32m"3"[31m
+                  [36m/>[31m
+                [36m</svg>[31m
+              [36m</span>[31m
+              [0mGeneral[0m
+            [36m</button>[31m
+            [36m<button[31m
+              [33mclass[31m=[32m"no-drag flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors text-muted-foreground hover:bg-accent/60 hover:text-foreground"[31m
+              [33mtype[31m=[32m"button"[31m
+            [36m>[31m
+              [36m<span[31m
+                [33mclass[31m=[32m"[&>svg]:size-3.5"[31m
+              [36m>[31m
+                [36m<svg[31m
+                  [33mclass[31m=[32m"lucide lucide-palette"[31m
+                  [33mfill[31m=[32m"none"[31m
+                  [33mheight[31m=[32m"24"[31m
+                  [33mstroke[31m=[32m"currentColor"[31m
+                  [33mstroke-linecap[31m=[32m"round"[31m
+                  [33mstroke-linejoin[31m=[32m"round"[31m
+                  [33mstroke-width[31m=[32m"2"[31m
+                  [33mviewBox[31m=[32m"0 0 24 24"[31m
+                  [33mwidth[31m=[32m"24"[31m
+                  [33mxmlns[31m=[32m"http://www.w3.org/2000/svg"[31m
+                [36m>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"13.5"[31m
+                    [33mcy[31m=[32m"6.5"[31m
+                    [33mfill[31m=[32m"currentColor"[31m
+                    [33mr[31m=[32m".5"[31m
+                  [36m/>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"17.5"[31m
+                    [33mcy[31m=[32m"10.5"[31m
+                    [33mfill[31m=[32m"currentColor"[31m
+                    [33mr[31m=[32m".5"[31m
+                  [36m/>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"8.5"[31m
+                    [33mcy[31m=[32m"7.5"[31m
+                    [33mfill[31m=[32m"currentColor"[31m
+                    [33mr[31m=[32m".5"[31m
+                  [36m/>[31m
+                  [36m<circle[31m
+                    [33mcx[31m=[32m"6.5"[31m
+                    [33mcy[31m=[32m"12.5"[31m
+                    [33mfill[31m=[32m"currentColor"[31m
+                    [33mr[31m=[32m".5"[31m
+                  [36m/>[31m
+                  [36m<path[31m
+                    [33md[31m=[32m"M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"[31m
+                  [36m/>[31m
+                [36m</svg>[31m
+              [36m</span>[31m
+              [0mAppearance[0m
+            [36m</button>[31m
+            [36m<button[31m
+              [33maria-current[31m=[32m"page"[31m
+              [33mclass[31m=[32m"no-drag flex h-8 w-full items-center...[39m
+   [32m✓[39m SettingsDialog[2m > [22mpersists explicit local terminal overrides above Ghostty[32m 43[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mlabels a font-size-only override as a local override and clears it with Use imported[32m 78[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mshows the registered shortcuts in the dedicated Keyboard Shortcuts section[32m 139[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mnavigates to Notifications section and displays toggles, permission status, volume slider, and test button[32m 77[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mtoggles Enable Notifications and updates state and localStorage[32m 52[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mtriggers probeNotificationDelivery when clicking Send Test Notification[32m 81[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mpicks custom sound and triggers pickNotificationAudio[32m 143[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mkeeps General free of the duplicate appearance summary[32m 14[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mnavigates to Appearance section, renders controls, and persists changes to localStorage[32m 200[2mms[22m[39m
+   [33m[2m✓[22m[39m SettingsDialog[2m > [22mnavigates to Browser section, changes search engine and zoom, and persists to localStorage [33m 312[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mnavigates to Remote Access section, renders paired devices, and revokes device on confirmation[32m 137[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mnavigates to Browser section and applies zoom to active browsers using setBrowserZoom[32m 168[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mnavigates to Agents section, displays detected agents, configures default agent and overrides[32m 253[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mpersists Appearance through the appearanceSettings API across remount[32m 227[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mstates that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed[32m 50[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mdescribes Default Agent as first in the New Tab list with a Default label, not auto-launch[32m 90[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mdoes not expose Quick Commands navigation or section[32m 32[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mdoes not offer a Workspace section, which the sidebar already owns[32m 31[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mrenders a non-empty General overview that does not duplicate Appearance controls[32m 15[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mF-settings-03: deferred hooks when closed[2m > [22mdoes not invoke useTerminalSettings or register listeners when open=false[32m 1[2mms[22m[39m
+   [32m✓[39m SettingsDialog[2m > [22mF-settings-03: deferred hooks when closed[2m > [22msource structure gates useTerminalSettings behind open check via inner component[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/components/SettingsDialog.test.tsx[2m > [22mSettingsDialog[2m > [22mfetches Ghostty preferences and shows the effective terminal value/source
+[31m[1mTestingLibraryElementError[22m[39m: Unable to find a label with the text of: macOS Option as Alt
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33maria-label[39m=[32m"Settings"[39m
+      [33maria-modal[39m=[32m"false"[39m
+      [33mclass[39m=[32m"fixed inset-0 z-50 flex overflow-hidden bg-background text-foreground"[39m
+      [33mrole[39m=[32m"dialog"[39m
+    [36m>[39m
+      [36m<aside[39m
+        [33mclass[39m=[32m"flex w-[280px] shrink-0 flex-col border-r border-border bg-background"[39m
+        [33mdata-testid[39m=[32m"settings-nav"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"h-titlebar shrink-0"[39m
+          [33mdata-tauri-drag-region[39m=[32m"true"[39m
+        [36m/>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"px-3 pb-3 pt-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"no-drag mb-5 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-arrow-left size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m12 19-7-7 7-7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M19 12H5"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+            [0mBack to app[0m
+          [36m</button>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/55"[39m
+          [36m>[39m
+            [0mSettings[0m
+          [36m</div>[39m
+          [36m<nav[39m
+            [33maria-label[39m=[32m"Settings sections"[39m
+            [33mclass[39m=[32m"space-y-0.5"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"no-drag flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors text-muted-foreground hover:bg-accent/60 hover:text-foreground"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"[&>svg]:size-3.5"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-settings2"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M20 7h-9"[39m
+                  [36m/>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M14 17H5"[39m
+                  [36m/>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"17"[39m
+                    [33mcy[39m=[32m"17"[39m
+                    [33mr[39m=[32m"3"[39m
+                  [36m/>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"7"[39m
+                    [33mcy[39m=[32m"7"[39m
+                    [33mr[39m=[32m"3"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</span>[39m
+              [0mGeneral[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"no-drag flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors text-muted-foreground hover:bg-accent/60 hover:text-foreground"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"[&>svg]:size-3.5"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33mclass[39m=[32m"lucide lucide-palette"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"24"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"2"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"24"[39m
+                  [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+                [36m>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"13.5"[39m
+                    [33mcy[39m=[32m"6.5"[39m
+                    [33mfill[39m=[32m"currentColor"[39m
+                    [33mr[39m=[32m".5"[39m
+                  [36m/>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"17.5"[39m
+                    [33mcy[39m=[32m"10.5"[39m
+                    [33mfill[39m=[32m"currentColor"[39m
+                    [33mr[39m=[32m".5"[39m
+                  [36m/>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"8.5"[39m
+                    [33mcy[39m=[32m"7.5"[39m
+                    [33mfill[39m=[32m"currentColor"[39m
+                    [33mr[39m=[32m".5"[39m
+                  [36m/>[39m
+                  [36m<circle[39m
+                    [33mcx[39m=[32m"6.5"[39m
+                    [33mcy[39m=[32m"12.5"[39m
+                    [33mfill[39m=[32m"currentColor"[39m
+                    [33mr[39m=[32m".5"[39m
+                  [36m/>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+              [36m</span>[39m
+              [0mAppearance[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33maria-current[39m=[32m"page"[39m
+              [33mclass[39m=[32m"no-drag flex h-8 w-full items-center...
+[90m [2m❯[22m Object.getElementError node_modules/@testing-library/dom/dist/config.js:[2m37:19[22m[39m
+[90m [2m❯[22m getAllByLabelText node_modules/@testing-library/dom/dist/queries/label-text.js:[2m111:38[22m[39m
+[90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m52:17[22m[39m
+[90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m95:19[22m[39m
+[36m [2m❯[22m src/components/SettingsDialog.test.tsx:[2m305:19[22m[39m
+    [90m303| [39m    expect(screen.getByText(/Ghostty · Imported/i)).toBeInTheDocument(…
+    [90m304| [39m    expect(screen.getByText("/Users/test/.config/ghostty/config")).toB…
+    [90m305| [39m    [34mexpect[39m(screen[33m.[39m[34mgetByLabelText[39m([32m"macOS Option as Alt"[39m))[33m.[39m[34mtoBeChecked[39m()[33m;[39m
+    [90m   | [39m                  [31m^[39m
+    [90m306| [39m  })[33m;[39m
+    [90m307| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m27 passed[39m[22m[90m (28)[39m
+[2m   Start at [22m 10:10:31
+[2m   Duration [22m 5.53s[2m (transform 548ms, setup 203ms, collect 1.78s, tests 2.69s, environment 381ms, prepare 73ms)[22m
+
+error: script "test" exited with code 1
+NATIVE_EXIT=1

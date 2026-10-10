@@ -1,0 +1,44 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteReconnect.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1044433) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteReconnect.test.tsx (1 test | 1 failed) 5ms
+   × reconnects events and refreshes missed focus without losing pairing 5ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteReconnect.test.tsx > reconnects events and refreshes missed focus without losing pairing
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/remote/RemoteReconnect.test.tsx:44:16
+     42|   // Given a paired browser that has loaded one desktop selection.
+     43|   vi.useFakeTimers();
+     44|   localStorage.setItem(`ferryx_remote_token_local:${window.location.or…
+       |                ^
+     45|   vi.stubGlobal("WebSocket", EventSocket);
+     46|   let sessionId: string | null = "before-outage";
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/remote/RemoteReconnect.test.tsx > reconnects events and refreshes missed focus without losing pairing
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteReconnect.test.tsx:24:16
+     22|   vi.useRealTimers();
+     23|   vi.unstubAllGlobals();
+     24|   localStorage.clear();
+       |                ^
+     25|   EventSocket.instances = [];
+     26| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  10:11:17
+   Duration  1.42s (transform 429ms, setup 103ms, collect 912ms, tests 5ms, environment 227ms, prepare 48ms)
+
+error: script "test" exited with code 1

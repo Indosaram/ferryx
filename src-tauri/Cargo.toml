@@ -1,12 +1,13 @@
 [package]
 name = "ferryx"
-version = "2026.928.7"
+version = "2026.1009.2"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license = "SUL-1.0"
 repository = "https://github.com/ferryx/ferryx"
 homepage = "https://ferryx.app"
 edition = "2021"
+rust-version = "1.89"
 default-run = "ferryx"
 
 [lib]
@@ -51,6 +52,10 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 default = ["native-terminal"]
+# Task 3 private QA barrier channel for the pane-liveness diagnostic
+# classifier headless harness. Compile-time gated; never enabled in release
+# builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
+local-split-qa = []
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
     "dep:wgpu",
@@ -209,6 +214,7 @@ webkit2gtk = { version = "2.0.2", default-features = false }
 [dev-dependencies]
 tempfile = "3.17"
 tokio-test = "0.4"
+tokio = { version = "1.53", features = ["test-util"] }
 
 [profile.release]
 lto = "thin"

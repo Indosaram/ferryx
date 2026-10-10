@@ -1,0 +1,49 @@
+$ vitest run --maxWorkers=1 src/components/TabBar.browserTab.runtime.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1041116) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/TabBar.browserTab.runtime.test.tsx (2 tests | 2 failed) 5ms
+   × New Browser Tab click creates visible browser content > shows a browser tab and viewport for the configured homepage 4ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+   × New Browser Tab click creates visible browser content > shows a browser tab and viewport for a blank homepage 0ms
+     → Cannot read properties of undefined (reading 'clear')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TabBar.browserTab.runtime.test.tsx > New Browser Tab click creates visible browser content > shows a browser tab and viewport for the configured homepage
+ FAIL  src/components/TabBar.browserTab.runtime.test.tsx > New Browser Tab click creates visible browser content > shows a browser tab and viewport for a blank homepage
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TabBar.browserTab.runtime.test.tsx:115:18
+    113| describe("New Browser Tab click creates visible browser content", () =…
+    114|   beforeEach(() => {
+    115|     localStorage.clear();
+       |                  ^
+    116|     browserMocks.createBrowser.mockReset();
+    117|     browserMocks.createBrowser.mockImplementation(async (request: { ur…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/components/TabBar.browserTab.runtime.test.tsx > New Browser Tab click creates visible browser content > shows a browser tab and viewport for the configured homepage
+ FAIL  src/components/TabBar.browserTab.runtime.test.tsx > New Browser Tab click creates visible browser content > shows a browser tab and viewport for a blank homepage
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/TabBar.browserTab.runtime.test.tsx:109:16
+    107| afterEach(() => {
+    108|   cleanup();
+    109|   localStorage.clear();
+       |                ^
+    110|   nativeMenu.lastCall = null;
+    111| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  10:10:30
+   Duration  1.90s (transform 774ms, setup 101ms, collect 1.40s, tests 5ms, environment 229ms, prepare 48ms)
+
+error: script "test" exited with code 1

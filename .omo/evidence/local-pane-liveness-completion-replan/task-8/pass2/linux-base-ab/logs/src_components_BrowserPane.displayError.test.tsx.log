@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/components/BrowserPane.displayError.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1040928) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/BrowserPane.displayError.test.tsx (5 tests | 5 failed) 7ms
+   × BrowserPane display error banner and retry > renders no error banner when setBrowserBounds resolves successfully 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane display error banner and retry > renders error banner with code and operation when setBrowserBounds rejects with a structured code 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane display error banner and retry > clicking Retry calls setBrowserBounds again exactly once and clears the banner upon resolution 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane display error banner and retry > clicking Retry triggers setBrowserBounds only once per click even when rejection persists 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × BrowserPane display error banner and retry > renders error banner with visibility operation if setBrowserVisible rejects 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/BrowserPane.displayError.test.tsx > BrowserPane display error banner and retry > renders no error banner when setBrowserBounds resolves successfully
+ FAIL  src/components/BrowserPane.displayError.test.tsx > BrowserPane display error banner and retry > renders error banner with code and operation when setBrowserBounds rejects with a structured code
+ FAIL  src/components/BrowserPane.displayError.test.tsx > BrowserPane display error banner and retry > clicking Retry calls setBrowserBounds again exactly once and clears the banner upon resolution
+ FAIL  src/components/BrowserPane.displayError.test.tsx > BrowserPane display error banner and retry > clicking Retry triggers setBrowserBounds only once per click even when rejection persists
+ FAIL  src/components/BrowserPane.displayError.test.tsx > BrowserPane display error banner and retry > renders error banner with visibility operation if setBrowserVisible rejects
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/BrowserPane.displayError.test.tsx:48:23
+     46|   browserMocks.setBrowserBounds.mockImplementation(async () => undefin…
+     47|   browserMocks.setBrowserVisible.mockImplementation(async () => undefi…
+     48|   window.localStorage.clear();
+       |                       ^
+     49| });
+     50| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:10:27
+   Duration  1.04s (transform 168ms, setup 102ms, collect 532ms, tests 7ms, environment 223ms, prepare 52ms)
+
+error: script "test" exited with code 1

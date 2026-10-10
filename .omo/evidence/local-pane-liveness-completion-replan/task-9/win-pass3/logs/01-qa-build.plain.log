@@ -1,0 +1,1012 @@
+﻿QA_BUILD_START 2026-10-05T00:39:39.8448306+09:00
+LOAD=65 FREE_GB=15.14
+cargo.exe :    Compiling serde_core v1.0.229
+At C:\Users\sook\ferryx-pane-completion\win-build3.ps1:10 char:1
++ & cargo build --manifest-path src-tauri/Cargo.toml --features local-s ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling serde_core v1.0.229:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling thiserror v2.0.20
+   Compiling web_atoms v0.2.6
+   Compiling selectors v0.36.1
+   Compiling markup5ever v0.38.0
+   Compiling bitflags v2.13.1
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling deranged v0.5.8
+   Compiling semver v1.0.28
+   Compiling serde_spanned v1.1.1
+   Compiling uuid v1.26.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling erased-serde v0.4.10
+   Compiling html5ever v0.38.0
+   Compiling rustc_version v0.4.1
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling url v2.5.8
+   Compiling cfb v0.7.3
+   Compiling indexmap v1.9.3
+   Compiling jsonptr v0.6.3
+   Compiling cargo-platform v0.1.9
+   Compiling camino v1.2.5
+   Compiling serde-untagged v0.1.9
+   Compiling cargo_metadata v0.19.2
+   Compiling dom_query v0.27.0
+   Compiling plist v1.10.0
+   Compiling serde_with v3.22.0
+   Compiling infer v0.19.0
+   Compiling json-patch v3.0.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling embed-resource v3.0.11
+   Compiling time v0.3.55
+   Compiling dpi v0.1.2
+   Compiling tauri-winres v0.3.6
+   Compiling webview2-com-sys v0.38.2
+   Compiling schemars v0.8.22
+   Compiling urlpattern v0.3.0
+   Compiling cargo_toml v0.22.3
+   Compiling tauri-utils v2.9.3
+   Compiling cookie v0.18.2
+   Compiling khronos_api v3.1.0
+   Compiling naga-types v30.0.1
+   Compiling tao v0.35.3
+   Compiling keyboard-types v0.7.0
+   Compiling png v0.18.1
+   Compiling gl_generator v0.14.0
+   Compiling serialize-to-javascript v0.1.2
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling wgpu-types v30.0.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling muda v0.19.3
+   Compiling glutin_wgl_sys v0.6.1
+   Compiling image v0.25.10
+   Compiling gpu-allocator v0.28.0
+   Compiling webview2-com v0.38.2
+   Compiling naga v30.0.1
+   Compiling tower-http v0.6.11
+   Compiling tungstenite v0.29.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling tauri-winrt-notification v0.7.3
+   Compiling snow v0.9.6
+   Compiling quinn-proto v0.11.17
+   Compiling nix v0.28.0
+   Compiling notify-rust v4.18.0
+   Compiling libsqlite3-sys v0.30.1
+   Compiling wry v0.55.1
+   Compiling tokio-tungstenite v0.29.0
+   Compiling reqwest v0.13.4
+   Compiling tauri-runtime v2.11.3
+   Compiling tauri-plugin v2.6.3
+   Compiling tauri-build v2.6.3
+   Compiling tauri-codegen v2.6.3
+   Compiling tauri-runtime-wry v2.11.4
+   Compiling yasna v0.6.0
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling rusqlite v0.32.1
+   Compiling winit v0.30.13
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-pane-completion\source-21dea3c0\src-tauri\vendor\portable-pty)
+   Compiling axum v0.8.9
+   Compiling quinn v0.11.11
+   Compiling notify v8.2.0
+   Compiling rcgen v0.14.10
+   Compiling mime_guess v2.0.5
+   Compiling rodio v0.22.2
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling ed25519-dalek v2.2.0
+   Compiling wgpu-hal v30.0.1
+   Compiling x25519-dalek v2.0.1
+   Compiling reqwest v0.12.28
+   Compiling tower-http v0.7.1
+   Compiling tauri v2.11.5
+   Compiling tauri-macros v2.6.3
+   Compiling tauri-plugin-fs v2.5.1
+   Compiling tauri-plugin-dialog v2.7.2
+   Compiling tauri-plugin-process v2.3.1
+   Compiling tauri-plugin-updater v2.10.1
+   Compiling tauri-plugin-notification v2.3.3
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-21dea3c0\src-tauri)
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling wgpu-core v30.0.1
+   Compiling wgpu v30.0.1
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `super::handover::HandoverManager`
+ --> src\daemon\server.rs:4:5
+  |
+4 | use super::handover::HandoverManager;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:22:5
+   |
+22 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\ipc\remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src\remote\session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src\remote\server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ffi::OsString`
+ --> src\ssh\..\ferryx_scope\ssh\process.rs:5:5
+  |
+5 |     ffi::OsString,
+  |     ^^^^^^^^^^^^^
+
+warning: unused variable: `handover_socket_path`
+    --> src\daemon\server.rs:4252:54
+     |
+4252 |                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+     |                                                      ^^^^^^^^^^^^^^^^^^^^ help: try ignoring the field: `handove
+r_socket_path: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `host`
+   --> src\ipc\remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `session`
+   --> src\terminal\pty.rs:564:22
+    |
+564 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src\terminal\remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+    --> src\lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: type `ArmSpec` is more private than the item `QaBarrierChannel::wait_for_release`
+   --> src\ipc\qa_barrier.rs:733:5
+    |
+733 |     pub async fn wait_for_release(&self, spec: &ArmSpec) -> ReleaseOutcome {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `QaBarrierChannel::wait_for_rel
+ease` is reachable at visibility `pub`
+    |
+note: but type `ArmSpec` is only usable at visibility `pub(crate)`
+   --> src\ipc\qa_barrier.rs:199:1
+    |
+199 | pub(crate) struct ArmSpec {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `RecordedSplit` is more private than the item `split_create_payload`
+    --> src\ipc\terminal.rs:2042:5
+     |
+2042 | /     pub fn split_create_payload(
+2043 | |         prepared: &PreparedLocalSplit,
+2044 | |         session_id: &str,
+2045 | |         daemon_epoch: u64,
+2046 | |         session: &DaemonSessionDetails,
+2047 | |         recorded: Option<&RecordedSplit>,
+2048 | |     ) -> Value {
+     | |______________^ function `split_create_payload` is reachable at visibility `pub(in crate::ipc::terminal)`
+     |
+note: but type `RecordedSplit` is only usable at visibility `pub(self)`
+    --> src\ipc\terminal.rs:1951:5
+     |
+1951 |     struct RecordedSplit {
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: type `RecordedSplit` is more private than the item `cancel_ack_payload`
+    --> src\ipc\terminal.rs:2249:5
+     |
+2249 | /     pub fn cancel_ack_payload(
+2250 | |         record: &RecordedSplit,
+2251 | |         phase: &str,
+2252 | |         duplicate: bool,
+...    |
+2258 | |         source_still_present: Option<bool>,
+2259 | |     ) -> Value {
+     | |______________^ function `cancel_ack_payload` is reachable at visibility `pub(in crate::ipc::terminal)`
+     |
+note: but type `RecordedSplit` is only usable at visibility `pub(self)`
+    --> src\ipc\terminal.rs:1951:5
+     |
+1951 |     struct RecordedSplit {
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src\terminal\output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachab
+le at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src\terminal\machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src\terminal\paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemo
+n::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src\terminal\paired_runtime.rs:294:5
+    |
+294 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::
+Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src\terminal\paired_runtime.rs:731:5
+    |
+731 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtim
+e::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src\terminal\paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::live_import`
+   --> src\terminal\remote.rs:819:5
+    |
+819 | /     pub fn live_import(
+820 | |         &self,
+821 | |         state: RemoteExportState,
+822 | |         transport: Option<Arc<dyn Transport>>,
+823 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::import_transferred`
+   --> src\terminal\remote.rs:840:5
+    |
+840 | /     pub fn import_transferred(
+841 | |         &self,
+842 | |         state: RemoteExportState,
+843 | |         transport: Option<Arc<dyn Transport>>,
+844 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sin
+k`
+   --> src\terminal\service.rs:75:5
+    |
+ 75 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::
+TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `webview_unreachable` is never used
+  --> src\browser\hard_reload.rs:98:4
+   |
+98 | fn webview_unreachable(error: tauri::Error) -> IpcError {
+   |    ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `app` and `timeout` are never read
+   --> src\browser\snapshot_source.rs:339:5
+    |
+338 | pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    |            -------------------------- fields in this struct
+339 |     app: AppHandle<R>,
+    |     ^^^
+340 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: method `is_proceed` is never used
+  --> src\daemon\handover.rs:22:19
+   |
+21 | impl UpgradeAction {
+   | ------------------ method in this implementation
+22 |     pub(crate) fn is_proceed(self) -> bool {
+   |                   ^^^^^^^^^^
+
+warning: struct `SpawnOwnerGuard` is never constructed
+   --> src\daemon\handover.rs:450:19
+    |
+450 | pub(crate) struct SpawnOwnerGuard {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `retain_spawn_owner` is never used
+   --> src\daemon\handover.rs:574:19
+    |
+528 | impl HandoverManager {
+    | -------------------- method in this implementation
+...
+574 |     pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: function `rollback_transferred_readers` is never used
+  --> src\daemon\server.rs:43:10
+   |
+43 | async fn rollback_transferred_readers<R, A, D>(
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `adopt_transferred_ownership` is never used
+  --> src\daemon\server.rs:71:4
+   |
+71 | fn adopt_transferred_ownership(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `release_adopted_ownership` is never used
+   --> src\daemon\server.rs:104:4
+    |
+104 | fn release_adopted_ownership(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `from_locked_file` is never used
+   --> src\daemon\server.rs:990:19
+    |
+941 | impl DaemonLockFile {
+    | ------------------- associated function in this implementation
+...
+990 |     pub(crate) fn from_locked_file(file: File) -> Self {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: associated function `from_locked_files` is never used
+    --> src\daemon\server.rs:1061:19
+     |
+1050 | impl DaemonLockFiles {
+     | -------------------- associated function in this implementation
+...
+1061 |     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
+     |                   ^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict` is never used
+    --> src\daemon\server.rs:1967:15
+     |
+1967 | pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict_owned` is never used
+    --> src\daemon\server.rs:1988:15
+     |
+1988 | pub(crate) fn handover_delivery_verdict_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_restorable_unexported` is never used
+    --> src\daemon\server.rs:2007:15
+     |
+2007 | pub(crate) fn handover_restorable_unexported(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_effective_owned` is never used
+    --> src\daemon\server.rs:2026:15
+     |
+2026 | pub(crate) fn handover_effective_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_spawn_relative_path` is never used
+    --> src\daemon\server.rs:5424:4
+     |
+5424 | fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `machine_sessions` is never used
+   --> src\daemon\session_service.rs:975:19
+    |
+361 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+975 |     pub(crate) fn machine_sessions(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: field `workspace_queues` is never read
+  --> src\daemon\workspace_service.rs:25:5
+   |
+19 | pub struct DaemonWorkspaceService {
+   |            ---------------------- field in this struct
+...
+25 |     workspace_queues: parking_lot::Mutex<
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `spawn_queue` is never used
+  --> src\daemon\workspace_service.rs:42:19
+   |
+41 | impl DaemonWorkspaceService {
+   | --------------------------- method in this implementation
+42 |     pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+   |                   ^^^^^^^^^^^
+
+warning: function `desktop_entry_for_mime` is never used
+  --> src\ipc\file_open_with.rs:42:15
+   |
+42 | pub(crate) fn desktop_entry_for_mime(contents: &str, mime: &str) -> Option<String> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_valid_desktop_id` is never used
+  --> src\ipc\file_open_with.rs:93:15
+   |
+93 | pub(crate) fn is_valid_desktop_id(id: &str) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `desktop_application_dirs` is never used
+   --> src\ipc\file_open_with.rs:103:15
+    |
+103 | pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src\ipc\file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src\ipc\file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\ipc\file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: fields `client_request_id`, `source_backend_session_id`, `workspace_id`, and `worktree_path` are never read
+   --> src\ipc\qa_barrier.rs:212:16
+    |
+199 | pub(crate) struct ArmSpec {
+    |                   ------- fields in this struct
+...
+212 |     pub(crate) client_request_id: Option<String>,
+    |                ^^^^^^^^^^^^^^^^^
+213 |     #[serde(rename = "sourceBackendSessionId", default)]
+214 |     pub(crate) source_backend_session_id: Option<String>,
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+215 |     #[serde(rename = "workspaceId", default)]
+216 |     pub(crate) workspace_id: Option<String>,
+    |                ^^^^^^^^^^^^
+217 |     #[serde(rename = "worktreePath", default)]
+218 |     pub(crate) worktree_path: Option<String>,
+    |                ^^^^^^^^^^^^^
+    |
+    = note: `ArmSpec` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during 
+dead code analysis
+
+warning: method `presentation_tuple` is never used
+   --> src\native_terminal\surface_host.rs:567:8
+    |
+560 | impl NativeTerminalSession {
+    | -------------------------- method in this implementation
+...
+567 |     fn presentation_tuple(&self) -> Option<&crate::daemon::protocol::PaneAttachTuple> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `authorization_wait` is never used
+  --> src\notification\permission.rs:14:15
+   |
+14 | pub(crate) fn authorization_wait() -> Duration {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `request_authorization_with` is never used
+  --> src\notification\permission.rs:24:15
+   |
+24 | pub(crate) fn request_authorization_with(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wait_for_authorization` is never used
+  --> src\notification\permission.rs:48:15
+   |
+48 | pub(crate) fn wait_for_authorization(
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\remote\auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `local_credential` is never read
+   --> src\remote\browser_backend.rs:423:5
+    |
+421 | pub struct LocalIpcBrowserBackend {
+    |            ---------------------- field in this struct
+422 |     socket_path: String,
+423 |     local_credential: Option<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: method `disarm` is never used
+   --> src\remote\relay_server.rs:241:12
+    |
+216 | impl PairingClaimGuard {
+    | ---------------------- method in this implementation
+...
+241 |     pub fn disarm(&mut self) {
+    |            ^^^^^^
+
+warning: function `probe_tailscale_cli` is never used
+   --> src\remote\state.rs:215:4
+    |
+215 | fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: field `stderr_fd` is never read
+   --> src\ssh\bridge.rs:818:5
+    |
+814 | pub struct BridgeConnection {
+    |            ---------------- field in this struct
+...
+818 |     stderr_fd: Option<RawFd>,
+    |     ^^^^^^^^^
+
+warning: function `GetStdHandle` is never used
+   --> src\ssh\transport_windows.rs:203:8
+    |
+203 |     fn GetStdHandle(kind: u32) -> HANDLE;
+    |        ^^^^^^^^^^^^
+
+warning: function `inspect` is never used
+   --> src\terminal\foreground.rs:226:15
+    |
+226 | pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
+    |               ^^^^^^^
+
+warning: struct `ResolvedSpawnContext` is never constructed
+   --> src\terminal\pty.rs:155:19
+    |
+155 | pub(crate) struct ResolvedSpawnContext {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `apply` is never used
+   --> src\terminal\pty.rs:162:8
+    |
+161 | impl ResolvedSpawnContext {
+    | ------------------------- method in this implementation
+162 |     fn apply(&self, command: &mut CommandBuilder, session_id: &str) {
+    |        ^^^^^
+
+warning: variant `Inherited` is never constructed
+   --> src\terminal\pty.rs:216:5
+    |
+214 | enum SpawnPathPolicy {
+    |      --------------- variant in this enum
+215 |     LegacyDiscovery,
+216 |     Inherited,
+    |     ^^^^^^^^^
+    |
+    = note: `SpawnPathPolicy` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead c
+ode analysis
+
+warning: methods `spawn_resolved_with_id` and `try_acquire_cwd_probe` are never used
+   --> src\terminal\pty.rs:342:19
+    |
+235 | impl PtyManager {
+    | --------------- methods in this implementation
+...
+342 |     pub(crate) fn spawn_resolved_with_id(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+828 |     pub(crate) fn try_acquire_cwd_probe(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PumpToken` is never constructed
+  --> src\terminal\service.rs:21:19
+   |
+21 | pub(crate) struct PumpToken(u64);
+   |                   ^^^^^^^^^
+
+warning: struct `PumpTokenFence` is never constructed
+  --> src\terminal\service.rs:24:19
+   |
+24 | pub(crate) struct PumpTokenFence {
+   |                   ^^^^^^^^^^^^^^
+
+warning: methods `install`, `is_active`, and `remove` are never used
+  --> src\terminal\service.rs:30:19
+   |
+29 | impl PumpTokenFence {
+   | ------------------- methods in this implementation
+30 |     pub(crate) fn install(&self) -> PumpToken {
+   |                   ^^^^^^^
+...
+36 |     pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
+   |                   ^^^^^^^^^
+37 |
+38 |     pub(crate) fn remove(&self, token: PumpToken) -> bool {
+   |                   ^^^^^^
+
+warning: methods `try_acquire_cwd_probe`, `spawn_resolved_with_id`, and `pump_adopted_output` are never used
+   --> src\terminal\service.rs:178:19
+    |
+ 53 | impl TerminalService {
+    | -------------------- methods in this implementation
+...
+178 |     pub(crate) fn try_acquire_cwd_probe(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+232 |     pub(crate) fn spawn_resolved_with_id(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+328 |     pub(crate) fn pump_adopted_output(
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Adopted` is never constructed
+   --> src\terminal\session.rs:199:5
+    |
+197 | pub(crate) enum ProcessHandle {
+    |                 ------------- variant in this enum
+198 |     Spawned(Box<dyn Child + Send + Sync>),
+199 |     Adopted(AdoptedProcess),
+    |     ^^^^^^^
+
+warning: method `wait_and_reap` is never used
+    --> src\terminal\session.rs:1128:19
+     |
+ 446 | impl PtySession {
+     | --------------- method in this implementation
+...
+1128 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `resolve_ordinary_shell_command` is never used
+   --> src\terminal\shell.rs:441:15
+    |
+441 | pub(crate) fn resolve_ordinary_shell_command(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ordinary_shell_command_with_env` is never used
+   --> src\terminal\shell.rs:450:4
+    |
+450 | fn ordinary_shell_command_with_env<E>(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inherited_executable` is never used
+   --> src\terminal\shell.rs:486:4
+    |
+486 | fn inherited_executable(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inherited_candidate_is_executable` is never used
+   --> src\terminal\shell.rs:518:4
+    |
+518 | fn inherited_candidate_is_executable(path: &std::path::Path, platform: TargetPlatform) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ProcessIdentity` is never constructed
+  --> src\terminal\suspension.rs:55:8
+   |
+55 | struct ProcessIdentity {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `Observation` is never constructed
+  --> src\terminal\suspension.rs:62:8
+   |
+62 | struct Observation {
+   |        ^^^^^^^^^^^
+
+warning: trait `Process` is never used
+  --> src\terminal\suspension.rs:67:7
+   |
+67 | trait Process {
+   |       ^^^^^^^
+
+warning: struct `OwnedStop` is never constructed
+  --> src\terminal\suspension.rs:74:8
+   |
+74 | struct OwnedStop {
+   |        ^^^^^^^^^
+
+warning: struct `Ownership` is never constructed
+  --> src\terminal\suspension.rs:81:8
+   |
+81 | struct Ownership {
+   |        ^^^^^^^^^
+
+warning: function `verify` is never used
+  --> src\terminal\suspension.rs:85:4
+   |
+85 | fn verify(target: &SuspensionTarget, identity: &ProcessIdentity) -> Result<(), SuspensionError> {
+   |    ^^^^^^
+
+warning: methods `stop`, `classify`, and `resume` are never used
+   --> src\terminal\suspension.rs:97:8
+    |
+ 96 | impl Ownership {
+    | -------------- methods in this implementation
+ 97 |     fn stop(&mut self, target: &SuspensionTarget, process: &impl Process) -> Result<ActuationReceipt, SuspensionE
+rror> {
+    |        ^^^^
+...
+131 |     fn classify(&mut self, target: &SuspensionTarget, process: &impl Process) -> Result<SuspensionSource, Suspens
+ionError> {
+    |        ^^^^^^^^
+...
+147 |     fn resume(&mut self, target: &SuspensionTarget, process: &impl Process) -> Result<(), SuspensionError> {
+    |        ^^^^^^
+
+warning: function `ownership` is never used
+   --> src\terminal\suspension.rs:157:4
+    |
+157 | fn ownership() -> &'static parking_lot::Mutex<Ownership> {
+    |    ^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src\worktree\git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `with_preparation_git_budget` is never used
+   --> src\worktree\git.rs:143:15
+    |
+143 | pub(crate) fn with_preparation_git_budget<T>(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0275]: overflow evaluating the requirement `validation::NumericDimension: Sync`
+     |
+     = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate 
+(`ferryx_lib`)
+note: required because it appears within the type `NumericType`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:107:12
+     |
+ 107 | pub struct NumericType {
+     |            ^^^^^^^^^^^
+note: required because it appears within the type `InterfaceVar`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:125:12
+     |
+ 125 | pub struct InterfaceVar {
+     |            ^^^^^^^^^^^^
+note: required because it appears within the type `validation::Varying`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:154:6
+     |
+ 154 | enum Varying {
+     |      ^^^^^^^
+note: required because it appears within the type `PhantomData<validation::Varying>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\marker.rs:811:11
+note: required because it appears within the type `alloc::raw_vec::RawVec<validation::Varying>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\alloc\src\raw_vec\mod.rs:73:18
+note: required because it appears within the type `Vec<validation::Varying>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\alloc\src\vec\mod.rs:438:11
+note: required because it appears within the type `validation::EntryPoint`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:285:8
+     |
+ 285 | struct EntryPoint {
+     |        ^^^^^^^^^^
+     = note: required because it appears within the type `((ShaderStage, std::string::String), validation::EntryPoint)`
+     = note: required for `hashbrown::raw::RawTable<((ShaderStage, std::string::String), validation::EntryPoint)>` to i
+mplement `Sync`
+note: required because it appears within the type `HashMap<(ShaderStage, String), EntryPoint, BuildHasherDefault<...>>`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hashbrown-0.17.1\src\map.rs:182:12
+     |
+ 182 | pub struct HashMap<K, V, S = DefaultHashBuilder, A: Allocator = Global> {
+     |            ^^^^^^^
+note: required because it appears within the type `wgpu::wgpu_core::validation::Interface`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:300:12
+     |
+ 300 | pub struct Interface {
+     |            ^^^^^^^^^
+note: required because it appears within the type `ShaderMetaData`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\validation.rs:317:10
+     |
+ 317 | pub enum ShaderMetaData {
+     |          ^^^^^^^^^^^^^^
+note: required because it appears within the type `wgpu::wgpu_core::pipeline::ShaderModule`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\pipeline.rs:69:12
+     |
+  69 | pub struct ShaderModule {
+     |            ^^^^^^^^^^^^
+     = note: required for `std::sync::Arc<wgpu::wgpu_core::pipeline::ShaderModule>` to implement `std::marker::Send`
+note: required because it appears within the type `MaybeDangling<std::sync::Arc<wgpu::wgpu_core::pipeline::ShaderModule
+>>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\maybe_dangling.rs:74:11
+note: required because it appears within the type `ManuallyDrop<std::sync::Arc<wgpu::wgpu_core::pipeline::ShaderModule>
+>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\manually_drop.rs:161:11
+note: required because it appears within the type `MaybeUninit<std::sync::Arc<wgpu::wgpu_core::pipeline::ShaderModule>>
+`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\maybe_uninit.rs:355:10
+     = note: required because it appears within the type `[MaybeUninit<std::sync::Arc<wgpu::wgpu_core::pipeline::Shader
+Module>>; 3]`
+note: required because it appears within the type `arrayvec::arrayvec::ArrayVec<std::sync::Arc<wgpu::wgpu_core::pipelin
+e::ShaderModule>, 3>`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec.rs:43:12
+     |
+  43 | pub struct ArrayVec<T, const CAP: usize> {
+     |            ^^^^^^^^
+note: required because it appears within the type `wgpu::wgpu_core::pipeline::RenderPipeline`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\pipeline.rs:918:12
+     |
+ 918 | pub struct RenderPipeline {
+     |            ^^^^^^^^^^^^^^
+     = note: required for `std::sync::Weak<wgpu::wgpu_core::pipeline::RenderPipeline>` to implement `std::marker::Send`
+note: required because it appears within the type `binding_model::ExclusivePipeline`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\binding_model.rs:749:17
+     |
+ 749 | pub(crate) enum ExclusivePipeline {
+     |                 ^^^^^^^^^^^^^^^^^
+     = note: required for `OnceLock<binding_model::ExclusivePipeline>` to implement `std::marker::Send`
+note: required because it appears within the type `wgpu::wgpu_core::binding_model::BindGroupLayout`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\binding_model.rs:811:12
+     |
+ 811 | pub struct BindGroupLayout {
+     |            ^^^^^^^^^^^^^^^
+     = note: required for `std::sync::Arc<wgpu::wgpu_core::binding_model::BindGroupLayout>` to implement `Sync`
+note: required because it appears within the type `std::option::Option<std::sync::Arc<wgpu::wgpu_core::binding_model::B
+indGroupLayout>>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\option.rs:597:9
+note: required because it appears within the type `MaybeDangling<Option<Arc<BindGroupLayout>>>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\maybe_dangling.rs:74:11
+note: required because it appears within the type `ManuallyDrop<Option<Arc<BindGroupLayout>>>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\manually_drop.rs:161:11
+note: required because it appears within the type `MaybeUninit<Option<Arc<BindGroupLayout>>>`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\mem\maybe_uninit.rs:355:10
+     = note: required because it appears within the type `[MaybeUninit<Option<Arc<BindGroupLayout>>>; 8]`
+note: required because it appears within the type `ArrayVec<Option<Arc<BindGroupLayout>>, 8>`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\arrayvec-0.7.8\src\arrayvec.rs:43:12
+     |
+  43 | pub struct ArrayVec<T, const CAP: usize> {
+     |            ^^^^^^^^
+note: required because it appears within the type `wgpu::wgpu_core::binding_model::PipelineLayout`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\binding_model.rs:1029:1
+2
+     |
+1029 | pub struct PipelineLayout {
+     |            ^^^^^^^^^^^^^^
+     = note: required for `std::sync::Arc<wgpu::wgpu_core::binding_model::PipelineLayout>` to implement `Sync`
+note: required because it appears within the type `wgpu::wgpu_core::pipeline::RenderPipelineState`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\pipeline.rs:912:19
+     |
+ 912 | pub(crate) struct RenderPipelineState {
+     |                   ^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `ResourceState<wgpu::wgpu_core::pipeline::RenderPipelineState>`
+    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30.0.1\src\resource.rs:95:10
+     |
+  95 | pub enum ResourceState<T> {
+     |          ^^^^^^^^^^^^^
+     = note: the full name for the type has been written to 'C:\Users\sook\ferryx-pane-completion\source-21dea3c0\src-t
+auri\target\debug\deps\ferryx_lib.long-type-8719202604950037509.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+For more information about this error, try `rustc --explain E0275`.
+warning: `ferryx` (lib) generated 90 warnings
+error: could not compile `ferryx` (lib) due to 1 previous error; 90 warnings emitted
+QA_BUILD_EXIT=101 at 2026-10-05T00:41:12.7632707+09:00

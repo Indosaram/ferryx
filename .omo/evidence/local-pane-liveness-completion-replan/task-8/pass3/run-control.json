@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "task": "local-pane-liveness Task 8 pass 3 (remote composed-candidate verification)",
+  "candidate": {
+    "commit": "21dea3c01d1ec423498bc48eb2d29107be75eddf",
+    "tree": "02488435b60cb416eebc377db7097d53b3a7e992",
+    "base": "d82b35e4",
+    "branch": "work/local-pane-liveness-completion-foundation"
+  },
+  "notepad": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ulw-20261004-151839.XXXXXX.md.mrlsHnwHCA",
+  "evidenceRoot": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3",
+  "localRuns": {
+    "win_runner": {
+      "bash_id": "bash_10",
+      "command": "ssh -i <win_key> sook@100.126.171.58 powershell.exe -NoProfile -Command \"$env:CARGO_TARGET_DIR=...\\source-21dea3c0\\target; Set-Location ...\\source-21dea3c0; node ...\\task8-21dea3c0\\runner3.mjs <root> <out> windows\""
+    },
+    "linux_resume": {
+      "bash_id": "bash_11",
+      "command": "ssh indo@100.91.254.71 \"cd /home/indo/ferryx-pane-completion/source-21dea3c0 && CARGO_TARGET_DIR=.../target CARGO_BUILD_JOBS=4 node .../task8-21dea3c0/runner3-resume.mjs .../source-21dea3c0 .../task8-21dea3c0 linux 2>&1 | tee -a .../resume.log\""
+    }
+  },
+  "hostRuns": {
+    "mac": {
+      "host": "CQFQ4P2LXK",
+      "ssh": "I552267@100.65.239.35",
+      "runnerPid": 75800,
+      "runner": "/Users/I552267/ferryx-pane-completion/task8-21dea3c0/runner3.mjs",
+      "stageLog": "/Users/I552267/ferryx-pane-completion/task8-21dea3c0/stage.log",
+      "commands": "/Users/I552267/ferryx-pane-completion/task8-21dea3c0/commands.jsonl",
+      "logs": "/Users/I552267/ferryx-pane-completion/task8-21dea3c0/logs/",
+      "currentGate": "full-ui",
+      "heartbeat": "progress-full-ui.log",
+      "timeoutArtifacts": [
+        "timeout-full-ui.json",
+        "timeout-full-ui-lsof.txt",
+        "timeout-full-ui-sample.txt"
+      ],
+      "deadlineMs": 2400000
+    },
+    "linux": {
+      "host": "indo",
+      "ssh": "indo@100.91.254.71",
+      "runnerPids": [
+        1512984,
+        1512991,
+        1512992
+      ],
+      "runner": "/home/indo/ferryx-pane-completion/task8-21dea3c0/runner3-resume.mjs",
+      "resumeLog": "/home/indo/ferryx-pane-completion/task8-21dea3c0/resume.log",
+      "commands": "/home/indo/ferryx-pane-completion/task8-21dea3c0/commands.jsonl",
+      "logs": "/home/indo/ferryx-pane-completion/task8-21dea3c0/logs/",
+      "currentGate": "rust-configs-then-full-ui",
+      "deadlineMs": 2400000
+    },
+    "windows": {
+      "host": "DESKTOP-1LAPJMP",
+      "ssh": "sook@100.126.171.58",
+      "key": "/Users/indo/code/project/maho-workspace/.secrets/signing/maho_win_builder_ed25519",
+      "runner": "C:/Users/sook/ferryx-pane-completion/task8-21dea3c0/runner3.mjs",
+      "commands": "C:/Users/sook/ferryx-pane-completion/task8-21dea3c0/commands.jsonl",
+      "logs": "C:/Users/sook/ferryx-pane-completion/task8-21dea3c0/logs/",
+      "currentGate": "full-ui",
+      "deadlineMs": 2400000
+    }
+  },
+  "monitors": {
+    "mac_stream": "mon_8PXN6Y2C9X3ASS40",
+    "mac_disk_watchdog": "mon_2QKENQN7E460HC07",
+    "linux_resume_stream": "mon_YCNNE5ATW2RX64S2",
+    "windows_commands": "mon_3X14E0A4H3D1J7GY",
+    "mac_fullui_completion": "mon_PV54H919Y9ZZNJEY",
+    "linux_fullui_completion": "mon_JVAWWCY7NB56BJNQ",
+    "windows_fullui_completion": "mon_1CBKKFTZ7ZH5BY6H",
+    "windows_stage_v1_dead": "mon_X07Q2MNC65JJ1X6Z"
+  },
+  "scripts": {
+    "runner": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/runner3.mjs",
+    "resumeRunner": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/runner3-resume.mjs",
+    "stageUnix": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/stage-unix.sh",
+    "stageWindows": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/stage-windows.ps1",
+    "fetch": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/fetch-evidence.sh",
+    "cleanupUnix": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/cleanup-unix.sh",
+    "cleanupWindows": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/cleanup-windows.ps1"
+  },
+  "status": "UI gates PASS on all 3 hosts (build/split 19/lifecycle 112/runner 28). Rust gates NOT_RUN_BLOCKED by single E0505 at surface_host.rs:989 on all 3 hosts (candidate 5464da0d). Full-UI suites running on all 3 hosts. Cleanup pending. TASK 8 NOT COMPLETE.",
+  "generatedAt": "2026-10-04T06:58:34.805Z",
+  "rustHalf": {
+    "status": "RE-RUNNING on the repaired delta (d97233c1, 6 files) — UI bytes unchanged, ui/dist from 21dea3c0 retained",
+    "repair": {
+      "file": "src-tauri/src/native_terminal/surface_host.rs",
+      "lines": "two-line clone fix: `let completion_window_for_closure = completion_window.clone();` before dispatch_render_on_main_thread, and `completion_window_for_closure.emit(...)` inside the closure",
+      "patch": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/surface_host-repair.patch",
+      "patchSha256": "366bfdb7c9d2359c6f9074ae914af33399ddbc9916e4d377b7de06d504f69945",
+      "preSha256": "6e4928ce757aeef8da626ec33a20573d28976b1be430fa180e7bfc8a76e31cc9",
+      "postSha256": "9039b136990166a7edb3d264a0249848d69ee888379e6107c216a6cdb2fe696a",
+      "author": "st_01a1059f (separate author; not this verifier)"
+    },
+    "deltaStrategy": "Reuse the already-staged tree source-21dea3c0 on each host (git archive 21dea3c0 + built ui/dist, UI bytes unchanged) and apply ONLY the surface_host patch, verifying pre/post sha256. No UI scope is re-run.",
+    "scripts": {
+      "runner": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/runner3-rust.mjs",
+      "applyUnix": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/apply-repair.sh",
+      "applyWindows": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/apply-repair.ps1"
+    },
+    "transferred": {
+      "mac": "/Users/I552267/ferryx-pane-completion/task8-21dea3c0/",
+      "linux": "/home/indo/ferryx-pane-completion/task8-21dea3c0/",
+      "windows": "C:/Users/sook/ferryx-pane-completion/task8-21dea3c0/"
+    },
+    "gateOrder": [
+      "per-config --list with counts (lib, qa, handover)",
+      "affected filters",
+      "all-targets",
+      "full lib suite",
+      "linux-only suspension + split_journal"
+    ],
+    "shortCircuit": "a failed list/compile records its dependent gates NOT_RUN_BLOCKED with the causal log; no repeated compilations",
+    "deadlines": {
+      "list": 1800000,
+      "filters": 1800000,
+      "allTargets": 1800000,
+      "fullLib": 2400000
+    },
+    "runner": "/Volumes/T9-Mac/project/ferryx-wt/local-pane-liveness-completion-foundation/.omo/evidence/local-pane-liveness-completion-replan/task-8/pass3/runner3-rust2.mjs (adds the 3 integration targets)",
+    "deltaFiles": {
+      "src-tauri/src/native_terminal/surface_host.rs": "ca5de395323e6b6c3c949ffbcc4968ccf7b258347ebbe6fed086a916dcefcdfc",
+      "src-tauri/src/daemon/client.rs": "fa71539d36ccd9e5c033fb0c32290d8948c0bc4f837e6771e91c7ec2a10c05a0",
+      "src-tauri/src/daemon/handover.rs": "373209103460df5080edfe6f21722efeecfa000e5889adbe77c9163f88cc960c",
+      "src-tauri/tests/daemon_handover_contract.rs": "d7d79eecdf3e82df121c73bbe27fbc0340f23f0da78abb8d4bb8165661209594",
+      "src-tauri/tests/daemon_persistence_contract.rs": "28b651f4198d4c4e7b12f20e029345971f53790881a5d6282d6cd5981d8b4d96",
+      "src-tauri/tests/zero_config_gen4_audit.rs": "bcb49a752bae26e9292f7bd20b33c5370d380d63be3cdfcb3723e400f4bfed76"
+    },
+    "deltaVerifiedOn": [
+      "mac",
+      "linux",
+      "windows"
+    ],
+    "runs": {
+      "mac": "bash_25",
+      "linux": "bash_26",
+      "windows": "bash_29"
+    },
+    "monitors": {
+      "mac": "mon_V31AK3SP0GEERHZ6",
+      "linux": "mon_T5HQADH0TF1XQB9T",
+      "windows": "mon_RA9A1NHA6W9J0X4N"
+    },
+    "gates": [
+      "local_split_reliability_ (list+run)",
+      "pane_liveness_ (list+run)",
+      "all-targets",
+      "3 integration targets (list+run each)",
+      "qa_barrier (list+run)",
+      "daemon_handover_transfer_contract (list+run)",
+      "full lib",
+      "linux: suspension + split_journal"
+    ]
+  },
+  "transportRepair": {
+    "status": "DELEGATED to source-only worker st_01a105a5, scoped to ui/src/lib/terminalTransport/terminalTransport.test.ts only",
+    "regression": "base d82b35e4 11/11 pass (native 0) vs candidate 21dea3c0 1 failed | 10 passed (native 1)",
+    "rule": "must NOT be staged together with the surface_host.rs repair; after it arrives, re-run only that affected suite remotely and bind its delta to the candidate commit"
+  },
+  "macFullUi": {
+    "status": "COMPLETE",
+    "native": 1,
+    "selected": 6521,
+    "tests": "192 failed / 6329 passed",
+    "testFiles": "7 failed / 365 passed (372)",
+    "timedOut": false,
+    "note": "pass-2's 1200s timeout did NOT recur; run finished on its own inside the 2400s deadline. No root cause invented for the pass-2 timeout."
+  },
+  "candidateChain": [
+    {
+      "sha": "21dea3c0",
+      "subject": "round-3 backend/native/frontend/scripts repairs (31 files)",
+      "note": "UI source of record for this pass"
+    },
+    {
+      "sha": "764934a4",
+      "subject": "fix(native): clone the completion window before moving it into the render closure",
+      "note": "E0505 fix, surface_host.rs +2/-1"
+    },
+    {
+      "sha": "7c0fed30",
+      "subject": "test(ui): bind the transport listSessions fixture to the incarnation contract",
+      "note": "A/B-proven regression repair"
+    },
+    {
+      "sha": "17295029",
+      "subject": "test(native): script one acquisition for the presentation accessor test",
+      "note": "native test fix"
+    },
+    {
+      "sha": "b0ed4bef",
+      "subject": "test(daemon): reconcile the create stage before asserting the spawn write",
+      "note": "client.rs x2 + handover.rs"
+    },
+    {
+      "sha": "d97233c1",
+      "subject": "test(daemon): complete the integration fixtures for the new wire fields",
+      "note": "3 integration targets"
+    }
+  ]
+}

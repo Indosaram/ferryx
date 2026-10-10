@@ -41,6 +41,7 @@ import { notificationCenterStore } from "./lib/notificationCenter/notificationCe
 import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
+import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -183,6 +184,9 @@ const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, 
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
 const SettingsDialog = lazy(loadSettingsDialog);
+const SystemResourcesDialog = lazy(() =>
+  import("./components/SystemResourcesDialog").then((m) => ({ default: m.SystemResourcesDialog }))
+);
 const WelcomeWizard = lazy(() =>
   import("./components/onboarding/WelcomeWizard").then((m) => ({
     default: m.WelcomeWizard,
@@ -1279,14 +1283,14 @@ function WorkspaceApp({
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
         if (!isAgent) {
           // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
-          if (session.backendSessionId === null) {
+          if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         } else {
           const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
           if (affordance.canReconnect) {
             hasResumableAgents = true;
-          } else if (session.backendSessionId === null) {
+          } else if (!recoveredFromHmr && session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         }
@@ -1305,7 +1309,7 @@ function WorkspaceApp({
         });
       }
     },
-    [restoreWorkspace],
+    [recoveredFromHmr, restoreWorkspace],
   );
 
   // Initial session restore on startup & HMR recovery managed by coordinator.
@@ -1313,6 +1317,7 @@ function WorkspaceApp({
     workspaceId: activeProject.workspaceId,
     recoveredFromHmr,
     restoreWorkspace: restoreWorkspaceAndReconnect,
+    reconcileLocalSessions: (live) => dispatchWorkspaceAction({ type: "LOCAL_SESSIONS_RECONCILED", live }),
     enabled: registeredProjectId === activeProject.workspaceId,
   });
 
@@ -1351,6 +1356,18 @@ function WorkspaceApp({
     });
   }, [persistSessionStrict]);
 
+  useEffect(() => {
+    setLocalSplitPersistence((owner) => {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === owner.workspaceId);
+      const snapshot = getWorkspaceSnapshot(owner.workspaceId);
+      if (!project || !snapshot) return Promise.reject(new Error("Split persistence owner is unavailable"));
+      return persistSessionStrict(owner.workspaceId, project.repoRoot, {
+        ...snapshot, sessions: { ...snapshot.sessions, [owner.id]: owner },
+      });
+    });
+    return () => setLocalSplitPersistence(undefined);
+  }, [persistSessionStrict]);
+
   const handleReconnectAgentSession = useCallback(
     (sessionId: string, options?: { silent?: boolean }) => {
       return reconnectAgentSession(
@@ -1370,6 +1387,7 @@ function WorkspaceApp({
               backendSessionId: result.sessionId,
               cwd: result.session.cwd ?? localSession.cwd,
               daemonEpoch: result.daemonEpoch,
+              incarnation: result.session.incarnation ?? null,
             });
             await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
           },
@@ -1579,6 +1597,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isResourcesOpen, setIsResourcesOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
@@ -2306,13 +2325,33 @@ function WorkspaceApp({
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
-      if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+      if (activeRemoteHostRef.current) {
+        switchDebug("split.active.refused.remote-host", { reason: `direction=${direction}` });
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        switchDebug("split.active.refused.paired-feature-gated", { reason: `direction=${direction}` });
+        return;
+      }
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
-      if (!activeTab || activeTab.kind === "browser") return;
+      if (!activeTab || activeTab.kind === "browser") {
+        switchDebug("split.active.refused.no-terminal-tab", {
+          reason: activeTab ? `tab-kind=${activeTab.kind}` : "no-active-tab",
+        });
+        return;
+      }
       const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
-      const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
+      if (!activeLayout) {
+        switchDebug("split.active.fallback.leaf-default.layout-missing", { reason: `tabId=${activeTab.id}` });
+      } else if (!activeLayout.activeLeafId) {
+        switchDebug("split.active.fallback.leaf-default.active-leaf-missing", { reason: `tabId=${activeTab.id}` });
+      }
+      const targetLeafId = activeLayout?.activeLeafId ??
+        (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
+      switchDebug("split.active.requested", {
+        reason: `direction=${direction} targetLeafId=${targetLeafId}`,
+      });
       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
@@ -2325,7 +2364,7 @@ function WorkspaceApp({
     if (!activeTab || activeTab.kind === "browser") return;
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
-    const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
+    const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
   }, [closePane, reportRuntimeError]);
 
@@ -3299,6 +3338,7 @@ function WorkspaceApp({
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
+          onOpenResources={() => setIsResourcesOpen(true)}
           attention={sidebarAttention}
           onToggle={toggleSidebar}
         />
@@ -3511,6 +3551,11 @@ function WorkspaceApp({
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
             onOpenSshProject={handleOpenSshProject} />
+        </Suspense>
+      ) : null}
+      {isResourcesOpen ? (
+        <Suspense fallback={null}>
+          <SystemResourcesDialog onClose={() => setIsResourcesOpen(false)} />
         </Suspense>
       ) : null}
       {!activeRemoteHost && onboardingSteps && onboardingSteps.length > 0 ? (

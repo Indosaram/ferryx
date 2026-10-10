@@ -335,8 +335,9 @@ Updated for post-magic-link unified top picker selection (`ui/src/remote/useAcco
 - **Top Picker Inventory Integration (`RemoteWorkspaceMirror`)**:
   - Enrolled online machines are discovered in the background via `useAccountWorktrees`.
   - Machine inventories are loaded over read-only tunnels (`GET /api/v1/workspace/state` on declared `projects[].worktrees`), strictly excluding synthetic fallback context options to prevent phantom "default worktree" entries.
-  - Cross-machine worktrees populate the existing dropdown options grouped by `<MachineName> / <WorkspaceId>` to retain distinct machine identity even when workspaces share identical names. The option keeps the raw desktop `workspaceId`; machine identity travels in a separate `machineId` used for grouping, row keys, active-row matching, and selection.
-  - Inventory loading, offline, and per-machine error/retry rows render only inside the opened picker; before a choice the body is blank and the header shows only the collapsed trigger.
+  - Worktrees from every machine populate the existing desktop-style worktree list, grouped by `workspaceId` exactly like the desktop sidebar. No machine name, machine group, machine status row, or machine choice is ever rendered. The option keeps the raw desktop `workspaceId`; the owning machine travels in a hidden `machineId` used only for row keys, active-row matching, and dispatch, so identical workspaces on two machines stay two distinct rows.
+  - Only aggregate inventory state renders inside the opened picker ("Loading worktrees...", a relay error alert, and one "Retry loading worktrees" action for failed probes); offline machines simply contribute no rows. Before a choice the body is blank and the header shows only the collapsed trigger.
+  - In account mode the picker footer omits the "Machines" (host drawer) action entirely; its left slot is a neutral "Sign out" icon action instead. Paired-device mode keeps "Machines".
 - **Explicit User Selection & Context Gate**:
   - The client NEVER issues `POST /api/v1/workspace/select` or manipulates desktop focus during discovery.
   - When the user opens the top picker and explicitly clicks an option:
@@ -346,5 +347,5 @@ Updated for post-magic-link unified top picker selection (`ui/src/remote/useAcco
     4. Upon confirmation matching the target workspace and worktree slug, the gate opens and the active surface mounts.
   - Subsequent cross-machine switches from the top picker reuse this same connection acquisition and tunnel lifecycle discipline.
 - **Failure Isolation & Non-blocking Degraded States**:
-  - Offline machines and partial host discovery failures are scoped to the picker options, without failing online machines or blocking the UI shell.
+  - Offline machines and partial host discovery failures only remove rows from the worktree list, without failing online machines or blocking the UI shell.
   - Inflight selection failures provide explicit "Retry Selection" and "Back to Worktrees" recovery actions without leaving the interface stalled.

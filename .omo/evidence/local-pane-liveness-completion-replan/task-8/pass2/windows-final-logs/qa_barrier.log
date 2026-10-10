@@ -1,0 +1,646 @@
+   Compiling ferryx v2026.928.7 (C:\Users\sook\ferryx-pane-completion\source-172baa87\src-tauri)
+error[E0432]: unresolved import `super::handover_transaction`
+   --> src\daemon\handover.rs:517:20
+    |
+517 |         use super::handover_transaction::{HandoverState, HandoverTransaction};
+    |                    ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `super::handover_transaction`
+   --> src\daemon\handover.rs:533:20
+    |
+533 |         use super::handover_transaction::{HandoverState, HandoverTransaction};
+    |                    ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `fs2`
+ --> src\daemon\split_journal.rs:1:5
+  |
+1 | use fs2::FileExt;
+  |     ^^^ use of unresolved module or unlinked crate `fs2`
+  |
+  = help: if you wanted to use a crate named `fs2`, use `cargo add fs2` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find `handover_transaction` in `super`
+   --> src\daemon\handover.rs:516:80
+    |
+516 |     pub fn recorded_decision(legacy: &std::path::Path) -> Result<Option<super::handover_transaction::HandoverState>, String> {
+    |                                                                                ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `handover_transaction` in `super`
+  --> src\daemon\server.rs:49:58
+   |
+49 |     D: std::future::Future<Output = Result<Option<super::handover_transaction::HandoverState>, String>>,
+   |                                                          ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+   |
+note: found an item that was configured out
+  --> src\daemon\mod.rs:9:9
+   |
+ 8 | #[cfg(unix)]
+   |       ---- the item is gated here
+ 9 | pub mod handover_transaction;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `handover_transaction` in `super`
+  --> src\daemon\server.rs:55:25
+   |
+55 |             Some(super::handover_transaction::HandoverState::Active) => Ok(()),
+   |                         ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+   |
+note: found an item that was configured out
+  --> src\daemon\mod.rs:9:9
+   |
+ 8 | #[cfg(unix)]
+   |       ---- the item is gated here
+ 9 | pub mod handover_transaction;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `handover_transaction` in `super`
+   --> src\daemon\server.rs:111:45
+    |
+111 |         let mut transaction = super::super::handover_transaction::HandoverTransaction::new_simple(
+    |                                             ^^^^^^^^^^^^^^^^^^^^ could not find `handover_transaction` in `super`
+    |
+note: found an item that was configured out
+   --> src\daemon\mod.rs:9:9
+    |
+  8 | #[cfg(unix)]
+    |       ---- the item is gated here
+  9 | pub mod handover_transaction;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find type `HandoverManager` in this scope
+   --> src\daemon\server.rs:102:24
+    |
+102 |             || async { HandoverManager::recorded_decision(&path) }).await;
+    |                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+    |
+help: consider importing this struct through its public re-export
+    |
+ 63 +     use crate::daemon::HandoverManager;
+    |
+
+error[E0433]: cannot find type `HandoverManager` in this scope
+   --> src\daemon\server.rs:116:24
+    |
+116 |             || async { HandoverManager::recorded_decision(&path) }).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^ use of undeclared type `HandoverManager`
+    |
+help: consider importing this struct through its public re-export
+    |
+ 63 +     use crate::daemon::HandoverManager;
+    |
+
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `is_v5_ownership_transfer_enabled`
+  --> src\daemon\handover.rs:76:31
+   |
+76 |         idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+ --> src\daemon\server.rs:7:5
+  |
+7 | use crate::daemon::protocol::AgentProviderSessionKey;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:306:9
+    |
+306 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+    --> src\ipc\native_terminal.rs:3593:13
+     |
+3593 |         use serde_json::Value;
+     |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\ipc\remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src\ipc\terminal.rs:3251:13
+     |
+3251 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src\ipc\terminal.rs:3275:13
+     |
+3275 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src\ipc\pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src\native_terminal\renderer\color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `serde_json::Value`
+    --> src\native_terminal\surface_host.rs:9548:13
+     |
+9548 |         use serde_json::Value;
+     |             ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src\remote\attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src\remote\attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src\remote\machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1595:9
+     |
+1595 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1596:9
+     |
+1596 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1597:9
+     |
+1597 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: `ipc::error::IpcErrorCode` doesn't implement `std::fmt::Display`
+    --> src\daemon\server.rs:3135:59
+     |
+3135 | ...                   code: Some(error.code.to_string()), details: error.details },
+     |                                             ^^^^^^^^^ method cannot be called on `ipc::error::IpcErrorCode` due to unsatisfied trait bounds
+     |
+    ::: src\ipc\error.rs:8:1
+     |
+   8 | pub enum IpcErrorCode {
+     | --------------------- method `to_string` not found for this enum because it doesn't satisfy `ipc::error::IpcErrorCode: ToString` or `ipc::error::IpcErrorCode: std::fmt::Display`
+     |
+     = note: the following trait bounds were not satisfied:
+             `ipc::error::IpcErrorCode: std::fmt::Display`
+             which is required by `ipc::error::IpcErrorCode: ToString`
+note: the trait `std::fmt::Display` must be implemented
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\fmt\mod.rs:1187:0
+note: the method `to_string` exists on the type `std::string::String`
+    --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\alloc\src\string.rs:2893:4
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `to_string`, perhaps you need to implement it:
+             candidate #1: `ToString`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+    --> src\ipc\terminal.rs:2410:22
+     |
+2410 |             session: crate::daemon::protocol::DaemonSessionDetails {
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0283]: type annotations needed
+   --> src\terminal\service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                               ------------            ^^^^
+    |                               |
+    |                               required by a bound introduced by this call
+    |
+    = note: multiple `impl`s satisfying `_: Into<std::string::String>` found in the following crates: `core`, `unicase`:
+            - impl<'a> Into<std::string::String> for unicase::UniCase<std::string::String>;
+            - impl<T, U> Into<U> for T
+              where U: std::convert::From<T>;
+note: required by a bound in `session_lifecycle::SessionLifecycleRegistry::mark_running`
+   --> src\daemon\session_lifecycle.rs:58:53
+    |
+ 58 |     pub fn mark_running(&mut self, session_id: impl Into<String>) {
+    |                                                     ^^^^^^^^^^^^ required by this bound in `SessionLifecycleRegistry::mark_running`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+help: consider removing this method call, as the receiver has type `&str` and `&str: Into<std::string::String>` trivially holds
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(session_id);
+    |
+
+error[E0283]: type annotations needed
+   --> src\terminal\service.rs:570:55
+    |
+570 |         self.lifecycle.lock().mark_running(session_id.into());
+    |                                                       ^^^^
+    |
+    = note: multiple `impl`s satisfying `_: std::convert::From<&str>` found in the following crates: `axum_core`, `bytes`, `naga`, `reqwest`, `winnow`:
+            - impl std::convert::From<&'static str> for axum::body::Body;
+            - impl std::convert::From<&'static str> for bytes::Bytes;
+            - impl std::convert::From<&'static str> for reqwest::Body;
+            - impl std::convert::From<&'static str> for reqwest::async_impl::body::Body;
+            - impl std::convert::From<&'static str> for wgpu::naga::front::wgsl::error::DiagnosticAttributeNotSupportedPosition;
+            - impl std::convert::From<&'static str> for winnow::error::StrContextValue;
+    = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+    |
+570 -         self.lifecycle.lock().mark_running(session_id.into());
+570 +         self.lifecycle.lock().mark_running(<&str as Into<T>>::into(session_id));
+    |
+
+error[E0027]: pattern does not mention field `local_split`
+    --> src\daemon\protocol.rs:1814:13
+     |
+1814 | /             DaemonRequest::Spawn {
+1815 | |                 client_request_id,
+1816 | |                 workspace_id,
+1817 | |                 worktree,
+...    |
+1822 | |                 startup,
+1823 | |             } => {
+     | |_____________^ missing field `local_split`
+     |
+help: include the missing field in the pattern
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, local_split } => {
+     |
+help: if you don't care about this missing field, you can explicitly ignore it
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, local_split: _ } => {
+     |
+help: or always ignore missing fields here
+     |
+1822 -                 startup,
+1823 -             } => {
+1822 +                 startup, .. } => {
+     |
+
+error[E0599]: no method named `lock_exclusive` found for struct `std::fs::File` in the current scope
+   --> src\daemon\split_journal.rs:172:19
+    |
+172 |         lock_file.lock_exclusive()?;
+    |                   ^^^^^^^^^^^^^^ method not found in `std::fs::File`
+
+error[E0063]: missing field `incarnation` in initializer of `daemon::protocol::DaemonSessionDetails`
+  --> src\ipc\file_link_tests.rs:11:5
+   |
+11 |     DaemonSessionDetails {
+   |     ^^^^^^^^^^^^^^^^^^^^ missing `incarnation`
+
+error[E0599]: no method named `schedule_cancellation_receipt` found for reference `&std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src\native_terminal\surface_host.rs:651:13
+    |
+651 |     channel.schedule_cancellation_receipt(
+    |     --------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `schedule_cancellation_receipt` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src\native_terminal\surface_host.rs:706:29
+    |
+706 |                     channel.schedule_cancellation_receipt(
+    |                     --------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `try_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src\native_terminal\surface_host.rs:728:25
+    |
+728 |             if !channel.try_claim(crate::ipc::qa_barrier::PRESENTATION_BARRIER, &session_id, &spec.operation_id) {
+    |                         ^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `release_claim` found for struct `std::sync::Arc<qa_barrier::QaBarrierChannel>` in the current scope
+   --> src\native_terminal\surface_host.rs:778:31
+    |
+778 |                 channel_clone.release_claim(
+    |                 --------------^^^^^^^^^^^^^ method not found in `std::sync::Arc<qa_barrier::QaBarrierChannel>`
+
+error[E0599]: no method named `active_presentation_generation` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope
+   --> src\native_terminal\surface_host.rs:971:38
+    |
+971 | ...                   host.active_presentation_generation() == Some(frame_generation)
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+971 -                                 host.active_presentation_generation() == Some(frame_generation)
+971 +                                 host.active_presentation_geometry() == Some(frame_generation)
+    |
+
+error[E0599]: no method named `active_presentation_epoch` found for reference `&surface_host::NativeTerminalSurfaceHost` in the current scope
+   --> src\native_terminal\surface_host.rs:972:45
+    |
+972 | ...                   && host.active_presentation_epoch() == Some(frame_epoch)
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `active_presentation_geometry` with a similar name
+    |
+972 -                                     && host.active_presentation_epoch() == Some(frame_epoch)
+972 +                                     && host.active_presentation_geometry() == Some(frame_epoch)
+    |
+
+error[E0063]: missing field `local_split` in initializer of `daemon::protocol::DaemonRequest`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:350:13
+    |
+350 |             DaemonRequest::Spawn {
+    |             ^^^^^^^^^^^^^^^^^^^^ missing `local_split`
+
+error[E0277]: can't compare `&str` with `std::path::PathBuf`
+   --> src\terminal\pty.rs:192:9
+    |
+192 | /         assert_eq!(
+193 | |             command.get_cwd().unwrap().to_str().unwrap(),
+194 | |             crate::daemon::session_service::normalize_process_cwd(&cwd)
+195 | |         );
+    | |_________^ no implementation for `&str == std::path::PathBuf`
+    |
+    = help: the trait `PartialEq<std::path::PathBuf>` is not implemented for `&str`
+help: the trait `PartialEq<std::path::PathBuf>` is implemented for `str`
+   --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\std\src\path.rs:2262:0
+
+error[E0277]: can't compare `&str` with `std::path::PathBuf`
+   --> src\terminal\pty.rs:196:9
+    |
+196 | /         assert_eq!(
+197 | |             command.get_env("FERRYX_WORKTREE_PATH").unwrap().to_str().unwrap(),
+198 | |             crate::daemon::session_service::normalize_process_cwd(root.path())
+199 | |         );
+    | |_________^ no implementation for `&str == std::path::PathBuf`
+    |
+    = help: the trait `PartialEq<std::path::PathBuf>` is not implemented for `&str`
+help: the trait `PartialEq<std::path::PathBuf>` is implemented for `str`
+   --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\std\src\path.rs:2262:0
+
+warning: unused import: `base64::Engine`
+   --> src\remote\account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `host`
+   --> src\ipc\remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `super_key`
+   --> src\native_terminal\input.rs:372:13
+    |
+372 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:6507:13
+     |
+6507 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:6558:13
+     |
+6558 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src\native_terminal\surface_host.rs:9233:13
+     |
+9233 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src\native_terminal\surface_host.rs:9243:13
+     |
+9243 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: unused variable: `hook`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1154:13
+     |
+1154 |         let hook = root.path().join("repo/.git/hooks/post-checkout");
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1155:13
+     |
+1155 |         let port = ready.local_addr().unwrap().port();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:671:9
+    |
+671 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:719:9
+    |
+719 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2501:13
+     |
+2501 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2531:13
+     |
+2531 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `c_pid`
+    --> src\ssh\bridge.rs:2569:13
+     |
+2569 |         let c_pid = c_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_pid`
+
+warning: unused variable: `r_pid`
+    --> src\ssh\bridge.rs:2570:13
+     |
+2570 |         let r_pid = r_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_r_pid`
+
+warning: unused variable: `initial_len`
+   --> src\ssh\projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: unused variable: `session`
+   --> src\terminal\pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src\terminal\remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pid1`
+    --> src\terminal\remote.rs:1705:13
+     |
+1705 |         let pid1 = child1.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid1`
+
+warning: unused variable: `pid2`
+    --> src\terminal\remote.rs:1706:13
+     |
+1706 |         let pid2 = child2.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid2`
+
+error: implementation of `Fn` is not general enough
+   --> src\terminal\shell.rs:647:13
+    |
+647 |             ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Fn` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `Fn<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `Fn<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `FnOnce` is not general enough
+   --> src\terminal\shell.rs:647:13
+    |
+647 |             ordinary_shell_command_with_env(None, TargetPlatform::Windows, environment).unwrap();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `FnOnce` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `FnOnce<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `FnOnce<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `Fn` is not general enough
+   --> src\terminal\shell.rs:653:13
+    |
+653 |             ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Fn` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `Fn<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `Fn<(&'2 str,)>`, for some specific lifetime `'2`
+
+error: implementation of `FnOnce` is not general enough
+   --> src\terminal\shell.rs:653:13
+    |
+653 |             ordinary_shell_command_with_env(Some("custom"), TargetPlatform::Windows, environment)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `FnOnce` is not general enough
+    |
+    = note: closure with signature `fn(&'2 str) -> std::option::Option<std::ffi::OsString>` must implement `FnOnce<(&'1 str,)>`, for any lifetime `'1`...
+    = note: ...but it actually implements `FnOnce<(&'2 str,)>`, for some specific lifetime `'2`
+
+Some errors have detailed explanations: E0027, E0063, E0277, E0283, E0432, E0433, E0599.
+For more information about an error, try `rustc --explain E0027`.
+warning: `ferryx` (lib test) generated 44 warnings
+error: could not compile `ferryx` (lib test) due to 29 previous errors; 44 warnings emitted
+NATIVE_EXIT=101

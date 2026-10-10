@@ -1,0 +1,1041 @@
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling libc v0.2.189
+   Compiling equivalent v1.0.2
+   Compiling serde v1.0.229
+   Compiling pkg-config v0.3.34
+   Compiling hashbrown v0.17.1
+   Compiling smallvec v1.15.2
+   Compiling heck v0.5.0
+   Compiling version_check v0.9.5
+   Compiling log v0.4.33
+   Compiling once_cell v1.21.4
+   Compiling winnow v0.5.40
+   Compiling memchr v2.8.3
+   Compiling indexmap v2.14.0
+   Compiling target-lexicon v0.12.16
+   Compiling version-compare v0.2.1
+   Compiling autocfg v1.5.1
+   Compiling pin-project-lite v0.2.17
+   Compiling itoa v1.0.18
+   Compiling parking_lot_core v0.9.12
+   Compiling thiserror v1.0.69
+   Compiling scopeguard v1.2.0
+   Compiling shlex v2.0.1
+   Compiling cfg-expr v0.15.8
+   Compiling find-msvc-tools v0.1.11
+   Compiling futures-core v0.3.34
+   Compiling bytes v1.12.1
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling cc v1.4.3
+   Compiling winnow v1.0.4
+   Compiling thiserror v2.0.20
+   Compiling lock_api v0.4.14
+   Compiling semver v1.0.28
+   Compiling siphasher v1.0.3
+   Compiling utf8_iter v1.0.4
+   Compiling slab v0.4.12
+   Compiling phf_shared v0.13.1
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling fastrand v2.5.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling generic-array v0.14.7
+   Compiling phf_generator v0.13.1
+   Compiling zmij v1.0.23
+   Compiling typenum v1.20.1
+   Compiling http v1.5.0
+   Compiling quick-xml v0.41.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling bitflags v2.13.1
+   Compiling syn v3.0.3
+   Compiling syn v2.0.119
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling num-conv v0.2.2
+   Compiling time-core v0.1.9
+   Compiling rustc_version v0.4.1
+   Compiling powerfmt v0.2.0
+   Compiling base64 v0.22.1
+   Compiling getrandom v0.2.17
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling phf_codegen v0.13.1
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling futures-sink v0.3.34
+   Compiling typeid v1.0.3
+   Compiling byteorder v1.5.0
+   Compiling futures-task v0.3.34
+   Compiling erased-serde v0.4.10
+   Compiling aho-corasick v1.1.5
+   Compiling unic-char-range v0.9.0
+   Compiling fnv v1.0.7
+   Compiling new_debug_unreachable v1.0.6
+   Compiling regex-syntax v0.8.11
+   Compiling unic-common v0.9.0
+   Compiling unic-char-property v0.9.0
+   Compiling string_cache_codegen v0.6.1
+   Compiling serde_json v1.0.151
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling precomputed-hash v0.1.1
+   Compiling unic-ucd-version v0.9.0
+   Compiling anyhow v1.0.104
+   Compiling getrandom v0.4.3
+   Compiling serde_spanned v1.1.1
+   Compiling same-file v1.0.6
+   Compiling alloc-stdlib v0.2.4
+   Compiling unic-ucd-ident v0.9.0
+   Compiling web_atoms v0.2.6
+   Compiling parking_lot v0.12.5
+   Compiling brotli-decompressor v5.0.3
+   Compiling walkdir v2.5.0
+   Compiling futures-channel v0.3.34
+   Compiling string_cache v0.9.0
+   Compiling serde_derive v1.0.229
+   Compiling zerovec-derive v0.11.5
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling synstructure v0.13.2
+   Compiling thiserror-impl v1.0.69
+   Compiling phf_macros v0.13.1
+   Compiling darling_core v0.23.0
+   Compiling bytemuck_derive v1.12.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling regex-automata v0.4.18
+   Compiling darling_macro v0.23.0
+   Compiling zeroize_derive v1.5.0
+   Compiling futures-util v0.3.34
+   Compiling phf v0.13.1
+   Compiling percent-encoding v2.3.2
+   Compiling darling v0.23.0
+   Compiling regex v1.13.1
+   Compiling rustc-hash v2.1.3
+   Compiling serde_with_macros v3.22.0
+   Compiling zerofrom v0.1.8
+   Compiling dunce v1.0.5
+   Compiling dtoa v1.0.11
+   Compiling zeroize v1.9.0
+   Compiling bytemuck v1.25.2
+   Compiling ctor-proc-macro v0.0.7
+   Compiling yoke v0.8.3
+   Compiling bitflags v1.3.2
+   Compiling form_urlencoded v1.2.2
+   Compiling dtoa-short v0.3.5
+   Compiling uuid v1.26.0
+   Compiling brotli v8.0.4
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling ctor v0.8.0
+   Compiling cssparser-macros v0.6.1
+   Compiling derive_more-impl v2.1.1
+   Compiling tendril v0.5.1
+   Compiling rand_core v0.6.4
+   Compiling selectors v0.36.1
+   Compiling indexmap v1.9.3
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling futures-io v0.3.34
+   Compiling subtle v2.6.1
+   Compiling glob v0.3.4
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling syn v1.0.109
+   Compiling camino v1.2.5
+   Compiling cssparser v0.36.0
+   Compiling markup5ever v0.38.0
+   Compiling icu_collections v2.3.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling icu_locale_core v2.3.0
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling servo_arc v0.4.3
+   Compiling proc-macro-error v1.0.4
+   Compiling schemars v0.8.22
+   Compiling derive_more v2.1.1
+   Compiling rustix v1.1.4
+   Compiling deranged v0.5.8
+   Compiling hashbrown v0.12.3
+   Compiling bit-vec v0.8.0
+   Compiling schemars_derive v0.8.22
+   Compiling bit-set v0.8.0
+   Compiling icu_provider v2.3.0
+   Compiling html5ever v0.38.0
+   Compiling toml_datetime v0.6.3
+   Compiling serde_spanned v0.6.9
+   Compiling cargo-platform v0.1.9
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling jsonptr v0.6.3
+   Compiling time v0.3.55
+   Compiling toml_edit v0.20.2
+   Compiling cfb v0.7.3
+   Compiling errno v0.3.14
+   Compiling linux-raw-sys v0.12.1
+   Compiling foldhash v0.2.0
+   Compiling dyn-clone v1.0.20
+   Compiling json-patch v3.0.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling cargo_metadata v0.19.2
+   Compiling infer v0.19.0
+   Compiling serde-untagged v0.1.9
+   Compiling dom_query v0.27.0
+   Compiling crypto-common v0.1.7
+   Compiling serde_with v3.22.0
+   Compiling cpufeatures v0.2.17
+   Compiling heck v0.4.1
+   Compiling futures-executor v0.3.34
+   Compiling toml v0.8.2
+   Compiling proc-macro-crate v2.0.2
+   Compiling block-buffer v0.10.4
+   Compiling cfg_aliases v0.2.2
+   Compiling libm v0.2.16
+   Compiling idna_adapter v1.2.2
+   Compiling zerocopy v0.8.56
+   Compiling zerocopy-derive v0.8.56
+   Compiling system-deps v6.2.2
+   Compiling idna v1.1.0
+   Compiling glib-macros v0.18.5
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling num-traits v0.2.19
+   Compiling libloading v0.8.9
+   Compiling option-ext v0.2.0
+   Compiling arrayvec v0.7.8
+   Compiling plist v1.10.0
+   Compiling tokio-macros v2.7.2
+   Compiling rand_core v0.10.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling glib-sys v0.18.1
+   Compiling gobject-sys v0.18.0
+   Compiling gio-sys v0.18.1
+   Compiling gdk-sys v0.18.2
+   Compiling url v2.5.8
+   Compiling gdk-pixbuf-sys v0.18.0
+   Compiling cairo-sys-rs v0.18.2
+   Compiling pango-sys v0.18.0
+   Compiling atk-sys v0.18.2
+   Compiling gtk-sys v0.18.2
+   Compiling urlpattern v0.3.0
+   Compiling tokio v1.53.1
+   Compiling tracing-core v0.1.36
+   Compiling gio v0.18.4
+   Compiling getrandom v0.3.4
+   Compiling tauri-utils v2.9.3
+   Compiling winnow v0.7.15
+   Compiling tracing-attributes v0.1.31
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling raw-window-handle v0.6.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling dlib v0.5.3
+   Compiling dirs-sys v0.5.0
+   Compiling glib v0.18.5
+   Compiling embed-resource v3.0.11
+   Compiling rustls-pki-types v1.15.1
+   Compiling ring v0.17.14
+   Compiling tracing v0.1.44
+   Compiling wayland-sys v0.31.11
+   Compiling cargo_toml v0.22.3
+   Compiling tauri-winres v0.3.6
+   Compiling dirs v6.0.0
+   Compiling memoffset v0.9.1
+   Compiling toml_edit v0.19.15
+   Compiling time-macros v0.2.32
+   Compiling field-offset v0.3.6
+   Compiling simd-adler32 v0.3.10
+   Compiling untrusted v0.9.0
+   Compiling lazy_static v1.5.0
+   Compiling crc32fast v1.5.0
+   Compiling javascriptcore-rs-sys v1.1.1
+   Compiling soup3-sys v0.5.0
+   Compiling gtk v0.18.2
+   Compiling proc-macro-crate v1.3.1
+   Compiling parking v2.2.1
+   Compiling adler2 v2.0.1
+   Compiling gtk3-macros v0.18.2
+   Compiling miniz_oxide v0.8.9
+   Compiling webkit2gtk-sys v2.0.2
+   Compiling x11 v2.21.0
+   Compiling rustls v0.23.43
+   Compiling fdeflate v0.3.7
+   Compiling symphonia-core v0.5.5
+   Compiling gdkx11-sys v0.18.2
+   Compiling digest v0.10.7
+   Compiling flate2 v1.1.9
+   Compiling dpi v0.1.2
+   Compiling wayland-backend v0.3.17
+   Compiling x11-dl v2.21.0
+   Compiling atomic-waker v1.1.2
+   Compiling downcast-rs v1.2.1
+   Compiling polling v3.11.0
+   Compiling http-body v1.1.0
+   Compiling cookie v0.18.2
+   Compiling libdbus-sys v0.2.7
+   Compiling scoped-tls v1.0.1
+   Compiling httparse v1.10.1
+   Compiling enumflags2_derive v0.7.12
+   Compiling tauri-plugin v2.6.3
+   Compiling tauri-build v2.6.3
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling encoding_rs v0.8.35
+   Compiling tower-service v0.3.3
+   Compiling cairo-rs v0.18.5
+   Compiling tauri v2.11.5
+   Compiling atk v0.18.2
+   Compiling javascriptcore-rs v1.1.2
+   Compiling wayland-client v0.31.15
+   Compiling proc-macro-crate v3.5.0
+   Compiling symphonia-metadata v0.5.5
+   Compiling png v0.17.16
+   Compiling event-listener v5.4.2
+   Compiling crossbeam-channel v0.5.16
+   Compiling concurrent-queue v2.5.0
+   Compiling zvariant_utils v4.2.0
+   Compiling dlopen2_derive v0.4.3
+   Compiling block-padding v0.3.3
+   Compiling wayland-scanner v0.31.11
+   Compiling wry v0.55.1
+   Compiling mime v0.3.17
+   Compiling tauri-runtime v2.11.3
+   Compiling dlopen2 v0.8.2
+   Compiling ico v0.5.0
+   Compiling inout v0.1.4
+   Compiling event-listener-strategy v0.5.4
+   Compiling dbus v0.9.12
+   Compiling zvariant_derive v5.15.0
+   Compiling sha2 v0.10.9
+   Compiling futures-lite v2.6.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling gdkwayland-sys v0.18.2
+   Compiling serde_repr v0.1.21
+   Compiling try-lock v0.2.5
+   Compiling tauri-runtime-wry v2.11.4
+   Compiling pxfm v0.1.30
+   Compiling unicode-segmentation v1.13.3
+   Compiling rustc-hash v1.1.0
+   Compiling tower-layer v0.3.3
+   Compiling endi v1.1.1
+   Compiling naga-types v30.0.1
+   Compiling tauri-codegen v2.6.3
+   Compiling want v0.3.1
+   Compiling cipher v0.4.4
+   Compiling keyboard-types v0.7.0
+   Compiling png v0.18.1
+   Compiling webpki-roots v1.0.9
+   Compiling naga v30.0.1
+   Compiling serialize-to-javascript-impl v0.1.2
+   Compiling async-io v2.6.0
+   Compiling sync_wrapper v1.0.2
+   Compiling bit-vec v0.9.1
+   Compiling rustls-webpki v0.103.15
+   Compiling httpdate v1.0.3
+   Compiling unicode-width v0.1.14
+   Compiling rustix v0.38.44
+   Compiling byteorder-lite v0.1.0
+   Compiling ash v0.38.0+1.3.281
+   Compiling hyper v1.11.0
+   Compiling bit-set v0.10.0
+   Compiling serialize-to-javascript v0.1.2
+   Compiling tauri-macros v2.6.3
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling enumflags2 v0.7.12
+   Compiling half v2.7.1
+   Compiling codespan-reporting v0.13.1
+   Compiling rand_core v0.9.5
+   Compiling universal-hash v0.5.1
+   Compiling zcheapstr v1.1.0
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling ahash v0.8.12
+   Compiling linux-raw-sys v0.4.15
+   Compiling async-task v4.7.1
+   Compiling khronos-egl v6.0.0
+   Compiling opaque-debug v0.3.1
+   Compiling static_assertions v1.1.0
+   Compiling moxcms v0.8.1
+   Compiling ipnet v2.12.1
+   Compiling allocator-api2 v0.2.21
+   Compiling wgpu-types v30.0.1
+   Compiling rand_chacha v0.9.0
+   Compiling hyper-util v0.1.20
+   Compiling zvariant v5.15.0
+   Compiling hashbrown v0.16.1
+   Compiling wayland-protocols v0.32.13
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling async-channel v2.5.0
+   Compiling tauri-plugin-fs v2.5.1
+   Compiling http-body-util v0.1.5
+   Compiling wgpu-hal v30.0.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling alsa-sys v0.4.0
+   Compiling pango v0.18.3
+   Compiling gdk-pixbuf v0.18.5
+   Compiling soup3 v0.5.0
+   Compiling presser v0.3.1
+   Compiling image v0.25.10
+   Compiling zbus_names v4.3.4
+   Compiling async-signal v0.2.14
+   Compiling calloop v0.13.0
+   Compiling rand v0.9.5
+   Compiling async-lock v3.4.2
+   Compiling piper v0.2.5
+   Compiling ordered-float v4.6.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling renderdoc-sys v1.1.0
+   Compiling ttf-parser v0.25.1
+   Compiling vcpkg v0.2.15
+   Compiling xkeysym v0.2.1
+   Compiling cursor-icon v1.2.0
+   Compiling xcursor v0.3.11
+   Compiling openssl-probe v0.2.1
+   Compiling strict-num v0.1.1
+   Compiling arrayref v0.3.9
+   Compiling profiling v1.0.18
+   Compiling inotify-sys v0.1.8
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling glow v0.17.0
+   Compiling cfg_aliases v0.1.1
+   Compiling cpufeatures v0.3.0
+   Compiling gdk v0.18.2
+   Compiling rustls-native-certs v0.8.4
+   Compiling tiny-skia-path v0.11.4
+   Compiling nix v0.28.0
+   Compiling wayland-cursor v0.31.14
+   Compiling chacha20 v0.10.1
+   Compiling libsqlite3-sys v0.30.1
+   Compiling wayland-csd-frame v0.3.0
+   Compiling async-process v2.5.0
+   Compiling calloop-wayland-source v0.3.0
+   Compiling blocking v1.6.2
+   Compiling zbus_macros v5.19.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling hyper-rustls v0.27.9
+   Compiling tower-http v0.6.11
+   Compiling owned_ttf_parser v0.25.1
+   Compiling async-executor v1.14.0
+   Compiling polyval v0.6.2
+   Compiling async-broadcast v0.7.2
+   Compiling tauri-plugin-process v2.3.1
+   Compiling tauri-plugin-dialog v2.7.2
+   Compiling tauri-plugin-updater v2.10.1
+   Compiling tauri-plugin-notification v2.3.3
+   Compiling sha1 v0.10.7
+   Compiling tokio-util v0.7.19
+   Compiling num-integer v0.1.47
+   Compiling quinn-udp v0.5.15
+   Compiling wgpu-core v30.0.1
+   Compiling aead v0.5.2
+   Compiling async-recursion v1.1.1
+   Compiling async-trait v0.1.92
+   Compiling memmap2 v0.9.11
+   Compiling ordered-stream v0.2.0
+   Compiling hex v0.4.3
+   Compiling ryu v1.0.23
+   Compiling unicase v2.9.0
+   Compiling data-encoding v2.11.1
+   Compiling extended v0.1.0
+   Compiling gdkx11 v0.18.2
+   Compiling rfd v0.16.0
+   Compiling cpal v0.17.3
+   Compiling tinyvec_macros v0.1.1
+   Compiling litrs v1.0.0
+   Compiling ab_glyph_rasterizer v0.1.10
+   Compiling tungstenite v0.29.0
+   Compiling tinyvec v1.12.0
+   Compiling symphonia-format-riff v0.5.5
+   Compiling mime_guess v2.0.5
+   Compiling serde_urlencoded v0.7.1
+   Compiling document-features v0.2.12
+   Compiling ab_glyph v0.2.32
+   Compiling zbus v5.19.0
+   Compiling num-bigint v0.4.8
+   Compiling alsa v0.11.0
+   Compiling ghash v0.5.1
+   Compiling tiny-skia v0.11.4
+   Compiling rand v0.10.2
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hashbrown v0.14.5
+   Compiling poly1305 v0.8.0
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling webpki-roots v0.26.11
+   Compiling chacha20 v0.9.1
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling xattr v1.6.1
+   Compiling gethostname v1.1.0
+   Compiling rand_pcg v0.10.2
+   Compiling quinn v0.11.11
+   Compiling winit v0.30.13
+   Compiling wgpu v30.0.1
+   Compiling snow v0.9.6
+   Compiling filetime v0.2.29
+   Compiling as-raw-xcb-connection v1.0.1
+   Compiling x11rb-protocol v0.13.2
+   Compiling gpu-allocator v0.28.0
+   Compiling signature v2.2.0
+   Compiling dasp_sample v0.11.0
+   Compiling lru-slab v0.1.2
+   Compiling symphonia v0.5.5
+   Compiling aes-gcm v0.10.3
+   Compiling ed25519 v2.2.3
+   Compiling quinn-proto v0.11.17
+   Compiling tar v0.4.46
+   Compiling chacha20poly1305 v0.10.1
+   Compiling tokio-tungstenite v0.29.0
+   Compiling hashlink v0.9.1
+   Compiling sctk-adwaita v0.10.1
+   Compiling num-rational v0.4.2
+   Compiling notify-rust v4.18.0
+   Compiling reqwest v0.13.4
+   Compiling inotify v0.11.5
+   Compiling xkbcommon-dl v0.4.2
+   Compiling wayland-protocols-plasma v0.3.12
+   Compiling axum-core v0.5.6
+   Compiling rand_chacha v0.3.1
+   Compiling yasna v0.6.0
+   Compiling ferryx v2026.928.7 (/home/indo/ferryx-pane-completion/source-base/src-tauri)
+   Compiling tempfile v3.27.0
+   Compiling hmac v0.12.1
+   Compiling blake2 v0.10.6
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-log v0.2.0
+   Compiling filedescriptor v0.8.3
+   Compiling serial2 v0.2.38
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling thread_local v1.1.10
+   Compiling shell-words v1.1.1
+   Compiling minisign-verify v0.2.5
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-iterator v0.3.0
+   Compiling matchit v0.8.4
+   Compiling smol_str v0.2.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling portable-pty v0.9.0 (/home/indo/ferryx-pane-completion/source-base/src-tauri/vendor/portable-pty)
+   Compiling notify v8.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling rusqlite v0.32.1
+   Compiling axum v0.8.9
+   Compiling rcgen v0.14.10
+   Compiling pbkdf2 v0.12.2
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling rand v0.8.7
+   Compiling rodio v0.22.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling reqwest v0.12.28
+   Compiling x25519-dalek v2.0.1
+   Compiling cbc v0.1.2
+   Compiling tower-http v0.7.1
+   Compiling pollster v1.0.1
+   Compiling base64 v0.23.1
+   Compiling tokio-stream v0.1.19
+   Compiling x11rb v0.13.2
+   Compiling tokio-test v0.4.5
+   Compiling webkit2gtk v2.0.2
+   Compiling tao v0.35.3
+   Compiling muda v0.19.3
+warning: unused import: `seal_offer`
+ --> src/account/offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src/agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src/browser/chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src/browser/snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src/daemon/server.rs:20:5
+   |
+20 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src/ipc/remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> src/remote/session_transport.rs:1:5
+  |
+1 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteSessionDetails`
+ --> src/remote/server.rs:4:90
+  |
+4 | use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+  |                                                                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+  --> src/ssh/bridge.rs:28:25
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                         ^^^^^^^
+
+warning: unused import: `FromRawFd`
+  --> src/ssh/bridge.rs:28:34
+   |
+28 | use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+   |                                  ^^^^^^^^^
+
+warning: unused import: `AsRawFd`
+    --> src/terminal/session.rs:1099:27
+     |
+1099 |         use std::os::fd::{AsRawFd, FromRawFd};
+     |                           ^^^^^^^
+
+warning: unused variable: `pid`
+    --> src/daemon/client.rs:1564:17
+     |
+1564 |                 pid,
+     |                 ^^^ help: try ignoring the field: `pid: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:190:9
+    |
+190 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_socket.rs:295:9
+    |
+295 |     let mut frame = recv_frame(stream.as_raw_fd())?;
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/daemon/handover_wire.rs:202:9
+    |
+202 |     let mut iov_index = 0usize;
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `sent` is never read
+   --> src/daemon/handover_wire.rs:188:20
+    |
+188 |     let mut sent = 0usize;
+    |                    ^^^^^^ this value is reassigned later and never used
+...
+198 |         sent = n as usize;
+    |         ----------------- `sent` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `written_total` is never read
+   --> src/daemon/handover_wire.rs:213:37
+    |
+213 |             let mut written_total = 0usize;
+    |                                     ^^^^^^ this value is reassigned later and never used
+...
+222 |             written_total = n as usize;
+    |             -------------------------- `written_total` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> src/daemon/server.rs:591:41
+    |
+591 |     pub(crate) fn detach_without_unlock(mut self) -> File {
+    |                                         ----^^^^
+    |                                         |
+    |                                         help: remove this `mut`
+
+warning: unused variable: `host`
+   --> src/ipc/remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: value assigned to `desired_size` is never read
+    --> src/terminal/remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/terminal/session.rs:1159:13
+     |
+1159 |         let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src/lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: type `DaemonLockFiles` is more private than the item `adopt_authority`
+   --> src/daemon/handover_socket.rs:227:1
+    |
+227 | / pub fn adopt_authority(
+228 | |     authority: TransferredAuthority,
+229 | | ) -> Result<(Option<tokio::net::UnixListener>, DaemonLockFiles), HandoverSocketError> {
+    | |_____________________________________________________________________________________^ function `adopt_authority` is reachable at visibility `pub`
+    |
+note: but type `DaemonLockFiles` is only usable at visibility `pub(crate)`
+   --> src/daemon/server.rs:733:1
+    |
+733 | pub(crate) struct DaemonLockFiles {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src/terminal/output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src/terminal/machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src/terminal/paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemon::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src/terminal/paired_runtime.rs:289:5
+    |
+289 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src/terminal/paired_runtime.rs:711:5
+    |
+711 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src/terminal/paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::live_import`
+   --> src/terminal/remote.rs:819:5
+    |
+819 | /     pub fn live_import(
+820 | |         &self,
+821 | |         state: RemoteExportState,
+822 | |         transport: Option<Arc<dyn Transport>>,
+823 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `RemoteRuntime::import_transferred`
+   --> src/terminal/remote.rs:840:5
+    |
+840 | /     pub fn import_transferred(
+841 | |         &self,
+842 | |         state: RemoteExportState,
+843 | |         transport: Option<Arc<dyn Transport>>,
+844 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sink`
+   --> src/terminal/service.rs:45:5
+    |
+ 45 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src/terminal/remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `app` and `timeout` are never read
+   --> src/browser/snapshot_source.rs:339:5
+    |
+338 | pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    |            -------------------------- fields in this struct
+339 |     app: AppHandle<R>,
+    |     ^^^
+340 |     timeout: Duration,
+    |     ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `UpgradeAction` is never used
+  --> src/daemon/handover.rs:14:17
+   |
+14 | pub(crate) enum UpgradeAction {
+   |                 ^^^^^^^^^^^^^
+
+warning: method `is_proceed` is never used
+  --> src/daemon/handover.rs:22:19
+   |
+21 | impl UpgradeAction {
+   | ------------------ method in this implementation
+22 |     pub(crate) fn is_proceed(self) -> bool {
+   |                   ^^^^^^^^^^
+
+warning: function `idle_upgrade_enabled` is never used
+  --> src/daemon/handover.rs:29:15
+   |
+29 | pub(crate) fn idle_upgrade_enabled(value: Option<&str>) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `idle_upgrade_requested` is never used
+  --> src/daemon/handover.rs:33:15
+   |
+33 | pub(crate) fn idle_upgrade_requested() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upgrade_action` is never used
+  --> src/daemon/handover.rs:57:15
+   |
+57 | pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: bool) -> UpgradeAction {
+   |               ^^^^^^^^^^^^^^
+
+warning: function `remote_spawn_relative_path` is never used
+    --> src/daemon/server.rs:4872:4
+     |
+4872 | fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:719:19
+    |
+358 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+719 |     pub(crate) fn machine_sessions(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src/ipc/file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/ipc/file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: constant `INPUT_OUTPUT` is never used
+  --> src/native_terminal/platform/linux.rs:40:7
+   |
+40 | const INPUT_OUTPUT: u32 = 1;
+   |       ^^^^^^^^^^^^
+
+warning: method `begin_owned_render` is never used
+   --> src/native_terminal/surface_host.rs:322:8
+    |
+215 | impl RenderScheduleCoordinator {
+    | ------------------------------ method in this implementation
+...
+322 |     fn begin_owned_render(&self) -> Option<u64> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `authorization_wait` is never used
+  --> src/notification/permission.rs:14:15
+   |
+14 | pub(crate) fn authorization_wait() -> Duration {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `request_authorization_with` is never used
+  --> src/notification/permission.rs:24:15
+   |
+24 | pub(crate) fn request_authorization_with(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wait_for_authorization` is never used
+  --> src/notification/permission.rs:48:15
+   |
+48 | pub(crate) fn wait_for_authorization(
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/remote/auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: method `disarm` is never used
+   --> src/remote/relay_server.rs:241:12
+    |
+216 | impl PairingClaimGuard {
+    | ---------------------- method in this implementation
+...
+241 |     pub fn disarm(&mut self) {
+    |            ^^^^^^
+
+warning: function `inspect` is never used
+   --> src/terminal/foreground.rs:226:15
+    |
+226 | pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
+    |               ^^^^^^^
+
+warning: method `wait_and_reap` is never used
+    --> src/terminal/session.rs:1018:19
+     |
+ 409 | impl PtySession {
+     | --------------- method in this implementation
+...
+1018 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 56 warnings (run `cargo fix --lib -p ferryx` to apply 18 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 11s
+     Running tests/daemon_persistence_contract.rs (target/debug/deps/daemon_persistence_contract-2cc1df78399fa6a3)
+
+running 1 test
+test test_daemon_output_sequence_contiguity_and_replay_gap ... 
+thread 'test_daemon_output_sequence_contiguity_and_replay_gap' (1956270) panicked at tests/daemon_persistence_contract.rs:1093:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+V01 reaped owned daemon 1956271; removing /tmp/fx-v01-3DSJPn
+FAILED
+
+failures:
+
+failures:
+    test_daemon_output_sequence_contiguity_and_replay_gap
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 1.85s
+
+error: test failed, to rerun pass `--test daemon_persistence_contract`

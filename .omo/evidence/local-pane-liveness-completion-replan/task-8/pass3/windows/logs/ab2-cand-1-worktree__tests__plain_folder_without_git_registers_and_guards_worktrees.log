@@ -1,0 +1,802 @@
+warning: unused import: `seal_offer`
+ --> src\account\offer_sink.rs:9:47
+  |
+9 | use crate::remote::sealed_offer::{open_offer, seal_offer};
+  |                                               ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Serialize`
+ --> src\agent_transcript.rs:1:26
+  |
+1 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `ImportedCookie`
+  --> src\browser\chromium_cookie_source.rs:13:67
+   |
+13 |     filter_google_cookies, resolve_installed_browser_profile_dir, ImportedCookie,
+   |                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Manager`
+ --> src\browser\snapshot_source.rs:8:24
+  |
+8 | use tauri::{AppHandle, Manager};
+  |                        ^^^^^^^
+
+warning: unused import: `is_v5_ownership_transfer_enabled`
+  --> src\daemon\handover.rs:76:31
+   |
+76 |         idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+ --> src\daemon\server.rs:8:5
+  |
+8 | use crate::daemon::protocol::AgentProviderSessionKey;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::session_service::*`
+  --> src\daemon\server.rs:21:5
+   |
+21 | use super::session_service::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:306:9
+    |
+306 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\ipc\remote_drop.rs:6:23
+  |
+6 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src\ipc\terminal.rs:3254:13
+     |
+3254 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+    --> src\ipc\terminal.rs:3278:13
+     |
+3278 |         use tauri::Manager;
+     |             ^^^^^^^^^^^^^^
+
+warning: unused imports: `DaemonRequest`, `SplitAttachAttempt`, `SplitOperationRequest`, and `SplitOperationResponse`
+ --> src\ipc\pane_liveness_contract.rs:4:28
+  |
+4 |         clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+  |                            ^^^^^^^^^^^^^
+5 |         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
+6 |         SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+  |         ^^^^^^^^^^^^^^^^^^
+7 |         SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src\native_terminal\renderer\color_glyph.rs:209:9
+    |
+209 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:7:5
+  |
+7 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+   --> src\remote\attach_router.rs:184:35
+    |
+184 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+
+warning: unused import: `tokio::io::AsyncWriteExt as _`
+   --> src\remote\attach_router.rs:240:13
+    |
+240 |         use tokio::io::AsyncWriteExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scoped_contracts::Epoch`
+  --> src\remote\machine_agent_state_tests.rs:14:5
+   |
+14 | use crate::scoped_contracts::Epoch;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1595:9
+     |
+1595 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1596:9
+     |
+1596 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1597:9
+     |
+1597 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `base64::Engine`
+   --> src\remote\account_grants.rs:108:9
+    |
+108 |     use base64::Engine as _;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `handover_socket_path`
+    --> src\daemon\server.rs:3901:54
+     |
+3901 |                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+     |                                                      ^^^^^^^^^^^^^^^^^^^^ help: try ignoring the field: `handover_socket_path: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `host`
+   --> src\ipc\remote_drop.rs:310:13
+    |
+310 |         let host =
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_host`
+
+warning: variable does not need to be mutable
+   --> src\native_terminal\renderer\font_manager.rs:208:13
+    |
+208 |         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:6594:13
+     |
+6594 |         let mut harness = DirectRenderHarness::new(
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\native_terminal\surface_host.rs:6645:13
+     |
+6645 |         let mut harness = DirectRenderHarness::new(vec![
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `receipt`
+    --> src\native_terminal\surface_host.rs:9321:13
+     |
+9321 |         let receipt = harness
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receipt`
+
+warning: unused variable: `render_receipt`
+    --> src\native_terminal\surface_host.rs:9331:13
+     |
+9331 |         let render_receipt = harness
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_receipt`
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1759:14
+     |
+1759 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: unused variable: `hook`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1156:13
+     |
+1156 |         let hook = root.path().join("repo/.git/hooks/post-checkout");
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+    --> src\remote\workspace_api\worktree_authority_tests.rs:1157:13
+     |
+1157 |         let port = ready.local_addr().unwrap().port();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:671:9
+    |
+671 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:719:9
+    |
+719 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2501:13
+     |
+2501 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `pid`
+    --> src\ssh\bridge.rs:2531:13
+     |
+2531 |         let pid = conn.child_id().expect("child pid");
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_pid`
+
+warning: unused variable: `c_pid`
+    --> src\ssh\bridge.rs:2569:13
+     |
+2569 |         let c_pid = c_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_pid`
+
+warning: unused variable: `r_pid`
+    --> src\ssh\bridge.rs:2570:13
+     |
+2570 |         let r_pid = r_child.id().unwrap();
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_r_pid`
+
+warning: unused variable: `initial_len`
+   --> src\ssh\projects.rs:512:13
+    |
+512 |         let initial_len = target_len as u64;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_len`
+
+warning: unused variable: `session`
+   --> src\terminal\pty.rs:562:22
+    |
+562 |             let Some(session) = manager.get_session(&session_id) else {
+    |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+
+warning: value assigned to `desired_size` is never read
+    --> src\terminal\remote.rs:1073:56
+     |
+1073 |               let mut desired_size: Option<(u16, u16)> = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+1085 | /                     desired_size = Some(
+1086 | |                         s.pending_size
+1087 | |                             .take()
+1088 | |                             .map(|(c, r, _)| (c, r))
+1089 | |                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+1090 | |                     );
+     | |_____________________- `desired_size` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pid1`
+    --> src\terminal\remote.rs:1705:13
+     |
+1705 |         let pid1 = child1.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid1`
+
+warning: unused variable: `pid2`
+    --> src\terminal\remote.rs:1706:13
+     |
+1706 |         let pid2 = child2.id().unwrap();
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_pid2`
+
+warning: unused variable: `scroll_daemon_client`
+    --> src\lib.rs:1188:9
+     |
+1188 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+     |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: type `daemon::agent_state::AgentState` is more private than the item `session_service::DaemonSessionService::publish_agent_state_for_test`
+   --> src\daemon\session_service.rs:620:5
+    |
+620 |     pub fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `session_service::DaemonSessionService::publish_agent_state_for_test` is reachable at visibility `pub`
+    |
+note: but type `daemon::agent_state::AgentState` is only usable at visibility `pub(crate)`
+   --> src\daemon\agent_state.rs:8:1
+    |
+  8 | pub(crate) struct AgentState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MachineSender` is more private than the item `SessionHub::machine_senders`
+   --> src\terminal\output_hub.rs:700:5
+    |
+700 |     pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SessionHub::machine_senders` is reachable at visibility `pub(crate)`
+    |
+note: but type `MachineSender` is only usable at visibility `pub(in crate::terminal::output_hub)`
+   --> src\terminal\machine_output.rs:76:1
+    |
+ 76 | pub(super) struct MachineSender {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_daemon::Proxy::set_agent_sink`
+   --> src\terminal\paired_daemon.rs:107:5
+    |
+107 |     pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_daemon::Proxy::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `paired_runtime::Runtime::set_agent_sink`
+   --> src\terminal\paired_runtime.rs:289:5
+    |
+289 |     pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::set_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `paired_runtime::Command` is more private than the item `paired_runtime::Runtime::sender`
+   --> src\terminal\paired_runtime.rs:711:5
+    |
+711 |     pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `paired_runtime::Runtime::sender` is reachable at visibility `pub(crate)`
+    |
+note: but type `paired_runtime::Command` is only usable at visibility `pub(self)`
+   --> src\terminal\paired_runtime.rs:166:1
+    |
+166 | enum Command {
+    | ^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::live_import`
+   --> src\terminal\remote.rs:819:5
+    |
+819 | /     pub fn live_import(
+820 | |         &self,
+821 | |         state: RemoteExportState,
+822 | |         transport: Option<Arc<dyn Transport>>,
+823 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::live_import` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::Transport` is more private than the item `terminal::remote::RemoteRuntime::import_transferred`
+   --> src\terminal\remote.rs:840:5
+    |
+840 | /     pub fn import_transferred(
+841 | |         &self,
+842 | |         state: RemoteExportState,
+843 | |         transport: Option<Arc<dyn Transport>>,
+844 | |     ) -> Result<(), RemoteFailure> {
+    | |__________________________________^ method `terminal::remote::RemoteRuntime::import_transferred` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::Transport` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:185:1
+    |
+185 | pub(crate) trait Transport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `terminal::remote::AgentStateSink` is more private than the item `terminal::service::TerminalService::set_paired_agent_sink`
+   --> src\terminal\service.rs:69:5
+    |
+ 69 |     pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `terminal::service::TerminalService::set_paired_agent_sink` is reachable at visibility `pub`
+    |
+note: but trait `terminal::remote::AgentStateSink` is only usable at visibility `pub(crate)`
+   --> src\terminal\remote.rs:167:1
+    |
+167 | pub(crate) trait AgentStateSink: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `webview_unreachable` is never used
+  --> src\browser\hard_reload.rs:98:4
+   |
+98 | fn webview_unreachable(error: tauri::Error) -> IpcError {
+   |    ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `app` and `timeout` are never read
+   --> src\browser\snapshot_source.rs:339:5
+    |
+338 | pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    |            -------------------------- fields in this struct
+339 |     app: AppHandle<R>,
+    |     ^^^
+340 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: static `V5_ENV_LOCK` is never used
+   --> src\daemon\handover.rs:122:12
+    |
+122 |     static V5_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    |            ^^^^^^^^^^^
+
+warning: struct `V5EnvGuard` is never constructed
+   --> src\daemon\handover.rs:125:12
+    |
+125 |     struct V5EnvGuard {
+    |            ^^^^^^^^^^
+
+warning: associated functions `set`, `set_locked`, and `install` are never used
+   --> src\daemon\handover.rs:133:12
+    |
+132 |     impl V5EnvGuard {
+    |     --------------- associated functions in this implementation
+133 |         fn set(value: Option<&str>) -> Self {
+    |            ^^^
+...
+140 |         fn set_locked(value: Option<&str>) -> Self {
+    |            ^^^^^^^^^^
+...
+144 |         fn install(
+    |            ^^^^^^^
+
+warning: associated function `from_locked_file` is never used
+   --> src\daemon\server.rs:758:19
+    |
+709 | impl DaemonLockFile {
+    | ------------------- associated function in this implementation
+...
+758 |     pub(crate) fn from_locked_file(file: File) -> Self {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: associated function `from_locked_files` is never used
+   --> src\daemon\server.rs:829:19
+    |
+818 | impl DaemonLockFiles {
+    | -------------------- associated function in this implementation
+...
+829 |     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict` is never used
+    --> src\daemon\server.rs:1735:15
+     |
+1735 | pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_delivery_verdict_owned` is never used
+    --> src\daemon\server.rs:1756:15
+     |
+1756 | pub(crate) fn handover_delivery_verdict_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_restorable_unexported` is never used
+    --> src\daemon\server.rs:1775:15
+     |
+1775 | pub(crate) fn handover_restorable_unexported(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handover_effective_owned` is never used
+    --> src\daemon\server.rs:1794:15
+     |
+1794 | pub(crate) fn handover_effective_owned(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_spawn_relative_path` is never used
+    --> src\daemon\server.rs:5047:4
+     |
+5047 | fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `contains` is never used
+   --> src\daemon\session_service.rs:168:19
+    |
+166 | impl SpawnError {
+    | --------------- method in this implementation
+167 |     #[cfg(test)]
+168 |     pub(super) fn contains(&self, needle: &str) -> bool {
+    |                   ^^^^^^^^
+
+warning: methods `machine_sessions`, `expire_spawn_request_for_test`, `spawn_cache_len_for_test`, `provider_claim_len_for_test`, and `reserve_provider_claim_for_test` are never used
+    --> src\daemon\session_service.rs:975:19
+     |
+ 361 | impl DaemonSessionService {
+     | ------------------------- methods in this implementation
+...
+ 975 |     pub(crate) fn machine_sessions(
+     |                   ^^^^^^^^^^^^^^^^
+...
+2504 |     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2515 |     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2520 |     pub(super) fn provider_claim_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2525 |     pub(super) fn reserve_provider_claim_for_test(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `workspace_queues` is never read
+  --> src\daemon\workspace_service.rs:25:5
+   |
+19 | pub struct DaemonWorkspaceService {
+   |            ---------------------- field in this struct
+...
+25 |     workspace_queues: parking_lot::Mutex<
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `spawn_queue` is never used
+  --> src\daemon\workspace_service.rs:42:19
+   |
+41 | impl DaemonWorkspaceService {
+   | --------------------------- method in this implementation
+42 |     pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+   |                   ^^^^^^^^^^^
+
+warning: function `desktop_application_dirs` is never used
+   --> src\ipc\file_open_with.rs:103:15
+    |
+103 | pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kind` is never read
+   --> src\ipc\file_preview.rs:539:5
+    |
+534 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+539 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: function `identity_holds` is never used
+    --> src\ipc\file_preview.rs:1147:4
+     |
+1147 | fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\ipc\file_preview.rs:1163:25
+     |
+1163 | struct ChildReservation(String);
+     |        ---------------- ^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: method `presentation_tuple` is never used
+   --> src\native_terminal\surface_host.rs:567:8
+    |
+560 | impl NativeTerminalSession {
+    | -------------------------- method in this implementation
+...
+567 |     fn presentation_tuple(&self) -> Option<&crate::daemon::protocol::PaneAttachTuple> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: method `test_capture` is never used
+   --> src\paired_host\service.rs:362:25
+    |
+324 | impl PairedHostService {
+    | ---------------------- method in this implementation
+...
+362 |     pub(crate) async fn test_capture(
+    |                         ^^^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src\remote\auth.rs:1246:18
+     |
+1246 | struct StoreLock(std::fs::File);
+     |        --------- ^^^^^^^^^^^^^
+     |        |
+     |        field in this struct
+     |
+     = help: consider removing this field
+
+warning: field `local_credential` is never read
+   --> src\remote\browser_backend.rs:423:5
+    |
+421 | pub struct LocalIpcBrowserBackend {
+    |            ---------------------- field in this struct
+422 |     socket_path: String,
+423 |     local_credential: Option<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: struct `Observation` is never constructed
+  --> src\remote\machine_input_probe.rs:18:19
+   |
+18 | pub(super) struct Observation(pub watch::Receiver<Progress>, String);
+   |                   ^^^^^^^^^^^
+
+warning: associated function `register` is never used
+  --> src\remote\machine_input_probe.rs:20:12
+   |
+19 | impl Observation {
+   | ---------------- associated function in this implementation
+20 |     pub fn register(id: &str) -> Self {
+   |            ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src\remote\server.rs:6487:12
+     |
+6487 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: function `probe_tailscale_cli` is never used
+   --> src\remote\state.rs:215:4
+    |
+215 | fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_snapshot_post_build_hook` is never used
+    --> src\remote\state.rs:1140:19
+     |
+ 812 | impl RemoteGatewayState {
+     | ----------------------- method in this implementation
+...
+1140 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `stderr_fd` is never read
+   --> src\ssh\bridge.rs:818:5
+    |
+814 | pub struct BridgeConnection {
+    |            ---------------- field in this struct
+...
+818 |     stderr_fd: Option<RawFd>,
+    |     ^^^^^^^^^
+
+warning: function `inspect` is never used
+   --> src\terminal\foreground.rs:226:15
+    |
+226 | pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
+    |               ^^^^^^^
+
+warning: function `test_persist_count` is never used
+   --> src\terminal\paired_runtime.rs:101:15
+    |
+101 | pub(crate) fn test_persist_count() -> usize {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: method `entry_for_test` is never used
+   --> src\terminal\remote.rs:502:19
+    |
+323 | impl RemoteRuntime {
+    | ------------------ method in this implementation
+...
+502 |     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
+    |                   ^^^^^^^^^^^^^^
+
+warning: struct `PumpToken` is never constructed
+  --> src\terminal\service.rs:21:19
+   |
+21 | pub(crate) struct PumpToken(u64);
+   |                   ^^^^^^^^^
+
+warning: struct `PumpTokenFence` is never constructed
+  --> src\terminal\service.rs:24:19
+   |
+24 | pub(crate) struct PumpTokenFence {
+   |                   ^^^^^^^^^^^^^^
+
+warning: methods `install`, `is_active`, and `remove` are never used
+  --> src\terminal\service.rs:30:19
+   |
+29 | impl PumpTokenFence {
+   | ------------------- methods in this implementation
+30 |     pub(crate) fn install(&self) -> PumpToken {
+   |                   ^^^^^^^
+...
+36 |     pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
+   |                   ^^^^^^^^^
+37 |
+38 |     pub(crate) fn remove(&self, token: PumpToken) -> bool {
+   |                   ^^^^^^
+
+warning: method `pump_adopted_output` is never used
+   --> src\terminal\service.rs:322:19
+    |
+ 53 | impl TerminalService {
+    | -------------------- method in this implementation
+...
+322 |     pub(crate) fn pump_adopted_output(
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Adopted` is never constructed
+   --> src\terminal\session.rs:199:5
+    |
+197 | pub(crate) enum ProcessHandle {
+    |                 ------------- variant in this enum
+198 |     Spawned(Box<dyn Child + Send + Sync>),
+199 |     Adopted(AdoptedProcess),
+    |     ^^^^^^^
+
+warning: methods `set_writer_for_test` and `wait_and_reap` are never used
+    --> src\terminal\session.rs:867:19
+     |
+ 446 | impl PtySession {
+     | --------------- methods in this implementation
+...
+ 867 |     pub(crate) fn set_writer_for_test(&self, writer: Box<dyn Write + Send>) {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+1128 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `ownership` is never used
+   --> src\terminal\suspension.rs:157:4
+    |
+157 | fn ownership() -> &'static parking_lot::Mutex<Ownership> {
+    |    ^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1601:12
+     |
+1601 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1603:12
+     |
+1603 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+    --> src\remote\server.rs:6106:9
+     |
+6106 |         state.auth_manager.revoke_device(&device.id);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+6106 |         let _ = state.auth_manager.revoke_device(&device.id);
+     |         +++++++
+
+warning: `ferryx` (lib test) generated 97 warnings (run `cargo fix --lib -p ferryx --tests` to apply 41 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.31s
+     Running unittests src\lib.rs (target\debug\deps\ferryx_lib-edbc0e6372dc8389.exe)
+
+running 1 test
+test worktree::tests::plain_folder_without_git_registers_and_guards_worktrees ... 
+thread 'worktree::tests::plain_folder_without_git_registers_and_guards_worktrees' (29388) panicked at src\worktree\mod.rs:49:9:
+assertion `left == right` failed
+  left: "\\\\?\\C:\\Users\\sook"
+ right: "\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\.tmp5IYsNK"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    worktree::tests::plain_folder_without_git_registers_and_guards_worktrees
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2279 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,37 @@
+$ vitest run --maxWorkers=1 src/lib/agentReconnect.integration.test.ts
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1036957) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/agentReconnect.integration.test.ts (7 tests | 1 failed) 21ms
+   ✓ agent reconnect cross-layer contracts > persists recovered OMO CWD and transcript without changing the workspace root 8ms
+   ✓ agent reconnect cross-layer contracts > spans stale persisted load through typed reconnect and saved snapshot 2ms
+   ✓ agent reconnect cross-layer contracts > loads a legacy agentSessionId and completes reconnect with the canonical provider identity 1ms
+   ✓ agent reconnect cross-layer contracts > runs typed spawn, attach, proposed persistence, and same-local-id rebind 1ms
+   ✓ agent reconnect cross-layer contracts > keeps cold identity and structured failure when attach rejects 1ms
+   × agent reconnect cross-layer contracts > auto-resumes deserialized exited agent sessions through scheduleAgentAutoResume in Eager mode 6ms
+     → expected "spy" to be called 1 times, but got 0 times
+   ✓ agent reconnect cross-layer contracts > adopts live existing daemon session on AGENT_SESSION_CONFLICT without calling closeTerminal 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/agentReconnect.integration.test.ts > agent reconnect cross-layer contracts > auto-resumes deserialized exited agent sessions through scheduleAgentAutoResume in Eager mode
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/lib/agentReconnect.integration.test.ts:228:19
+    226| 
+    227|     await vi.advanceTimersByTimeAsync(0);
+    228|     expect(spawn).toHaveBeenCalledTimes(1);
+       |                   ^
+    229|     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ start…
+    230|     await vi.advanceTimersByTimeAsync(400);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 passed (7)
+   Start at  10:09:26
+   Duration  1.12s (transform 534ms, setup 100ms, collect 603ms, tests 21ms, environment 222ms, prepare 50ms)
+
+error: script "test" exited with code 1

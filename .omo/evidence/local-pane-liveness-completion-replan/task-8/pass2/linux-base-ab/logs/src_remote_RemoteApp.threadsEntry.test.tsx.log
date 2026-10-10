@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteApp.threadsEntry.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1043691) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/remote/RemoteApp.threadsEntry.test.tsx (3 tests | 3 failed) 5ms
+   × mobile remote entry > mobile viewport opens the chat view, not a thread list or a terminal 4ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × mobile remote entry > desktop viewport still opens the terminal 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+   × mobile remote entry > desktop viewport keeps the view switching affordances 0ms
+     → Cannot read properties of undefined (reading 'setItem')
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > mobile viewport opens the chat view, not a thread list or a terminal
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > desktop viewport still opens the terminal
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > desktop viewport keeps the view switching affordances
+TypeError: Cannot read properties of undefined (reading 'setItem')
+ ❯ src/remote/RemoteApp.threadsEntry.test.tsx:66:18
+     64|   beforeEach(() => {
+     65|     originalInnerWidth = window.innerWidth;
+     66|     localStorage.setItem("ferryx_remote_token", "test-token");
+       |                  ^
+     67|     vi.stubGlobal("WebSocket", EventWebSocket);
+     68|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > mobile viewport opens the chat view, not a thread list or a terminal
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > desktop viewport still opens the terminal
+ FAIL  src/remote/RemoteApp.threadsEntry.test.tsx > mobile remote entry > desktop viewport keeps the view switching affordances
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/remote/RemoteApp.threadsEntry.test.tsx:73:18
+     71|     Object.defineProperty(window, "innerWidth", { value: originalInner…
+     72|     cleanup();
+     73|     localStorage.clear();
+       |                  ^
+     74|     vi.unstubAllGlobals();
+     75|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  10:11:07
+   Duration  1.26s (transform 324ms, setup 109ms, collect 752ms, tests 5ms, environment 228ms, prepare 45ms)
+
+error: script "test" exited with code 1

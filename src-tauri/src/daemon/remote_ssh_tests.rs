@@ -290,6 +290,11 @@ async fn direct_ssh_real_transport_registration_and_pty() {
                 "--nocapture",
             ])
             .env(CHILD, dir.path())
+            // The daemon supervises its SSH transport by re-entering this test binary's ignored
+            // `ssh_bridge_transport_supervisor_entry`; without the marker the bridge refuses to
+            // supervise at all. The real app dispatches `--ferryx-ssh-supervisor` from its own
+            // main instead, so this env belongs to the child process only.
+            .env("FERRYX_SSH_SUPERVISOR_LIBTEST", "1")
             .env("PATH", std::env::join_paths(paths).unwrap())
             .kill_on_drop(true)
             .output(),
@@ -540,7 +545,7 @@ async fn exercise_child(root: &Path) {
         })
         .await
         .expect("remote command produced exact root through real SSH PTY");
-        let DaemonResponse::DescribeSessionOk { session } = daemon.handle_describe_session(&id)
+        let DaemonResponse::DescribeSessionOk { session, .. } = daemon.handle_describe_session(&id)
         else {
             panic!("session details")
         };
@@ -601,6 +606,7 @@ async fn exercise_child(root: &Path) {
     .expect("remote command produced exact worktree root through real SSH PTY");
     let DaemonResponse::DescribeSessionOk {
         session: wt_session,
+        ..
     } = daemon.handle_describe_session(&wt_session_id)
     else {
         panic!("session details")

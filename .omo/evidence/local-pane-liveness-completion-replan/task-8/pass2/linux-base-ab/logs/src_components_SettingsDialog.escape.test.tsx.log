@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/components/SettingsDialog.escape.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042105) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/SettingsDialog.escape.test.tsx (5 tests | 5 failed) 6ms
+   × SettingsDialog Escape key scoping & accessibility > does not close the dialog when Escape is pressed inside a non-empty shortcuts search input 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog Escape key scoping & accessibility > closes the dialog when Escape is pressed on the dialog body 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog Escape key scoping & accessibility > does not close the dialog when Escape dismisses an OPEN select, but does close once it is shut 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog Escape key scoping & accessibility > sets aria-current='page' on the active nav button 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × SettingsDialog Escape key scoping & accessibility > moves initial focus into the dialog on mount 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/SettingsDialog.escape.test.tsx > SettingsDialog Escape key scoping & accessibility > does not close the dialog when Escape is pressed inside a non-empty shortcuts search input
+ FAIL  src/components/SettingsDialog.escape.test.tsx > SettingsDialog Escape key scoping & accessibility > closes the dialog when Escape is pressed on the dialog body
+ FAIL  src/components/SettingsDialog.escape.test.tsx > SettingsDialog Escape key scoping & accessibility > does not close the dialog when Escape dismisses an OPEN select, but does close once it is shut
+ FAIL  src/components/SettingsDialog.escape.test.tsx > SettingsDialog Escape key scoping & accessibility > sets aria-current='page' on the active nav button
+ FAIL  src/components/SettingsDialog.escape.test.tsx > SettingsDialog Escape key scoping & accessibility > moves initial focus into the dialog on mount
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/SettingsDialog.escape.test.tsx:69:16
+     67| afterEach(cleanup);
+     68| beforeEach(() => {
+     69|   localStorage.clear();
+       |                ^
+     70|   native.getTerminalPreferences.mockReset();
+     71|   native.getTerminalPreferences.mockResolvedValue({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  10:10:44
+   Duration  1.60s (transform 506ms, setup 122ms, collect 1.02s, tests 6ms, environment 256ms, prepare 58ms)
+
+error: script "test" exited with code 1

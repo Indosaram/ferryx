@@ -1,0 +1,52 @@
+{
+  "rows": 228,
+  "pass1": 49,
+  "candidate": 49,
+  "rust": 34,
+  "baseline": 120,
+  "recovery": 10,
+  "duplicates": 0,
+  "missingEvidence": [],
+  "classificationCounts": {
+    "mac": 10,
+    "linux": 99,
+    "windows": 11
+  },
+  "ownedArchivesAbsent": true,
+  "cleanup": {
+    "linuxFixtures": {
+      "receipt": "FIXTURE_CLEANUP_OK ownedRoots=4",
+      "exit": 0
+    },
+    "windowsFixtures": {
+      "receipt": "FIXTURE_CLEANUP_OK ownedRoots=4 foreignRootsPreserved=2",
+      "exit": 0
+    },
+    "linuxStaging": {
+      "receipt": "CLEANUP_OK sourceAbsent=true baseAbsent=true ghosttyLinkDetached=true archivesAbsent=true",
+      "monitor": "mon_ZN2RFT82HZ5G4JSJ",
+      "exit": 0
+    },
+    "windowsStaging": {
+      "receipt": "CLEANUP_OK sourceAbsent=True ownedProcesses=0 ghosttyPreserved=True",
+      "monitor": "mon_F1RNPP1S7127BXT3",
+      "exit": 0
+    },
+    "macStaging": {
+      "exit": 0,
+      "monitor": "mon_2M8WQE8Y04SZJ0CJ",
+      "receipt": "CLEANUP_OK sourceAbsent=true baseAbsent=true ghosttyLinkDetached=true archivesAbsent=true; SHARED_GHOSTTY_PRESERVED"
+    },
+    "localArchives": {
+      "exit": 0,
+      "receipt": "LOCAL_ARCHIVES_REMOVED",
+      "paths": [
+        "source.tar",
+        "base-d82b35e4.tar"
+      ]
+    }
+  },
+  "commit": "172baa874f5e320ef08f4ed1dc5f11b391898477",
+  "tree": "a0ac605669047d15f184b395018924f38aaf71b0",
+  "status": ""
+}

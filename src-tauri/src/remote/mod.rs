@@ -80,6 +80,10 @@ mod dag_paired_tests;
 #[path = "machine_agent_state_tests.rs"]
 mod machine_agent_state_tests;
 
+#[cfg(test)]
+#[path = "machine_grid_tests.rs"]
+mod machine_grid_tests;
+
 // Portable counterpart to `dag_paired_tests` (which needs a Unix listener): the
 // paired DAG stream is exercised through `MachineClient::attach_dag`.
 #[cfg(test)]

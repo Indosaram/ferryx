@@ -1,0 +1,8 @@
+RGATE_DONE mac split-list native=0 listcount=15 
+RGATE_DONE mac split native=0 listcount=0 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2676 filtered out; finished in 0.18s
+RGATE_DONE mac all-targets native=101 listcount=0 
+RGATE_DONE mac transfer-list native=101 listcount=0 
+RGATE_DONE mac transfer native=101 listcount=0 
+RGATE_DONE mac pane-list native=0 listcount=47 
+RGATE_DONE mac pane native=0 listcount=0 test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 2644 filtered out; finished in 62.39s
+ALL_RUSTA_DONE mac

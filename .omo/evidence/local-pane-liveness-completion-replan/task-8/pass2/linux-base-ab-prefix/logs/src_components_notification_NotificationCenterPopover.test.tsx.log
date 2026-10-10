@@ -1,0 +1,76 @@
+$ vitest run --maxWorkers=1 src/components/notification/NotificationCenterPopover.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1037163) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/notification/NotificationCenterPopover.test.tsx (16 tests | 16 failed) 8ms
+   × NotificationCenterPopover > renders empty state when there are no notifications 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > closes on backdrop click 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > closes on Escape key and restores focus 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > traps focus between first and last focusable elements on Tab / Shift+Tab 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > does not auto-mark read when popover opens 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > renders row details: agent icon, StatusDot, title, location, relative time, and unread indicator 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > deduplicates location string when workspace and worktree are equal or one is missing 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > renders StatusDot for done and bell reasons 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > calls onNavigateToSession on row click and closes, but does NOT mark read 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > renders closed-session rows as muted 'Session ended' and non-clickable 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > does not render a separate clear button on the row 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > B1: row keyboard activation still navigates and closes when Enter or Space is pressed directly on the row 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > B2: clamps popover horizontally within narrow viewport so right edge does not overflow 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > B2: re-anchors popover on window resize while open 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > header: 'Mark all read' clears the unread count but keeps blocked work visible, with no separate Clear all button 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × NotificationCenterPopover > reflects 201st row eviction in render 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 16 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > renders empty state when there are no notifications
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > closes on backdrop click
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > closes on Escape key and restores focus
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > traps focus between first and last focusable elements on Tab / Shift+Tab
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > does not auto-mark read when popover opens
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > renders row details: agent icon, StatusDot, title, location, relative time, and unread indicator
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > deduplicates location string when workspace and worktree are equal or one is missing
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > renders StatusDot for done and bell reasons
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > calls onNavigateToSession on row click and closes, but does NOT mark read
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > renders closed-session rows as muted 'Session ended' and non-clickable
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > does not render a separate clear button on the row
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > B1: row keyboard activation still navigates and closes when Enter or Space is pressed directly on the row
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > B2: clamps popover horizontally within narrow viewport so right edge does not overflow
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > B2: re-anchors popover on window resize while open
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > header: 'Mark all read' clears the unread count but keeps blocked work visible, with no separate Clear all button
+ FAIL  src/components/notification/NotificationCenterPopover.test.tsx > NotificationCenterPopover > reflects 201st row eviction in render
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/notification/NotificationCenterPopover.test.tsx:12:18
+     10| 
+     11|   beforeEach(() => {
+     12|     localStorage.clear();
+       |                  ^
+     13|     store = createNotificationCenterStore({ storage: null });
+     14| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/16]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  16 failed (16)
+   Start at  10:09:29
+   Duration  1.00s (transform 112ms, setup 101ms, collect 472ms, tests 8ms, environment 236ms, prepare 48ms)
+
+error: script "test" exited with code 1

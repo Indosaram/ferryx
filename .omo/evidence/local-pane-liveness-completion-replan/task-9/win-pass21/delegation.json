@@ -1,0 +1,47 @@
+{
+  "at": "2026-10-04T21:42:04.831Z",
+  "scenario": "split-happy",
+  "mechanism": "schtasks /create /it + /run bound to the interactive console user",
+  "interpreter": {
+    "node": "v24.19.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "entryMarkerFile": "delegation-entry.marker",
+  "entryMarkerBudgetMs": 10000,
+  "sequenceBudgetMs": 900000,
+  "maxAttempts": 90,
+  "attemptsUsed": 1,
+  "stopReason": "delegated-run-completed",
+  "stalled": false,
+  "code": null,
+  "ledgerPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\windows-interactive-delegation.json",
+  "attempts": [
+    {
+      "index": 1,
+      "taskName": "ferryx-qa-split-happy-47740-a1-j1rs4b",
+      "attemptDir": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b",
+      "batPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\ferryx-qa-split-happy-47740-a1-j1rs4b.bat",
+      "entryMarkerPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\delegation-entry.marker",
+      "recordPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\relaunch-record.json",
+      "outPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\relaunch.out",
+      "errPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\relaunch.err",
+      "exitPath": "C:\\Users\\sook\\ferryx-pane-completion\\ev21\\sh89\\delegation\\attempt-1-j1rs4b\\relaunch.exit",
+      "markerPreexisting": false,
+      "markerAppeared": true,
+      "markerWaitMs": 671,
+      "markerWindowMs": 10000,
+      "markerText": "DELEGATION_ENTRY 2026-10-05  6:42:05.53 task=ferryx-qa-split-happy-47740-a1-j1rs4b cwd=C:\\Windows\\System32 \r\n",
+      "createCode": 0,
+      "runCode": 0,
+      "exitBudgetMs": 899998,
+      "exitFileBytes": null,
+      "exitFileContentBudgetMs": null,
+      "taskQuery": null,
+      "teardown": null,
+      "outcome": "COMPLETED",
+      "exitCode": 7,
+      "detail": null
+    }
+  ]
+}

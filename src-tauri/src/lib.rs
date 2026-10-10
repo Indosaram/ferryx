@@ -1,8 +1,13 @@
-// Raised for the native terminal's WGPU types: resolving the `Send`/`Sync` obligations they carry
-// walks a deep chain of `wgpu-core` containers (`NumericDimension` -> `NumericType` -> `InterfaceVar`
-// -> `Varying` -> ... -> `ShaderModule` -> `RenderPipeline` -> ... -> `ResourceState`), which
-// exceeds the default 128-step budget in the non-test build. This only raises that budget.
-#![recursion_limit = "256"]
+// The QA barrier's hold/settle stages carry futures that hold Tauri's managed
+// `NativeTerminalSurfaceHostState` across an `await`, so the compiler must prove
+// that managed state `Sync` through the whole WGPU object graph
+// (`NumericDimension` -> `InterfaceVar` -> ... -> `ResourceState`). That
+// derivation is deep enough to overflow the default limit of 128 and fail
+// `cargo build --features local-split-qa` with
+// `E0275: overflow evaluating the requirement validation::NumericDimension: Sync`
+// while `cargo check` passes. The bound is a compile-time resolution depth, not
+// runtime behaviour, and a normal build reaches none of this code.
+#![recursion_limit = "512"]
 
 pub mod account;
 pub mod agent_detect;
@@ -31,6 +36,7 @@ pub mod ssh;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
+pub mod watchdog;
 
 use crate::daemon::DaemonClient;
 #[cfg(all(target_os = "windows", feature = "native-terminal"))]
@@ -1196,6 +1202,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     // process lifecycle, not only from tests.
     let cleanup_reaper_client = Arc::clone(&daemon_client);
     let pending_create_reaper_client = Arc::clone(&daemon_client);
+    // Task 3 (local-split-qa): the private QA barrier channel for the GUI lane.
+    // The pane-liveness runner launches this GUI with NO arguments and hands
+    // the channel over through the private inherited env only, so a normal
+    // launch installs nothing at all.
+    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+    let qa_boot_daemon_client = Arc::clone(&daemon_client);
     // Consumed by the setup hook below, which spawns the periodic worktree
     // rescan task; kept as a separate clone so `.manage(workspace_registry)`
     // below still owns the managed instance.
@@ -1290,6 +1302,32 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            // Hand the daemon's lifetime to the supervisor before a terminal can ask for one, so
+            // quitting, crashing, or replacing this app can no longer take the PTYs with it. The
+            // daemon client repeats this on demand, which is what makes the race harmless; this
+            // call exists so the agent is armed even when no terminal is ever opened. A failure is
+            // not fatal: the client falls back to spawning a detached daemon.
+            #[cfg(target_os = "macos")]
+            {
+                if crate::daemon::launchd::agent_management_supported() {
+                    tauri::async_runtime::spawn_blocking(|| {
+                        let binary = std::env::current_exe().map_err(|error| error.to_string());
+                        match binary.and_then(|binary| {
+                            crate::daemon::launchd::ensure_launchd_agent(&binary)
+                                .map_err(|error| error.to_string())
+                        }) {
+                            Ok(plist) => tracing::info!(
+                                plist = %plist.display(),
+                                "Launchd agent owns the daemon lifetime"
+                            ),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "Could not arm the launchd agent; the daemon will be spawned detached"
+                            ),
+                        }
+                    });
+                }
+            }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {
@@ -1348,11 +1386,29 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             tauri::async_runtime::spawn(async move {
                 ipc::terminal::start_pending_create_reaper(pending_create_reaper_client).await;
             });
+            // Task 3 (local-split-qa): install the private QA barrier channel on
+            // the GUI boot path and settle `fixture-setup` from the real
+            // isolated-profile session inventory. No-op without the runner env.
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            {
+                // Started first: the watchers wait (bounded) for the channel the
+                // call below installs, so no boot ordering can leave them without it.
+                crate::ipc::terminal::start_qa_split_watchers(Arc::clone(&qa_boot_daemon_client));
+                crate::ipc::qa_barrier::start_gui_boot_channel(
+                    app.handle().clone(),
+                    qa_boot_daemon_client,
+                );
+            }
             install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
             crate::worktree::spawn_worktree_rescan_task(
                 app.handle().clone(),
                 worktree_rescan_registry,
             );
+            let watchdog_handle = crate::watchdog::start_watchdog(
+                app.handle().clone(),
+                crate::watchdog::WatchdogConfig::default(),
+            );
+            app.manage(watchdog_handle);
             browser_remote_service_setup.set_snapshot_source(Arc::new(
                 crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(
                     app.handle().clone(),
@@ -1411,14 +1467,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let builder = builder.manage(native_terminal_surface_host);
 
     builder.invoke_handler(tauri::generate_handler![
+        crate::ipc::account::cmd_account_enrollment_status,
+        crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_list,
         crate::ipc::paired_host::paired_host_operation,
         crate::ipc::paired_host::paired_host_capabilities,
         crate::ipc::paired_host::paired_host_read,
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
-        crate::ipc::account::cmd_account_enrollment_status,
-        crate::ipc::account::cmd_account_enroll_this_machine,
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::file_preview::cmd_file_preview_open,
@@ -1436,6 +1492,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
+        cmd_terminal_spawn_operation,
         cmd_terminal_spawn_batch,
         cmd_terminal_attach,
         cmd_terminal_history_snapshot,
@@ -1470,6 +1527,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_set_attention_frame,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
+        cmd_clipboard_write_text,
         cmd_native_terminal_paste,
         cmd_native_terminal_clipboard_content,
         cmd_native_terminal_mouse,
@@ -1486,6 +1544,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_get_active_selection,
         cmd_project_initial,
         cmd_boot_trace,
+        crate::ipc::system_resources::cmd_system_resources,
         cmd_project_register,
         ipc::project_remote::cmd_project_register_remote,
         ipc::project_remote::cmd_ssh_list_directories,
@@ -1522,6 +1581,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_delete_destructive,
         cmd_worktree_delete_preview,
         cmd_worktree_status,
+        ipc::github_issue::cmd_github_issue_preview,
         cmd_worktree_disk_scan_start,
         cmd_worktree_disk_scan_cancel,
         cmd_worktree_disk_scan_result,
@@ -2317,6 +2377,13 @@ pub fn run() {
         .try_init();
 
     create_app(tauri::Builder::default())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
+                    watchdog.stop();
+                }
+            }
+        });
 }

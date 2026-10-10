@@ -500,7 +500,12 @@ mod tests {
         let frame = sample_frame(dev_null_fds(2));
         send_frame(sender.as_raw_fd(), &frame).expect("send");
         let mut header = [0u8; HANDOVER_HEADER_BYTES];
-        let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as _) } as usize];
+        // Size the control buffer for zero descriptors, not one. `CMSG_SPACE(sizeof(RawFd))` is
+        // not a one-descriptor buffer on Linux: CMSG_ALIGN rounds it so CMSG_SPACE(1 fd) ==
+        // CMSG_SPACE(2 fds) == 24 bytes, a two-descriptor frame fits without MSG_CTRUNC, and
+        // the truncation path is never entered. Zero descriptors stays below the sender's
+        // CMSG_LEN(2 fds) on both Linux (16 < 24) and macOS (12 < 20).
+        let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(0) } as usize];
         let mut received: Vec<OwnedFd> = Vec::new();
         let error = unsafe {
             recv_header_with_control_capacity(

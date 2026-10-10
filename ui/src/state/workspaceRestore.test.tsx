@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tauriMocks = vi.hoisted(() => ({
   isTauriRuntime: vi.fn(() => true),
@@ -16,6 +16,7 @@ vi.mock("../lib/tauri", async (importOriginal) => {
 import { createLayoutState } from "./layout";
 import {
   useWorkspaceStore,
+  workspaceReducer,
   type WorkspaceServices,
   type WorkspaceState,
 } from "./workspaceStore";
@@ -615,6 +616,46 @@ describe("workspaceRestore coordinator", () => {
     await expect(defaultListLiveBackendSessionIds()).rejects.toThrow("daemon list unavailable");
   });
 
+  it.each([
+    { incarnation: "original-pty", backendSessionId: "backend-1", daemonEpoch: "18446744073709551614", lifecycle: "working" },
+    { incarnation: "replacement-pty", backendSessionId: "standby:sess-1", daemonEpoch: null, lifecycle: "exited" },
+  ])("preloads default inventory across epochs with $incarnation", async ({ incarnation, backendSessionId, daemonEpoch, lifecycle }) => {
+    const workspaceId = "ws-default-inventory";
+    const persisted = persistedSingleTerminal(workspaceId, "backend-1", "18446744073709551613");
+    const session = persisted.workspaces[workspaceId].terminalSessions["sess-1"];
+    tauriMocks.loadSession.mockResolvedValueOnce({
+      ...persisted,
+      workspaces: {
+        [workspaceId]: {
+          ...persisted.workspaces[workspaceId],
+          terminalSessions: { "sess-1": { ...session, incarnation: "original-pty" } },
+        },
+      },
+    });
+    tauriMocks.listTerminalSessions.mockResolvedValueOnce([{
+      sessionId: "backend-1",
+      worktreePath: "/repo/test",
+      running: true,
+      daemonEpoch: "18446744073709551614",
+      incarnation,
+    }]);
+
+    await preloadWorkspaceSnapshots([workspaceId]);
+
+    expect(tauriMocks.loadSession).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.listTerminalSessions).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceSnapshot(workspaceId)?.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId,
+      daemonEpoch,
+      lifecycle,
+      incarnation: "original-pty",
+      worktreePath: "/repo/test",
+      lastOutputSequence: null,
+    });
+    expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+  });
+
   it("restores SSH pane identity while the daemon list is temporarily unavailable", async () => {
     const workspaceId = "ssh:list-unavailable";
     const persisted = persistedSingleTerminal(workspaceId, "stable", "old");
@@ -704,9 +745,14 @@ describe("workspaceRestore coordinator", () => {
   it("marks session as exited without auto-respawn when daemon epoch has changed", async () => {
     const workspaceId = "ws-epoch-mismatch";
     const restoreWorkspace = vi.fn();
-    const loadSessionFn = vi.fn(async () => persistedSingleTerminal(workspaceId, "backend-1", "epoch-OLD"));
+    const persisted = persistedSingleTerminal(workspaceId, "backend-1", "epoch-OLD");
+    const loadSessionFn = vi.fn(async () => ({ ...persisted, workspaces: {
+      ...persisted.workspaces, [workspaceId]: { ...persisted.workspaces[workspaceId], terminalSessions: {
+        "sess-1": { ...persisted.workspaces[workspaceId].terminalSessions["sess-1"], incarnation: "old-pty" },
+      } },
+    } }));
     const listLiveBackendSessionIdsFn = vi.fn(async () => [
-      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW", incarnation: "replacement-pty" },
     ]);
     const { unmount } = renderHook(() =>
       useWorkspaceRestore({
@@ -945,6 +991,169 @@ describe("workspaceRestore coordinator", () => {
     expect(restored.sessions["sess-2"]?.backendSessionId).toMatch(/^standby:/);
 
     localStorage.removeItem("ferryx.settings.general");
+    unmount();
+  });
+});
+
+describe("local session reconciliation after inventory failure", () => {
+  const pairedId = `daemon:${"c".repeat(64)}`;
+
+  function mixedPersisted(incarnation?: string) {
+    const local = persistedSingleTerminal("local", "local-proxy");
+    const localWithIdentity = {
+      ...local.workspaces.local,
+      terminalSessions: {
+        "sess-1": { ...local.workspaces.local.terminalSessions["sess-1"], incarnation },
+      },
+    };
+    const paired = persistedSingleTerminal(pairedId, "paired-proxy", "42");
+    return {
+      ...local,
+      workspaces: {
+        ...local.workspaces,
+        local: localWithIdentity,
+        [pairedId]: {
+          ...paired.workspaces[pairedId],
+          target: { kind: "pairedDaemon" as const, hostId: "host-a" },
+          remoteWorkspaceId: "remote-root",
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    resetWorkspaceRestore();
+    clearWorkspaceSnapshot();
+    clearHmrWorkspaceState();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("settles preloaded reconnecting local sessions once a retried inventory call succeeds", async () => {
+    await preloadWorkspaceSnapshots(["local", pairedId], async () => mixedPersisted("local-incarnation"), async () => {
+      throw new Error("daemon handover in progress");
+    });
+    expect(getWorkspaceSnapshot("local")?.sessions["sess-1"]?.remoteConnectionState).toBe("reconnecting");
+
+    const restoreWorkspace = vi.fn();
+    const reconcileLocalSessions = vi.fn();
+    const listLiveBackendSessionIdsFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("still handing over"))
+      .mockResolvedValue([{ sessionId: "local-proxy", daemonEpoch: "epoch-2", running: true, incarnation: "local-incarnation" }]);
+
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId: "local",
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        reconcileLocalSessions,
+        loadSessionFn: async () => { throw new Error("preloaded path must not read disk"); },
+        listLiveBackendSessionIdsFn,
+      }),
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(listLiveBackendSessionIdsFn).toHaveBeenCalledTimes(1);
+    expect(reconcileLocalSessions).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(listLiveBackendSessionIdsFn).toHaveBeenCalledTimes(2);
+    expect(reconcileLocalSessions).toHaveBeenCalledTimes(1);
+
+    const live = reconcileLocalSessions.mock.calls[0][0];
+    expect(live).toBeInstanceOf(Map);
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+    const reconciled = workspaceReducer(restored, { type: "LOCAL_SESSIONS_RECONCILED", live });
+    expect(reconciled.sessions["sess-1"].remoteConnectionState).toBeUndefined();
+    expect(reconciled.sessions["sess-1"]).toMatchObject({ backendSessionId: "local-proxy", lifecycle: "running" });
+    unmount();
+  });
+
+  it("marks local sessions disconnected after the retry budget is exhausted", async () => {
+    await preloadWorkspaceSnapshots(["local", pairedId], async () => mixedPersisted(), async () => {
+      throw new Error("daemon offline");
+    });
+
+    const restoreWorkspace = vi.fn();
+    const reconcileLocalSessions = vi.fn();
+    const listLiveBackendSessionIdsFn = vi.fn(async () => { throw new Error("daemon offline"); });
+
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId: "local",
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        reconcileLocalSessions,
+        listLiveBackendSessionIdsFn,
+      }),
+    );
+
+    // Attempts at 0, 250, 750, 1750, 3750, 7750, ... 27750ms; the next 4s wait would exceed 30s.
+    await act(async () => { await vi.advanceTimersByTimeAsync(27_000); });
+    expect(reconcileLocalSessions).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(reconcileLocalSessions).toHaveBeenCalledTimes(1);
+    expect(reconcileLocalSessions).toHaveBeenCalledWith(null);
+    // 250ms doubling to a 4s cap inside a 30s budget: 11 attempts, then no more calls.
+    expect(listLiveBackendSessionIdsFn).toHaveBeenCalledTimes(11);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(listLiveBackendSessionIdsFn).toHaveBeenCalledTimes(11);
+
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+    const reconciled = workspaceReducer(restored, { type: "LOCAL_SESSIONS_RECONCILED", live: null });
+    expect(reconciled.sessions["sess-1"].remoteConnectionState).toBe("disconnected");
+    unmount();
+  });
+
+  it("stops retrying when unmounted", async () => {
+    await preloadWorkspaceSnapshots(["local", pairedId], async () => mixedPersisted(), async () => {
+      throw new Error("daemon offline");
+    });
+    const reconcileLocalSessions = vi.fn();
+    const listLiveBackendSessionIdsFn = vi.fn(async () => { throw new Error("daemon offline"); });
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId: "local",
+        recoveredFromHmr: false,
+        restoreWorkspace: vi.fn(),
+        reconcileLocalSessions,
+        listLiveBackendSessionIdsFn,
+      }),
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    unmount();
+    const callsAtUnmount = listLiveBackendSessionIdsFn.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(listLiveBackendSessionIdsFn).toHaveBeenCalledTimes(callsAtUnmount);
+    expect(reconcileLocalSessions).not.toHaveBeenCalled();
+  });
+
+  it("does not leave a local workspace reconnecting just because a paired workspace exists", async () => {
+    await preloadWorkspaceSnapshots(["local", pairedId], async () => mixedPersisted(), async () => [
+      { sessionId: "local-proxy", daemonEpoch: "epoch-1", running: true },
+    ]);
+    expect(getWorkspaceSnapshot("local")?.sessions["sess-1"]?.remoteConnectionState).toBeUndefined();
+    expect(getWorkspaceSnapshot("local")?.sessions["sess-1"]?.backendSessionId).toBe("local-proxy");
+
+    const reconcileLocalSessions = vi.fn();
+    const listLiveBackendSessionIdsFn = vi.fn(async () => []);
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId: "local",
+        recoveredFromHmr: false,
+        restoreWorkspace: vi.fn(),
+        reconcileLocalSessions,
+        listLiveBackendSessionIdsFn,
+      }),
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(listLiveBackendSessionIdsFn).not.toHaveBeenCalled();
+    expect(reconcileLocalSessions).not.toHaveBeenCalled();
     unmount();
   });
 });

@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-pub const HELPER_VERSION: &str = "2026.930.1";
+pub const HELPER_VERSION: &str = "2026.1009.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.

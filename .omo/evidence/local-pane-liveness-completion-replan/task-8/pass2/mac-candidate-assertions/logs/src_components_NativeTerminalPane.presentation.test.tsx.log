@@ -1,0 +1,446 @@
+$ vitest run --maxWorkers=1 src/components/NativeTerminalPane.presentation.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-172baa87/ui
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > does not steal dialog focus when an earlier attachment finishes
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m1[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517646[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > keeps a presented macOS surface under a dialog without accepting terminal keys
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m2[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517677[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > does not recover an in-flight input after a dialog takes ownership
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m3[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517710[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > does not recover an in-flight input after a dialog takes ownership
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m4[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791078517720[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-1'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791078517720[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m5[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791078517721[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-1'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791078517721[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m6[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517741[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({"daemonEpoch":"epoch-a","remoteGeneration":7,"remoteConnectionState":"connected"})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m7[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517782[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > rebinds the same backend ID and fences the previous attach completion ({"daemonEpoch":"epoch-b","remoteGeneration":1})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m8[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517809[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > rebinds the same backend ID and fences the previous attach completion ({"daemonEpoch":"epoch-a","remoteGeneration":2})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m9[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517829[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-b","remoteGeneration":1})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m10[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517839[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-b","remoteGeneration":1})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m11[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791078517842[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-2'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791078517842[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m12[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791078517842[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-2'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791078517842[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-b","remoteGeneration":1})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m13[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517844[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-a","remoteGeneration":2})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m14[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517854[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-a","remoteGeneration":2})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m15[39m,
+  event: [32m'terminal.surface.input.accepted'[39m,
+  wallTimeMs: [33m1791078517856[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-3'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    payloadBytes: [33m1[39m,
+    queuedAt: [33m1791078517856[39m
+  }
+}
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m16[39m,
+  event: [32m'terminal.surface.input.dispatch'[39m,
+  wallTimeMs: [33m1791078517856[39m,
+  details: {
+    operationId: [32m'req-347e6613-backend-a-3'[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    paneIdentity: [1mnull[22m,
+    bindingKey: [1mnull[22m,
+    attemptGeneration: [1mnull[22m,
+    daemonEpoch: [1mnull[22m,
+    incarnation: [1mnull[22m,
+    dispatchedAt: [33m1791078517856[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-a","remoteGeneration":2})
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m17[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517857[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > yields an exited native surface outside macOS so the disconnect overlay is not occluded
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m18[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517866[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > never reattaches a dead PTY when retained-frame geometry recovery is requested
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m19[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078517877[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > holds the final frame until a reconnected replacement is presented
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m20[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078518002[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-a'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+stdout | src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > holds the final frame until a reconnected replacement is presented
+[ferryx:switch] {
+  runId: [32m'6c82b5bf-04ad-4e8c-8686-4ca1ea52a449'[39m,
+  sequence: [33m21[39m,
+  event: [32m'terminal.surface.presented'[39m,
+  wallTimeMs: [33m1791078518014[39m,
+  details: {
+    localSessionId: [90mundefined[39m,
+    backendSessionId: [32m'backend-b'[39m,
+    cursorCol: [33m0[39m,
+    cursorRow: [33m0[39m,
+    cellWidthPx: [33m8[39m,
+    cellHeightPx: [33m16[39m
+  }
+}
+
+ ❯ src/components/NativeTerminalPane.presentation.test.tsx (14 tests | 3 failed) 419ms
+   ✓ native terminal presentation retention > does not steal dialog focus when an earlier attachment finishes 66ms
+   ✓ native terminal presentation retention > keeps a presented macOS surface under a dialog without accepting terminal keys 32ms
+   ✓ native terminal presentation retention > does not recover an in-flight input after a dialog takes ownership 32ms
+   × native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({}) 42ms
+     → expected [ [ …(2) ] ] to deeply equal [ [ …(2) ] ]
+   × native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({"daemonEpoch":"epoch-a","remoteGeneration":7,"remoteConnectionState":"connected"}) 22ms
+     → expected [ [ …(2) ] ] to deeply equal [ [ …(2) ] ]
+   ✓ native terminal presentation retention > rebinds the same backend ID and fences the previous attach completion ({"daemonEpoch":"epoch-b","remoteGeneration":1}) 20ms
+   ✓ native terminal presentation retention > rebinds the same backend ID and fences the previous attach completion ({"daemonEpoch":"epoch-a","remoteGeneration":2}) 17ms
+   ✓ native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-b","remoteGeneration":1}) 13ms
+   ✓ native terminal presentation retention > fences pending input recovery across a same-ID binding change ({"daemonEpoch":"epoch-a","remoteGeneration":2}) 12ms
+   ✓ native terminal presentation retention > does not attach a cold exited pane and leaves an opaque fallback 2ms
+   ✓ native terminal presentation retention > yields an exited native surface outside macOS so the disconnect overlay is not occluded 9ms
+   ✓ native terminal presentation retention > never reattaches a dead PTY when retained-frame geometry recovery is requested 107ms
+   ✓ native terminal presentation retention > does not retain a first frame that arrives after the session exited 18ms
+   × native terminal presentation retention > holds the final frame until a reconnected replacement is presented 25ms
+     → expected [ [ …(2) ] ] to deeply equal [ [ …(2) ] ]
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({})
+ FAIL  src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > retains a shown final frame on exit, blocks input, and releases it on unmount ({"daemonEpoch":"epoch-a","remoteGeneration":7,"remoteConnectionState":"connected"})
+AssertionError: expected [ [ …(2) ] ] to deeply equal [ [ …(2) ] ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    [[22m
+[2m      "cmd_native_terminal_detach",[22m
+[2m      {[22m
+[31m+       "attachTuple": {[39m
+[31m+         "attemptGeneration": 0,[39m
+[31m+         "backendSessionId": "backend-a",[39m
+[31m+         "bindingKey": "backend-a::0:",[39m
+[31m+         "daemonEpoch": "",[39m
+[31m+         "frontendSessionId": "pane-a",[39m
+[31m+         "incarnation": null,[39m
+[31m+         "paneIdentity": "pane-a",[39m
+[31m+       },[39m
+[2m        "sessionId": "backend-a",[22m
+[2m      },[22m
+[2m    ],[22m
+[2m  ][22m
+
+ ❯ src/components/NativeTerminalPane.presentation.test.tsx:169:52
+    167|     expect(commands("cmd_native_terminal_send_input")).toHaveLength(0);
+    168|     await act(async () => { view.unmount(); });
+    169|     expect(commands("cmd_native_terminal_detach")).toEqual([
+       |                                                    ^
+    170|       ["cmd_native_terminal_detach", { sessionId: "backend-a" }],
+    171|     ]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/components/NativeTerminalPane.presentation.test.tsx > native terminal presentation retention > holds the final frame until a reconnected replacement is presented
+AssertionError: expected [ [ …(2) ] ] to deeply equal [ [ …(2) ] ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    [[22m
+[2m      "cmd_native_terminal_detach",[22m
+[2m      {[22m
+[31m+       "attachTuple": {[39m
+[31m+         "attemptGeneration": 0,[39m
+[31m+         "backendSessionId": "backend-a",[39m
+[31m+         "bindingKey": "backend-a::0:",[39m
+[31m+         "daemonEpoch": "",[39m
+[31m+         "frontendSessionId": "pane-a",[39m
+[31m+         "incarnation": null,[39m
+[31m+         "paneIdentity": "pane-a",[39m
+[31m+       },[39m
+[2m        "sessionId": "backend-a",[22m
+[2m      },[22m
+[2m    ],[22m
+[2m  ][22m
+
+ ❯ src/components/NativeTerminalPane.presentation.test.tsx:289:52
+    287| 
+    288|     await act(async () => { presentReplacement(PRESENTED); });
+    289|     expect(commands("cmd_native_terminal_detach")).toEqual([
+       |                                                    ^
+    290|       ["cmd_native_terminal_detach", { sessionId: "backend-a" }],
+    291|     ]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 11 passed (14)
+   Start at  10:48:30
+   Duration  7.27s (transform 1.02s, setup 927ms, collect 1.94s, tests 419ms, environment 2.53s, prepare 228ms)
+
+error: script "test" exited with code 1

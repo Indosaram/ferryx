@@ -1,0 +1,20 @@
+[package]
+name = "ferryx-session-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure state machines for the Ferryx session host and its clients (spec: docs/session-restore/spec.md)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "session_core"
+path = "src/lib.rs"
+
+[dependencies]
+ferryx-fxsh = { path = "../fxsh" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace]

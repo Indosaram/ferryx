@@ -1,0 +1,30 @@
+{
+  "commit": "172baa874f5e320ef08f4ed1dc5f11b391898477",
+  "required": [
+    {
+      "path": "scripts/qa/pane-liveness.mjs",
+      "tracked": true
+    },
+    {
+      "path": "scripts/qa/pane-liveness-vitest.config.mjs",
+      "tracked": true
+    },
+    {
+      "path": "src-tauri/src/ipc/qa_barrier.rs",
+      "tracked": true
+    },
+    {
+      "path": "src-tauri/src/daemon/split_journal.rs",
+      "tracked": true
+    },
+    {
+      "path": "src-tauri/tests/daemon_handover_transfer_contract.rs",
+      "tracked": true
+    },
+    {
+      "path": "ui/src/lib/localSplitLifecycle.test.ts",
+      "tracked": true
+    }
+  ],
+  "scope": "Task8 only; Task9 native scenarios and Task10 packaging explicitly not dispatched"
+}

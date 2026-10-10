@@ -1,0 +1,39 @@
+$ vitest run --maxWorkers=1 src/components/TerminalSplitView.paneHandleReach.test.tsx
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ❯ src/components/TerminalSplitView.paneHandleReach.test.tsx (1 test | 1 failed) 168ms
+   × pane handle reachability over a native terminal > overlays the handle only inside the narrow hotspot without shrinking the terminal 167ms
+     → [2mexpect([22m[31melement[39m[2m).toHaveClass([22m[32m[32m"h-3"[32m[39m[2m)[22m
+
+Expected the element to have class:
+[32m  h-3[39m
+Received:
+[31m  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TerminalSplitView.paneHandleReach.test.tsx > pane handle reachability over a native terminal > overlays the handle only inside the narrow hotspot without shrinking the terminal
+Error: [2mexpect([22m[31melement[39m[2m).toHaveClass([22m[32m[32m"h-3"[32m[39m[2m)[22m
+
+Expected the element to have class:
+[32m  h-3[39m
+Received:
+[31m  absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing pointer-events-none opacity-0[39m
+ ❯ src/components/TerminalSplitView.paneHandleReach.test.tsx:83:20
+     81|     const leaf = screen.getByTestId("pane-leaf");
+     82| 
+     83|     expect(handle).toHaveClass("h-3");
+       |                    ^
+     84|     expect(handle).toHaveClass("opacity-0", "pointer-events-none");
+     85|     expect(terminal.style.marginTop).toBe("");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  10:39:34
+   Duration  61.81s (transform 4.91s, setup 5.44s, collect 37.53s, tests 168ms, environment 8.74s, prepare 545ms)
+
+error: script "test" exited with code 1

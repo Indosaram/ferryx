@@ -1,5 +1,13 @@
 # Headless Linux Server Deployment Guide for Ferryx
 
+> **Current setup (2026-09-28):** Prefer the standalone `ferryx-cli` installer below and
+> `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
+> for headless machine enrollment. Run `ferryx-cli --daemon` under a service manager or in
+> a dedicated terminal. The legacy `ferryx pair generate` / `ferryx remote pair generate`
+> instructions in sections 6-7 are historical and now return `ACCOUNT_LOGIN_REQUIRED`;
+> they cannot issue new PINs. The older GUI binary dependency discussion below applies
+> to `ferryx`, not to the standalone `ferryx-cli`.
+
 This guide explains how to deploy and operate Ferryx in headless daemon mode on a Linux server without a graphical display. It documents mechanics confirmed in the source code, including process execution, Unix domain sockets, file locks, systemd service configuration, remote access network modes, pairing, and troubleshooting. External operational recommendations, such as unit definitions and package installation commands, require adaptation to your environment.
 
 ---
@@ -343,7 +351,7 @@ Ferryx does not terminate TLS on this internal listener (`:2225`). For untrusted
 ### Configuring the Gateway on Headless Servers
 
 The Ferryx command-line interface provides `remote status` and `remote pair`, but does not offer a dedicated `remote enable` subcommand (`src-tauri/src/cli.rs:300-325`).
-Running `ferryx pair generate` while the gateway is in `Off` mode auto-configures the daemon to `Relay` mode (`src-tauri/src/daemon/server.rs:1948-1972`). This pairing side effect enables remote relay access without manual file edits.
+The retired `ferryx pair generate` command no longer changes gateway mode or issues a PIN. Configure remote access separately and enroll the headless machine through the account flow.
 
 To configure other modes on a headless host, write `~/.ferryx/remote/remote-config.json` before starting the daemon (or restart the daemon after editing):
 
@@ -457,33 +465,17 @@ When created, it writes `~/.ferryx/remote/identity.json` with permissions `0600`
 * `publicKey`: Standard base64-encoded 32-byte verifying key.
 * `privateKey`: Standard base64-encoded 32-byte signing seed.
 
-### Step 2: Generating a Pairing Code
+### Step 2: Enrolling the headless machine
 
-On the server, run:
+Run `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
+on the headless host, then open the authorization link sent to that address. The command waits
+for approval and enrolls the existing daemon identity. If `FERRYX_ACCOUNT_ORIGIN` is set, omit
+`--origin`. `ferryx pair generate` and `ferryx remote pair generate` no longer issue codes:
+they return `ACCOUNT_LOGIN_REQUIRED` (exit status 2). See [account service](account-service.md)
+for the alternate one-time enrollment-code path.
 
-```bash
-ferryx pair generate
-# or: ferryx remote pair generate
-```
-
-This command connects to the daemon over `/tmp/rorca-<UID>/daemon.sock` (`src-tauri/src/cli.rs:221-280`).
-If the gateway is currently `Off`, this call auto-configures the daemon to `Relay` mode and establishes a relay connection (`src-tauri/src/daemon/server.rs:1948-1972`).
-
-Output streams:
-The PIN and pairing URL are written to standard output (`src-tauri/src/cli.rs:260-274`). Informational text is written to standard error.
-
-Local network mode output:
-```text
-849201
-```
-Stderr: `Pairing registered by the running daemon; it holds the relay control connection.`
-
-Relay mode output:
-```text
-849201
-https://relay.checka.cc#pair=ab83cd...
-```
-Stderr: `Pairing registered by the running daemon; it holds the relay control connection.`
+The PIN exchange details below describe the legacy protocol, not a working way to mint a
+new code from the current CLI.
 
 ### Pairing Constraints and Lifetimes
 
@@ -724,7 +716,7 @@ mkdir -m 0700 /tmp/rorca-"$(id -u)"
 * In `localNetwork` mode, the resolver tests a route probe to `8.8.8.8:80` and falls back to inspecting network interfaces via `getifaddrs`. Lack of a default route does not force failure if an active interface has an IPv4 address.
 * In `tailscale` mode, the resolver scans for an address within the `100.64.0.0/10` CGNAT block (`100.64.0.0` through `100.127.255.255`). CGNAT detection does not prove that the Tailscale daemon is running or authenticated.
 
-The daemon continues running its local UDS client accept loop (`src-tauri/src/daemon/server.rs:1500-1515`). Remote gateway restoration failure does not terminate the daemon process. Headless mode filters tracing to agent-state release events only, so gateway restoration warnings are not sent to journald.
+The daemon continues running its local UDS client accept loop (`src-tauri/src/daemon/server.rs`). Remote gateway restoration failure does not terminate the daemon process. Check `~/.ferryx/logs/daemon.log` for gateway restoration warnings.
 
 **Resolution:**
 1. In LAN mode, verify that your host has an active non-loopback IPv4 address:
@@ -749,8 +741,10 @@ The server returns plain text error bodies (`src-tauri/src/remote/server.rs:354-
 Expired codes may be pruned before lookup, resulting in `Invalid pairing code`.
 
 **Resolution:**
-Generate a fresh PIN with `ferryx pair generate` and complete the exchange immediately on the client.
-If you exceed 5 failed attempts, the window enters rate limiting (`pairing_rate_limited`, HTTP 429). Waiting 60 seconds allows the rate-limiting window to expire, but does not revive an expired PIN. Generate a new code once the window clears.
+The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli account login`
+or request a new account-issued grant through the desktop account flow. If you exceed 5 failed
+attempts on the legacy PIN exchange, the window enters rate limiting (`pairing_rate_limited`,
+HTTP 429); waiting for it to expire does not revive an expired PIN.
 
 ### Problem 5: Missing `FERRYX_DAEMON_READY` in Automated Scripts
 

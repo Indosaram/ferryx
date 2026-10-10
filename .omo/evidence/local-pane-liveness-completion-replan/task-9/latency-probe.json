@@ -1,0 +1,112 @@
+﻿{
+    "session":  1,
+    "pollMs":  250,
+    "maxMs":  30000,
+    "serverUp":  true,
+    "results":  [
+                    {
+                        "firstAttachDelayMs":  1000,
+                        "launchToAttachMs":  1287,
+                        "firstAttachTotal":  16,
+                        "firstAttachNamed":  2,
+                        "appAliveAtEnd":  true,
+                        "domAtMsFromLaunch":  1640,
+                        "domLatencyFromAttachMs":  353,
+                        "pollCount":  2,
+                        "polls":  [
+                                      {
+                                          "atMs":  1287,
+                                          "total":  16,
+                                          "named":  2,
+                                          "hasDocument":  false,
+                                          "hasNewTerminal":  false
+                                      },
+                                      {
+                                          "atMs":  1640,
+                                          "total":  81,
+                                          "named":  38,
+                                          "hasDocument":  true,
+                                          "hasNewTerminal":  false
+                                      }
+                                  ]
+                    },
+                    {
+                        "firstAttachDelayMs":  3000,
+                        "launchToAttachMs":  3041,
+                        "firstAttachTotal":  16,
+                        "firstAttachNamed":  2,
+                        "appAliveAtEnd":  true,
+                        "domAtMsFromLaunch":  3358,
+                        "domLatencyFromAttachMs":  317,
+                        "pollCount":  2,
+                        "polls":  [
+                                      {
+                                          "atMs":  3041,
+                                          "total":  16,
+                                          "named":  2,
+                                          "hasDocument":  false,
+                                          "hasNewTerminal":  false
+                                      },
+                                      {
+                                          "atMs":  3358,
+                                          "total":  110,
+                                          "named":  65,
+                                          "hasDocument":  true,
+                                          "hasNewTerminal":  false
+                                      }
+                                  ]
+                    },
+                    {
+                        "firstAttachDelayMs":  6000,
+                        "launchToAttachMs":  6051,
+                        "firstAttachTotal":  16,
+                        "firstAttachNamed":  2,
+                        "appAliveAtEnd":  true,
+                        "domAtMsFromLaunch":  6388,
+                        "domLatencyFromAttachMs":  337,
+                        "pollCount":  2,
+                        "polls":  [
+                                      {
+                                          "atMs":  6051,
+                                          "total":  16,
+                                          "named":  2,
+                                          "hasDocument":  false,
+                                          "hasNewTerminal":  false
+                                      },
+                                      {
+                                          "atMs":  6387,
+                                          "total":  110,
+                                          "named":  65,
+                                          "hasDocument":  true,
+                                          "hasNewTerminal":  false
+                                      }
+                                  ]
+                    },
+                    {
+                        "firstAttachDelayMs":  12000,
+                        "launchToAttachMs":  12045,
+                        "firstAttachTotal":  16,
+                        "firstAttachNamed":  2,
+                        "appAliveAtEnd":  true,
+                        "domAtMsFromLaunch":  12362,
+                        "domLatencyFromAttachMs":  317,
+                        "pollCount":  2,
+                        "polls":  [
+                                      {
+                                          "atMs":  12045,
+                                          "total":  16,
+                                          "named":  2,
+                                          "hasDocument":  false,
+                                          "hasNewTerminal":  false
+                                      },
+                                      {
+                                          "atMs":  12362,
+                                          "total":  110,
+                                          "named":  65,
+                                          "hasDocument":  true,
+                                          "hasNewTerminal":  false
+                                      }
+                                  ]
+                    }
+                ]
+}

@@ -1,0 +1,51 @@
+$ vitest run --maxWorkers=1 src/lib/updater.test.ts
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+ ❯ src/lib/updater.test.ts (23 tests | 1 failed) 119ms
+   ✓ updater status machine > offers plugin updates when the channel is installer 43ms
+   ✓ updater status machine > offers plugin updates when the channel is native 3ms
+   ✓ updater status machine > starts idle 1ms
+   ✓ updater status machine > moves through checking to available when an update exists 3ms
+   ✓ updater status machine > returns to idle when the endpoint reports no update 1ms
+   ✓ updater status machine > surfaces a check failure as an error state instead of throwing 2ms
+   × updater status machine > reports monotonic download progress and relaunches after installation 9ms
+     → expected "spy" to be called 1 times, but got 0 times
+   ✓ updater status machine > surfaces a download failure as an error state 2ms
+   ✓ updater status machine > refuses to download before an update has been found 2ms
+   ✓ updater status machine > stops notifying an unsubscribed listener 3ms
+   ✓ updater status machine > relaunches through the process plugin 3ms
+   ✓ updater status machine > flushes workspace persistence guards before restarting for an installed update 3ms
+   ✓ updater status machine > reads the running app version 2ms
+   ✓ updater status machine > skips the update check when the install is Store-managed 3ms
+   ✓ updater status machine > caches the Store-managed probe across checks 2ms
+   ✓ updater status machine > treats a failed Store-managed probe as updater-owned 3ms
+   ✓ periodic update polling > checks immediately, then once per interval until stopped 6ms
+   ✓ periodic update polling > keeps re-checking while an update is offered so a newer release replaces it 5ms
+   ✓ periodic update polling > does not re-check once an update is staged for install 7ms
+   ✓ periodic update polling > never polls outside the desktop shell 4ms
+   ✓ non-Tauri runtime > never touches the updater plugin outside the desktop shell 2ms
+   ✓ non-Tauri runtime > reports an unknown version instead of calling into Tauri 3ms
+   ✓ window close guards > keeps running every registered guard 3ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/updater.test.ts > updater status machine > reports monotonic download progress and relaunches after installation
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/lib/updater.test.ts:141:22
+    139|     expect(progress.at(-1)).toBe(1);
+    140|     expect(updater.getUpdateStatus().state).toBe("downloaded");
+    141|     expect(relaunch).toHaveBeenCalledTimes(1);
+       |                      ^
+    142|   });
+    143| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 22 passed (23)
+   Start at  10:44:16
+   Duration  2.92s (transform 144ms, setup 715ms, collect 112ms, tests 119ms, environment 998ms, prepare 121ms)
+
+error: script "test" exited with code 1

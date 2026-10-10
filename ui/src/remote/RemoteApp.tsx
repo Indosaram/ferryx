@@ -22,6 +22,7 @@ import {
   normalizeRemoteWorkspaceState,
   RemoteWorkspaceMirror,
   type RemoteContextOption,
+  type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { capRetainedMessages } from "./agentConversation";
@@ -91,6 +92,16 @@ import {
   useAccountWorktrees,
   type AccountWorktreeOption,
 } from "./useAccountWorktrees";
+import {
+  mergeSessionInventory,
+  parseInventoryEvent,
+  parseMachineAgentStateFrame,
+  parseSessionsPayload,
+  preferredSessionForWorktree,
+  selectInventorySession,
+  type RemoteSessionInventory,
+  type RemoteSessionInventoryEntry,
+} from "./remoteSessionInventory";
 
 const RemoteTerminal = lazy(() =>
   import("./RemoteTerminal").then((m) => ({ default: m.RemoteTerminal }))
@@ -107,6 +118,9 @@ import {
   getStoredAccountSessionToken,
   getStoredAccountTokenOrigin,
   clearStoredAccountSessionToken,
+  clearAccountPreferredSessions,
+  getAccountPreferredSessionId,
+  setAccountPreferredSessionId,
   getAccountLastSelectedTarget,
   setAccountLastSelectedTarget,
   clearAccountLastSelectedTarget,
@@ -211,6 +225,27 @@ function formatAttentionAriaLabel(
   const location = differentWorktree && targetWorktree ? ` (${targetWorktree})` : "";
   const countSuffix = waitingCount > 1 ? ` (${waitingCount} waiting)` : " (waiting)";
   return `${target.label}${location}${countSuffix}`;
+}
+
+/* Read-only desktop-context sync policy: the machine's published active context may
+   only follow the machine the current context belongs to. It never runs while a stored
+   target is still in flight, never replaces an independently chosen session, and never
+   reads through a connection for a different machine (a lingering root tab from another
+   host must not leak into the chosen machine's picker). */
+export function desktopContextSyncDecision(input: {
+  hasToken: boolean;
+  connectionMachineId: string | null;
+  contextMachineId: string | null;
+  targetInFlight: boolean;
+  independentSessionChosen: boolean;
+}): boolean {
+  return (
+    input.hasToken &&
+    input.connectionMachineId !== null &&
+    input.connectionMachineId === input.contextMachineId &&
+    !input.targetInFlight &&
+    !input.independentSessionChosen
+  );
 }
 
 const EMPTY_MODEL: RemoteWorkspaceModel = {
@@ -875,6 +910,7 @@ async function readChatHistory(args: {
   limit: number;
   cursor?: ReferenceHistoryCursor | null;
   signal?: AbortSignal;
+  transport?: Pick<TunnelTransport, "fetchLike"> | null;
 }): Promise<{ page: ReferenceHistoryPage; fence: ReferenceHistoryFence }> {
   const path = `${referenceChatRoute(args.sessionId, "history")}?${referenceChatReadQuery(
     args.target,
@@ -884,10 +920,19 @@ async function readChatHistory(args: {
   )}`;
   let response: Response;
   try {
-    response = await fetch(remoteApiUrl(args.baseUrl, path), {
-      headers: { Authorization: `Bearer ${args.token}` },
-      signal: args.signal,
-    });
+    args.signal?.throwIfAborted();
+    if (args.transport) {
+      const raw = await args.transport.fetchLike(path, {
+        headers: { Authorization: `Bearer ${args.token}` },
+      });
+      args.signal?.throwIfAborted();
+      response = new Response(raw.body.slice(), { status: raw.status, headers: raw.headers });
+    } else {
+      response = await fetch(remoteApiUrl(args.baseUrl, path), {
+        headers: { Authorization: `Bearer ${args.token}` },
+        signal: args.signal,
+      });
+    }
   } catch (error) {
     if (args.signal?.aborted) throw error;
     throw new ReferenceHistoryFetchError(
@@ -952,6 +997,47 @@ export const RemoteApp: React.FC = () => {
   );
 };
 
+interface MinimalMachineSessionTarget {
+  machineId: string;
+  sessionId: string;
+  daemonEpoch?: string | number | null;
+}
+
+interface MinimalMachineSession {
+  workspaceId: string;
+  worktree: { wsId: string; slug: string } | null;
+  target?: MinimalMachineSessionTarget | null;
+  sessionId?: string | null;
+  daemonEpoch?: string | number | null;
+  running?: boolean;
+  title?: string | null;
+  agentType?: string | null;
+}
+
+/** Tab strip for one machine worktree, built from the merged inventory so every session
+ * the machine still reports is listed and each state stays attached to its own epoch. */
+function machineTabsFromInventory(
+  entries: readonly RemoteSessionInventoryEntry[],
+  workspaceId: string | null,
+  worktreeSlug: string | null,
+  worktreeLabel: string | null,
+): RemoteTerminalTabInfo[] {
+  return entries.flatMap((entry) => {
+    if (workspaceId && entry.workspaceId !== workspaceId) return [];
+    if ((entry.worktreeSlug ?? null) !== (worktreeSlug ?? null)) return [];
+    return [{
+      id: entry.sessionId,
+      label: entry.title ?? "Terminal",
+      sessionId: entry.sessionId,
+      ...(worktreeSlug ? { worktreeSlug } : {}),
+      ...(worktreeLabel ? { worktreeLabel } : {}),
+      ...(entry.daemonEpoch ? { daemonEpoch: entry.daemonEpoch } : {}),
+      ...(entry.activityState ? { activityState: entry.activityState } : {}),
+      ...(entry.agentType ? { agentType: entry.agentType } : {}),
+    }];
+  });
+}
+
 export const RemoteHostConnection: React.FC<{
   hostId: string;
   relayUrl: string;
@@ -986,6 +1072,12 @@ export const RemoteHostConnection: React.FC<{
     return stored?.length ? stored : readDirectCandidateHints(hostId, readUrlHints);
   });
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
+  const modelRef = useRef(model);
+  const modelMachineIdRef = useRef<string | null>(null);
+  // Set by every user-driven selection that names a session or tab: the read-only
+  // desktop-context sync must never replace an independently chosen session.
+  const independentSessionRef = useRef(false);
+  modelRef.current = model;
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -1062,6 +1154,12 @@ export const RemoteHostConnection: React.FC<{
     workspaceId: string;
     worktreeSlug: string | null;
     worktreeLabel: string | null;
+    /* Ephemeral: the exact session the user picked. It is never persisted (the stored
+       last-selected target stays the canonical four fields), but it must survive the
+       acquire-connection hop so the issued selection attaches to that session instead
+       of the worktree's first one. */
+    sessionId?: string | null;
+    daemonEpoch?: string | null;
   } | null>(null);
   // Read by selection callbacks so their identities (and the event socket that depends
   // on them) do not churn every time the account target changes.
@@ -1117,6 +1215,7 @@ export const RemoteHostConnection: React.FC<{
     accountSelectionGenerationRef.current += 1;
     accountSessionTokenRef.current = null;
     clearStoredAccountSessionToken();
+    clearAccountPreferredSessions();
     clearAccountLastSelectedTarget();
     setAccountSessionToken(null);
     disconnect();
@@ -1136,7 +1235,33 @@ export const RemoteHostConnection: React.FC<{
     Boolean(accountSessionToken),
     handleLogout,
   );
+  const {
+    applyInventoryEvent,
+    noteSessionActivity,
+    noteSessionsPayload,
+  } = accountDiscovery;
+  const accountDiscoveryRef = useRef(accountDiscovery);
+  accountDiscoveryRef.current = accountDiscovery;
 
+  /* The machine inventory is read from effects and socket callbacks that are declared
+     before the derived model below, so it is mirrored into a ref every render. */
+  const inventoryRef = useRef<RemoteSessionInventory | null>(null);
+  const inventoryRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleInventoryRefreshRef = useRef<() => void>(() => {});
+  // Re-arms the read-only desktop-context sync when a same-machine inventory refresh
+  // (session started/exited boundary) lands: same-context tab changes are re-read
+  // without ever selecting desktop focus.
+  const [desktopSyncTick, setDesktopSyncTick] = useState(0);
+  // Always-follow: bumped when the machine publishes a desktop focus change, and when a
+  // follow attempt had to wait for an in-flight selection to settle.
+  const [desktopFollowTick, setDesktopFollowTick] = useState(0);
+  const desktopFollowDeferredRef = useRef(false);
+  const lastFollowedRef = useRef<{ connection: unknown; key: string } | null>(null);
+  // Set only by the automatic page-load restore: the desktop focus wins over the stored
+  // target. An explicit pick instead baselines the desktop focus it connected under.
+  const restoreFollowRef = useRef(false);
+
+  // Auto-restore last explicitly selected account target upon page load / refresh
   const restoreAttemptInFlightRef = useRef(false);
   const restoreAttemptedForTokenRef = useRef<string | null>(null);
   useEffect(() => {
@@ -1151,27 +1276,33 @@ export const RemoteHostConnection: React.FC<{
     const storedTarget = getAccountLastSelectedTarget(relayUrl);
     if (!storedTarget) return;
 
+    // Check if machine is known
     const targetMachine = accountDiscovery.machines.find((m) => m.machineId === storedTarget.machineId);
     if (!targetMachine) {
+      // Complete successful authoritative inventory with zero error: target machine does not exist on this account
       if (accountDiscovery.initialized && !accountDiscovery.loading && !accountDiscovery.error) {
         clearAccountLastSelectedTarget(relayUrl);
       }
       return;
     }
 
+    // If target machine is currently offline, preserve target without clearing
     if (targetMachine.online === false) {
       return;
     }
 
     const machineStatus = accountDiscovery.machineStatuses[storedTarget.machineId];
+    // If still probing/tunneling/idle, wait for completion
     if (!machineStatus || machineStatus.status === "tunneling" || machineStatus.status === "idle") {
       return;
     }
 
+    // If machine probe failed transiently (error / offline), preserve target without clearing
     if (machineStatus.status === "error" || machineStatus.status === "offline") {
       return;
     }
 
+    // Machine probe succeeded ("ready"): check for matching worktree option
     if (machineStatus.status === "ready") {
       const matchingOpt = accountDiscovery.accountOptions.find(
         (opt) =>
@@ -1183,6 +1314,7 @@ export const RemoteHostConnection: React.FC<{
       if (matchingOpt) {
         if (restoreAttemptedForTokenRef.current !== accountSessionToken) {
           restoreAttemptInFlightRef.current = true;
+          restoreFollowRef.current = true;
           void selectAccountOption(matchingOpt).then((ok) => {
             restoreAttemptInFlightRef.current = false;
             if (ok) {
@@ -1259,6 +1391,148 @@ export const RemoteHostConnection: React.FC<{
   }, [activeTunnelConnection, token, transportBaseUrl]);
 
 
+  // Read-only desktop-context sync (account route): after a fresh machine context is
+  // established, follow that machine's published active context — validate the exact
+  // session and daemon epoch against authoritative /api/v1/sessions, enrich tab activity
+  // through noteContextTabs, and apply the active session only inside the workspace and
+  // worktree the user already chose. Never POSTs /workspace/select; an explicit workspace,
+  // a stored target in flight, or an independently chosen session always wins.
+  useEffect(() => {
+    if (!token || !activeTunnelConnection) return;
+    const machineId = activeTunnelConnection.machine.machineId;
+    const chosenWorkspace = model.context.workspaceId;
+    const chosenWorktree = model.context.worktreeSlug;
+    // Intentional empty initial account picker: no chosen context, no sync.
+    if (!chosenWorkspace) return;
+    if (
+      !desktopContextSyncDecision({
+        hasToken: true,
+        connectionMachineId: machineId,
+        contextMachineId: modelMachineIdRef.current,
+        targetInFlight: initialAccountTargetRef.current !== null,
+        independentSessionChosen: independentSessionRef.current,
+      })
+    ) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await activeTunnelConnection.transport.fetchLike("/api/v1/workspace/state", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled || res.status < 200 || res.status >= 300) return;
+        const state = normalizeRemoteWorkspaceState(JSON.parse(new TextDecoder().decode(res.body)));
+        // Explicit workspace/worktree choice wins — compared exactly, including null:
+        // a desktop active context from another worktree (or another shape of context)
+        // is never applied.
+        if (state.context.workspaceId !== chosenWorkspace) return;
+        if (state.context.worktreeSlug !== chosenWorktree) return;
+        const active = state.context.activeTerminal;
+        const activeSessionId = active?.sessionId ?? null;
+        const activeEpoch =
+          state.context.daemonEpoch === null || state.context.daemonEpoch === undefined
+            ? null
+            : String(state.context.daemonEpoch);
+        // Tab labels sync independently as soon as the active context matches the chosen
+        // scope; they are activity observations and can never select a target.
+        if (
+          !cancelled &&
+          desktopContextSyncDecision({
+            hasToken: true,
+            connectionMachineId: machineId,
+            contextMachineId: modelMachineIdRef.current,
+            targetInFlight: initialAccountTargetRef.current !== null,
+            independentSessionChosen: independentSessionRef.current,
+          })
+        ) {
+          accountDiscovery.noteContextTabs(machineId, state.context.terminalTabs);
+        }
+        // No epoch on the boundary means no fence: the apply path stays closed.
+        if (!activeSessionId || activeEpoch === null) return;
+        const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled || sessRes.status < 200 || sessRes.status >= 300) return;
+        const sessData = JSON.parse(new TextDecoder().decode(sessRes.body));
+        // Canonical parser: machine attribution, required running, canonical epoch.
+        const parsedSessions = parseSessionsPayload(machineId, sessData);
+        if (!parsedSessions.ok) return;
+        const validated = parsedSessions.inventory.entries.some(
+          (entry) =>
+            entry.sessionId === activeSessionId &&
+            entry.machineId === machineId &&
+            entry.workspaceId === chosenWorkspace &&
+            entry.worktreeSlug === chosenWorktree &&
+            entry.running &&
+            entry.daemonEpoch === activeEpoch,
+        );
+        // The user may have chosen a session (or a stored target may surface) while the
+        // reads were in flight — refs are rechecked immediately before applying.
+        if (
+          !validated ||
+          cancelled ||
+          !desktopContextSyncDecision({
+            hasToken: true,
+            connectionMachineId: machineId,
+            contextMachineId: modelMachineIdRef.current,
+            targetInFlight: initialAccountTargetRef.current !== null,
+            independentSessionChosen: independentSessionRef.current,
+          })
+        ) return;
+        // Scope may have moved while the reads were in flight; React's updater rejects
+        // that on prev, so reject it here before any trusted write as well.
+        if (
+          modelRef.current.context.workspaceId !== chosenWorkspace ||
+          modelRef.current.context.worktreeSlug !== chosenWorktree
+        ) return;
+        // The pick confirmation persists its resolved default as this worktree's preferred
+        // entry, and the follow-up refresh derives candidateSid from that preference ahead
+        // of the model's own request. Persist the validated desktop active now, and mirror
+        // the same context into modelRef for readers that run before the next render.
+        setAccountPreferredSessionId(relayUrl, machineId, chosenWorkspace, chosenWorktree, activeSessionId);
+        modelRef.current = {
+          ...modelRef.current,
+          context: {
+            ...modelRef.current.context,
+            activeTabId: state.context.activeTabId ?? modelRef.current.context.activeTabId,
+            activeTerminal: active,
+            daemonEpoch: state.context.daemonEpoch ?? modelRef.current.context.daemonEpoch,
+          },
+        };
+        setModel((prev) => {
+          if (prev.context.workspaceId !== chosenWorkspace) return prev;
+          if (prev.context.worktreeSlug !== chosenWorktree) return prev;
+          if (
+            prev.context.activeTerminal?.sessionId === activeSessionId &&
+            prev.context.activeTabId === state.context.activeTabId
+          ) return prev;
+          return {
+            ...prev,
+            context: {
+              ...prev.context,
+              activeTabId: state.context.activeTabId ?? prev.context.activeTabId,
+              activeTerminal: active,
+              daemonEpoch: state.context.daemonEpoch ?? prev.context.daemonEpoch,
+            },
+          };
+        });
+      } catch (error) {
+        // Best effort by design: a transient or malformed read-only answer leaves the
+        // current context untouched, but it is never silently swallowed.
+        console.warn("[remote] desktop-context sync skipped", error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    token,
+    activeTunnelConnection,
+    model.context.workspaceId,
+    model.context.worktreeSlug,
+    accountDiscovery.noteContextTabs,
+    relayUrl,
+    desktopSyncTick,
+  ]);
 
   const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown }) => {
     const machineId = optionalString(metadata?.machineId);
@@ -1324,38 +1598,145 @@ export const RemoteHostConnection: React.FC<{
     if (!token) return null;
     try {
       if (activeTunnelConnection) {
-        const res = await activeTunnelConnection.transport.fetchLike("/api/v1/workspace/state", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.status === 401 || res.status === 403) {
-          disconnect();
+        // In machine account mode, load state strictly from machine projects, worktrees and sessions.
+        // Never query or overwrite with legacy desktop mirror /api/v1/workspace/state.
+        const [projRes, sessRes] = await Promise.all([
+          activeTunnelConnection.transport.fetchLike("/api/v1/workspace/projects", {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
+
+        if (projRes.status < 200 || projRes.status >= 300 || sessRes.status < 200 || sessRes.status >= 300) {
           return null;
         }
-        if (res.status < 200 || res.status >= 300) return null;
-        try {
-          const sessRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (sessRes.status >= 200 && sessRes.status < 300) {
-            const sessText = new TextDecoder().decode(sessRes.body);
-            const sessData = JSON.parse(sessText);
-            const rows = Array.isArray(sessData) ? sessData : Array.isArray(sessData?.sessions) ? sessData.sessions : [];
-            const newEpochs: Record<string, string> = {};
-            for (const s of rows) {
-              const sid = s.sessionId ?? s.session_id ?? s.target?.sessionId;
-              const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
-              if (sid && epoch !== undefined && epoch !== null) {
-                sessionEpochsRef.current.set(sid, String(epoch));
-                newEpochs[sid] = String(epoch);
-              }
-            }
-            if (Object.keys(newEpochs).length > 0) {
-              setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
-            }
+
+        const projsData = projRes.status >= 200 && projRes.status < 300
+          ? JSON.parse(new TextDecoder().decode(projRes.body))
+          : null;
+        const sessData = sessRes.status >= 200 && sessRes.status < 300
+          ? JSON.parse(new TextDecoder().decode(sessRes.body))
+          : null;
+
+        if (!Array.isArray(sessData) && !Array.isArray(sessData?.sessions)) {
+          return null;
+        }
+
+        const projectsList = Array.isArray(projsData?.projects) ? projsData.projects : [];
+        const sessionRows: MinimalMachineSession[] = Array.isArray(sessData)
+          ? sessData
+          : sessData.sessions;
+
+        const newEpochs: Record<string, string> = {};
+        for (const s of sessionRows) {
+          const sid = s.sessionId ?? s.target?.sessionId;
+          const epoch = s.daemonEpoch ?? s.target?.daemonEpoch;
+          if (sid && epoch !== undefined && epoch !== null) {
+            sessionEpochsRef.current.set(sid, String(epoch));
+            newEpochs[sid] = String(epoch);
           }
-        } catch {}
-        const text = new TextDecoder().decode(res.body);
-        return normalizeRemoteWorkspaceState(JSON.parse(text));
+        }
+        if (Object.keys(newEpochs).length > 0) {
+          setSessionEpochs((prev) => ({ ...prev, ...newEpochs }));
+        }
+
+        const machineId = activeTunnelConnection.machine.machineId;
+        modelMachineIdRef.current = machineId;
+        noteSessionsPayload(machineId, sessData);
+        const parsedInventory = parseSessionsPayload(machineId, sessData);
+        const previousInventory = accountDiscoveryRef.current.sessionInventories[machineId] ?? null;
+        /* Selection and tabs come from the merged inventory, never from this one partial
+           answer: otherwise a response that omits the selected session would move the
+           user to a different terminal. */
+        const inventory = parsedInventory.ok
+          ? mergeSessionInventory(previousInventory, parsedInventory.inventory)
+          : previousInventory;
+
+        // If an initial account target or selected model exists, retain or focus that machine context
+        const currentTarget = initialAccountTargetRef.current;
+        const currentModel = modelRef.current;
+        const currentWs = currentTarget?.workspaceId ?? currentModel.context.workspaceId ?? projectsList[0]?.workspaceId ?? null;
+        const currentSlug = currentTarget?.worktreeSlug ?? currentModel.context.worktreeSlug ?? null;
+        const currentLabel = currentTarget?.worktreeLabel ?? currentModel.context.worktreeLabel ?? currentSlug ?? "main";
+        const requestedSessionId = currentModel.context.activeTerminal?.sessionId ?? null;
+
+        // The pending target's exact session outranks any remembered preference: a
+        // background refresh must never resolve a chosen session to the worktree's first
+        // one while the selection is still being issued.
+        const preferredSid = currentWs
+          ? getAccountPreferredSessionId(relayUrl, machineId, currentWs, currentSlug)
+          : null;
+        const pendingSid = currentTarget?.sessionId ?? null;
+        const candidateSid = pendingSid ?? preferredSid ?? requestedSessionId;
+        const candidateEpoch = pendingSid
+          ? currentTarget?.daemonEpoch ?? sessionEpochsRef.current.get(pendingSid) ?? null
+          : sessionEpochsRef.current.get(candidateSid ?? "") ?? null;
+
+        const chosen = candidateSid && inventory
+          ? selectInventorySession(inventory, {
+              workspaceId: currentWs ?? "",
+              worktreeSlug: currentSlug,
+              sessionId: candidateSid,
+              daemonEpoch: candidateEpoch,
+              requireRunning: false,
+            })
+          : null;
+
+        let sid: string | null = null;
+        let activeTitle: string | null = null;
+        let isRunning = false;
+        if (candidateSid && chosen) {
+          sid = chosen.entry.sessionId;
+          activeTitle = chosen.entry.title;
+          isRunning = chosen.entry.running;
+        } else if (pendingSid) {
+          /* The pending selection is not confirmed for this epoch. Stay gated: never
+             synthesize an active terminal that the same-id confirmation could accept, and
+             never fall through to a sibling session. A previously confirmed terminal for a
+             different session stays only if it is the one already shown. */
+          const previous = currentModel.context.activeTerminal;
+          const samePrevious = previous && previous.sessionId === pendingSid ? previous : null;
+          sid = samePrevious?.sessionId ?? null;
+          activeTitle = samePrevious?.title ?? null;
+          isRunning = samePrevious ? samePrevious.running !== false : false;
+        } else if (candidateSid && inventory?.completeness !== "complete") {
+          /* Absence in a partial or unknown answer is not evidence the terminal is gone,
+             so the session the UI already shows stays selected. */
+          sid = requestedSessionId;
+          activeTitle = currentModel.context.activeTerminal?.title ?? null;
+          isRunning = currentModel.context.activeTerminal?.running !== false;
+        } else if (!candidateSid && currentWs) {
+          const deterministic = inventory
+            ? preferredSessionForWorktree(inventory, currentWs, currentSlug, [preferredSid, requestedSessionId])
+            : null;
+          if (deterministic) {
+            sid = deterministic.sessionId;
+            activeTitle = deterministic.title;
+            isRunning = deterministic.running;
+          }
+        }
+
+        return {
+          context: {
+            workspaceId: currentWs,
+            worktreeSlug: currentSlug,
+            worktreeLabel: currentLabel,
+            activeTerminal: sid
+              ? {
+                  sessionId: sid,
+                  running: isRunning,
+                  title: activeTitle ?? "Terminal",
+                  workspaceId: currentWs,
+                  worktreeLabel: currentLabel,
+                }
+              : null,
+            activeTabId: sid ?? null,
+            terminalTabs: machineTabsFromInventory(inventory?.entries ?? [], currentWs, currentSlug, currentLabel),
+          },
+          options: accountDiscoveryRef.current.accountOptions,
+        };
       }
       const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
         headers: { Authorization: `Bearer ${token}` },
@@ -1370,7 +1751,7 @@ export const RemoteHostConnection: React.FC<{
     } catch {
       return null;
     }
-  }, [activeHost?.machineId, activeTunnelConnection, disconnect, token, transportBaseUrl]);
+  }, [activeTunnelConnection, disconnect, relayUrl, token, transportBaseUrl]);
 
   const refreshWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     const refreshVersion = workspaceRefreshVersionRef.current;
@@ -1379,6 +1760,17 @@ export const RemoteHostConnection: React.FC<{
     setModel(next);
     return next;
   }, [loadWorkspace]);
+
+  /* An inventory boundary can arrive in bursts while worktrees change; coalescing keeps
+     one workspace read in flight instead of one per frame. */
+  const scheduleInventoryRefresh = useCallback(() => {
+    if (inventoryRefreshTimerRef.current !== null) return;
+    inventoryRefreshTimerRef.current = setTimeout(() => {
+      inventoryRefreshTimerRef.current = null;
+      void refreshWorkspace();
+    }, 150);
+  }, [refreshWorkspace]);
+  scheduleInventoryRefreshRef.current = scheduleInventoryRefresh;
 
   useEffect(() => {
     const hash = window.location.hash;
@@ -1540,6 +1932,9 @@ export const RemoteHostConnection: React.FC<{
           confirmed.context.workspaceId === tgt.workspaceId &&
           confirmedSlug === requestedSlug
         ) {
+          // A restored target that names an exact session is a manual choice: keep it
+          // independent across the target-clear so sync cannot take the session over.
+          independentSessionRef.current = Boolean(tgt.sessionId);
           setInitialAccountTarget(null);
         }
       }
@@ -1562,8 +1957,28 @@ export const RemoteHostConnection: React.FC<{
         : raw instanceof Uint8Array
         ? new TextDecoder().decode(raw)
         : String(raw ?? "");
+
+      if (activeTunnelConnection) {
+        const inventoryEvent = parseInventoryEvent(activeTunnelConnection.machine.machineId, text);
+        if (inventoryEvent.kind === "inventory") {
+          applyInventoryEvent(activeTunnelConnection.machine.machineId, text);
+          scheduleInventoryRefreshRef.current();
+          setDesktopSyncTick((tick) => tick + 1);
+        }
+        if (inventoryEvent.kind === "ignored" && inventoryEvent.type === "desktopSelectionChanged") {
+          setDesktopFollowTick((tick) => tick + 1);
+          return;
+        }
+        if (inventoryEvent.kind !== "ignored") return;
+      }
+
       const change = parseActiveSelectionEvent(text);
       if (!change) return;
+
+      // In machine account mode, ignore legacy desktop activeSelection focus events.
+      // Machine context is owned by the mobile client's machine session.
+      if (activeTunnelConnection) return;
+
       workspaceRefreshVersionRef.current += 1;
       const selection = change.selection;
       const pendingSelection = pendingSelectionRef.current;
@@ -1681,6 +2096,9 @@ export const RemoteHostConnection: React.FC<{
   }, [clearPendingSelection]);
 
   const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false): Promise<boolean> => {
+    // A user selection naming a session (or an explicit tab) is an independent choice:
+    // the read-only desktop-context sync must never replace it afterwards.
+    independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
@@ -1713,16 +2131,189 @@ export const RemoteHostConnection: React.FC<{
       };
 
       if (activeTunnelConnection) {
-        const res = await activeTunnelConnection.transport.fetchLike("/api/v1/workspace/select", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(selectPayload),
+        // In machine account mode, discover or create the machine session directly via /api/v1/sessions
+        let targetSession: MinimalMachineSession | null = null;
+
+        const sessListRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+          headers: { Authorization: `Bearer ${token}` },
         });
-        ok = res.status >= 200 && res.status < 300;
-        status = res.status;
+
+        if (sessListRes.status < 200 || sessListRes.status >= 300) {
+          throw new Error(`Machine sessions query failed (${sessListRes.status})`);
+        }
+
+        const sessListData = JSON.parse(new TextDecoder().decode(sessListRes.body));
+        if (!sessListData || typeof sessListData !== "object" || !Array.isArray(sessListData.sessions)) {
+          throw new Error("Machine sessions query returned invalid payload");
+        }
+        const isComplete = sessListData.completeness === "complete";
+        const rows: MinimalMachineSession[] = sessListData.sessions;
+        const machineId = activeTunnelConnection.machine.machineId;
+        const parsedListing = parseSessionsPayload(machineId, sessListData);
+        const inventory = parsedListing.ok
+          ? mergeSessionInventory(
+              accountDiscoveryRef.current.sessionInventories[machineId] ?? null,
+              parsedListing.inventory,
+            )
+          : accountDiscoveryRef.current.sessionInventories[machineId] ?? null;
+
+        if (option.machineId && option.machineId !== machineId) {
+          throw new Error("Selected session belongs to a different machine");
+        }
+
+        if (!createTerminal) {
+          if (option.sessionId) {
+            const chosen = inventory
+              ? selectInventorySession(inventory, {
+                  workspaceId: option.workspaceId,
+                  worktreeSlug: option.worktreeSlug ?? null,
+                  sessionId: option.sessionId,
+                  daemonEpoch: sessionEpochsRef.current.get(option.sessionId) ?? null,
+                })
+              : null;
+            const exact = chosen
+              ? rows.find((r) => (r.target?.sessionId ?? r.sessionId) === chosen.entry.sessionId) ?? null
+              : rows.find((r) => {
+                  if (r.running === false) return false;
+                  const targetSid = r.target?.sessionId ?? r.sessionId;
+                  if (targetSid !== option.sessionId) return false;
+                  if (r.workspaceId !== option.workspaceId) return false;
+                  const slug = r.worktree?.slug ?? null;
+                  return slug === (option.worktreeSlug || null);
+                }) ?? null;
+            /* A daemon epoch the client already knows and that disagrees with the machine's
+               answer means the cached terminal is gone; attaching anyway would type into a
+               different process. */
+            const expectedEpoch =
+              (option as { daemonEpoch?: string | null }).daemonEpoch ??
+              sessionEpochsRef.current.get(option.sessionId) ??
+              null;
+            const rowEpoch = exact?.target?.daemonEpoch ?? exact?.daemonEpoch ?? null;
+            if (exact && expectedEpoch && rowEpoch !== null && rowEpoch !== undefined && String(rowEpoch) !== expectedEpoch) {
+              throw new Error(`Machine session ${option.sessionId} was replaced (daemon epoch changed)`);
+            }
+            if (exact) {
+              targetSession = exact;
+            } else {
+              throw new Error(`Requested machine session ${option.sessionId} is unavailable`);
+            }
+          } else {
+            const cachedId = getAccountPreferredSessionId(relayUrl, machineId, option.workspaceId, option.worktreeSlug);
+            const deterministic = inventory
+              ? preferredSessionForWorktree(inventory, option.workspaceId, option.worktreeSlug ?? null, [
+                  cachedId,
+                  model.context.activeTerminal?.sessionId ?? null,
+                ])
+              : null;
+            if (cachedId && !deterministic) {
+              setAccountPreferredSessionId(relayUrl, machineId, option.workspaceId, option.worktreeSlug, "");
+            }
+            if (deterministic) {
+              targetSession = rows.find((r) => (r.target?.sessionId ?? r.sessionId) === deterministic.sessionId) ?? null;
+            } else {
+              const matching = rows.find((r) => {
+                if (r.running === false) return false;
+                if (r.workspaceId !== option.workspaceId) return false;
+                const slug = r.worktree?.slug ?? null;
+                return slug === (option.worktreeSlug || null);
+              });
+              targetSession = matching ?? null;
+            }
+          }
+        }
+
+        if (!targetSession) {
+          if (!isComplete) {
+            throw new Error("Cannot create machine session: session inventory is incomplete");
+          }
+          const createPayload = {
+            requestId: crypto.randomUUID(),
+            workspaceId: option.workspaceId,
+            worktree: option.worktreeSlug
+              ? { wsId: option.workspaceId, slug: option.worktreeSlug }
+              : null,
+            cols: 80,
+            rows: 24,
+            inheritFromSessionId: null,
+            cwdRelative: null,
+            startup: { kind: "shell" },
+          };
+          const createRes = await activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(createPayload),
+          });
+
+          if (createRes.status >= 200 && createRes.status < 300) {
+            targetSession = JSON.parse(new TextDecoder().decode(createRes.body));
+          } else {
+            status = createRes.status;
+            throw new Error(`Failed to create machine session (${createRes.status})`);
+          }
+        }
+
+        if (targetSession) {
+          ok = true;
+          const sid = targetSession.target?.sessionId ?? targetSession.sessionId;
+          const epoch = targetSession.target?.daemonEpoch ?? targetSession.daemonEpoch;
+          if (sid && epoch !== undefined && epoch !== null) {
+            sessionEpochsRef.current.set(sid, String(epoch));
+            setSessionEpochs((prev) => ({ ...prev, [sid]: String(epoch) }));
+          }
+          if (sid) {
+            option.sessionId = sid;
+            const machineId = activeTunnelConnection.machine.machineId;
+            setAccountPreferredSessionId(relayUrl, machineId, option.workspaceId, option.worktreeSlug, sid);
+          }
+
+          const isRunning = targetSession.running !== false;
+          const contextLabel = option.worktreeLabel ?? option.worktreeSlug ?? "main";
+
+          /* The tab strip is every session the machine still reports for this worktree,
+             merged so a partial answer cannot hide the others. */
+          const contextTabs = machineTabsFromInventory(
+            inventory?.entries ?? [],
+            option.workspaceId,
+            option.worktreeSlug ?? null,
+            contextLabel,
+          );
+          const activeContext = {
+            workspaceId: option.workspaceId,
+            worktreeSlug: option.worktreeSlug ?? null,
+            worktreeLabel: contextLabel,
+            activeTerminal: sid
+              ? {
+                  sessionId: sid,
+                  running: isRunning,
+                  title: targetSession.title ?? "Terminal",
+                  workspaceId: option.workspaceId,
+                  worktreeLabel: contextLabel,
+                }
+              : null,
+            activeTabId: sid ?? null,
+            terminalTabs: contextTabs,
+          };
+
+          // Invalidate any in-flight background refresh to prevent stale overwrites
+          workspaceRefreshVersionRef.current += 1;
+
+          modelRef.current = {
+            ...modelRef.current,
+            context: activeContext,
+          };
+
+          setModel((prev) => ({
+            ...prev,
+            context: activeContext,
+          }));
+
+          setInitialAccountTarget(null);
+          clearPendingSelection(true);
+          return true;
+        }
       } else {
         const response = await fetch(
           apiUrl(transportBaseUrl, "/api/v1/workspace/select"),
@@ -1748,7 +2339,7 @@ export const RemoteHostConnection: React.FC<{
       clearPendingSelection();
       return false;
     }
-  }, [activeHost?.machineId, activeTunnelConnection, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl]);
+  }, [activeTunnelConnection, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl]);
 
   // Account picker choices only record the target; the selection is issued here once the
   // committed token/connection for the chosen machine are visible to selectContext.
@@ -1766,18 +2357,121 @@ export const RemoteHostConnection: React.FC<{
       workspaceId: target.workspaceId,
       worktreeSlug: target.worktreeSlug,
       worktreeLabel: target.worktreeLabel,
+      ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+      ...(target.daemonEpoch ? { daemonEpoch: target.daemonEpoch } : {}),
     });
   }, [token, activeTunnelConnection, initialAccountTarget, selectContext]);
 
-  const tabs = model.context.terminalTabs;
-  const activeIndex = tabs && model.context.activeTabId
-    ? tabs.findIndex((tab) => tab.id === model.context.activeTabId)
+  /* Always-follow (account route): the machine's published desktop focus is the view.
+     After a connection is established and whenever the desktop publishes a focus change,
+     the browser re-reads the authoritative active context and follows it. The session is
+     validated against the machine's own session list, which is also where its daemon epoch
+     comes from: the workspace-state epoch path can answer null, and a follow must not
+     depend on it. A manual pick stays until the desktop focus changes again.
+     Read-only: never POSTs /workspace/select. */
+  const selectContextRef = useRef(selectContext);
+  selectContextRef.current = selectContext;
+  useEffect(() => {
+    if (!initialAccountTarget && !pending && desktopFollowDeferredRef.current) {
+      desktopFollowDeferredRef.current = false;
+      setDesktopFollowTick((tick) => tick + 1);
+    }
+  }, [initialAccountTarget, pending]);
+  useEffect(() => {
+    if (!token || !activeTunnelConnection) return;
+    const connection = activeTunnelConnection;
+    const machineId = connection.machine.machineId;
+    // Decided before any await: a pick that is still settling when this connection comes
+    // up is an explicit choice, and only a later desktop focus change may replace it.
+    const explicitPick = Boolean(initialAccountTargetRef.current || pendingSelectionRef.current)
+      && !restoreFollowRef.current;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await connection.transport.fetchLike("/api/v1/workspace/state", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled || res.status < 200 || res.status >= 300) return;
+        const state = normalizeRemoteWorkspaceState(JSON.parse(new TextDecoder().decode(res.body)));
+        const workspaceId = state.context.workspaceId;
+        const worktreeSlug = state.context.worktreeSlug ?? null;
+        const active = state.context.activeTerminal;
+        const sessionId = active?.sessionId ?? null;
+        // No exact session means no desktop view to follow.
+        if (!workspaceId || !sessionId) return;
+        const key = `${machineId}\u0000${workspaceId}\u0000${worktreeSlug ?? ""}\u0000${sessionId}`;
+        const last = lastFollowedRef.current;
+        if (last && last.connection === connection && last.key === key) return;
+        const sessRes = await connection.transport.fetchLike("/api/v1/sessions", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled || sessRes.status < 200 || sessRes.status >= 300) return;
+        const parsed = parseSessionsPayload(machineId, JSON.parse(new TextDecoder().decode(sessRes.body)));
+        if (!parsed.ok) return;
+        // The machine's own list is the authority for identity, scope and liveness; its row
+        // also carries the daemon epoch this client must fence the attach with.
+        const entry = parsed.inventory.entries.find(
+          (row) =>
+            row.sessionId === sessionId &&
+            row.machineId === machineId &&
+            row.workspaceId === workspaceId &&
+            row.worktreeSlug === worktreeSlug &&
+            row.running,
+        );
+        if (!entry || cancelled) return;
+        const epoch = entry.daemonEpoch;
+        if (explicitPick) {
+          lastFollowedRef.current = { connection, key };
+          return;
+        }
+        if (initialAccountTargetRef.current || pendingSelectionRef.current) {
+          // The automatic restore is settling; retry once it clears instead of racing it.
+          desktopFollowDeferredRef.current = true;
+          return;
+        }
+        restoreFollowRef.current = false;
+        accountDiscovery.noteContextTabs(machineId, state.context.terminalTabs);
+        const current = modelRef.current.context;
+        const alreadyShown =
+          current.workspaceId === workspaceId &&
+          (current.worktreeSlug ?? null) === worktreeSlug &&
+          current.activeTerminal?.sessionId === sessionId;
+        lastFollowedRef.current = { connection, key };
+        if (alreadyShown) return;
+        const applied = await selectContextRef.current({
+          machineId,
+          workspaceId,
+          worktreeSlug,
+          worktreeLabel: state.context.worktreeLabel ?? worktreeSlug,
+          sessionId,
+          ...(epoch ? { daemonEpoch: epoch } : {}),
+        } as RemoteContextOption);
+        // A refused or failed apply is retried on the next focus change or reconnect.
+        if (!applied && !cancelled) lastFollowedRef.current = null;
+      } catch (error) {
+        console.warn("[remote] desktop follow skipped", error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, activeTunnelConnection, desktopFollowTick, accountDiscovery.noteContextTabs]);
+
+  const activeMachineId = activeTunnelConnection?.machine.machineId ?? null;
+  // Swipe order mirrors the inventory the sidebar renders, so the gesture, the position
+  // header, and the aria-selected row describe one sequence. -1 means no rendered row
+  // holds the selection: swipes are no-ops instead of first-row jumps.
+  // Swipe follows the published tab order (terminalTabs), so a swipe can reach a tab whose
+  // published worktree differs from the current one.
+  const swipePanes = useMemo(() => model.context.terminalTabs ?? [], [model.context.terminalTabs]);
+  const activeSwipeIndex = model.context.activeTabId
+    ? swipePanes.findIndex((tab) => tab.id === model.context.activeTabId)
     : 0;
-  const currentIndex = activeIndex >= 0 ? activeIndex : 0;
+  const currentIndex = activeSwipeIndex >= 0 ? activeSwipeIndex : 0;
 
   const handleSwipePreviousTab = useCallback(() => {
-    if (!tabs || tabs.length <= 1 || currentIndex <= 0 || !model.context.workspaceId) return;
-    const prevTab = tabs[currentIndex - 1];
+    if (swipePanes.length <= 1 || currentIndex <= 0 || !model.context.workspaceId) return;
+    const prevTab = swipePanes[currentIndex - 1];
     if (prevTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
@@ -1787,11 +2481,11 @@ export const RemoteHostConnection: React.FC<{
         sessionId: prevTab.sessionId,
       });
     }
-  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
+  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, swipePanes]);
 
   const handleSwipeNextTab = useCallback(() => {
-    if (!tabs || tabs.length <= 1 || currentIndex >= tabs.length - 1 || !model.context.workspaceId) return;
-    const nextTab = tabs[currentIndex + 1];
+    if (swipePanes.length <= 1 || currentIndex >= swipePanes.length - 1 || !model.context.workspaceId) return;
+    const nextTab = swipePanes[currentIndex + 1];
     if (nextTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
@@ -1801,7 +2495,7 @@ export const RemoteHostConnection: React.FC<{
         sessionId: nextTab.sessionId,
       });
     }
-  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
+  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, swipePanes]);
 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = initialAccountTarget
@@ -1889,6 +2583,51 @@ export const RemoteHostConnection: React.FC<{
     });
     if (identity !== null) setChatGateway(identity);
   }, []);
+
+  const terminalCreateWebSocket = useMemo(() => {
+    if (!activeTunnelConnection) return undefined;
+    return async (path: string) => {
+      let targetPath = path;
+      if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
+        const epoch = await getSessionDaemonEpoch(effectiveSessionId);
+        if (!epoch) {
+          throw new Error(
+            `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
+          );
+        }
+        const sep = targetPath.includes("?") ? "&" : "?";
+        targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
+      }
+      return activeTunnelConnection.openWebSocket(targetPath);
+    };
+  }, [activeTunnelConnection, effectiveSessionId, getSessionDaemonEpoch]);
+
+  const activeTunnelMachineId = activeTunnelConnection?.machine.machineId ?? null;
+  const sessionEpochsActiveMachine = activeTunnelMachineId;
+  useEffect(() => {
+    /* Epochs are keyed by session id only, so they must not survive a machine change:
+       the same id on another machine is a different terminal. */
+    sessionEpochsRef.current.clear();
+    setSessionEpochs({});
+  }, [sessionEpochsActiveMachine]);
+
+  const handleMachineAgentStateFrame = useCallback((raw: string) => {
+    const frame = parseMachineAgentStateFrame(raw);
+    if (!frame) return;
+    const machineId = activeTunnelMachineId;
+    if (!machineId || (frame.machineId && frame.machineId !== machineId)) return;
+    const knownEpoch =
+      inventoryRef.current?.entries.find((entry) => entry.sessionId === frame.sessionId)?.daemonEpoch ?? null;
+    if (frame.daemonEpoch && knownEpoch && frame.daemonEpoch !== knownEpoch) return;
+    noteSessionActivity(machineId, {
+      sessionId: frame.sessionId,
+      state: frame.state,
+      source: "agent_state",
+      machineId,
+      daemonEpoch: frame.daemonEpoch,
+      agentType: frame.agent,
+    });
+  }, [activeTunnelMachineId, noteSessionActivity]);
 
   useEffect(() => {
     if (!token) {
@@ -2008,6 +2747,7 @@ export const RemoteHostConnection: React.FC<{
           registryId: registryId ?? "",
           limit: CHAT_HISTORY_PAGE_LIMIT,
           signal: controller.signal,
+          transport: activeTunnelConnection?.transport,
         });
         if (cancelled) return;
         // The pane is the fence: an answer for a target that is no longer current is dropped,
@@ -2229,20 +2969,29 @@ export const RemoteHostConnection: React.FC<{
         "submit",
         chatMutationBody(target, payload),
       );
+      const stillCurrent = chatTargetRef.current !== null && sameReferenceTarget(target, chatTargetRef.current);
       if (outcome.ok) {
         if (heldId === undefined) {
           // the acknowledgement settles the SENT PREFIX only: an edit made while it was in
           // flight survives, and so does everything typed after it
           const settled = referenceDrafts.settle(target, text);
           referenceDrafts.end(target);
-          setChatDraftText(settled.text);
+          if (stillCurrent) setChatDraftText(settled.text);
         } else {
           referenceQueues.remove(target, heldId);
+          if (!stillCurrent) return true;
           setChatHeld([...referenceQueues.read(target)]);
           setChatHeldSendingId(null);
         }
-        setChatComposerNotice(null);
+        if (stillCurrent) setChatComposerNotice(null);
         return true;
+      }
+      if (!stillCurrent) {
+        if (heldId === undefined) {
+          if (referenceDrafts.read(target).text.length === 0) referenceDrafts.set(target, text);
+          referenceDrafts.end(target);
+        }
+        return false;
       }
       // Nothing was written: the echo stops claiming it was sent, and the text comes back.
       setChatComposerNotice(
@@ -2593,15 +3342,52 @@ export const RemoteHostConnection: React.FC<{
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
 
-
-
   /* Declared above the auth early return so the hook count is identical on the
      login screen and after pairing; a hook below the guard changes the order. */
   const isAccountMode = Boolean(accountSessionToken);
+  const activeMachineInventory = activeTunnelConnection
+    ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
+    : null;
+  inventoryRef.current = activeMachineInventory;
+
+  /* Pane rows render from the model's tab strip, which is a snapshot taken when the model
+     was built. Observations arrive afterwards, so the live inventory wins over the snapshot
+     for the matching epoch: a pane must not be frozen on the state it was built with.
+     An observation whose epoch contradicts the pane is never applied. */
+  const paneTabsWithObservedActivity = (tabs: RemoteTerminalTabInfo[] | undefined) => {
+    if (!tabs || tabs.length === 0) return tabs;
+    const entries = activeMachineInventory?.entries ?? [];
+    if (entries.length === 0) return tabs;
+    return tabs.map((tab) => {
+      const sessionId = tab.sessionId;
+      if (!sessionId) return tab;
+      const entry = entries.find((row) => row.sessionId === sessionId);
+      if (!entry) return tab;
+      const paneEpoch = tab.daemonEpoch === null || tab.daemonEpoch === undefined ? null : String(tab.daemonEpoch);
+      const entryEpoch = entry.daemonEpoch ?? null;
+      if (paneEpoch && entryEpoch && paneEpoch !== entryEpoch) return tab;
+      const observed = entry.activityState ?? null;
+      const snapshot = tab.activityState ?? null;
+      if (!observed && !snapshot) return tab;
+      if (!observed && snapshot) return tab;
+      if (observed === snapshot && (!entry.agentType || entry.agentType === tab.agentType)) return tab;
+      return {
+        ...tab,
+        ...(observed ? { activityState: observed } : {}),
+        ...(entry.agentType ? { agentType: entry.agentType } : {}),
+        ...(entryEpoch ? { daemonEpoch: entryEpoch } : {}),
+      };
+    });
+  };
+
   const effectiveModel: RemoteWorkspaceModel = isAccountMode && accountDiscovery.accountOptions.length > 0
     ? {
         ...model,
         options: accountDiscovery.accountOptions,
+        context: {
+          ...model.context,
+          terminalTabs: paneTabsWithObservedActivity(model.context.terminalTabs),
+        },
       }
     : model;
 
@@ -2659,48 +3445,61 @@ export const RemoteHostConnection: React.FC<{
   // Signed in to the account but no worktree chosen yet: only the collapsed top picker
   // is shown and the body stays blank until an explicit choice.
   const accountPreselection = isAccountMode && !token;
-  const activeMachineId = activeTunnelConnection?.machine.machineId ?? null;
 
-  const accountPickerStatus = isAccountMode ? (
+  // Aggregate inventory status only: the picker lists worktrees like the desktop and never
+  // names, groups, or offers a choice between machines.
+  const accountStatuses = Object.values(accountDiscovery.machineStatuses);
+  const accountInventoryLoading =
+    accountDiscovery.loading || accountStatuses.some((status) => status.status === "tunneling");
+  const failedStatuses = accountStatuses.filter((status) => status.status === "error");
+  const failedMachineIds = failedStatuses.map((status) => status.machine.machineId);
+  const failureMessages = [
+    ...new Set(
+      failedStatuses.map((status) =>
+        status.errorCode ? `${status.errorCode}: ${status.error ?? ""}` : (status.error ?? "Worktrees could not be loaded."),
+      ),
+    ),
+  ];
+  const accountInventorySettled =
+    isAccountMode && !accountInventoryLoading && !accountDiscovery.error && accountDiscovery.accountOptions.length === 0;
+  // Name the known cause of an empty picker instead of a generic line; never names machines.
+  const accountEmptyReason = !accountInventorySettled || failedMachineIds.length > 0
+    ? null
+    : accountDiscovery.machines.length === 0
+      ? "No desktops linked to this account."
+      : accountStatuses.some((status) => status.status === "offline")
+        ? "Desktop is offline. Open Ferryx on your computer."
+        : null;
+  const accountPickerStatus =
+    isAccountMode &&
+    (accountInventoryLoading || accountDiscovery.error || failedMachineIds.length > 0 || accountEmptyReason) ? (
     <div data-testid="remote-account-inventory-status" className="space-y-0.5 pb-1">
-      {accountDiscovery.loading ? (
-        <p className="px-2 py-1 text-[11px] text-muted-foreground">Loading machines...</p>
+      {accountInventoryLoading ? (
+        <p className="px-2 py-1 text-[11px] text-muted-foreground">Loading worktrees...</p>
       ) : null}
       {accountDiscovery.error ? (
         <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{accountDiscovery.error}</p>
       ) : null}
-      {accountDiscovery.machines.map((machine) => {
-        const status = accountDiscovery.machineStatuses[machine.machineId];
-        if (!status || status.status === "ready" || status.status === "idle") return null;
-        const name = machine.displayName || machine.machineId;
-        return (
-          <div
-            key={machine.machineId}
-            data-testid={`remote-account-machine-status-${machine.machineId}`}
-            data-status={status.status}
-            className="flex min-h-[24px] items-center gap-1.5 px-2 text-[11px] text-muted-foreground"
+      {accountEmptyReason ? (
+        <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">{accountEmptyReason}</p>
+      ) : null}
+      {failedMachineIds.length > 0 ? (
+        <div className="flex min-h-[24px] items-center gap-1.5 px-2 text-[11px] text-muted-foreground">
+          <span role="alert" className="min-w-0 flex-1 break-words text-destructive">
+            {failureMessages.join(" / ")}
+          </span>
+          <button
+            type="button"
+            aria-label="Retry loading worktrees"
+            onClick={() => {
+              for (const machineId of failedMachineIds) void accountDiscovery.retryMachine(machineId);
+            }}
+            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-worktree-sidebar-foreground hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
-            <span className="min-w-0 flex-1 truncate">
-              {name}
-              {status.status === "tunneling"
-                ? " - connecting..."
-                : status.status === "offline"
-                ? " - offline"
-                : ` - ${status.error ?? "unavailable"}`}
-            </span>
-            {status.status === "error" ? (
-              <button
-                type="button"
-                aria-label={`Retry ${name}`}
-                onClick={() => void accountDiscovery.retryMachine(machine.machineId)}
-                className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-worktree-sidebar-foreground hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                Retry
-              </button>
-            ) : null}
-          </div>
-        );
-      })}
+            Retry
+          </button>
+        </div>
+      ) : null}
     </div>
   ) : null;
 
@@ -2716,12 +3515,25 @@ export const RemoteHostConnection: React.FC<{
       worktreeSlug: accountOpt.worktreeSlug,
       worktreeLabel: accountOpt.worktreeLabel,
     };
+    /* The exact-terminal identity is captured while the row is still trusted: the option
+       may carry it, and the inventory snapshot from the same moment is the fallback. A
+       later machine answer is compared against this, never used to define it. */
+    const inventoryEpoch = accountOpt.sessionId
+      ? accountDiscoveryRef.current.sessionInventories[accountOpt.machineId]?.entries.find(
+          (entry) => entry.sessionId === accountOpt.sessionId,
+        )?.daemonEpoch ?? null
+      : null;
+    const selectionTarget = {
+      ...target,
+      sessionId: accountOpt.sessionId ?? null,
+      daemonEpoch: (accountOpt as { daemonEpoch?: string | null }).daemonEpoch ?? inventoryEpoch,
+    };
     setCreationError(null);
 
     if (activeTunnelConnection && token && activeMachineId === accountOpt.machineId) {
       // Same machine: keep the connection, gate the body until the exact target confirms.
       initialAccountSelectionAttemptedRef.current = false;
-      setInitialAccountTarget(target);
+      setInitialAccountTarget(selectionTarget);
       setAccountLastSelectedTarget(relayUrl, target);
       return true;
     }
@@ -2739,6 +3551,7 @@ export const RemoteHostConnection: React.FC<{
       accountSessionTokenRef.current !== expectedToken ||
       !expectedToken
     ) {
+      // Selection was invalidated while acquire was in flight (e.g. user logged out or switched selection).
       if (conn) {
         try {
           conn.close();
@@ -2748,7 +3561,8 @@ export const RemoteHostConnection: React.FC<{
     }
 
     if (!conn) {
-      setCreationError(`Failed to establish secure tunnel to ${accountOpt.machineDisplayName || accountOpt.machineId}`);
+      const worktree = accountOpt.worktreeLabel ?? accountOpt.worktreeSlug;
+      setCreationError(`Could not open ${worktree ? `${accountOpt.workspaceId} / ${worktree}` : accountOpt.workspaceId}. Try again.`);
       return false;
     }
 
@@ -2772,7 +3586,7 @@ export const RemoteHostConnection: React.FC<{
     }));
     setToken(conn.deviceToken);
     initialAccountSelectionAttemptedRef.current = false;
-    setInitialAccountTarget(target);
+    setInitialAccountTarget(selectionTarget);
     setAccountLastSelectedTarget(relayUrl, target);
     return true;
   };
@@ -2902,7 +3716,9 @@ export const RemoteHostConnection: React.FC<{
         pending={pending}
         selectorOpen={selectorOpen}
         onSelectorOpenChange={setSelectorOpen}
-        onOpenHosts={() => setHostDrawerOpen(true)}
+        // Account mode never exposes a machine chooser; sign-out stays reachable in the picker.
+        onOpenHosts={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
+        onSignOut={isAccountMode ? handleSignOut : undefined}
         activeMachineId={activeMachineId}
         pickerStatus={
           accountPreselection && creationError ? (
@@ -2933,7 +3749,12 @@ export const RemoteHostConnection: React.FC<{
         creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
         {accountPreselection ? (
-          <div data-testid="remote-account-empty-body" className="flex-1" />
+          <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
+            <p className="text-xs text-muted-foreground">
+              Choose a worktree to open its terminal.
+            </p>
+            {accountPickerStatus}
+          </div>
         ) : initialAccountTarget ? (
             <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-4 bg-background text-foreground">
               <div className="space-y-1">
@@ -2955,6 +3776,8 @@ export const RemoteHostConnection: React.FC<{
                           workspaceId: initialAccountTarget.workspaceId,
                           worktreeSlug: initialAccountTarget.worktreeSlug,
                           worktreeLabel: initialAccountTarget.worktreeLabel,
+                          ...(initialAccountTarget.sessionId ? { sessionId: initialAccountTarget.sessionId } : {}),
+                          ...(initialAccountTarget.daemonEpoch ? { daemonEpoch: initialAccountTarget.daemonEpoch } : {}),
                         });
                       }}
                       className="px-2.5 py-1 text-[11px] font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
@@ -3112,24 +3935,8 @@ export const RemoteHostConnection: React.FC<{
               onSocketLifecycle={handleTerminalSocketLifecycle}
               isAccountSession={Boolean(activeTunnelConnection)}
               daemonEpoch={sessionEpochs[effectiveSessionId] ?? sessionEpochsRef.current.get(effectiveSessionId)}
-              createWebSocket={
-                activeTunnelConnection
-                  ? async (path) => {
-                      let targetPath = path;
-                      if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
-                        const epoch = await getSessionDaemonEpoch(effectiveSessionId);
-                        if (!epoch) {
-                          throw new Error(
-                            `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
-                          );
-                        }
-                        const sep = targetPath.includes("?") ? "&" : "?";
-                        targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
-                      }
-                      return activeTunnelConnection.openWebSocket(targetPath);
-                    }
-                  : undefined
-              }
+              onAgentStateFrame={handleMachineAgentStateFrame}
+              createWebSocket={terminalCreateWebSocket}
             />
           ) : null}
       </RemoteWorkspaceMirror>
@@ -3139,8 +3946,7 @@ export const RemoteHostConnection: React.FC<{
         onOpenChange={setHostDrawerOpen}
         onDisconnect={disconnect}
         onSignOut={handleSignOut}
-        // Account mode keeps sign-out reachable before a worktree tunnel exists.
-        isAccountSession={isAccountMode}
+        isAccountSession={Boolean(activeTunnelConnection)}
       />
     </div>
   );

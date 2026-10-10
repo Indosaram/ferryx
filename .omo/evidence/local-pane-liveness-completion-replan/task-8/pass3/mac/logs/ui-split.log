@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/lib/localSplitLifecycle.test.ts
+
+ RUN  v3.2.7 /Users/I552267/ferryx-pane-completion/source-21dea3c0/ui
+
+ ✓ src/lib/localSplitLifecycle.test.ts (19 tests) 14ms
+
+ Test Files  1 passed (1)
+      Tests  19 passed (19)
+   Start at  15:24:10
+   Duration  6.97s (transform 120ms, setup 2.17s, collect 130ms, tests 14ms, environment 4.24s, prepare 236ms)
+

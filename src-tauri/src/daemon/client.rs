@@ -3,6 +3,10 @@ use crate::daemon::protocol::{
     DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails,
     DaemonStreamMessage, TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
+use crate::daemon::protocol::{
+    LocalSplitEnvelope, PreparedLocalSplit, SplitDelivery, SplitIdentity, SplitOperationResult,
+    LOCAL_SPLIT_LIFECYCLE_CAPABILITY, LOCAL_SPLIT_VALIDITY_MS,
+};
 use crate::daemon::server::{get_socket_path, validate_runtime_socket_path};
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::remote::auth::{DeviceInfo, DevicePermission};
@@ -156,6 +160,12 @@ pub struct DaemonSpawnResult {
 // start; it never delays a real failure.
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+// How long a freshly loaded launchd job is given to bind its socket before the client assumes the
+// job is loaded-but-dead and reloads it. `RunAtLoad` fires the daemon immediately, so a healthy
+// agent answers in well under this; keeping it short is what stops a stale job from costing the
+// full readiness budget on every GUI start.
+const SUPERVISED_START_WAIT: Duration = Duration::from_secs(5);
+
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
 where
     R: AsyncBufRead + Unpin,
@@ -184,6 +194,126 @@ where
             "Ferryx daemon startup timed out waiting for readiness signal",
         )
     })?
+}
+
+/// The pid of the daemon that answers on this machine's canonical endpoint, or `None` when no live
+/// daemon owns it.
+///
+/// Read-only and side-effect free: it opens its own connection, handshakes, and drops it without
+/// touching the upgrade path. A daemon that lost the instance-lock race uses this to tell "another
+/// process already serves every session" - nothing left to do, exit cleanly - apart from "this
+/// machine has no daemon", which is a real failure worth a non-zero exit and a supervisor restart.
+#[cfg(unix)]
+pub async fn endpoint_owner_pid() -> Option<u32> {
+    endpoint_owner_pid_at(&crate::daemon::server::get_socket_path()).await
+}
+
+/// [`endpoint_owner_pid`] against an explicit socket path, so the probe is testable without a
+/// process-wide socket location.
+#[cfg(unix)]
+pub async fn endpoint_owner_pid_at(socket_path: &Path) -> Option<u32> {
+    let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut json = serde_json::to_string(&DaemonRequest::Handshake {
+        version: DAEMON_PROTOCOL_VERSION,
+        token: None,
+    })
+    .ok()?;
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await.ok()?;
+    write_half.flush().await.ok()?;
+
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if read == 0 {
+        return None;
+    }
+    match serde_json::from_str::<DaemonResponse>(&line) {
+        Ok(DaemonResponse::HandshakeOk { pid, .. }) => Some(pid),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn endpoint_owner_pid() -> Option<u32> {
+    None
+}
+
+#[cfg(all(test, unix))]
+mod endpoint_owner_probe_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    fn handshake_reply(pid: u32) -> String {
+        let mut reply = serde_json::to_string(&DaemonResponse::HandshakeOk {
+            version: DAEMON_PROTOCOL_VERSION,
+            pid,
+            epoch: 7,
+            binary_path: None,
+            binary_mtime_ms: None,
+            daemon_version: None,
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
+        })
+        .unwrap();
+        reply.push('\n');
+        reply
+    }
+
+    #[tokio::test]
+    async fn a_live_daemon_reports_its_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            write
+                .write_all(handshake_reply(4242).as_bytes())
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(endpoint_owner_pid_at(&socket).await, Some(4242));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_absent_or_unrelated_endpoint_owns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("nothing.sock");
+        assert_eq!(endpoint_owner_pid_at(&absent).await, None);
+
+        let socket = dir.path().join("unrelated.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let mut reply = serde_json::to_string(&DaemonResponse::Pong).unwrap();
+            reply.push('\n');
+            write.write_all(reply.as_bytes()).await.unwrap();
+        });
+
+        assert_eq!(endpoint_owner_pid_at(&socket).await, None);
+        peer.await.unwrap();
+    }
 }
 /// Reads a published transport token from `path`. An absent file, or one holding only whitespace,
 /// is no credential at all: it is reported as absent so a reader treats the pair it is reading as
@@ -321,6 +451,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::Suspend { .. }
             | DaemonRequest::Resume { .. }
             | DaemonRequest::ListSessions
+            | DaemonRequest::SpawnOperationStatus { .. }
+            | DaemonRequest::ResourceUsage
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
@@ -351,6 +483,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
+        DaemonRequest::SpawnOperationStatus { .. } => "spawnOperationStatus",
+        DaemonRequest::CancelSpawnOperation { .. } => "cancelSpawnOperation",
         DaemonRequest::Write { .. } => "write",
         DaemonRequest::Resize { .. } => "resize",
         DaemonRequest::Signal { .. } => "signal",
@@ -368,6 +502,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
+        DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
@@ -576,10 +711,150 @@ fn image_name_matches_expected_daemon_image(image_name: &str, expected: &[String
     !candidate.is_empty() && expected.iter().any(|name| normalize(name) == candidate)
 }
 
+fn split_transport_error(
+    mut error: IpcError,
+    identity: Option<&SplitIdentity>,
+    stage: &str,
+    delivery: SplitDelivery,
+) -> IpcError {
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if !details.is_object() {
+        details = json!({"causeDetails": details});
+    }
+    details["stage"] = json!(stage);
+    details["delivery"] = json!(delivery);
+    // A transport failure never proves an operation absent or a child dead.
+    if details.get("operationState").is_none() {
+        details["operationState"] = json!("unknown");
+    }
+    if let Some(identity) = identity {
+        details["requestId"] = json!(identity.request_id);
+        details["originEpoch"] = json!(identity.origin_epoch);
+    }
+    error.with_details(details)
+}
+
+async fn split_until<T>(
+    deadline: tokio::time::Instant,
+    identity: Option<&SplitIdentity>,
+    stage: &str,
+    delivery: SplitDelivery,
+    future: impl std::future::Future<Output = Result<T, IpcError>>,
+) -> Result<T, IpcError> {
+    // timeout_at polls a ready future before its timer. Explicitly prevent an
+    // already-expired attempt from writing even on a writable socket.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(split_transport_error(
+            IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split attempt deadline elapsed"),
+            identity,
+            stage,
+            delivery,
+        ));
+    }
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(result) => result.map_err(|error| split_transport_error(error, identity, stage, delivery)),
+        Err(_) => Err(split_transport_error(
+            IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split attempt deadline elapsed"),
+            identity,
+            stage,
+            delivery,
+        )),
+    }
+}
+
+/// Every await uses the original deadline. The caller owns and drops the whole
+/// connection on error/cancellation; a partial line must never return to a pool.
+async fn split_exchange_until<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    request: &DaemonRequest,
+    identity: Option<&SplitIdentity>,
+    deadline: tokio::time::Instant,
+    handshake: bool,
+) -> Result<DaemonResponse, IpcError>
+where
+    R: AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut bytes = serde_json::to_vec(request).map_err(|error| {
+        split_transport_error(
+            IpcError::new(IpcErrorCode::ParseError, error.to_string()),
+            identity,
+            "serialize",
+            SplitDelivery::NotSent,
+        )
+    })?;
+    bytes.push(b'\n');
+    // Before polling write_all there can be no delivery. Once polled, an
+    // unknown prefix may reach the peer, including the complete request.
+    split_until(
+        deadline,
+        identity,
+        "beforeWrite",
+        SplitDelivery::NotSent,
+        async { Ok(()) },
+    )
+    .await?;
+    let delivery = if handshake {
+        SplitDelivery::NotSent
+    } else {
+        SplitDelivery::Ambiguous
+    };
+    split_until(
+        deadline,
+        identity,
+        if handshake { "handshakeWrite" } else { "write" },
+        delivery,
+        async {
+            writer
+                .write_all(&bytes)
+                .await
+                .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
+        },
+    )
+    .await?;
+    split_until(
+        deadline,
+        identity,
+        if handshake { "handshakeFlush" } else { "flush" },
+        delivery,
+        async {
+            writer
+                .flush()
+                .await
+                .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
+        },
+    )
+    .await?;
+    let mut line = String::new();
+    split_until(
+        deadline,
+        identity,
+        if handshake { "handshakeRead" } else { "read" },
+        delivery,
+        async {
+            let count = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            if count == 0 || !line.ends_with('\n') {
+                return Err(IpcError::new(
+                    IpcErrorCode::IoError,
+                    "Daemon disconnected before a complete response",
+                ));
+            }
+            serde_json::from_str(&line)
+                .map_err(|error| IpcError::new(IpcErrorCode::ParseError, error.to_string()))
+        },
+    )
+    .await
+}
+
 struct ActiveConnection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
+
 
 impl ActiveConnection {
     async fn request(
@@ -815,6 +1090,9 @@ pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
+    /// Spawn-only connection so a new terminal never queues behind slow general
+    /// requests (listSessions/describe loops, registerWorkspace) on `connection`.
+    spawn_connection: Arc<Mutex<Option<ActiveConnection>>>,
     remote_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<RemoteSessionSlot>>>>,
     local_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<LocalSessionSlot>>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
@@ -829,11 +1107,13 @@ impl Default for DaemonClient {
 }
 
 impl DaemonClient {
+
     pub fn new() -> Self {
         Self {
             socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
@@ -847,11 +1127,531 @@ impl DaemonClient {
             socket_path,
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    async fn split_connect_until(
+        &self,
+        identity: Option<&SplitIdentity>,
+        deadline: tokio::time::Instant,
+        require_capability: bool,
+    ) -> Result<(ActiveConnection, u64, Option<u64>), IpcError> {
+        let path = self.socket_path.clone();
+        let (credential, endpoint) = split_until(
+            deadline,
+            identity,
+            "connect",
+            SplitDelivery::NotSent,
+            async {
+                crate::ipc::run_blocking(move || {
+                    Self::validate_existing_socket_path(&path)?;
+                    let credential = read_transport_token();
+                    #[cfg(unix)]
+                    let endpoint = path;
+                    #[cfg(not(unix))]
+                    let endpoint = {
+                        let port = fs::read_to_string(&path)
+                            .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+                        let port: u16 = port.trim().parse().map_err(|error: std::num::ParseIntError| {
+                            IpcError::new(IpcErrorCode::ParseError, error.to_string())
+                        })?;
+                        std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port)
+                    };
+                    Ok((credential, endpoint))
+                })
+                .await
+            },
+        )
+        .await?;
+        let stream = split_until(
+            deadline,
+            identity,
+            "connect",
+            SplitDelivery::NotSent,
+            async {
+                DaemonStream::connect(endpoint)
+                    .await
+                    .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
+            },
+        )
+        .await?;
+        let (reader, writer) = stream.into_split();
+        let mut connection = ActiveConnection {
+            reader: BufReader::new(reader),
+            writer,
+        };
+        let response = split_exchange_until(
+            &mut connection.reader,
+            &mut connection.writer,
+            &DaemonRequest::Handshake {
+                version: DAEMON_PROTOCOL_VERSION,
+                token: credential,
+            },
+            identity,
+            deadline,
+            true,
+        )
+        .await?;
+        match response {
+            DaemonResponse::HandshakeOk {
+                version,
+                epoch,
+                capabilities,
+                admission_time_unix_ms,
+                ..
+            } if version == DAEMON_PROTOCOL_VERSION => {
+                if require_capability
+                    && (!capabilities
+                        .iter()
+                        .any(|value| value == LOCAL_SPLIT_LIFECYCLE_CAPABILITY)
+                        || admission_time_unix_ms.is_none())
+                {
+                    return Err(split_transport_error(
+                        IpcError::new(
+                            IpcErrorCode::UnsupportedCapability,
+                            "Daemon does not support local split lifecycle",
+                        ),
+                        identity,
+                        "handshake",
+                        SplitDelivery::NotSent,
+                    ));
+                }
+                Ok((connection, epoch, admission_time_unix_ms))
+            }
+            DaemonResponse::HandshakeOk { version, .. } => Err(split_transport_error(
+                daemon_protocol_mismatch_error(DAEMON_PROTOCOL_VERSION, version),
+                identity,
+                "handshake",
+                SplitDelivery::NotSent,
+            )),
+            DaemonResponse::ProtocolMismatch {
+                expected_version,
+                received_version,
+            } => Err(split_transport_error(
+                daemon_protocol_mismatch_error(expected_version, received_version),
+                identity,
+                "handshake",
+                SplitDelivery::NotSent,
+            )),
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
+                let mut error = IpcError::new(
+                    code.as_deref()
+                        .map(IpcErrorCode::from_code_str)
+                        .unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(split_transport_error(
+                    error,
+                    identity,
+                    "handshake",
+                    SplitDelivery::NotSent,
+                ))
+            }
+            _ => Err(split_transport_error(
+                IpcError::internal("Unexpected handshake response"),
+                identity,
+                "handshake",
+                SplitDelivery::NotSent,
+            )),
+        }
+    }
+
+    pub async fn prepare_local_split_until(
+        &self,
+        request_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<SplitIdentity, IpcError> {
+        let (_connection, epoch, admission_time) =
+            self.split_connect_until(None, deadline, true).await?;
+        let expires_at_unix_ms = admission_time
+            .and_then(|time| time.checked_add(LOCAL_SPLIT_VALIDITY_MS))
+            .ok_or_else(|| IpcError::internal("Invalid daemon admission clock"))?;
+        Ok(SplitIdentity {
+            request_id: request_id.into(),
+            origin_epoch: epoch.to_string(),
+            expires_at_unix_ms,
+        })
+    }
+
+    async fn split_request_until(
+        &self,
+        mut request: DaemonRequest,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<DaemonResponse, IpcError> {
+        let (mut connection, epoch, _) = self
+            .split_connect_until(Some(identity), deadline, true)
+            .await?;
+        if let DaemonRequest::Spawn {
+            local_split: Some(envelope),
+            ..
+        } = &mut request
+        {
+            if envelope.origin_epoch != epoch {
+                return Err(split_transport_error(
+                    IpcError::new(
+                        IpcErrorCode::SpawnEpochChanged,
+                        "Daemon epoch changed before Create",
+                    ),
+                    Some(identity),
+                    "beforeWrite",
+                    SplitDelivery::NotSent,
+                ));
+            }
+            envelope.remaining_ms = u64::try_from(
+                deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX);
+        }
+        let response = split_exchange_until(
+            &mut connection.reader,
+            &mut connection.writer,
+            &request,
+            Some(identity),
+            deadline,
+            false,
+        )
+        .await?;
+        match response {
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
+                let mut error = IpcError::new(
+                    code.as_deref()
+                        .map(IpcErrorCode::from_code_str)
+                        .unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(split_transport_error(
+                    error,
+                    Some(identity),
+                    "response",
+                    SplitDelivery::Confirmed,
+                ))
+            }
+            response => Ok(response),
+        }
+    }
+
+    pub async fn describe_session_until(
+        &self,
+        session_id: &str,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<DaemonSessionDetails, IpcError> {
+        match self
+            .split_request_until(
+                DaemonRequest::DescribeSession {
+                    session_id: session_id.into(),
+                },
+                identity,
+                deadline,
+            )
+            .await?
+        {
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
+            _ => Err(split_transport_error(
+                IpcError::internal("Unexpected describe response"),
+                Some(identity),
+                "response",
+                SplitDelivery::Ambiguous,
+            )),
+        }
+    }
+
+    pub async fn describe_session_bounded_until(
+        &self, session_id: &str, deadline: tokio::time::Instant,
+    ) -> Result<DaemonSessionDetails, IpcError> {
+        let (mut connection, _, _) = self.split_connect_until(None, deadline, false).await?;
+        match split_exchange_until(&mut connection.reader, &mut connection.writer,
+            &DaemonRequest::DescribeSession { session_id: session_id.into() },
+            None, deadline, false).await?
+        {
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
+            DaemonResponse::Error { message, code, details } => {
+                let mut error = IpcError::new(code.as_deref().map(IpcErrorCode::from_code_str)
+                    .unwrap_or(IpcErrorCode::InternalError), message);
+                error.details = details;
+                Err(error)
+            }
+            _ => Err(IpcError::internal("Unexpected bounded describe response")),
+        }
+    }
+
+    pub async fn create_local_split_until(
+        &self,
+        prepared: &PreparedLocalSplit,
+        deadline: tokio::time::Instant,
+    ) -> Result<DaemonSpawnResult, IpcError> {
+        let identity = &prepared.identity;
+        let origin_epoch = identity
+            .origin_epoch
+            .parse::<u64>()
+            .map_err(|_| IpcError::new(IpcErrorCode::InvalidArgument, "Invalid split origin epoch"))?;
+        match self.local_split_status_until(identity, deadline).await? {
+            SplitOperationResult::Created { session_id, daemon_epoch, session, .. } => {
+                // A recorded creation answers this request only when it was created from the SAME
+                // parameters. Returning it unconditionally made the journal's fingerprint check
+                // unreachable for a reused identity: this path short-circuits before the daemon
+                // ever compares fingerprints, so a conflicting-fingerprint request was answered
+                // with the other request's session instead of being rejected. Measured:
+                // `conflictRejected=0` with all eight conflicting requests settling onto one
+                // session. A true duplicate still matches every field and keeps its idempotent
+                // answer; only a genuine mismatch is a conflict.
+                //
+                // `cwd` is deliberately not compared: the daemon records the canonicalized path
+                // while `prepared.cwd` is the pre-canonicalization string, so a textual compare
+                // would reject honest duplicates on Windows (`\\?\` prefixes).
+                let geometry_differs =
+                    session.cols != prepared.cols || session.rows != prepared.rows;
+                let workspace_differs = session
+                    .workspace_id
+                    .as_deref()
+                    .is_some_and(|recorded| recorded != prepared.workspace_id);
+                let worktree_differs = session.worktree != prepared.worktree;
+                if geometry_differs || workspace_differs || worktree_differs {
+                    return Err(IpcError::spawn_request_conflict(
+                        "Split request identity was reused with different parameters",
+                    ));
+                }
+                return Ok(DaemonSpawnResult { session_id, epoch: daemon_epoch, session });
+            }
+            SplitOperationResult::Absent { can_create: true } => {}
+            operation => {
+                let error = match operation {
+                    SplitOperationResult::Cancelled => IpcError::spawn_cancelled("Split request was cancelled"),
+                    SplitOperationResult::Absent { can_create: false } => IpcError::spawn_request_expired("Split identity expired; prepare a new request"),
+                    SplitOperationResult::Failed { error, .. } => error,
+                    _ => IpcError::new(IpcErrorCode::OperationOutcomeUnknown, "Split publication requires status reconciliation; do not create another request"),
+                };
+                return Err(error);
+            }
+        }
+        let request = DaemonRequest::Spawn {
+            client_request_id: identity.request_id.clone(),
+            workspace_id: prepared.workspace_id.clone(),
+            worktree: prepared.worktree.clone(),
+            cwd: Some(prepared.cwd.clone()),
+            cols: prepared.cols,
+            rows: prepared.rows,
+            shell: prepared.shell.clone(),
+            startup: None,
+            session_id: None,
+            local_split: Some(LocalSplitEnvelope {
+                origin_epoch,
+                expires_at_unix_ms: identity.expires_at_unix_ms,
+                remaining_ms: 0,
+            }),
+        };
+        match self.split_request_until(request, identity, deadline).await? {
+            DaemonResponse::SpawnOk {
+                session_id,
+                epoch,
+                session,
+            } => Ok(DaemonSpawnResult {
+                session_id,
+                epoch,
+                session,
+            }),
+            _ => Err(split_transport_error(
+                IpcError::internal("Unexpected Create response"),
+                Some(identity),
+                "response",
+                SplitDelivery::Ambiguous,
+            )),
+        }
+    }
+
+    pub async fn local_split_status_until(
+        &self,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<SplitOperationResult, IpcError> {
+        let origin_epoch = identity
+            .origin_epoch
+            .parse::<u64>()
+            .map_err(|_| IpcError::new(IpcErrorCode::InvalidArgument, "Invalid split origin epoch"))?;
+        let request = DaemonRequest::SpawnOperationStatus {
+            client_request_id: identity.request_id.clone(),
+            origin_epoch,
+            expires_at_unix_ms: identity.expires_at_unix_ms,
+        };
+        self.local_split_operation_until(request, identity, deadline)
+            .await
+    }
+
+    pub async fn cancel_local_split_until(
+        &self,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<SplitOperationResult, IpcError> {
+        let origin_epoch = identity
+            .origin_epoch
+            .parse::<u64>()
+            .map_err(|_| IpcError::new(IpcErrorCode::InvalidArgument, "Invalid split origin epoch"))?;
+        let request = DaemonRequest::CancelSpawnOperation {
+            client_request_id: identity.request_id.clone(),
+            origin_epoch,
+            expires_at_unix_ms: identity.expires_at_unix_ms,
+        };
+        self.local_split_operation_until(request, identity, deadline)
+            .await
+    }
+
+    async fn local_split_operation_until(
+        &self,
+        request: DaemonRequest,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<SplitOperationResult, IpcError> {
+        match self.split_request_until(request, identity, deadline).await? {
+            DaemonResponse::SpawnOperationOk { operation } => Ok(operation),
+            _ => Err(split_transport_error(
+                IpcError::internal("Unexpected operation response"),
+                Some(identity),
+                "response",
+                SplitDelivery::Ambiguous,
+            )),
+        }
+    }
+
+    pub async fn attach_until(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+        deadline: tokio::time::Instant,
+    ) -> Result<DaemonAttachment, IpcError> {
+        let (mut connection, _, _) = self.split_connect_until(None, deadline, false).await?;
+        let response = split_exchange_until(
+            &mut connection.reader,
+            &mut connection.writer,
+            &DaemonRequest::Attach {
+                session_id: session_id.into(),
+                after_sequence,
+            },
+            None,
+            deadline,
+            false,
+        )
+        .await?;
+        split_until(
+            deadline,
+            None,
+            "attachInstall",
+            SplitDelivery::Confirmed,
+            async { Ok(()) },
+        )
+        .await?;
+        Self::attachment_from_response(session_id, response, connection.reader, connection.writer)
+    }
+
+    fn attachment_from_response(
+        session_id: &str,
+        attach_resp: DaemonResponse,
+        mut reader: BufReader<OwnedReadHalf>,
+        write_half: OwnedWriteHalf,
+    ) -> Result<DaemonAttachment, IpcError> {
+        match attach_resp {
+            DaemonResponse::AttachOk {
+                epoch,
+                session_id: resp_session_id,
+                start_sequence,
+                end_sequence,
+                gap,
+                history,
+                pty_cols,
+                pty_rows,
+                history_segments,
+                remote_generation,
+            } => {
+                if resp_session_id != session_id {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "Attach response session mismatch",
+                    ));
+                }
+                let segments = history_segments
+                    .into_iter()
+                    .map(|wire| crate::terminal::output_hub::HistorySegment {
+                        cols: wire.cols,
+                        rows: wire.rows,
+                        bytes: wire.bytes.to_vec(),
+                    })
+                    .collect();
+
+                let (tx, rx) = mpsc::channel(256);
+                let task = tokio::spawn(async move {
+                    let _keepalive = write_half;
+                    let mut stream_line = String::new();
+                    loop {
+                        let n = tokio::select! {
+                            biased;
+                            _ = tx.closed() => break,
+                            result = reader.read_line(&mut stream_line) => match result {
+                                Ok(n) => n,
+                                Err(_) => break,
+                            },
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        if let Ok(msg) =
+                            serde_json::from_str::<DaemonStreamMessage<'static>>(stream_line.trim())
+                        {
+                            let is_exit = matches!(msg, DaemonStreamMessage::Exit { .. });
+                            if tx.send(msg).await.is_err() {
+                                break;
+                            }
+                            if is_exit {
+                                break;
+                            }
+                        }
+                        stream_line.clear();
+                    }
+                });
+
+                Ok(DaemonAttachment {
+                    session_id: resp_session_id,
+                    epoch,
+                    start_sequence,
+                    end_sequence,
+                    gap,
+                    history,
+                    history_segments: segments,
+                    pty_cols,
+                    pty_rows,
+                    remote_generation,
+                    messages: rx,
+                    stream_task: task,
+                })
+            }
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => Err(parse_attach_error_response(
+                message, code, details, session_id,
+            )),
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response for attach",
+            )),
         }
     }
 
@@ -1252,6 +2052,7 @@ impl DaemonClient {
             socket_path: self.socket_path.clone(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            spawn_connection: Arc::new(Mutex::new(None)),
             remote_connections: Arc::clone(&self.remote_connections),
             local_connections: Arc::clone(&self.local_connections),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
@@ -1265,6 +2066,9 @@ impl DaemonClient {
         daemon_version: Option<String>,
         daemon_mtime_ms: Option<u64>,
     ) {
+        if cfg!(debug_assertions) {
+            return;
+        }
         let own_version = env!("CARGO_PKG_VERSION");
         let own_exe = std::env::current_exe().ok();
         let own_mtime = own_exe
@@ -1398,20 +2202,78 @@ impl DaemonClient {
         // Launch external ferryx --daemon binary with exact bounded readiness event
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ferryx"));
 
-        let mut child = crate::util::no_window_tokio_command(&binary_path)
+        // Prefer the supervised agent. It owns the daemon's lifetime, so quitting the GUI can no
+        // longer take every terminal with it - the 2026-10-07 failure, where the daemon was a child
+        // of the app and died with it leaving no record. The detached spawn below stays as the
+        // fallback for platforms with no agent and for isolated runtimes, where installing one would
+        // point the user's login autostart at a test build.
+        if crate::daemon::launchd::agent_management_supported() {
+            let agent_binary = binary_path.clone();
+            let agent = crate::ipc::run_blocking(move || {
+                crate::daemon::launchd::ensure_launchd_agent(&agent_binary)
+                    .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+            })
+            .await;
+            match agent {
+                Ok(plist_path) => {
+                    tracing::info!(
+                        plist = %plist_path.display(),
+                        "Daemon lifetime handed to the launchd agent"
+                    );
+                    if let Ok(stream) = self.wait_for_supervised_daemon(SUPERVISED_START_WAIT).await
+                    {
+                        return Ok(stream);
+                    }
+                    // The job is loaded but no daemon is serving: launchd already ran it once and
+                    // the process is gone (a committed handover, a duplicate-endpoint exit, or a
+                    // crash it is not configured to relaunch). Reloading re-runs `RunAtLoad`, which
+                    // is what starts it again without waiting out the long readiness budget.
+                    let reload = crate::ipc::run_blocking({
+                        let plist_path = plist_path.clone();
+                        move || {
+                            crate::daemon::launchd::load_launchd_agent(&plist_path)
+                                .map_err(|error| IpcError::new(IpcErrorCode::InternalError, error))
+                        }
+                    })
+                    .await;
+                    match reload {
+                        Ok(()) => match self.wait_for_supervised_daemon(DAEMON_READY_TIMEOUT).await {
+                            Ok(stream) => return Ok(stream),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "The launchd agent still published no daemon endpoint; spawning a detached daemon instead"
+                            ),
+                        },
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "Could not reload the launchd agent; spawning a detached daemon instead"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Could not hand the daemon lifetime to launchd; spawning a detached daemon instead"
+                ),
+            }
+        }
+
+        let mut command = tokio::process::Command::new(&binary_path);
+        command
             .arg("--daemon")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                IpcError::new(
-                    IpcErrorCode::InternalError,
-                    format!(
-                        "Failed to spawn Ferryx daemon process ({}): {e}",
-                        binary_path.display()
-                    ),
-                )
-            })?;
+            .stderr(std::process::Stdio::piped());
+        // The detach must be configured on the std command: a child cannot change its session after
+        // `exec`, so `pre_exec` is the only place this can happen.
+        crate::util::detach_launched_child(command.as_std_mut());
+        let mut child = command.spawn().map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::InternalError,
+                format!(
+                    "Failed to spawn Ferryx daemon process ({}): {e}",
+                    binary_path.display()
+                ),
+            )
+        })?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             IpcError::new(
@@ -1420,8 +2282,7 @@ impl DaemonClient {
             )
         })?;
 
-        if let Err(error) =
-            wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
+        if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
             let _ = child.kill().await;
             return Err(error);
@@ -1439,6 +2300,31 @@ impl DaemonClient {
                 format!("Failed to connect to daemon socket after readiness signal: {e}"),
             )
         })
+    }
+
+    /// Waits for a supervised daemon to publish its endpoint, then connects exactly once.
+    ///
+    /// A supervised daemon has no readiness pipe to read: the agent owns the process, so the socket
+    /// becoming connectable is the only observable signal. The wait is bounded, so a refused or
+    /// crashed agent reports an error instead of hanging the GUI.
+    async fn wait_for_supervised_daemon(
+        &self,
+        timeout: Duration,
+    ) -> Result<DaemonStream, IpcError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Ok(stream) = self.try_connect_existing_socket().await {
+                return Ok(stream);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(IpcError::new(
+                    IpcErrorCode::InternalError,
+                    "Timed out waiting for the supervised daemon to publish its endpoint"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Connects and handshakes, re-reading the published pair once when the attempt that failed
@@ -2151,6 +3037,7 @@ impl DaemonClient {
                 rows,
                 shell,
                 None,
+                None,
             )
             .await?
             .session_id)
@@ -2166,9 +3053,10 @@ impl DaemonClient {
         rows: u16,
         shell: Option<String>,
         startup: Option<TerminalStartup>,
+        session_id: Option<String>,
     ) -> Result<DaemonSpawnResult, IpcError> {
         let resp = self
-            .send_request(DaemonRequest::Spawn {
+            .send_on_connection(&self.spawn_connection, DaemonRequest::Spawn {
                 client_request_id,
                 workspace_id,
                 worktree,
@@ -2177,6 +3065,8 @@ impl DaemonClient {
                 rows,
                 shell,
                 startup,
+                local_split: None,
+                session_id,
             })
             .await?;
 
@@ -2219,8 +3109,14 @@ impl DaemonClient {
                 expected_version,
                 received_version,
             )),
-            DaemonResponse::Error { message, .. } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            // Keep the daemon's structured code (e.g. SESSION_ID_CONFLICT, INVALID_ARGUMENT).
+            DaemonResponse::Error { message, code, details } => {
+                let mut error = IpcError::new(
+                    code.as_deref().map(IpcErrorCode::from_code_str).unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(error)
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -2254,7 +3150,7 @@ impl DaemonClient {
             .await?;
 
         match resp {
-            DaemonResponse::DescribeSessionOk { session } => Ok(session),
+            DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
@@ -2262,6 +3158,21 @@ impl DaemonClient {
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
             )),
+        }
+    }
+
+    pub async fn describe_session_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<(DaemonSessionDetails, Option<String>), IpcError> {
+        match self.send_request(DaemonRequest::DescribeSession {
+            session_id: session_id.into(),
+        }).await? {
+            DaemonResponse::DescribeSessionOk { session, daemon_epoch } => {
+                Ok((session, daemon_epoch))
+            }
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal("Unexpected identity description response")),
         }
     }
 
@@ -2738,6 +3649,7 @@ impl DaemonClient {
         }
     }
 
+
     pub async fn remote_session_status(
         &self,
         session_id: &str,
@@ -3184,6 +4096,18 @@ impl DaemonClient {
         }
     }
 
+    pub async fn resource_usage(
+        &self,
+    ) -> Result<crate::daemon::resource_usage::HostResourceSnapshot, IpcError> {
+        match self.send_request(DaemonRequest::ResourceUsage).await? {
+            DaemonResponse::ResourceUsageOk { snapshot } => Ok(snapshot),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
     pub async fn ping(&self) -> Result<(), IpcError> {
         let resp = self.send_request(DaemonRequest::Ping).await?;
         match resp {
@@ -3399,6 +4323,7 @@ impl DaemonClient {
         }
     }
 }
+
 
 #[cfg(test)]
 mod local_control_isolation_tests {
@@ -3863,6 +4788,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -3947,6 +4875,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -4035,6 +4966,9 @@ mod tests {
                         binary_path: None,
                         binary_mtime_ms: None,
                         daemon_version: None,
+                        // Legacy mock daemon does not advertise split admission.
+                        capabilities: Vec::new(),
+                        admission_time_unix_ms: None,
                     };
                     write
                         .write_all(
@@ -4183,6 +5117,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
@@ -4269,6 +5206,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
@@ -4319,6 +5259,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             // Connection 1 (desktop control): answer the handshake, receive the Ping,
             // and hold the reply so the control slot stays busy for the whole test.
@@ -4461,6 +5404,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
@@ -4652,6 +5598,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -4729,6 +5678,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -4980,6 +5932,8 @@ mod tests {
 
         let listener = UnixListener::bind(&socket_path).unwrap();
         let server = Arc::new(DaemonServer::new());
+        // Pair locally without auto-configuring the workstation's relay connection.
+        server.remote_state().config.write().mode = RemoteNetworkMode::LocalNetwork;
         let server_clone = Arc::clone(&server);
 
         let server_task = tokio::spawn(async move {
@@ -5007,7 +5961,7 @@ mod tests {
 
         // 2. Remote control typed APIs
         let status = client.remote_get_status().await.expect("remote get status");
-        assert_eq!(status.mode, RemoteNetworkMode::Off);
+        assert_eq!(status.mode, RemoteNetworkMode::LocalNetwork);
         assert!(!status.is_running);
 
         let pair_code = client
@@ -5064,6 +6018,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -5176,6 +6133,9 @@ mod tests {
                 binary_path: None,
                 binary_mtime_ms: None,
                 daemon_version: None,
+                // Legacy mock daemon does not advertise split admission.
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -5996,5 +6956,656 @@ mod tasklist_identity_tests {
                 "an unanswered probe is not a confirmed exit"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod local_split_transport_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncReadExt, AsyncWrite};
+
+    struct HeldWriter {
+        inner: tokio::io::DuplexStream,
+        stage: &'static str,
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl AsyncWrite for HeldWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.stage == "write" {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                }
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_write(cx, bytes)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.stage == "flush" {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                }
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    struct HeldReader {
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl tokio::io::AsyncRead for HeldReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncBufRead for HeldReader {
+        fn poll_fill_buf(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<&[u8]>> {
+            if let Some(entered) = self.entered.take() {
+                entered.send(()).unwrap();
+            }
+            Poll::Pending
+        }
+        fn consume(self: Pin<&mut Self>, _amount: usize) {}
+    }
+
+    fn identity() -> SplitIdentity {
+        SplitIdentity {
+            request_id: "98df3cfa-9ea5-4220-b2b6-365f70695e4f".into(),
+            origin_epoch: "7".into(),
+            expires_at_unix_ms: 601_000,
+        }
+    }
+
+    fn prepared() -> PreparedLocalSplit {
+        PreparedLocalSplit {
+            identity: identity(),
+            workspace_id: "fixture".into(),
+            worktree: None,
+            cwd: "/fixture".into(),
+            shell: None,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_split_reliability_wire_deadline_transport() {
+        for stage in ["write", "flush", "read", "handshakeRead", "connect"] {
+            let (stream, mut peer) = tokio::io::duplex(4096);
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let mut tasks = tokio::task::JoinSet::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+            tasks.spawn(async move {
+                let identity = identity();
+                if stage == "connect" {
+                    return split_until(
+                        deadline,
+                        Some(&identity),
+                        "connect",
+                        SplitDelivery::NotSent,
+                        async move {
+                            let _owned_socket = stream;
+                            entered_tx.send(()).unwrap();
+                            std::future::pending::<Result<DaemonResponse, IpcError>>().await
+                        },
+                    )
+                    .await;
+                }
+                let mut writer = HeldWriter {
+                    inner: stream,
+                    stage,
+                    entered: Some(entered_tx),
+                };
+                let mut reader = HeldReader {
+                    entered: if stage == "read" || stage == "handshakeRead" {
+                        writer.entered.take()
+                    } else {
+                        None
+                    },
+                };
+                split_exchange_until(
+                    &mut reader,
+                    &mut writer,
+                    &DaemonRequest::SpawnOperationStatus {
+                        client_request_id: identity.request_id.clone(),
+                        origin_epoch: 7,
+                        expires_at_unix_ms: identity.expires_at_unix_ms,
+                    },
+                    Some(&identity),
+                    deadline,
+                    stage == "handshakeRead",
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(9)).await;
+            let error = tasks.join_next().await.unwrap().unwrap().unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::SpawnAttemptTimeout);
+            let details = error.details.unwrap();
+            assert_eq!(details["stage"], stage);
+            assert_eq!(
+                details["delivery"],
+                if stage == "connect" || stage == "handshakeRead" {
+                    "notSent"
+                } else {
+                    "ambiguous"
+                }
+            );
+            let mut discarded = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut discarded))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(tasks.is_empty());
+            eprintln!("LOCAL_SPLIT_TRANSPORT stage={stage} socket_disposed=true workers_joined=true");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_split_reliability_expired_before_write_is_not_sent() {
+        let (mut writer, mut peer) = tokio::io::duplex(64);
+        let (reader, _keepalive) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(reader);
+        let error = split_exchange_until(
+            &mut reader,
+            &mut writer,
+            &DaemonRequest::Ping,
+            Some(&identity()),
+            tokio::time::Instant::now(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.details.unwrap()["delivery"], "notSent");
+        drop(writer);
+        assert_eq!(
+            peer.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        #[cfg(unix)]
+        listener: tokio::net::UnixListener,
+        #[cfg(not(unix))]
+        listener: tokio::net::TcpListener,
+        client: DaemonClient,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("transport");
+            #[cfg(unix)]
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            #[cfg(not(unix))]
+            let listener = {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+                listener
+            };
+            Self {
+                root,
+                listener,
+                client: DaemonClient::new_with_socket(path),
+            }
+        }
+
+        async fn accept(&self, capable: bool) -> ActiveConnection {
+            let (stream, _) = self.listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let mut connection = ActiveConnection {
+                reader: BufReader::new(reader),
+                writer,
+            };
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Handshake {
+                    version: DAEMON_PROTOCOL_VERSION,
+                    ..
+                }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"handshakeOk", "version":DAEMON_PROTOCOL_VERSION,
+                "pid":1, "epoch":7, "capabilities": if capable { vec![LOCAL_SPLIT_LIFECYCLE_CAPABILITY] } else { vec![] },
+                "admissionTimeUnixMs":1000}),
+            )
+            .await;
+            connection
+        }
+    }
+
+    async fn read_request(connection: &mut ActiveConnection) -> DaemonRequest {
+        let mut line = String::new();
+        assert!(connection.reader.read_line(&mut line).await.unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn reply(connection: &mut ActiveConnection, value: serde_json::Value) {
+        connection
+            .writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn eof(connection: &mut ActiveConnection) {
+        let mut line = String::new();
+        assert_eq!(connection.reader.read_line(&mut line).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn local_split_reliability_isolated_lifecycle_bypasses_general_slot() {
+        let fixture = Fixture::new().await;
+        let general = fixture.client.connection.lock().await;
+        let interactive = fixture.client.interactive_connection.lock().await;
+        let action = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+            assert_eq!(
+                fixture
+                    .client
+                    .prepare_local_split_until(&identity().request_id, deadline)
+                    .await
+                    .unwrap(),
+                identity()
+            );
+            let error = fixture
+                .client
+                .create_local_split_until(&prepared(), deadline)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::SpawnRequestConflict);
+            assert_eq!(error.details.unwrap()["delivery"], "confirmed");
+            assert!(matches!(
+                fixture
+                    .client
+                    .local_split_status_until(&identity(), deadline)
+                    .await
+                    .unwrap(),
+                SplitOperationResult::Pending {
+                    cancel_requested: false
+                }
+            ));
+            assert!(matches!(
+                fixture
+                    .client
+                    .cancel_local_split_until(&identity(), deadline)
+                    .await
+                    .unwrap(),
+                SplitOperationResult::Pending {
+                    cancel_requested: true
+                }
+            ));
+        };
+        let peer = async {
+            let mut connection = fixture.accept(true).await;
+            eof(&mut connection).await;
+            // Create reconciles with the daemon before it writes: the create stage's first
+            // request is a status probe, and only an `absent`/`canCreate` answer lets the
+            // Spawn follow on the next dedicated connection.
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::SpawnOperationStatus { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"absent", "canCreate":true}}),
+            )
+            .await;
+            eof(&mut connection).await;
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Spawn {
+                    local_split: Some(LocalSplitEnvelope {
+                        origin_epoch: 7,
+                        remaining_ms: 1..=9000,
+                        ..
+                    }),
+                    ..
+                }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"error", "message":"conflict", "code":"SPAWN_REQUEST_CONFLICT"}),
+            )
+            .await;
+            eof(&mut connection).await;
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::SpawnOperationStatus { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"pending", "cancelRequested":false}}),
+            )
+            .await;
+            eof(&mut connection).await;
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::CancelSpawnOperation { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"pending", "cancelRequested":true}}),
+            )
+            .await;
+            eof(&mut connection).await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        assert!(!fixture.client.upgrade_requested.load(Ordering::SeqCst));
+        drop((general, interactive));
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+        eprintln!("LOCAL_SPLIT_TRANSPORT isolated=true sockets_disposed=5 cleanup=true");
+    }
+
+    #[tokio::test]
+    async fn local_split_reliability_unsupported_sends_no_create() {
+        let fixture = Fixture::new().await;
+        let action = async {
+            let error = fixture
+                .client
+                .create_local_split_until(
+                    &prepared(),
+                    tokio::time::Instant::now() + Duration::from_secs(9),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::UnsupportedCapability);
+            assert_eq!(error.details.unwrap()["delivery"], "notSent");
+        };
+        let peer = async {
+            let mut connection = fixture.accept(false).await;
+            eof(&mut connection).await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        assert!(!fixture.client.upgrade_requested.load(Ordering::SeqCst));
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_split_reliability_attach_deadline_disposes_private_socket() {
+        for handshake_stall in [true, false] {
+            let fixture = Fixture::new().await;
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let client = fixture.client.clone();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move {
+                client
+                    .attach_until(
+                        "owned-backend",
+                        None,
+                        tokio::time::Instant::now() + Duration::from_secs(4),
+                    )
+                    .await
+            });
+            let peer = async {
+                let mut connection = if handshake_stall {
+                    let (stream, _) = fixture.listener.accept().await.unwrap();
+                    let (reader, writer) = stream.into_split();
+                    let mut connection = ActiveConnection {
+                        reader: BufReader::new(reader),
+                        writer,
+                    };
+                    assert!(matches!(
+                        read_request(&mut connection).await,
+                        DaemonRequest::Handshake { .. }
+                    ));
+                    connection
+                } else {
+                    let mut connection = fixture.accept(true).await;
+                    assert!(matches!(
+                        read_request(&mut connection).await,
+                        DaemonRequest::Attach {
+                            session_id,
+                            after_sequence: None
+                        } if session_id == "owned-backend"
+                    ));
+                    connection
+                };
+                entered_tx.send(()).unwrap();
+                eof(&mut connection).await;
+            };
+            let check = async {
+                entered_rx.await.unwrap();
+                tokio::time::pause();
+                struct ResumeClock;
+                impl Drop for ResumeClock {
+                    fn drop(&mut self) {
+                        tokio::time::resume();
+                    }
+                }
+                let clock = ResumeClock;
+                tokio::time::advance(Duration::from_secs(4)).await;
+                let result = tasks.join_next().await.unwrap().unwrap();
+                drop(clock);
+                let error = match result {
+                    Err(error) => error,
+                    Ok(attachment) => {
+                        attachment.stream_task.abort();
+                        panic!("stalled attach unexpectedly succeeded");
+                    }
+                };
+                let details = error.details.unwrap();
+                assert_eq!(error.code, IpcErrorCode::SpawnAttemptTimeout);
+                assert_eq!(
+                    details["stage"],
+                    if handshake_stall {
+                        "handshakeRead"
+                    } else {
+                        "read"
+                    }
+                );
+                assert_eq!(
+                    details["delivery"],
+                    if handshake_stall {
+                        "notSent"
+                    } else {
+                        "ambiguous"
+                    }
+                );
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(peer, check);
+            })
+            .await
+            .unwrap();
+            assert!(!fixture.client.upgrade_requested.load(Ordering::SeqCst));
+            assert!(tasks.is_empty());
+            drop(fixture.listener);
+            fixture.root.close().unwrap();
+            eprintln!(
+                "LOCAL_SPLIT_TRANSPORT attach_stall=true socket_disposed=true no_close=true cleanup=true"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_split_reliability_attach_stream_outlives_deadline_and_disposes_on_drop() {
+        let fixture = Fixture::new().await;
+        let (attached_tx, attached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let action = async {
+            let attachment = fixture
+                .client
+                .attach_until(
+                    "owned-backend",
+                    Some(17),
+                    tokio::time::Instant::now() + Duration::from_secs(4),
+                )
+                .await
+                .unwrap();
+            assert_eq!(attachment.session_id, "owned-backend");
+            assert_eq!(attachment.epoch, 7);
+            attached_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            assert!(!attachment.stream_task.is_finished());
+            drop(attachment.messages);
+            attachment.stream_task.await.unwrap();
+        };
+        let peer = async {
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Attach {
+                    after_sequence: Some(17),
+                    ..
+                }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"attachOk", "epoch":7, "sessionId":"owned-backend",
+                "startSequence":17, "endSequence":17, "gap":null, "history":"", "historySegments":[],
+                "ptyCols":80, "ptyRows":24, "remoteGeneration":null}),
+            )
+            .await;
+            attached_rx.await.unwrap();
+            tokio::time::pause();
+            struct ResumeClock;
+            impl Drop for ResumeClock {
+                fn drop(&mut self) {
+                    tokio::time::resume();
+                }
+            }
+            let clock = ResumeClock;
+            tokio::time::advance(Duration::from_secs(10)).await;
+            let mut byte = [0_u8; 1];
+            std::future::poll_fn(|cx| {
+                let mut buffer = tokio::io::ReadBuf::new(&mut byte);
+                match tokio::io::AsyncRead::poll_read(
+                    Pin::new(&mut connection.reader),
+                    cx,
+                    &mut buffer,
+                ) {
+                    Poll::Pending => Poll::Ready(()),
+                    Poll::Ready(result) => panic!(
+                        "attachment lost its write half or sent unexpected control: {result:?}"
+                    ),
+                }
+            })
+            .await;
+            drop(clock);
+            release_tx.send(()).unwrap();
+            eof(&mut connection).await;
+        };
+        tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        assert!(!fixture.client.upgrade_requested.load(Ordering::SeqCst));
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+        eprintln!(
+            "LOCAL_SPLIT_TRANSPORT attach_stream_retained=true receiver_drop_disposes=true cleanup=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_split_reliability_lost_create_reply_is_ambiguous_without_retry() {
+        let fixture = Fixture::new().await;
+        let action = async {
+            let error = fixture
+                .client
+                .create_local_split_until(
+                    &prepared(),
+                    tokio::time::Instant::now() + Duration::from_secs(9),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.details.unwrap()["delivery"], "ambiguous");
+            assert!(matches!(
+                fixture
+                    .client
+                    .local_split_status_until(
+                        &identity(),
+                        tokio::time::Instant::now() + Duration::from_secs(9)
+                    )
+                    .await
+                    .unwrap(),
+                SplitOperationResult::Pending { .. }
+            ));
+        };
+        let peer = async {
+            // The create stage reconciles first: one status probe, then exactly one Spawn write.
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::SpawnOperationStatus { .. }
+            ));
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"absent", "canCreate":true}}),
+            )
+            .await;
+            eof(&mut connection).await;
+            let mut connection = fixture.accept(true).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Spawn { .. }
+            ));
+            drop(connection);
+            let mut connection = fixture.accept(true).await;
+            assert!(
+                matches!(
+                    read_request(&mut connection).await,
+                    DaemonRequest::SpawnOperationStatus { .. }
+                ),
+                "Create was retransmitted"
+            );
+            reply(
+                &mut connection,
+                json!({"type":"spawnOperationOk", "operation":{"state":"pending", "cancelRequested":false}}),
+            )
+            .await;
+            eof(&mut connection).await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
     }
 }

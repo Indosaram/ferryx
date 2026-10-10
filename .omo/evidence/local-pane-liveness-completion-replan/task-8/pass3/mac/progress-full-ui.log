@@ -1,0 +1,15 @@
+{"at":"2026-10-04T06:30:45.605Z","bytes":4930,"lastFile":null}
+{"at":"2026-10-04T06:31:15.604Z","bytes":4930,"lastFile":null}
+{"at":"2026-10-04T06:31:45.604Z","bytes":4930,"lastFile":null}
+{"at":"2026-10-04T06:32:15.605Z","bytes":4930,"lastFile":null}
+{"at":"2026-10-04T06:32:45.607Z","bytes":102664,"lastFile":"✓ src/lib/sessionPersistence.test.ts (44 tests) 22ms"}
+{"at":"2026-10-04T06:33:15.609Z","bytes":177771,"lastFile":"✓ src/remote/remoteAppChatFrames.test.tsx (13 tests) 585ms"}
+{"at":"2026-10-04T06:33:45.612Z","bytes":240192,"lastFile":"✓ src/lib/browserTauri.test.ts (26 tests) 8ms"}
+{"at":"2026-10-04T06:34:15.614Z","bytes":250475,"lastFile":"✓ src/lib/directPathUpgrade.test.ts (42 tests) 14ms"}
+{"at":"2026-10-04T06:34:45.616Z","bytes":258225,"lastFile":"✓ src/components/FilePreviewVideo.test.tsx (9 tests) 75ms"}
+{"at":"2026-10-04T06:35:15.619Z","bytes":265564,"lastFile":"✓ src/components/BrowserPane.parity.test.tsx (5 tests) 120ms"}
+{"at":"2026-10-04T06:35:45.621Z","bytes":268142,"lastFile":"✓ src/remote/resolveAccountOriginRetention.test.ts (11 tests) 6ms"}
+{"at":"2026-10-04T06:36:15.623Z","bytes":271019,"lastFile":"✓ src/lib/shellReplacement.test.ts (5 tests) 5ms"}
+{"at":"2026-10-04T06:36:45.625Z","bytes":276773,"lastFile":"✓ src/components/DaemonConnectionBanner.test.tsx (3 tests) 43ms"}
+{"at":"2026-10-04T06:37:15.632Z","bytes":281559,"lastFile":"✓ src/features/ferryx/chat/ManagedChat.test.tsx (1 test) 31ms"}
+{"at":"2026-10-04T06:37:45.629Z","bytes":282941,"lastFile":"✓ src/features/ferryx/ssh/components.test.tsx (2 tests) 53ms"}

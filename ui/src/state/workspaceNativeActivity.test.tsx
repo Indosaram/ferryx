@@ -2,6 +2,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
+import { setLocalSplitPersistence } from "../lib/localSplitLifecycle";
+import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 
 import type { NativeTerminalAgentStatePayload, NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
 
@@ -64,8 +66,34 @@ function services(): WorkspaceServices {
     getTerminalCwd: vi.fn(async () => worktree.path),
     closeTerminal: vi.fn(async () => undefined),
     waitForTerminalExit: vi.fn(async () => undefined),
+    splitOperation: async (request) => {
+      await Promise.resolve();
+      if (request.action === "prepare") return { action: "prepare", prepared: {
+        identity: { requestId: request.requestId, originEpoch: "7", expiresAtUnixMs: Date.now() + 60_000 },
+        workspaceId: request.request.workspaceId, worktree: request.request.worktree,
+        cwd: worktree.path, shell: null, cols: 80, rows: 24,
+      } };
+      return { action: request.action, operation: request.action === "cancel"
+        ? { state: "cancelled" } : { state: "absent", canCreate: true } };
+    },
+    splitCreate: async () => {
+      const sessionId = `backend-${backendCounter++}`;
+      return { sessionId, daemonEpoch: "7", session: { sessionId, incarnation: `life:${sessionId}`,
+        cwd: worktree.path, cols: 80, rows: 24, running: true } };
+    },
+    splitAttach: async (request) => {
+      await Promise.resolve();
+      const sessionId = typeof request === "string" ? request : request.sessionId;
+      const attachTuple = getDurableNativeBinding(sessionId)!;
+      expect(persistedSessions.get(attachTuple.frontendSessionId)?.spawnIntent?.attachTuple).toEqual(attachTuple);
+      emitNativeTerminalPresentation(attachTuple);
+      return { sessionId, daemonEpoch: "7", historyStartSequence: null,
+        historyEndSequence: null, history: "", gap: null, attachTuple };
+    },
   };
 }
+
+const persistedSessions = new Map<string, import("../lib/types").TerminalSession>();
 
 function emitNativeTitle(payload: NativeTerminalTitlePayload): void {
   for (const listener of nativeListeners.title) listener(payload);
@@ -84,8 +112,14 @@ function emitNativeFocus(sessionId: string): void {
 }
 
 describe("workspace store native activity subscription", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { setLocalSplitPersistence(undefined); vi.restoreAllMocks(); });
   beforeEach(() => {
+    persistedSessions.clear();
+    resetNativeTerminalLifecycleForTest();
+    setLocalSplitPersistence(async owner => {
+      await Promise.resolve();
+      persistedSessions.set(owner.id, structuredClone(owner));
+    });
     clearWorkspaceSnapshot();
     clearHmrWorkspaceState();
     nativeListeners.title.clear();

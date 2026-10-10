@@ -403,6 +403,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       writeFileSync(dummyApp, "MOCK_APP_CONTENT");
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
 
       return {
         exitCode: 0,
@@ -425,7 +426,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
 
     assert.equal(receipt.host, "macbook");
     assert.equal(receipt.exitCode, 0);
-    assert.equal(receipt.artifacts.length, 2);
+    assert.equal(receipt.artifacts.length, 3);
 
     const receiptPath = join(runDir, "receipts", "build-receipt-macbook.json");
     assert.ok(existsSync(receiptPath));

@@ -1,13 +1,14 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 #[cfg(test)]
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
-    DaemonResponse, DaemonStreamMessage, HistorySegmentWire, TerminalStartup,
+    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire, TerminalStartup,
     DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
@@ -18,7 +19,6 @@ use crate::remote::state::{
 use crate::session::{clear_session_from_path, load_session_from_path, save_session_to_path};
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
-use super::session_service::*;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::borrow::Cow;
@@ -38,6 +38,317 @@ use tokio::net::UnixListener;
 #[cfg(all(test, unix))]
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
+
+async fn rollback_transferred_readers<R, A, D>(
+    relinquish: R,
+    abort: impl FnOnce() -> A,
+    decision: impl FnOnce() -> D,
+) -> Result<(), String>
+where
+    R: std::future::Future<Output = Result<(), String>>,
+    A: std::future::Future<Output = Result<DaemonResponse, String>>,
+    D: std::future::Future<Output = Result<Option<super::handover_transaction::HandoverState>, String>>,
+{
+    relinquish.await?;
+    match abort().await {
+        Ok(DaemonResponse::AbortHandoverOk) => Ok(()),
+        response => match decision().await? {
+            Some(super::handover_transaction::HandoverState::Active) => Ok(()),
+            _ => Err(format!("Abort decision is unconfirmed: {response:?}; predecessor must not resume")),
+        },
+    }
+}
+
+/// Installs the ownership record a predecessor exported for one session, after proving that the
+/// record agrees with the predecessor's own describe answer.
+///
+/// The successor has never spawned this session, so its own registry can never be the authority
+/// for it: the exported record is the only carrier of the workspace/worktree identity and of the
+/// client-request ownership a transferred session keeps, and installing it is what makes this
+/// daemon an authoritative owner *before* it takes the PTY master. A record that disagrees with the
+/// predecessor's declaration, or is missing, refuses the session so the predecessor keeps it.
+fn adopt_transferred_ownership(
+    metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
+    session_id: &str,
+    declared: &DaemonSessionDetails,
+    exported: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if declared.incarnation.as_deref().is_none_or(str::is_empty) {
+        return Err(format!(
+            "Predecessor declares no lifetime incarnation for '{session_id}'; source retained"
+        ));
+    }
+    let Some(workspace_id) = declared.workspace_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Err(format!("Missing authoritative workspace owner of '{session_id}'"));
+    };
+    let Some(exported) = exported else {
+        return Err(format!(
+            "Predecessor exported no authoritative owner record for '{session_id}'; source retained"
+        ));
+    };
+    let owner: StoredSessionMeta = serde_json::from_value(exported).map_err(|error| {
+        format!("Predecessor exported an unreadable owner record for '{session_id}': {error}")
+    })?;
+    if owner.workspace_id != workspace_id || owner.worktree != declared.worktree {
+        return Err(format!(
+            "Export workspace domain does not match the predecessor's declaration for '{session_id}'; source retained"
+        ));
+    }
+    metadata.write().insert(session_id.to_owned(), owner);
+    Ok(())
+}
+
+/// Drops the ownership records a successor installed for sessions it handed back to the
+/// predecessor: a relinquished session must not leave this daemon claiming its workspace.
+fn release_adopted_ownership(
+    metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
+    session_ids: &[String],
+) {
+    let mut records = metadata.write();
+    for session_id in session_ids {
+        records.remove(session_id);
+    }
+}
+
+#[cfg(test)]
+mod pane_reader_rollback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_relinquishes_before_predecessor_resume() {
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let relinquished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_state = relinquished.clone();
+        let abort_state = relinquished.clone();
+        let rollback = rollback_transferred_readers(async move {
+            entered.send(()).unwrap();
+            released.await.unwrap();
+            reader_state.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }, move || async move {
+            assert!(abort_state.load(std::sync::atomic::Ordering::Acquire));
+            Ok(DaemonResponse::AbortHandoverOk)
+        }, || async { Ok(None) });
+        let trigger = async move { started.await.unwrap(); release.send(()).unwrap(); };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(rollback, trigger)
+        }).await.unwrap();
+        result.unwrap();
+        assert!(relinquished.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_failed_relinquish_never_sends_abort() {
+        let result = rollback_transferred_readers(async { Err("reader still owns handle".into()) },
+            || async { panic!("predecessor must remain frozen") }, || async { Ok(None) }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_ambiguous_abort_never_confirms_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("undecided.sock");
+        let result = rollback_transferred_readers(async { Ok(()) },
+            || async { Err("abort delivery ambiguous".into()) },
+            || async { HandoverManager::recorded_decision(&path) }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_reader_rollback_decided_ambiguous_reads_recorded_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy.sock");
+        let identity = path.to_string_lossy().into_owned();
+        let mut transaction = super::super::handover_transaction::HandoverTransaction::new_simple(
+            &identity, &identity, 1, 1, 2, 2, &identity);
+        transaction.rollback_reason = Some("abort".into());
+        std::fs::write(path.with_extension("transaction"), serde_json::to_vec(&transaction).unwrap()).unwrap();
+        rollback_transferred_readers(async { Ok(()) }, || async { Err("lost ACK".into()) },
+            || async { HandoverManager::recorded_decision(&path) }).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pane_liveness_adopted_ownership_tests {
+    use super::*;
+
+    fn worktree(slug: &str) -> WorktreeIdentity {
+        WorktreeIdentity {
+            ws_id: "ws-declared".into(),
+            slug: slug.into(),
+        }
+    }
+
+    fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
+        StoredSessionMeta {
+            machine_session: None,
+            client_request_id: format!("req-{workspace_id}"),
+            workspace_id: workspace_id.to_owned(),
+            worktree: worktree.clone(),
+            cwd: PathBuf::from("/repo"),
+            provider_claim: None,
+            spawn_fingerprint: SpawnRequestFingerprint {
+                workspace_id: workspace_id.to_owned(),
+                worktree,
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                shell: None,
+                provider_claim: None,
+                startup: None,
+                requested_session_id: None,
+            },
+        }
+    }
+
+    fn declared(
+        workspace_id: Option<&str>,
+        worktree: Option<WorktreeIdentity>,
+        incarnation: Option<&str>,
+    ) -> DaemonSessionDetails {
+        let mut details = DaemonSessionDetails::new(
+            "session-owned".into(),
+            workspace_id.map(str::to_owned),
+            worktree,
+            Some("/repo".into()),
+            80,
+            24,
+            true,
+            None,
+            None,
+            None,
+            false,
+        );
+        details.incarnation = incarnation.map(str::to_owned);
+        details
+    }
+
+    fn metadata() -> RwLock<HashMap<String, StoredSessionMeta>> {
+        RwLock::new(HashMap::new())
+    }
+
+    /// The successor has no record of its own for a session it never spawned, so the record the
+    /// predecessor exports is the one that must end up owning the session here.
+    #[test]
+    fn pane_liveness_adoption_installs_the_exported_owner_record() {
+        let metadata = metadata();
+        let record = owner_record("ws-declared", None);
+        adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            Some(serde_json::to_value(&record).unwrap()),
+        )
+        .expect("an exported record that matches the declaration is adopted");
+        let installed = metadata
+            .read()
+            .get("session-owned")
+            .cloned()
+            .expect("the adopted session must have an authoritative workspace owner");
+        assert_eq!(installed.workspace_id, "ws-declared");
+        assert_eq!(installed.client_request_id, "req-ws-declared");
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_record_from_another_workspace() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            Some(serde_json::to_value(owner_record("ws-other", None)).unwrap()),
+        );
+        assert!(result.is_err(), "an export outside the declared workspace is refused");
+        assert!(
+            metadata.read().is_empty(),
+            "a refused session must not leave a workspace owner behind"
+        );
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_worktree_domain_mismatch() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(
+                Some("ws-declared"),
+                Some(worktree("main")),
+                Some("incarnation-a"),
+            ),
+            Some(
+                serde_json::to_value(owner_record("ws-declared", Some(worktree("other"))))
+                    .unwrap(),
+            ),
+        );
+        assert!(result.is_err(), "a different worktree is a different identity domain");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_missing_owner_record() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, Some("incarnation-a")),
+            None,
+        );
+        assert!(result.is_err(), "a session with no exported record cannot be owned");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_predecessor_without_an_incarnation() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(Some("ws-declared"), None, None),
+            Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+        );
+        assert!(result.is_err(), "an unprovable incarnation is not an identity domain");
+        assert!(metadata.read().is_empty());
+    }
+
+    #[test]
+    fn pane_liveness_adoption_refuses_a_declaration_without_a_workspace_owner() {
+        let metadata = metadata();
+        let result = adopt_transferred_ownership(
+            &metadata,
+            "session-owned",
+            &declared(None, None, Some("incarnation-a")),
+            Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+        );
+        assert!(
+            result.is_err(),
+            "a session with no declared workspace owner cannot be adopted"
+        );
+        assert!(metadata.read().is_empty());
+    }
+
+    /// Relinquishing a session hands it back to the predecessor; keeping the installed record would
+    /// leave this daemon claiming a workspace it does not own.
+    #[test]
+    fn pane_liveness_relinquished_sessions_lose_their_installed_ownership() {
+        let metadata = metadata();
+        for session in ["session-a", "session-b"] {
+            adopt_transferred_ownership(
+                &metadata,
+                session,
+                &declared(Some("ws-declared"), None, Some("incarnation-a")),
+                Some(serde_json::to_value(owner_record("ws-declared", None)).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(metadata.read().len(), 2);
+        release_adopted_ownership(&metadata, &["session-a".to_string()]);
+        let remaining = metadata.read();
+        assert!(!remaining.contains_key("session-a"));
+        assert!(remaining.contains_key("session-b"));
+    }
+}
 
 /// Returns the compile-time development profile. Debug builds isolate session state and daemon
 /// endpoints so a release GUI cannot attach to a dev daemon; release paths remain byte-identical.
@@ -1116,6 +1427,7 @@ pub struct DaemonServer {
     paired_hosts: crate::paired_host::service::PairedHostService,
     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
     pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
+    resource_sampler: Arc<crate::daemon::resource_usage::ResourceSampler>,
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
     remote_state: Arc<RemoteGatewayState>,
@@ -1705,6 +2017,22 @@ fn daemon_error(message: impl ToString) -> DaemonResponse {
     }
 }
 
+/// Maps a handover failure to its typed outcome. A refusal produced by the in-flight spawn
+/// gate is the retryable busy outcome -- `HandoverRejected` carrying the guard identity in
+/// `reason` -- because the gate reopens as soon as that spawn's guard drops, and the caller
+/// (the installer's upgrade poll, the desktop staleness probe) is expected to retry rather
+/// than treat the handover as structurally failed. Every other failure stays a generic
+/// error, prefixed with `context` when one is given.
+fn handover_failure_response(context: Option<&str>, message: String) -> DaemonResponse {
+    if crate::daemon::handover::is_spawn_gate_busy(&message) {
+        return DaemonResponse::HandoverRejected { reason: message };
+    }
+    match context {
+        Some(context) => daemon_error(format!("{context}: {message}")),
+        None => daemon_error(message),
+    }
+}
+
 fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
     DaemonResponse::Error {
         message: format!("Session '{session_id}' not found"),
@@ -1832,6 +2160,21 @@ impl DaemonServer {
             Arc::clone(&pty_manager),
             Arc::clone(&output_hub),
         ));
+        #[cfg(windows)]
+        {
+            // Windows has no supported way to observe a stop, so the suspension backend
+            // proves ownership against this daemon's own PTY registry rather than
+            // trusting a caller-supplied PID.
+            let ownership = Arc::clone(&terminal_service);
+            crate::terminal::install_ownership_verifier(move |pid, incarnation| {
+                ownership.list_sessions().into_iter().any(|session_id| {
+                    ownership.get_session(&session_id).is_some_and(|session| {
+                        session.pid() == Some(pid)
+                            && session.incarnation() == Some(incarnation)
+                    })
+                })
+            });
+        }
         let session_router = Arc::new(crate::daemon::proxy::SessionRouter::new(Arc::clone(
             &terminal_service,
         )));
@@ -1861,7 +2204,12 @@ impl DaemonServer {
                 .join()
                 .expect("workspace catalog initialization panicked")
         });
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
         let session_service = Arc::new(DaemonSessionService {
+            epoch,
             workspace_service,
             terminal_service: Arc::clone(&terminal_service),
             session_router: Arc::clone(&session_router),
@@ -1870,6 +2218,7 @@ impl DaemonServer {
             agent_states: Arc::new(AgentStateHub::default()),
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            split_admission: Mutex::new(HashMap::new()),
             machine_controllers: tokio::sync::Mutex::new(HashMap::new()),
             machine_lifecycles: Arc::new(Mutex::new(HashMap::new())),
             remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1924,11 +2273,6 @@ impl DaemonServer {
                 .unwrap_or_else(|_| unreachable!("gateway not published yet"))
                 .with_machine_services(Arc::clone(&session_service)),
         );
-
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(1);
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -1987,6 +2331,7 @@ impl DaemonServer {
             paired_hosts,
             session_router,
             handover_manager,
+            resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
             terminal_service,
             workspace_registry,
             remote_state,
@@ -2066,6 +2411,34 @@ impl DaemonServer {
     #[cfg(test)]
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
+    }
+
+    async fn describe_session_identity(&self, session_id: &str) -> DaemonResponse {
+        if self.session_router.is_local_session(session_id) {
+            match self.handle_describe_session(session_id) {
+                DaemonResponse::DescribeSessionOk { mut session, .. } => {
+                    if let Some(pid) = self.terminal_service.get_session(session_id).and_then(|s| s.pid()) {
+                        session.cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
+                            Ok(crate::ipc::terminal::process_cwd(pid))
+                        }).await.ok().flatten().map(|path| path.to_string_lossy().into_owned());
+                    }
+                    DaemonResponse::DescribeSessionOk {
+                        session,
+                        daemon_epoch: Some(self.epoch.to_string()),
+                    }
+                }
+                other => other,
+            }
+        } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(session_id) {
+            match peer.describe_session_identity(session_id).await {
+                Ok((session, daemon_epoch)) => DaemonResponse::DescribeSessionOk {
+                    session, daemon_epoch,
+                },
+                Err(message) => daemon_error(message),
+            }
+        } else {
+            daemon_session_not_found(session_id, "daemon_describe")
+        }
     }
 
     /// The loopback TCP endpoint (`port`, bearer `token`) the agent-state ingress bound, or
@@ -2489,6 +2862,22 @@ impl DaemonServer {
         });
     }
 
+    /// Records why this daemon is going away, then flushes the state that outlives it.
+    ///
+    /// Local PTYs die with the process, so the only durable state worth writing is the remote
+    /// session table: it is what lets a successor re-attach those sessions to the same ids. The
+    /// reason is written first because a daemon death with no record at all is the state the
+    /// 2026-10-07 incident had to be reconstructed from, and it could not be.
+    pub async fn shutdown_gracefully(&self, reason: &str) {
+        tracing::warn!(reason, "Daemon shutting down");
+        if let Err(message) = self
+            .persist_remote_sessions_at(self.remote_sessions_path.clone())
+            .await
+        {
+            tracing::error!(%message, "Failed to persist remote sessions while shutting down");
+        }
+    }
+
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
         self.run_server_with_handover_and_readiness(None, None)
             .await
@@ -2509,6 +2898,9 @@ impl DaemonServer {
     ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
+
+        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+        crate::daemon::qa_producers::install_and_start(&self).await;
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
@@ -2543,6 +2935,20 @@ impl DaemonServer {
                 };
 
                 let transfer_id = uuid::Uuid::new_v4().to_string();
+                let mut expected_owners = HashMap::new();
+                for session_id in &listed {
+                    let response = legacy_peer.send_request(&DaemonRequest::DescribeSession {
+                        session_id: session_id.clone(),
+                    }).await?;
+                    if let DaemonResponse::DescribeSessionOk { session, .. } = response {
+                        expected_owners.insert(session_id.clone(), session);
+                    }
+                }
+                let mut adopted_sessions = Vec::new();
+                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                let mut adopted_records: Vec<crate::daemon::qa_producers::HandoverSessionRecord> =
+                    Vec::new();
+                let mut commit_started = false;
                 let handover_socket_path =
                     crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
                 let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(
@@ -2558,8 +2964,8 @@ impl DaemonServer {
                     // is what turns a transport hiccup into dead terminals. Surface the error
                     // instead, and let the caller decide whether the handover may proceed.
                     loop {
-                        match crate::daemon::handover_socket::recv_session(&stream) {
-                            Ok(Some(export)) => exports.push(export),
+                        match crate::daemon::handover_socket::recv_session_with_owner(&stream) {
+                            Ok(Some(frame)) => exports.push(frame),
                             Ok(None) => break,
                             Err(error) => return Err((error, exports.len())),
                         }
@@ -2567,7 +2973,7 @@ impl DaemonServer {
                     Ok::<_, (crate::daemon::handover_socket::HandoverSocketError, usize)>(exports)
                 });
 
-                let transfer_outcome: Result<usize, String> = async {
+                let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
                     let transfer_resp = legacy_peer
                         .send_request(&DaemonRequest::TransferSessions {
                             handover_socket_path: handover_socket_path
@@ -2595,7 +3001,7 @@ impl DaemonServer {
                         })?;
                     let accepted = exports.len();
                     let exported: std::collections::HashSet<String> =
-                        exports.iter().map(|e| e.session_id.clone()).collect();
+                        exports.iter().map(|(export, _owner)| export.session_id.clone()).collect();
                     let durable_path = self.remote_sessions_path.clone();
                     let durable = crate::ipc::run_blocking(move || {
                         if !durable_path.exists() {
@@ -2678,15 +3084,68 @@ impl DaemonServer {
                         return Err(reason);
                     }
 
-                    for export in exports {
+                    for (export, owner) in exports {
                         tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
                         let (master, snapshot) = export.into_parts();
                         let session_id = snapshot.session_id.clone();
-                        let output_rx = self
+                        let expected = expected_owners.get(&session_id).ok_or_else(||
+                            format!("Predecessor cannot prove identity domain of '{session_id}'"))?;
+                        if expected.incarnation.is_none() || expected.incarnation != snapshot.incarnation {
+                            return Err(format!("Predecessor incarnation does not match export '{session_id}'; source retained"));
+                        }
+                        // This daemon has never spawned the session, so it holds no spawn record of
+                        // its own: ownership transfers only through the record the predecessor
+                        // exported, checked against the predecessor's own describe answer. Until
+                        // that record is installed here this daemon is not an authoritative owner
+                        // and must not take the PTY master.
+                        adopt_transferred_ownership(&self.session_metadata, &session_id, expected, owner)?;
+                        self.terminal_service.pty_manager().expect_transferred_owner(snapshot.clone())
+                            .map_err(|error| {
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
+                                error.to_string()
+                            })?;
+                        let output_rx = match self
                             .terminal_service
                             .pty_manager()
                             .adopt_transferred_session(master, snapshot)
-                            .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                        {
+                            Ok(output_rx) => output_rx,
+                            Err(error) => {
+                                // The session stays with the predecessor, so this daemon must not
+                                // keep claiming its workspace, nor keep the predecessor identity it
+                                // installed just above: only a successful adopt removes that entry,
+                                // so leaving it would hold the moved snapshot for the daemon's
+                                // lifetime.
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(&session_id));
+                                self.terminal_service.pty_manager().forget_transferred_owner(&session_id);
+                                return Err(format!("Failed to adopt transferred session: {error}"));
+                            }
+                        };
+                        adopted_sessions.push(session_id.clone());
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        {
+                            let mut record =
+                                crate::daemon::qa_producers::HandoverSessionRecord::new(
+                                    session_id.clone(),
+                                    expected.incarnation.clone(),
+                                );
+                            record.adopted_incarnation =
+                                crate::daemon::qa_producers::describe_incarnation(self.as_ref(), &session_id);
+                            record.adopted_readers_installed = 1;
+                            record.adopted_reader_live =
+                                crate::daemon::qa_producers::adopted_reader_live(
+                                    &self.terminal_service,
+                                    &session_id,
+                                );
+                            adopted_records.push(record);
+                            if let Some(channel) = crate::daemon::qa_producers::channel().await {
+                                crate::daemon::qa_producers::note_successor_adopt_off_runtime(
+                                    &channel,
+                                    &session_id,
+                                )
+                                .await;
+                            }
+                        }
                         // The receiver must be held and pumped for as long as the adopted child runs.
                         // Dropping it here marks the session's output channel closed, and the lifecycle
                         // watcher would then close the session -- terminating the very child this
@@ -2694,6 +3153,18 @@ impl DaemonServer {
                         self.terminal_service.pump_adopted_output(session_id, output_rx);
                     }
 
+                    #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                    {
+                        if crate::daemon::qa_producers::abort_after_adopt_requested() {
+                            // The runner's partial-adopt abort variant: the sessions really
+                            // arrived and were really adopted, so the rollback below is the
+                            // production relinquish-then-resume path, not a simulated one.
+                            return Err("QA-injected abort after adopt".to_string());
+                        }
+                    }
+
+                    commit_started = true;
+                    let commit_started_at = tokio::time::Instant::now();
                     let commit_resp = legacy_peer
                         .send_request(&DaemonRequest::CommitHandover {
                             legacy_socket_path: None,
@@ -2703,16 +3174,48 @@ impl DaemonServer {
                     if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                         return Err(format!("CommitHandover failed: {commit_resp:?}"));
                     }
-                    Ok::<usize, String>(accepted)
+                    let commit_latency_ms = commit_started_at.elapsed().as_millis() as u64;
+                    Ok::<(usize, usize, usize, u64), String>((
+                        offered,
+                        accepted,
+                        restorable,
+                        commit_latency_ms,
+                    ))
                 }
                 .await;
 
                 match transfer_outcome {
-                    Ok(accepted) => {
+                    Ok((offered, accepted, restorable, commit_latency_ms)) => {
                         tracing::info!(
                             accepted,
+                            offered,
+                            restorable,
+                            commit_latency_ms,
                             "Handover committed after adopting the transferred sessions"
                         );
+                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                        {
+                            if let Some(channel) = crate::daemon::qa_producers::channel().await {
+                                crate::daemon::qa_producers::observe_reader_state(
+                                    &self.terminal_service,
+                                    &mut adopted_records,
+                                );
+                                crate::daemon::qa_producers::emit_handover_transfer_off_runtime(
+                                    &channel,
+                                    &transfer_id,
+                                    &legacy_path,
+                                    self.epoch(),
+                                    crate::daemon::qa_producers::HandoverAccounting {
+                                        offered,
+                                        accepted,
+                                        restorable,
+                                    },
+                                    commit_latency_ms,
+                                    &adopted_records,
+                                )
+                                .await;
+                            }
+                        }
                         if let Err(error) = self
                             .restore_remote_sessions_at(self.remote_sessions_path.clone())
                             .await
@@ -2721,15 +3224,80 @@ impl DaemonServer {
                         }
                     }
                     Err(reason) => {
-                        let abort_resp = legacy_peer
-                            .send_request(&DaemonRequest::AbortHandover)
-                            .await;
-                        match abort_resp {
-                            Ok(DaemonResponse::AbortHandoverOk) => {
+                        if commit_started {
+                            let path = legacy_path.clone();
+                            let decision = crate::ipc::run_blocking(move ||
+                                HandoverManager::recorded_decision(&path).map_err(crate::ipc::IpcError::internal))
+                                .await.map_err(|error| error.to_string())?;
+                            if decision == Some(super::handover_transaction::HandoverState::Retired) {
+                                tracing::info!("Recovered committed handover from recorded transaction decision");
+                            } else {
+                                for session_id in &adopted_sessions {
+                                    self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
+                                        .await.map_err(|error| error.to_string())?;
+                                    release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
+                                }
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel().await {
+                                        crate::daemon::qa_producers::observe_reader_state(
+                                            &self.terminal_service,
+                                            &mut adopted_records,
+                                        );
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment_off_runtime(
+                                            &channel,
+                                            &transfer_id,
+                                            &legacy_path,
+                                            self.epoch(),
+                                            &adopted_records,
+                                            false,
+                                            &reason,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                return Err(format!("{reason}; recorded decision: {decision:?}"));
+                            }
+                        } else {
+                        let rollback = rollback_transferred_readers(async {
+                            for session_id in &adopted_sessions {
+                                self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
+                                    .await.map_err(|failure| format!("{reason}; relinquish failed: {failure}; predecessor remains frozen"))?;
+                                release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
+                            }
+                            Ok(())
+                        }, || async {
+                            legacy_peer.send_request(&DaemonRequest::AbortHandover).await
+                        }, || async {
+                            let path = legacy_path.clone();
+                            crate::ipc::run_blocking(move || HandoverManager::recorded_decision(&path)
+                                .map_err(crate::ipc::IpcError::internal)).await.map_err(|error| error.to_string())
+                        }).await;
+                        match rollback {
+                            Ok(()) => {
                                 tracing::warn!(
                                     %reason,
                                     "Handover transfer aborted; predecessor confirmed AbortHandover and resumed serving sessions"
                                 );
+                                #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                {
+                                    if let Some(channel) = crate::daemon::qa_producers::channel().await {
+                                        crate::daemon::qa_producers::observe_reader_state(
+                                            &self.terminal_service,
+                                            &mut adopted_records,
+                                        );
+                                        crate::daemon::qa_producers::emit_rollback_relinquishment_off_runtime(
+                                            &channel,
+                                            &transfer_id,
+                                            &legacy_path,
+                                            self.epoch(),
+                                            &adopted_records,
+                                            true,
+                                            &reason,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                             other => {
                                 tracing::error!(
@@ -2740,6 +3308,7 @@ impl DaemonServer {
                             }
                         }
                         return Err(reason);
+                        }
                     }
                 }
             } else {
@@ -2874,6 +3443,23 @@ impl DaemonServer {
         Ok(())
     }
 
+    fn resource_probes(&self) -> Vec<crate::daemon::resource_usage::SessionProbe> {
+        self.terminal_service
+            .list_sessions()
+            .into_iter()
+            .filter_map(|session_id| {
+                let session = self.terminal_service.get_session(&session_id)?;
+                Some(crate::daemon::resource_usage::SessionProbe {
+                    session_id,
+                    pid: session.pid(),
+                    worktree_path: session
+                        .worktree_path()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+            })
+            .collect()
+    }
+
     pub async fn handle_client<S>(self: Arc<Self>, stream: S)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -2944,10 +3530,26 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string()],
+                            admission_time_unix_ms: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                            ),
                         }
                     }
                 }
                 Ok(DaemonRequest::Ping) => DaemonResponse::Pong,
+                Ok(DaemonRequest::ResourceUsage) => {
+                    let probes = self.resource_probes();
+                    let sampler = Arc::clone(&self.resource_sampler);
+                    let runtime_dir = get_runtime_dir();
+                    match crate::ipc::run_blocking(move || Ok(sampler.sample(&probes, &runtime_dir))).await {
+                        Ok(snapshot) => DaemonResponse::ResourceUsageOk { snapshot },
+                        Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -3109,9 +3711,26 @@ impl DaemonServer {
                     rows,
                     shell,
                     startup,
+                    local_split,
+                    session_id: requested_session_id,
                 }) => {
-                    let res = self
-                        .handle_spawn(
+                    if let Some(envelope) = local_split {
+                        if startup.is_some() {
+                            daemon_error("Local split does not accept agent startup")
+                        } else {
+                            match self.session_service.create_split(&client_request_id,
+                                &workspace_id, worktree, cwd, cols, rows, shell, envelope, self.epoch).await {
+                                Ok(crate::daemon::protocol::SplitOperationResult::Created {
+                                    session_id, daemon_epoch, session, ..
+                                }) => DaemonResponse::SpawnOk { session_id, epoch: daemon_epoch, session },
+                                Ok(operation) => DaemonResponse::SpawnOperationOk { operation },
+                                Err(error) => DaemonResponse::Error { message: error.message,
+                                    code: Some(error.code.to_string()), details: error.details },
+                            }
+                        }
+                    } else {
+                    let res = self.session_service
+                        .handle_spawn_requested(
                             &client_request_id,
                             &workspace_id,
                             worktree,
@@ -3120,11 +3739,14 @@ impl DaemonServer {
                             rows,
                             shell,
                             startup,
+                            requested_session_id,
+                            #[cfg(test)]
+                            self.helper_home.clone(),
                         )
                         .await;
                     match res {
                         Ok(session_id) => match self.handle_describe_session(&session_id) {
-                            DaemonResponse::DescribeSessionOk { session } => {
+                            DaemonResponse::DescribeSessionOk { session, .. } => {
                                 DaemonResponse::SpawnOk {
                                     session_id,
                                     epoch: self.epoch,
@@ -3148,7 +3770,30 @@ impl DaemonServer {
                         Err(SpawnError::InvalidAgentResume(message)) => {
                             DaemonResponse::AgentResumeInvalid { message }
                         }
+                        Err(SpawnError::Structured(error)) => DaemonResponse::Error {
+                            message: error.message,
+                            code: Some(error.code.to_string()),
+                            details: error.details,
+                        },
                         Err(e) => daemon_error(e.to_string(),),
+                    }
+                    }
+                }
+                Ok(DaemonRequest::SpawnOperationStatus { client_request_id, origin_epoch, expires_at_unix_ms }) => {
+                    match self.session_service.split_status(&client_request_id, origin_epoch, self.epoch, expires_at_unix_ms).await {
+                        Ok(operation) => DaemonResponse::SpawnOperationOk { operation },
+                        Err(error) => daemon_error(error.message),
+                    }
+                }
+                Ok(DaemonRequest::CancelSpawnOperation { client_request_id, origin_epoch, expires_at_unix_ms: _ }) => {
+                    match tokio::time::timeout(Duration::from_millis(2500),
+                        self.session_service.cancel_split(&client_request_id, origin_epoch, self.epoch)).await {
+                        Ok(Ok(operation)) => DaemonResponse::SpawnOperationOk { operation },
+                        Ok(Err(error)) => daemon_error(error.message),
+                        Err(_) => DaemonResponse::SpawnOperationOk { operation:
+                            crate::daemon::protocol::SplitOperationResult::Unknown {
+                                reason: crate::daemon::protocol::SplitUnknownReason::PublicationUncertain,
+                            } },
                     }
                 }
                 Ok(DaemonRequest::DetectManualSsh { session_id }) => {
@@ -3187,25 +3832,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
-                    if self.session_router.is_local_session(&session_id) {
-                        let mut response = self.handle_describe_session(&session_id);
-                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
-                            let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
-                                Ok(crate::ipc::terminal::process_cwd(pid))
-                            }).await;
-                            if let DaemonResponse::DescribeSessionOk { session } = &mut response {
-                                session.cwd = cwd.ok().flatten().map(|path| path.to_string_lossy().into_owned());
-                            }
-                        }
-                        response
-                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
-                        match peer.describe_session(&session_id).await {
-                            Ok(session) => DaemonResponse::DescribeSessionOk { session },
-                            Err(message) => daemon_error(message),
-                        }
-                    } else {
-                        daemon_session_not_found(&session_id, "daemon_describe")
-                    }
+                    self.describe_session_identity(&session_id).await
                 }
                 Ok(DaemonRequest::DiscoverAgentSession {
                     session_id,
@@ -3843,7 +4470,7 @@ impl DaemonServer {
                                     active_sessions,
                                 }
                             }
-                            Err(e) => daemon_error(e),
+                            Err(e) => handover_failure_response(None, e),
                         }
                     }
                     #[cfg(not(unix))]
@@ -3875,10 +4502,32 @@ impl DaemonServer {
                                         // every casualty instead of silently skipping it.
                                         match self.terminal_service.pty_manager().export_session(&session_id) {
                                             Ok(export) => {
-                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export) {
+                                                // The successor can only take ownership of a session
+                                                // with the record that proves who owns it, so the
+                                                // owner's own record travels with the export. A
+                                                // session exported without one is refused by the
+                                                // successor, which keeps it here instead of losing it.
+                                                let owner = {
+                                                    let metadata = self.session_metadata.read();
+                                                    metadata.get(&session_id)
+                                                        .and_then(|meta| serde_json::to_value(meta).ok())
+                                                };
+                                                if owner.is_none() {
+                                                    tracing::error!(
+                                                        session_id = %session_id,
+                                                        "No authoritative owner record for this session; the successor will refuse it"
+                                                    );
+                                                }
+                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export, owner) {
                                                     Ok(()) => {
                                                         count += 1;
                                                         seq += 1;
+                                                        #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+                                                        crate::daemon::qa_producers::note_predecessor_export_off_runtime(
+                                                            crate::ipc::qa_barrier::active_channel().as_ref(),
+                                                            &session_id,
+                                                        )
+                                                        .await;
                                                     }
                                                     Err(error) => {
                                                         tracing::error!(
@@ -3940,11 +4589,17 @@ impl DaemonServer {
                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
                     }).await {
                         Ok(()) => DaemonResponse::CommitHandoverOk,
-                        Err(e) => daemon_error(e.to_string()),
+                        Err(e) => handover_failure_response(None, e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
-                    match self.handover_manager.abort_handover() {
+                    // `abort_handover` writes the decision transaction with create_new + fsync +
+                    // rename + parent-directory fsync, so it is offloaded exactly like the commit
+                    // path above instead of stalling a worker of the runtime that serves this loop.
+                    let manager = Arc::clone(&self.handover_manager);
+                    match crate::ipc::run_blocking(move || {
+                        manager.abort_handover().map_err(crate::ipc::IpcError::internal)
+                    }).await {
                         Ok(()) => {
                             let resumed = self
                                 .terminal_service
@@ -3956,7 +4611,7 @@ impl DaemonServer {
                             );
                             DaemonResponse::AbortHandoverOk
                         }
-                        Err(e) => daemon_error(e),
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::UploadClipboardImage { file_name, data }) => {
@@ -3993,6 +4648,7 @@ impl DaemonServer {
                     DaemonResponse::UnsubscribeDagOk
                 }
                 Ok(DaemonRequest::Shutdown) => {
+                    tracing::info!("Daemon shutdown requested over the control socket");
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
                         Err(message) => daemon_error(message),
@@ -4259,6 +4915,15 @@ impl DaemonServer {
                 .arg("--handover-from")
                 .arg(&legacy_path)
                 .stdin(std::process::Stdio::null());
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            crate::daemon::qa_producers::inject_handover_fault(
+                crate::ipc::qa_barrier::active_channel().as_deref(),
+                &mut cmd,
+            );
+            // The successor must outlive this predecessor, which retires as soon as the transfer
+            // commits; a successor left inside the predecessor's process group would be killed by
+            // whatever teardown reaches that group.
+            crate::util::detach_launched_child(&mut cmd);
             match successor_stdout {
                 Some(target) => {
                     cmd.stdout(target);
@@ -4352,7 +5017,7 @@ impl DaemonServer {
             .prepare_handover(&self.terminal_service)
         {
             Ok(res) => res,
-            Err(e) => return daemon_error(format!("Failed to prepare handover: {e}")),
+            Err(e) => return handover_failure_response(Some("Failed to prepare handover"), e),
         };
 
         Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener, target_exe);
@@ -4386,13 +5051,15 @@ impl DaemonServer {
                 };
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
-                let spawned = std::process::Command::new(&exe)
+                let mut successor = std::process::Command::new(&exe);
+                successor
                     .arg("--daemon")
                     .env("FERRYX_DAEMON_SUCCESSOR", "1")
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
+                    .stderr(std::process::Stdio::null());
+                crate::util::detach_launched_child(&mut successor);
+                let spawned = successor.spawn();
                 match spawned {
                     Ok(child) => {
                         tracing::warn!(
@@ -5898,7 +6565,7 @@ mod tests {
         let session_id = ok_res.unwrap();
         let desc_resp = server.handle_describe_session(&session_id);
         match desc_resp {
-            DaemonResponse::DescribeSessionOk { session } => {
+            DaemonResponse::DescribeSessionOk { session, .. } => {
                 assert_eq!(session.session_id, session_id);
                 assert!(session.cwd.is_some());
                 assert!(session.running);
@@ -6695,6 +7362,7 @@ mod tests {
                 binary_path,
                 binary_mtime_ms,
                 daemon_version,
+                ..
             } => {
                 assert_eq!(version, DAEMON_PROTOCOL_VERSION);
                 assert_eq!(pid, std::process::id());
@@ -6725,6 +7393,49 @@ mod tests {
 
         drop(write_half);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn owner_identity_local_and_draining_route_keep_distinct_epochs() {
+        let mut owner = DaemonServer::new();
+        owner.epoch = 9_007_199_254_740_993;
+        let owner = Arc::new(owner);
+        let repo = init_test_git_repo();
+        owner.handle_register_workspace("default", repo.path().to_str().unwrap()).unwrap();
+        let session_id = owner.handle_spawn("owner-identity", "default", None, None,
+            80, 24, None, None).await.unwrap();
+        let local = owner.describe_session_identity(&session_id).await;
+        let DaemonResponse::DescribeSessionOk { session: local_details, daemon_epoch } = local else {
+            panic!("unexpected local description: {local:?}");
+        };
+        assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert!(local_details.incarnation.is_some());
+
+        let root = tempfile::Builder::new().prefix("fx-owner").tempdir_in("/tmp").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.path().join("owner.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let serving_owner = Arc::clone(&owner);
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serving_owner.handle_client(stream).await;
+        });
+        let mut gateway = DaemonServer::new();
+        gateway.epoch = 41;
+        gateway.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec![session_id.clone()],
+        )));
+        let routed = tokio::time::timeout(Duration::from_secs(10),
+            gateway.describe_session_identity(&session_id)).await.unwrap();
+        let DaemonResponse::DescribeSessionOk { session, daemon_epoch } = routed else {
+            panic!("unexpected routed description: {routed:?}");
+        };
+        assert_eq!(daemon_epoch.as_deref(), Some("9007199254740993"));
+        assert_ne!(daemon_epoch, Some(gateway.epoch.to_string()));
+        assert_eq!(session.incarnation, local_details.incarnation);
+        tokio::time::timeout(Duration::from_secs(10), serving).await.unwrap().unwrap();
+        owner.handle_close(&session_id).await.unwrap();
     }
 
     #[tokio::test]

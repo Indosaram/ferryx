@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": "split-cancel",
+  "mode": "native",
+  "invocation": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\scripts\\qa\\pane-liveness.mjs",
+      "--scenario",
+      "split-cancel",
+      "--binary",
+      "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+      "--evidence-dir",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-42fba06f\\evidence\\split-cancel",
+      "--isolation-root",
+      "C:\\Users\\sook\\ferryx-pane-completion\\task9-42fba06f\\runtime\\split-cancel"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64"
+  },
+  "binary": {
+    "path": "C:\\Users\\sook\\ferryx-pane-completion\\source-21dea3c0\\src-tauri\\target\\debug\\ferryx.exe",
+    "sha256": "6ad63c5afdcbb8348fccd0253d0cdb0066fc054bda99b41387b5bc5fbeb5b042"
+  },
+  "sourceDigest": "cb621baf0d2741e8b547b102b7331cbfdda7b36a475f3227f37a48f5c7f0fe72",
+  "runId": "qa-run-9eea6a4b-48a6-4a4b-a509-7efa4b46cf79",
+  "operationId": "qa-op-3773c8da-f786-4238-b890-867d11ce702d",
+  "verdict": "BLOCKED",
+  "nativeEvidence": null,
+  "error": {
+    "code": "SPLIT_RIGHT_NOT_FOUND",
+    "message": "SPLIT_RIGHT_NOT_FOUND: the \"Split pane right\" affordance of the focused pane could not be identified: {\"selector\":\"Split pane right\",\"selectorNames\":[\"Split pane right\"],\"selectorAutomationIds\":[],\"interactive\":true,\"sessionId\":1,\"mainWindowHandle\":22743030,\"windowVisible\":true,\"visibleWindowCount\":2,\"windowsSearched\":[{\"hwnd\":22743030,\"title\":\"F\",\"className\":\"T\"},{\"hwnd\":25495876,\"title\":\"\",\"className\":\"T\"}],\"windowsSearchedCount\":2,\"windowSearchDepths\":[{\"hwnd\":22743030,\"depth\":10,\"containsFocus\":true},{\"hwnd\":25495876,\"depth\":0,\"containsFocus\":false}],\"matchedWindowHwnd\":null,\"focusedFound\":true,\"focusSource\":null,\"scopeDepth\":10,\"scopeIsWindowRoot\":false,\"candidateCount\":0,\"actionableCount\":0,\"candidates\":[],\"chosen\":null}"
+  },
+  "cleanupGate": {
+    "processesReaped": true,
+    "socketsRemoved": true,
+    "directoriesRemoved": true,
+    "ok": true,
+    "gateFailed": false
+  },
+  "barriers": []
+}

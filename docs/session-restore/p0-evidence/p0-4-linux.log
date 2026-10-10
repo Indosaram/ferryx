@@ -1,0 +1,15 @@
+STEP start a1
+Created symlink '/home/indo/.config/systemd/user/default.target.wants/ferryx-p0-host@a1.service' → '/home/indo/.config/systemd/user/ferryx-p0-host@.service'.
+a1 pid=1370637 ppid=1079 ppid_comm=systemd cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/app-ferryx\x2dp0\x2dhost.slice/ferryx-p0-host@a1.service
+STEP start b2 while a1 runs
+Created symlink '/home/indo/.config/systemd/user/default.target.wants/ferryx-p0-host@b2.service' → '/home/indo/.config/systemd/user/ferryx-p0-host@.service'.
+b2 pid=1370662 ppid_comm=systemd
+STEP restart b2 only
+a1_unchanged_after_b2_restart=yes
+STEP simulate GUI/daemon death: start a throwaway parent shell that exits
+a1_alive_after_unrelated_parent_exit=yes
+STEP retire a1 (self-exit + self-disable)
+a1_active=inactive a1_enabled=disabled a1_events=retired-exit
+b2_active=active
+STEP cleanup
+cleanup unit_present=no a1=inactive b2=inactive linger=yes

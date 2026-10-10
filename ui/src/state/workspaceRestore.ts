@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
 import { resetAgentAutoResumeGuard } from "../lib/agentAutoResume";
@@ -22,6 +22,61 @@ export type WorkspaceRestoreStatus = "idle" | "loading" | "restored" | "failed";
 const restoreStatusByWorkspace = new Map<string, WorkspaceRestoreStatus>();
 const preloadedRestoreStateByWorkspace = new Map<string, WorkspaceState | null>();
 const restoreStatusListeners = new Set<() => void>();
+// Workspaces restored while the daemon inventory was unavailable: their local sessions sit in
+// `remoteConnectionState: "reconnecting"` until a later inventory answer settles them.
+const pendingLocalReconcileWorkspaces = new Set<string>();
+const LOCAL_RECONCILE_INITIAL_DELAY_MS = 250;
+const LOCAL_RECONCILE_MAX_DELAY_MS = 4_000;
+const LOCAL_RECONCILE_BUDGET_MS = 30_000;
+
+export type LocalLiveSessionMap = Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null }>;
+
+function hasReconnectingLocalSession(state: WorkspaceState): boolean {
+  return Object.values(state.sessions).some(
+    (session) =>
+      session.remoteConnectionState === "reconnecting" &&
+      !isRemoteWorkspaceId(session.workspaceId) &&
+      !isPairedWorkspaceId(session.workspaceId),
+  );
+}
+
+/** Normalizes a live inventory answer; returns null when the answer is not authoritative. */
+function toLocalLiveSessionMap(raw: unknown): LocalLiveSessionMap | null {
+  if (raw === null || raw === undefined) return null;
+  const live: LocalLiveSessionMap = new Map();
+  let items: Iterable<unknown>;
+  let fallbackEpoch: string | null = null;
+  if (typeof raw === "object" && !(Symbol.iterator in (raw as object))) {
+    const container = raw as {
+      authoritative?: boolean;
+      complete?: boolean;
+      epoch?: string | null;
+      daemonEpoch?: string | null;
+      sessionIds?: Iterable<string>;
+      sessions?: Iterable<unknown>;
+    };
+    if (container.authoritative === false || container.complete === false) return null;
+    const epoch = container.epoch ?? container.daemonEpoch;
+    fallbackEpoch = epoch != null ? String(epoch) : null;
+    items = container.sessions ?? container.sessionIds ?? [];
+  } else {
+    items = raw as Iterable<unknown>;
+  }
+  for (const item of items) {
+    if (typeof item === "string") {
+      live.set(item, { daemonEpoch: fallbackEpoch, running: true });
+    } else if (item && typeof item === "object" && "sessionId" in item) {
+      const candidate = item as { sessionId: string; daemonEpoch?: string | null; running?: boolean; incarnation?: string | null };
+      live.set(candidate.sessionId, {
+        daemonEpoch: candidate.daemonEpoch != null ? String(candidate.daemonEpoch) : fallbackEpoch,
+        running: candidate.running !== false,
+        incarnation: candidate.incarnation ?? null,
+      });
+    }
+  }
+  return live;
+}
+
 function subscribeRestoreStatus(listener: () => void) {
   restoreStatusListeners.add(listener);
   return () => { restoreStatusListeners.delete(listener); };
@@ -52,9 +107,11 @@ export function resetWorkspaceRestore(workspaceId?: string): void {
   if (workspaceId) {
     restoreStatusByWorkspace.delete(workspaceId);
     preloadedRestoreStateByWorkspace.delete(workspaceId);
+    pendingLocalReconcileWorkspaces.delete(workspaceId);
   } else {
     restoreStatusByWorkspace.clear();
     preloadedRestoreStateByWorkspace.clear();
+    pendingLocalReconcileWorkspaces.clear();
   }
   resetAgentAutoResumeGuard(workspaceId);
 }
@@ -63,27 +120,33 @@ export type UseWorkspaceRestoreOptions = {
   workspaceId: string;
   recoveredFromHmr: boolean;
   restoreWorkspace: (state: WorkspaceState) => void;
+  /**
+   * Receives the live daemon inventory for local sessions restored as "reconnecting", or null
+   * when the inventory stayed unavailable for the whole retry budget.
+   */
+  reconcileLocalSessions?: (live: LocalLiveSessionMap | null) => void;
   loadSessionFn?: () => Promise<unknown>;
   listLiveBackendSessionIdsFn?: () => Promise<
-    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
+    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
         complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
     | null
   >;
   enabled?: boolean;
 };
 
-export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>> {
+export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; incarnation?: string | null; worktreePath?: string | null; running?: boolean }>> {
   if (isTauriRuntime()) {
     const liveSummaries = await listTerminalSessions();
     return liveSummaries.map((candidate) => ({
       sessionId: candidate.sessionId,
       daemonEpoch: candidate.daemonEpoch ?? null,
+      incarnation: candidate.incarnation ?? null,
       worktreePath: candidate.worktreePath ?? null,
       running: candidate.running ?? true,
     }));
@@ -92,8 +155,9 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
   return liveSessions.map((candidate) => ({
     sessionId: candidate.sessionId,
     daemonEpoch: candidate.daemonEpoch ?? null,
+    incarnation: candidate.incarnation ?? null,
     worktreePath: candidate.worktreePath ?? null,
-    running: (candidate as any).running ?? true,
+    running: candidate.running ?? true,
   }));
 }
 
@@ -173,6 +237,8 @@ export async function preloadWorkspaceSnapshots(
   catch (error) {
     if (!workspaceIds.every(id => id.startsWith("ssh:")) &&
       !workspaceIds.some(id => persistedSession.workspaces[id]?.target?.kind === "pairedDaemon")) throw error;
+    // Remote workspaces reconcile through their own status channel. Local workspaces restored
+    // here come back "reconnecting" and are queued for local reconciliation below.
     console.warn("Remote restore deferred daemon reconciliation:", error);
     liveBackendIds = null;
   }
@@ -198,6 +264,7 @@ export async function preloadWorkspaceSnapshots(
       continue;
     }
     const preparedState = prepareDiskRestoredState(workspaceId, restoredState);
+    if (hasReconnectingLocalSession(preparedState)) pendingLocalReconcileWorkspaces.add(workspaceId);
     setWorkspaceSnapshot(
       workspaceId,
       preparedState,
@@ -222,10 +289,16 @@ export function useWorkspaceRestore({
   workspaceId,
   recoveredFromHmr,
   restoreWorkspace,
+  reconcileLocalSessions,
   loadSessionFn = loadSession,
   listLiveBackendSessionIdsFn = defaultListLiveBackendSessionIds,
   enabled = true,
 }: UseWorkspaceRestoreOptions): WorkspaceRestoreStatus {
+  const reconcileLocalSessionsRef = useRef(reconcileLocalSessions);
+  reconcileLocalSessionsRef.current = reconcileLocalSessions;
+  const listLiveBackendSessionIdsRef = useRef(listLiveBackendSessionIdsFn);
+  listLiveBackendSessionIdsRef.current = listLiveBackendSessionIdsFn;
+
   useEffect(() => {
     if (!enabled) {
       switchDebug("workspace.restore.gated", { workspaceId });
@@ -314,6 +387,8 @@ export function useWorkspaceRestore({
         let liveBackendIds;
         try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
         catch (error) {
+          // Only ssh/paired workspaces may restore without a daemon inventory here; a lone local
+          // workspace keeps failing loudly so the restore can be retried.
           if (!workspaceId.startsWith("ssh:") && session.workspaces?.[workspaceId]?.target?.kind !== "pairedDaemon") throw error;
           console.warn("Remote restore deferred daemon reconciliation:", error);
           liveBackendIds = null;
@@ -353,6 +428,7 @@ export function useWorkspaceRestore({
           const stateToRestore = recoveredFromHmr
             ? restoredState
             : prepareDiskRestoredState(workspaceId, restoredState);
+          if (hasReconnectingLocalSession(stateToRestore)) pendingLocalReconcileWorkspaces.add(workspaceId);
           restoreWorkspace(stateToRestore);
           setWorkspaceRestoreStatus(workspaceId, "restored");
           switchDebug("workspace.restore.complete", {
@@ -393,5 +469,57 @@ export function useWorkspaceRestore({
     };
   }, [enabled, workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn]);
 
-  return useSyncExternalStore(subscribeRestoreStatus, () => getWorkspaceRestoreStatus(workspaceId));
+  const status = useSyncExternalStore(subscribeRestoreStatus, () => getWorkspaceRestoreStatus(workspaceId));
+
+  // Local sessions restored while the daemon inventory was unavailable (e.g. GUI boot during a
+  // rolling handover) are re-checked once the inventory answers. A failed IPC call is retried
+  // with bounded exponential backoff; when the budget runs out they are marked disconnected so
+  // the pane offers a reattach instead of spinning forever.
+  useEffect(() => {
+    if (!enabled || status !== "restored") return;
+    if (!reconcileLocalSessionsRef.current || !pendingLocalReconcileWorkspaces.has(workspaceId)) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let delay = LOCAL_RECONCILE_INITIAL_DELAY_MS;
+    let elapsed = 0;
+    const finish = (live: LocalLiveSessionMap | null) => {
+      pendingLocalReconcileWorkspaces.delete(workspaceId);
+      switchDebug("workspace.restore.local-reconcile", {
+        workspaceId,
+        outcome: live ? "live" : "gave-up",
+        liveCount: live?.size ?? 0,
+      });
+      reconcileLocalSessionsRef.current?.(live);
+    };
+    const attempt = async () => {
+      timer = null;
+      let live: LocalLiveSessionMap | null = null;
+      let failure: unknown = null;
+      try {
+        live = toLocalLiveSessionMap(await listLiveBackendSessionIdsRef.current());
+      } catch (error) {
+        failure = error;
+      }
+      if (cancelled) return;
+      if (live) {
+        finish(live);
+        return;
+      }
+      if (elapsed + delay > LOCAL_RECONCILE_BUDGET_MS) {
+        console.warn("Local session reconciliation gave up:", failure);
+        finish(null);
+        return;
+      }
+      elapsed += delay;
+      timer = setTimeout(() => void attempt(), delay);
+      delay = Math.min(delay * 2, LOCAL_RECONCILE_MAX_DELAY_MS);
+    };
+    void attempt();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [enabled, status, workspaceId]);
+
+  return status;
 }

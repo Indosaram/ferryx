@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import * as switchDebugModule from "./switchDebug";
 import {
   NativeTerminalInputQueueManager,
   NativeTerminalQueueOverflowError,
@@ -29,6 +30,31 @@ describe("NativeTerminalInputQueueManager", () => {
       maxQueueBytes: 1024,
       maxQueueEntries: 4,
     });
+  });
+
+  it("reports the age of the in-flight input when the queue overflows", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = createDeferred();
+      const first = queue.enqueue("blocked", null, 1, () => pending.promise);
+      expect(queue.getRunningAgeMs("blocked")).toBe(0);
+      vi.advanceTimersByTime(125);
+      expect(queue.getRunningAgeMs("blocked")).toBe(125);
+
+      const waiting = Array.from({ length: 3 }, () =>
+        queue.enqueue("blocked", null, 1, async () => undefined),
+      );
+      await expect(queue.enqueue("blocked", null, 1, async () => undefined))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(queue.getQueuedCount("blocked")).toBe(4);
+
+      pending.resolve();
+      await first;
+      await Promise.all(waiting);
+      expect(queue.getRunningAgeMs("blocked")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("executes tasks strictly in FIFO order per session without concurrent overlap", async () => {
@@ -405,5 +431,382 @@ describe("NativeTerminalInputQueueManager", () => {
     inFlightDeferred.resolve();
     await inFlightPromise;
     expect(queue.getQueuedBytes("session-1")).toBe(0);
+  });
+  it("maintains isolated per-lane in-flight request ID and running age when input and preedit overlap", async () => {
+    vi.useFakeTimers();
+    try {
+      const inputDeferred = createDeferred<string>();
+      const preeditDeferred = createDeferred<string>();
+
+      let capturedInputReqId = "";
+      let capturedPreeditReqId = "";
+
+      const inputPromise = queue.enqueue("session-concurrent", 1, 10, async (reqId) => {
+        capturedInputReqId = reqId;
+        await inputDeferred.promise;
+        return "input-done";
+      });
+
+      expect(capturedInputReqId).toMatch(/^req-[a-zA-Z0-9_-]+-session-concurrent-\d+$/);
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedInputReqId);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(0);
+
+      vi.advanceTimersByTime(50);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(50);
+
+      const preeditPromise = queue.enqueuePreedit("session-concurrent", 1, 10, async (reqId) => {
+        capturedPreeditReqId = reqId;
+        await preeditDeferred.promise;
+        return "preedit-done";
+      });
+
+      // While input is in flight, serialized pump keeps preedit queued
+      expect(capturedPreeditReqId).toBe("");
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedInputReqId);
+
+      vi.advanceTimersByTime(25);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(75);
+
+      // Settle input: pump now dispatches the queued preedit operation
+      inputDeferred.resolve("done");
+      await inputPromise;
+
+      expect(capturedPreeditReqId).toMatch(/^req-preedit-[a-zA-Z0-9_-]+-session-concurrent-\d+$/);
+      expect(capturedInputReqId).not.toBe(capturedPreeditReqId);
+
+      // Now preedit is in flight: request ID points to preedit and running age tracks preedit
+      expect(queue.getInFlightRequestId("session-concurrent")).toBe(capturedPreeditReqId);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(0);
+
+      vi.advanceTimersByTime(40);
+      expect(queue.getRunningAgeMs("session-concurrent")).toBe(40);
+
+      // Completing preedit lane clears remaining in-flight state cleanly
+      preeditDeferred.resolve("done");
+      await preeditPromise;
+
+      expect(queue.getInFlightRequestId("session-concurrent")).toBeNull();
+      expect(queue.getRunningAgeMs("session-concurrent")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+
+  it("emits bounded slow in-flight diagnostics and correlated request id when operation stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const debugSpy = vi.spyOn(switchDebugModule, "switchDebug");
+      debugSpy.mockClear();
+
+      const slowDeferred = createDeferred<string>();
+      let receivedRequestId = "";
+      const slowPromise = queue.enqueue("session-slow", 1, 10, async (reqId) => {
+        receivedRequestId = reqId;
+        return slowDeferred.promise;
+      }, undefined, "mouse.Press");
+
+      expect(receivedRequestId).toMatch(/^req-[a-zA-Z0-9_-]+-session-slow-\d+$/);
+      expect(queue.getInFlightRequestId("session-slow")).toBe(receivedRequestId);
+
+      // Advance time before threshold (200ms < 250ms)
+      vi.advanceTimersByTime(200);
+      expect(debugSpy).not.toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.anything(),
+      );
+
+      // Advance past threshold (250ms)
+      vi.advanceTimersByTime(50);
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          inFlightRequestId: receivedRequestId,
+          operation: "mouse.Press",
+          phase: "pending_ipc",
+        }),
+      );
+
+      // Enqueue a second item while head is blocked
+      const secondDeferred = createDeferred<string>();
+      let secondReceivedRequestId = "";
+      const secondPromise = queue.enqueue("session-slow", 1, 10, async (reqId) => {
+        secondReceivedRequestId = reqId;
+        return secondDeferred.promise;
+      });
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          inFlightRequestId: receivedRequestId,
+          trigger: "enqueue_head_blocked",
+        }),
+      );
+
+      // Enqueue a third item immediately: rate-limited, must NOT re-emit enqueue_head_blocked
+      debugSpy.mockClear();
+      const thirdDeferred = createDeferred<string>();
+      const thirdPromise = queue.enqueue("session-slow", 1, 10, async () => thirdDeferred.promise);
+      expect(debugSpy).not.toHaveBeenCalledWith(
+        "terminal.surface.input.in_flight_slow",
+        expect.objectContaining({ trigger: "enqueue_head_blocked" }),
+      );
+
+      // Settle the slow first operation
+      slowDeferred.resolve("first-done");
+      await slowPromise;
+
+      expect(debugSpy).toHaveBeenCalledWith(
+        "terminal.surface.input.slow",
+        expect.objectContaining({
+          backendSessionId: "session-slow",
+          requestId: receivedRequestId,
+        }),
+      );
+
+      // Verify FIFO: second operation was in flight before third
+      secondDeferred.resolve("second-done");
+      await secondPromise;
+      thirdDeferred.resolve("third-done");
+      await thirdPromise;
+
+      expect(queue.getInFlightRequestId("session-slow")).toBeNull();
+      debugSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("propagates custom requestId and operationName through enqueue and reports custom ID during in-flight execution", async () => {
+    const d1 = createDeferred<string>();
+    let receivedReqId = "";
+
+    const promise = queue.enqueue(
+      "session-custom",
+      1,
+      64,
+      async (reqId) => {
+        receivedReqId = reqId;
+        await d1.promise;
+        return "custom-done";
+      },
+      "custom-req-mouse-down-1",
+      "mouse.down",
+    );
+
+    expect(receivedReqId).toBe("custom-req-mouse-down-1");
+    expect(queue.getInFlightRequestId("session-custom")).toBe("custom-req-mouse-down-1");
+    expect(queue.getRunningAgeMs("session-custom")).toBeGreaterThanOrEqual(0);
+
+    d1.resolve("done");
+    const result = await promise;
+    expect(result).toBe("custom-done");
+    expect(queue.getInFlightRequestId("session-custom")).toBeNull();
+    expect(queue.getRunningAgeMs("session-custom")).toBeNull();
+  });
+
+  it("resets in-flight request ID and running age to null when in-flight operation rejects and proceeds to next queued operation", async () => {
+    const op1Deferred = createDeferred<void>();
+    const op2Deferred = createDeferred<string>();
+    let op2ReqId = "";
+
+    const expectedError = new Error("PTY write rejected");
+
+    const p1 = queue.enqueue("session-fail", 1, 10, async () => {
+      await op1Deferred.promise;
+      throw expectedError;
+    });
+    const p2 = queue.enqueue("session-fail", 1, 10, async (reqId) => {
+      op2ReqId = reqId;
+      await op2Deferred.promise;
+      return "op2-recovered";
+    });
+
+    expect(queue.getInFlightRequestId("session-fail")).toBeTruthy();
+    expect(queue.getRunningAgeMs("session-fail")).toBeGreaterThanOrEqual(0);
+
+    // Reject op1
+    op1Deferred.reject(expectedError);
+    await expect(p1).rejects.toThrow("PTY write rejected");
+
+    // Queue immediately advances to op2, with op2's request ID in flight
+    expect(op2ReqId).toBeTruthy();
+    expect(queue.getInFlightRequestId("session-fail")).toBe(op2ReqId);
+
+    // Resolve op2 and verify complete settlement to null
+    op2Deferred.resolve("ok");
+    const res2 = await p2;
+    expect(res2).toBe("op2-recovered");
+    expect(queue.getInFlightRequestId("session-fail")).toBeNull();
+    expect(queue.getRunningAgeMs("session-fail")).toBeNull();
+  });
+
+  it("preserves independent in-flight tracking across distinct sessions during concurrent progress and adversarial stale generation rejection", async () => {
+    vi.useFakeTimers();
+    try {
+      const dA1 = createDeferred<string>();
+      const dA2Spy = vi.fn(async () => "A2-dispatched");
+      const dB1 = createDeferred<string>();
+
+      let reqA1 = "";
+      let reqB1 = "";
+
+      const pA1 = queue.enqueue("session-A", 1, 10, async (reqId) => {
+        reqA1 = reqId;
+        await dA1.promise;
+        return "A1-done";
+      });
+      const pA2 = queue.enqueue("session-A", 1, 10, dA2Spy);
+      const pB1 = queue.enqueue("session-B", 1, 10, async (reqId) => {
+        reqB1 = reqId;
+        await dB1.promise;
+        return "B1-done";
+      });
+
+      vi.advanceTimersByTime(30);
+      expect(queue.getInFlightRequestId("session-A")).toBe(reqA1);
+      expect(queue.getRunningAgeMs("session-A")).toBe(30);
+      expect(queue.getInFlightRequestId("session-B")).toBe(reqB1);
+      expect(queue.getRunningAgeMs("session-B")).toBe(30);
+
+      // Adversarial generation advancement on session-A invalidates queued pA2
+      queue.invalidateOldGenerations("session-A", 2);
+      await expect(pA2).rejects.toThrow(NativeTerminalStaleGenerationError);
+      expect(dA2Spy).not.toHaveBeenCalled();
+
+      // In-flight op A1 and Session B remain unaffected
+      expect(queue.getInFlightRequestId("session-A")).toBe(reqA1);
+      expect(queue.getInFlightRequestId("session-B")).toBe(reqB1);
+
+      // Synchronous stale enqueue rejection on session-A
+      await expect(
+        queue.enqueue("session-A", 0, 10, async () => "old-sync"),
+      ).rejects.toThrow(NativeTerminalStaleGenerationError);
+
+      // Settle session A
+      dA1.resolve("A1");
+      await pA1;
+      expect(queue.getInFlightRequestId("session-A")).toBeNull();
+      expect(queue.getRunningAgeMs("session-A")).toBeNull();
+
+      // Session B remains in flight with continuous running age
+      expect(queue.getInFlightRequestId("session-B")).toBe(reqB1);
+      expect(queue.getRunningAgeMs("session-B")).toBe(30);
+
+      // Settle session B
+      dB1.resolve("B1");
+      await pB1;
+      expect(queue.getInFlightRequestId("session-B")).toBeNull();
+      expect(queue.getRunningAgeMs("session-B")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("distinguishes in-flight execution age from waiting queued head age", async () => {
+    vi.useFakeTimers();
+    try {
+      const d1 = createDeferred<string>();
+      const d2 = createDeferred<string>();
+
+      let req1 = "";
+      let req2 = "";
+
+      const p1 = queue.enqueue("sess-queue-age", 1, 10, async (id) => {
+        req1 = id;
+        await d1.promise;
+        return "first";
+      });
+
+      vi.advanceTimersByTime(20);
+
+      const p2 = queue.enqueue("sess-queue-age", 1, 10, async (id) => {
+        req2 = id;
+        await d2.promise;
+        return "second";
+      }, undefined, "input", {
+        paneIdentity: "pane-1",
+        bindingKey: "bk-1",
+      });
+
+      vi.advanceTimersByTime(50);
+
+      const queuedId = queue.getHeadQueuedRequestId("sess-queue-age");
+      expect(queuedId).toBeTruthy();
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(req1);
+      expect(queue.getRunningAgeMs("sess-queue-age")).toBe(70);
+      expect(queue.getQueuedHeadAgeMs("sess-queue-age")).toBe(50);
+
+      d1.resolve("first");
+      await p1;
+
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(queuedId);
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBe(req2);
+      expect(queue.getHeadQueuedRequestId("sess-queue-age")).toBeNull();
+      expect(queue.getQueuedHeadAgeMs("sess-queue-age")).toBeNull();
+
+      d2.resolve("second");
+      await p2;
+
+      expect(queue.getInFlightRequestId("sess-queue-age")).toBeNull();
+      expect(queue.getRunningAgeMs("sess-queue-age")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks in-flight request age and repeated drop accounting accurately during stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new NativeTerminalInputQueueManager({
+        maxQueueEntries: 2,
+        maxQueueBytes: 64,
+      });
+      const sessionId = "session-stall-test";
+      const debugSpy = vi.spyOn(switchDebugModule, "switchDebug").mockImplementation(() => null);
+
+      const inFlightDeferred = createDeferred<string>();
+      let inFlightRequestId = "";
+      const inFlightPromise = queue.enqueue(sessionId, null, 10, async (reqId) => {
+        inFlightRequestId = reqId;
+        return inFlightDeferred.promise;
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queue.getInFlightRequestId(sessionId)).toBe(inFlightRequestId);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(300);
+
+      const secondDeferred = createDeferred<string>();
+      const secondPromise = queue.enqueue(sessionId, null, 10, async () => {
+        return secondDeferred.promise;
+      });
+
+      let overflowError: unknown = null;
+      try {
+        await queue.enqueue(sessionId, null, 10, async () => "overflow");
+      } catch (err) {
+        overflowError = err;
+      }
+      expect(overflowError).toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(queue.getRunningAgeMs(sessionId)).toBe(300);
+      expect(queue.getInFlightRequestId(sessionId)).toBe(inFlightRequestId);
+
+      inFlightDeferred.resolve("done-1");
+      await inFlightPromise;
+
+      secondDeferred.resolve("done-2");
+      await secondPromise;
+
+      expect(queue.getInFlightRequestId(sessionId)).toBeNull();
+      expect(queue.getRunningAgeMs(sessionId)).toBeNull();
+      debugSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

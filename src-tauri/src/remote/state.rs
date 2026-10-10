@@ -113,6 +113,29 @@ pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
     octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
 }
 
+/// Test-only: the first CGNAT (`100.64.0.0/10`) address bound on this machine, or `None`.
+///
+/// Gate tests must bind an overlay address, and proof is injected separately through
+/// [`set_test_overlay_proof_override`], so this deliberately does not require overlay proof -
+/// which [`SystemInterfaceResolver::tailscale_address`] would demand and a CI VM cannot supply.
+/// Loopback aliases count: any local interface carrying the address makes it bindable, even
+/// though [`enumerate_ipv4_interface_addresses`] excludes loopback for the resolver's purposes.
+#[cfg(all(test, unix))]
+pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
+    enumerate_ipv4_addresses(true)
+        .ok()?
+        .into_iter()
+        .find(is_tailscale_cgnat_address)
+}
+
+#[cfg(all(test, not(unix)))]
+pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
+    enumerate_ipv4_interface_addresses()
+        .ok()?
+        .into_iter()
+        .find(is_tailscale_cgnat_address)
+}
+
 #[cfg(test)]
 type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sync>;
 #[cfg(test)]
@@ -331,6 +354,12 @@ fn verify_overlay_with_interface(iface_name: Option<&str>, addr: &std::net::Ipv4
 /// Enumerates active, non-loopback IPv4 interface addresses on this machine.
 #[cfg(unix)]
 fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    enumerate_ipv4_addresses(false)
+}
+
+/// Enumerates active IPv4 interface addresses, optionally including loopback ones.
+#[cfg(unix)]
+fn enumerate_ipv4_addresses(include_loopback: bool) -> Result<Vec<std::net::Ipv4Addr>, String> {
     use std::net::Ipv4Addr;
 
     let mut addrs = Vec::new();
@@ -346,7 +375,7 @@ fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, Strin
                 let flags = iface.ifa_flags as i32;
                 let up = flags & libc::IFF_UP != 0;
                 let loopback = flags & libc::IFF_LOOPBACK != 0;
-                if up && !loopback {
+                if up && (include_loopback || !loopback) {
                     let sockaddr_in = iface.ifa_addr as *const libc::sockaddr_in;
                     let raw = (*sockaddr_in).sin_addr.s_addr;
                     addrs.push(Ipv4Addr::from(u32::from_be(raw)));

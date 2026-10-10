@@ -1,0 +1,6 @@
+Base d82b35e4, host maho-mac CQFQ4P2LXK. Exact argv: bun run --cwd ui test src/components/TerminalSearchOverlay.test.tsx src/lib/updater.test.ts
+Native exit sentinel BASE_AB_DONE native=1 (monitor wrapper exit 0 is not acceptance).
+Tests 2 failed | 32 passed (34).
+TerminalSearchOverlay.test.tsx:332 expected calls length 2, got 3.
+updater.test.ts:141 expected relaunch spy called 1 time, got 0.
+Both same named failures observed in candidate full-ui snapshot. Full base raw transcript recorded in session bash_13 output.

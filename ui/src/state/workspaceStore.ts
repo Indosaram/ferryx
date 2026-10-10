@@ -29,6 +29,15 @@ import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
 import { disambiguateFileTabLabels } from "../lib/fileTabLabels";
+import {
+  LocalSplitLifecycle,
+  localSplitIntent,
+  registerLocalSplit,
+  unregisterLocalSplit,
+  cancelLocalSplit,
+  hasLocalSplit,
+  type LocalSplitSession,
+} from "../lib/localSplitLifecycle";
 import { createBrowserPaneContent, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
@@ -115,7 +124,8 @@ export type WorkspaceServices = {
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
   }) => Promise<string>;
-  /** Optional detailed spawn carrying the daemon-resolved cwd; enables the single-hop split path. */
+  /** Optional detailed spawn carrying the daemon-resolved cwd and the session identity; enables
+   *  the single-hop split path and lets a spawned pane record its incarnation immediately. */
   spawnTerminalDetailed?: (request: {
     workspaceId: string;
     worktree: WorktreeIdentity | null;
@@ -124,12 +134,15 @@ export type WorkspaceServices = {
     shell?: string | null;
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
-  }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null } | null }>;
+  }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null; incarnation?: string | null } | null }>;
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
   waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
+  splitOperation?: (request: import("../lib/types").SplitOperationRequest) => Promise<import("../lib/types").SplitOperationResponse>;
+  splitCreate?: typeof tauriIpc.spawnTerminalDetailed;
+  splitAttach?: typeof tauriIpc.attachTerminal;
 };
 
 export type SplitPaneOptions = {
@@ -226,6 +239,12 @@ export type WorkspaceAction =
       bindingKey?: string | null;
       reason: string;
     }
+  | { type: "LOCAL_SPLIT_UPDATE"; session: LocalSplitSession }
+  | { type: "LOCAL_SPLIT_REMOVE"; sessionId: string }
+  | {
+      type: "LOCAL_SESSIONS_RECONCILED";
+      live: Map<string, { daemonEpoch: string | null; running: boolean; incarnation?: string | null }> | null;
+    }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
   | {
       type: "SET_RECONNECT_LIFECYCLE";
@@ -235,7 +254,16 @@ export type WorkspaceAction =
       requestId?: string | null;
     }
   | { type: "APPLY_PROVIDER_SESSION"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null; clearAgent?: boolean }
+  | {
+      type: "REBIND_SESSION_BACKEND";
+      sessionId: string;
+      backendSessionId: string;
+      cwd?: string;
+      daemonEpoch?: string | null;
+      incarnation?: string | null;
+      clearAgent?: boolean;
+      pendingAttachment?: boolean;
+    }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string; observed?: boolean }
   | {
       type: "SESSION_SCREEN_ACTIVITY";
@@ -286,6 +314,15 @@ const defaultServices: WorkspaceServices = {
   getTerminalCwd,
   closeTerminal,
   waitForTerminalExit,
+  get splitOperation() {
+    return tauriIpc.spawnTerminalSplitOperation;
+  },
+  get splitCreate() {
+    return tauriIpc.spawnTerminalDetailed;
+  },
+  get splitAttach() {
+    return tauriIpc.attachTerminal;
+  },
 };
 
 export function useWorkspaceStore({
@@ -632,14 +669,33 @@ export function useWorkspaceStore({
   const createSpawnedTab = useCallback(
     async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
       await services.ensureTerminalEvents();
-      const backendSessionId =
-        backendSessionIdOverride ??
-        (await spawnTerminalForLogicalAction(services, {
-          workspaceId,
-          worktree: worktreeIdentity(worktree),
-          cwd: worktree.path,
-          shell,
-        }));
+      // The detailed spawn is the only one that reports the session's incarnation and the daemon
+      // epoch, and a pane without an incarnation can never form the durable seven-field attach
+      // tuple, so its native surface attach fails until reconciliation happens to fill it in.
+      // Use the detailed path wherever the transport provides it (the split path already does).
+      let daemonEpoch: string | null = null;
+      let incarnation: string | null = null;
+      let backendSessionId = backendSessionIdOverride;
+      if (!backendSessionId) {
+        if (services.spawnTerminalDetailed) {
+          const detailed = await spawnDetailedForLogicalAction(services, {
+            workspaceId,
+            worktree: worktreeIdentity(worktree),
+            cwd: worktree.path,
+            shell,
+          });
+          backendSessionId = detailed.sessionId;
+          daemonEpoch = detailed.daemonEpoch ?? null;
+          incarnation = detailed.session?.incarnation ?? null;
+        } else {
+          backendSessionId = await spawnTerminalForLogicalAction(services, {
+            workspaceId,
+            worktree: worktreeIdentity(worktree),
+            cwd: worktree.path,
+            shell,
+          });
+        }
+      }
       const sessionId = createId("session");
       const tabId = createId("tab");
       const session: TerminalSession = {
@@ -649,6 +705,8 @@ export function useWorkspaceStore({
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
+        ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+        ...(incarnation !== null ? { incarnation } : {}),
         lifecycle: "working",
         ...(isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)
           ? {
@@ -736,11 +794,77 @@ export function useWorkspaceStore({
     return recovery.stop;
   }, [sshRecoveryKey, dispatch]);
 
+  const splitController = useCallback(
+    (session: LocalSplitSession) => {
+      const intent = localSplitIntent(session);
+      if (!intent) return undefined;
+      const readOwner = (): WorkspaceState | undefined => {
+        const activeState = stateRef.current;
+        if (activeState.sessions[session.id]) return activeState;
+        return undefined;
+      };
+      const updateOwner = (action: WorkspaceAction) => {
+        dispatch(action);
+      };
+      const controller = new LocalSplitLifecycle(
+        {
+          operation: services.splitOperation ?? tauriIpc.spawnTerminalSplitOperation,
+          create: services.splitCreate ?? tauriIpc.spawnTerminalDetailed,
+          attach: services.splitAttach ?? tauriIpc.attachTerminal,
+          ensureEvents: services.ensureTerminalEvents,
+          read: () => readOwner()?.sessions[session.id],
+          publish: (next) => updateOwner({ type: "LOCAL_SPLIT_UPDATE", session: next }),
+          remove: () => {
+            // Ownership ends here: the registry is consulted by the recovery effect below
+            // (`hasLocalSplit`) and by `retryLocalSplit`, so leaving a dead id in it makes the
+            // session permanently unretryable. `unregisterLocalSplit` had no caller at all.
+            unregisterLocalSplit(session.id);
+            updateOwner({ type: "LOCAL_SPLIT_REMOVE", sessionId: session.id });
+          },
+          visible: () => {
+            const owner = readOwner();
+            const tabId = owner ? findTabIdForSession(owner, session.id) : null;
+            return Boolean(owner && tabId && isTabVisible(owner, tabId));
+          },
+        },
+        intent,
+      );
+      registerLocalSplit(session.id, controller);
+      return controller;
+    },
+    [dispatch, services, workspaceId],
+  );
+
+  useEffect(() => {
+    for (const session of Object.values(renderedState.sessions)) {
+      const intent = localSplitIntent(session);
+      if (!intent || hasLocalSplit(session.id)) continue;
+      const controller = splitController({ ...session, spawnIntent: intent });
+      if (intent.cancelRequested) {
+        void controller?.cancel();
+      } else if (session.reconnectLifecycle !== "idle") {
+        dispatch({
+          type: "LOCAL_SPLIT_UPDATE",
+          session: {
+            ...session,
+            spawnIntent: intent,
+            reconnectLifecycle: "failed",
+            reconnectError: {
+              code: "SPAWN_ATTEMPT_TIMEOUT",
+              message: "Shell startup requires reconciliation. Retry the original request.",
+              details: { delivery: "ambiguous" },
+            },
+          },
+        });
+      }
+    }
+  }, [renderedState.sessions, splitController, dispatch]);
+
   const ensureSessionBackends = useCallback(
     async (sessionIds: string[], options?: { fallbackToShell?: boolean }) => {
       const targets = sessionIds.filter((sessionId) => {
         const session = stateRef.current.sessions[sessionId];
-        if (!session || session.backendSessionId != null) return false;
+        if (!session || session.backendSessionId != null || localSplitIntent(session)) return false;
         if (isRemoteWorkspaceId(session.workspaceId)) return false;
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
         const isReconnecting = session.reconnectLifecycle === "validating" || session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "binding";
@@ -1000,19 +1124,35 @@ export function useWorkspaceStore({
     ) => {
       const snapshot = stateRef.current;
       const targetTab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!targetTab || !isTerminalTab(targetTab)) return;
+      if (!targetTab || !isTerminalTab(targetTab)) {
+        switchDebug("split.pane.refused.non-terminal-tab", {
+          reason: targetTab ? `tab-kind=${targetTab.kind}` : `tab-not-found:${tabId}`,
+        });
+        return;
+      }
       const targetLayout = snapshot.layout.layoutsByTabId?.[targetTab.id];
-      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) return;
+      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) {
+        switchDebug("split.pane.refused.target-leaf-not-in-layout", {
+          reason: `targetLeafId=${targetLeafId} layoutPresent=${targetLayout !== undefined} layoutLeaves=${targetLayout ? collectLeafIds(targetLayout.root).join("|") : "-"}`,
+        });
+        return;
+      }
 
       const sourceLocalSessionId = targetLayout.sessionIdsByLeafId[targetLeafId] ?? targetTab.sessionId;
       const sourceSession = snapshot.sessions[sourceLocalSessionId];
-      if (!sourceSession) return;
+      if (!sourceSession) {
+        switchDebug("split.pane.refused.source-session-missing", {
+          reason: `sourceLocalSessionId=${sourceLocalSessionId} tabSessionId=${targetTab.sessionId}`,
+        });
+        return;
+      }
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
-      // The pane has no backend yet, so it must not claim a live remote connection:
-      // REBIND_SESSION_BACKEND wires remote state once the split's PTY actually exists.
-      const session: TerminalSession = {
+      const reliableLocal =
+        !isRemoteWorkspaceId(sourceSession.workspaceId || workspaceId) &&
+        !isPairedWorkspaceId(sourceSession.workspaceId || workspaceId);
+      const session: LocalSplitSession = {
         id: localSessionId,
         cwd: sourceSession.cwd,
         worktreePath: sessionWorktreePath(sourceSession),
@@ -1021,7 +1161,17 @@ export function useWorkspaceStore({
         backendSessionId: null,
         lifecycle: "working",
         reconnectLifecycle: "spawning",
+        ...(reliableLocal ? { reconnectRequestId: crypto.randomUUID() } : {}),
       };
+      if (reliableLocal && session.reconnectRequestId) {
+        session.spawnIntent = {
+          requestId: session.reconnectRequestId,
+          prepared: null,
+          cancelRequested: false,
+          generation: 0,
+          createSent: false,
+        };
+      }
 
       dispatch({
         type: "SPLIT_PANE",
@@ -1033,13 +1183,27 @@ export function useWorkspaceStore({
         content: options.content,
         session,
       });
+      switchDebug("split.pane.dispatched", {
+        reason: `tabId=${targetTab.id} targetLeafId=${targetLeafId} direction=${direction} newLeafId=${newLeafId}`,
+      });
 
       if (options.content && options.content.kind !== "terminal") {
         return;
       }
 
+      if (session.spawnIntent) {
+        const controller = splitController(session);
+        await controller?.run({
+          workspaceId: session.workspaceId,
+          worktree: session.worktree,
+          inheritFromSessionId: sourceSession.backendSessionId,
+        });
+        return;
+      }
+
       let backendSessionId: string | null = null;
       let daemonEpoch: string | null = null;
+      let incarnation: string | null = null;
       let inheritedCwd = sourceSession.cwd;
       try {
         await services.ensureTerminalEvents();
@@ -1055,6 +1219,7 @@ export function useWorkspaceStore({
           });
           backendSessionId = result.sessionId;
           daemonEpoch = result.daemonEpoch ?? null;
+          incarnation = result.session?.incarnation ?? null;
           inheritedCwd = result.session?.cwd ?? inheritedCwd;
         } else {
           // Mock/test services without detailed spawn: resolve live cwd explicitly.
@@ -1087,6 +1252,7 @@ export function useWorkspaceStore({
             backendSessionId,
             cwd: inheritedCwd,
             ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+            ...(incarnation !== null ? { incarnation } : {}),
           }, owningWorkspaceId);
         } else {
           terminalEventBus.clearSession(backendSessionId);
@@ -1108,7 +1274,7 @@ export function useWorkspaceStore({
         throw error;
       }
     },
-    [dispatchToOwner, services, workspaceId],
+    [dispatchToOwner, services, workspaceId, splitController],
   );
 
   const moveTabToGroup = useCallback(
@@ -1191,7 +1357,7 @@ export function useWorkspaceStore({
       }
 
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
-      if (snapshot.layout.tabs.length === 1) {
+      if (snapshot.layout.tabs.length === 1 && !disposableSessions.some((session) => localSplitIntent(session))) {
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
@@ -2046,10 +2212,34 @@ function createInitialState(worktrees: Worktree[], workspaceId?: string): Worksp
 }
 
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
+  if (action.type === "LOCAL_SPLIT_UPDATE") {
+    const current = state.sessions[action.session.id];
+    if (!current) return state;
+    const currentIntent = localSplitIntent(current);
+    const incomingIntent = localSplitIntent(action.session);
+    if (currentIntent && (!incomingIntent || incomingIntent.requestId !== currentIntent.requestId ||
+      incomingIntent.generation < currentIntent.generation)) return state;
+    return { ...state, sessions: { ...state.sessions, [action.session.id]: action.session } };
+  }
+  if (action.type === "LOCAL_SPLIT_REMOVE") {
+    const sessions = { ...state.sessions };
+    delete sessions[action.sessionId];
+    return { ...state, sessions };
+  }
   switch (action.type) {
     case "RESTORE_WORKSPACE":
       return {
         ...action.state,
+        sessions: { ...action.state.sessions, ...Object.fromEntries(
+          Object.entries(state.sessions).filter(([id, current]) => {
+            const incoming = action.state.sessions[id];
+            return incoming && current.backendSessionId && (
+              incoming.backendSessionId !== current.backendSessionId ||
+              incoming.incarnation !== current.incarnation ||
+              (localSplitIntent(incoming)?.generation ?? 0) < (localSplitIntent(current)?.generation ?? 0)
+            );
+          }),
+        ) },
         workspaceId: action.state.workspaceId ?? state.workspaceId,
         worktreeLayouts: action.state.worktreeLayouts ?? {},
         unreadTabIds: action.state.unreadTabIds ?? {},
@@ -2239,6 +2429,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SET_TAB_PINNED":
       return { ...state, layout: layoutReducer(state.layout, action) };
     case "SPLIT_PANE": {
+      const requestedTabLayout = state.layout.layoutsByTabId?.[action.tabId];
+      const requestedLeafIds = requestedTabLayout ? collectLeafIds(requestedTabLayout.root) : null;
+      // `targetLeafId` is optional on this action; normalize so the discriminator below can name
+      // the requested leaf without widening `includes` to `string | undefined`.
+      const requestedTargetLeafId = action.targetLeafId ?? "";
       const layout = layoutReducer(state.layout, {
         type: "SPLIT_PANE",
         tabId: action.tabId,
@@ -2249,7 +2444,26 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         content: action.content,
         sessionId: action.session.id,
       });
-      if (layout === state.layout) return state;
+      if (layout === state.layout) {
+        // The layout refused the split, so the session is deliberately not inserted below and the
+        // caller's lifecycle reads `undefined` and returns. That refusal used to be invisible:
+        // `splitPane` logs `split.pane.dispatched` unconditionally, so a no-op here is
+        // indistinguishable from a split that succeeded and whose backend call went missing.
+        switchDebug("split.pane.layout-noop", {
+          reason: !requestedTabLayout
+            ? `tab-not-in-layout:${action.tabId}`
+            : !requestedLeafIds?.includes(requestedTargetLeafId)
+              ? `target-leaf-not-in-layout:${requestedTargetLeafId}`
+              : requestedLeafIds?.includes(action.newLeafId)
+                ? `new-leaf-already-present:${action.newLeafId}`
+                : "layout-unchanged",
+          tabId: action.tabId,
+          targetLeafId: action.targetLeafId,
+          newLeafId: action.newLeafId,
+          existingLeafIds: requestedLeafIds ? requestedLeafIds.join("|") : "-",
+        });
+        return state;
+      }
       return {
         ...state,
         sessions: { ...state.sessions, [action.session.id]: action.session },
@@ -2322,7 +2536,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const candidateState: WorkspaceState = { ...state, layout };
       if (!closingSessionId || isSessionReferenced(candidateState, closingSessionId)) return candidateState;
       const sessions = { ...state.sessions };
-      delete sessions[closingSessionId];
+      if (!localSplitIntent(sessions[closingSessionId])) delete sessions[closingSessionId];
       const activityBySessionId = { ...(state.activityBySessionId ?? {}) };
       delete activityBySessionId[closingSessionId];
       return { ...candidateState, sessions, activityBySessionId };
@@ -2333,7 +2547,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const activityBySessionId = { ...(state.activityBySessionId ?? {}) };
       for (const sessionId of closingSessionIds) {
         if (isSessionReferencedOutsideTab(state, sessionId, action.tabId)) continue;
-        delete sessions[sessionId];
+        if (!localSplitIntent(sessions[sessionId])) delete sessions[sessionId];
         delete activityBySessionId[sessionId];
       }
       if (action.replacement?.session) sessions[action.replacement.session.id] = action.replacement.session;
@@ -2529,6 +2743,52 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       return settleActivityForDeadSessions({ ...state, sessions }, lostSessionIds);
     }
+    case "LOCAL_SESSIONS_RECONCILED": {
+      let changed = false;
+      const deadSessionIds: string[] = [];
+      const sessions = { ...state.sessions };
+      for (const [id, session] of Object.entries(sessions)) {
+        if (session.remoteConnectionState !== "reconnecting") continue;
+        if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) continue;
+        changed = true;
+        if (action.live === null) {
+          sessions[id] = { ...session, remoteConnectionState: "disconnected" };
+          continue;
+        }
+        const liveInfo = session.backendSessionId ? action.live.get(session.backendSessionId) : undefined;
+        if (liveInfo && liveInfo.running !== false) {
+          const epochChanged = liveInfo.daemonEpoch != null && liveInfo.daemonEpoch !== session.daemonEpoch;
+          const liveIncarnation = liveInfo.incarnation ?? null;
+          const sessionIncarnation = session.incarnation ?? null;
+          const sameIncarnationProven = sessionIncarnation && liveIncarnation && sessionIncarnation === liveIncarnation;
+          const isLegacyUnknown = !sessionIncarnation || !liveIncarnation;
+          if (epochChanged && !sameIncarnationProven) {
+            sessions[id] = {
+              ...session,
+              remoteConnectionState: "disconnected",
+              reconnectLifecycle: "failed",
+            };
+          } else {
+            sessions[id] = {
+              ...session,
+              remoteConnectionState: isLegacyUnknown && epochChanged ? "disconnected" : undefined,
+              lifecycle: "running",
+              ...(liveInfo.daemonEpoch != null ? { daemonEpoch: liveInfo.daemonEpoch } : {}),
+              ...(epochChanged ? { lastOutputSequence: null } : {}),
+              ...(liveIncarnation ? { incarnation: liveIncarnation } : {}),
+            };
+          }
+        } else {
+          sessions[id] = {
+            ...session,
+            remoteConnectionState: "disconnected",
+            reconnectLifecycle: "failed",
+          };
+        }
+      }
+      if (!changed) return state;
+      return settleActivityForDeadSessions({ ...state, sessions }, deadSessionIds);
+    }
     case "SESSION_LIFECYCLE": {
       const matchedSessionIds: string[] = [];
       const sessions = Object.fromEntries(
@@ -2568,6 +2828,23 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       if (action.bindingKey && session.backendSessionId) {
         const currentBindingKey = `${session.backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
         if (action.bindingKey !== currentBindingKey) return state;
+      }
+      if (localSplitIntent(session)) {
+        return {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            [session.id]: {
+              ...session,
+              reconnectLifecycle: "failed",
+              reconnectError: {
+                code: "INTERNAL_ERROR",
+                message: action.reason,
+                details: { delivery: "confirmed", stage: "presentation" },
+              },
+            },
+          },
+        };
       }
       if (isRemoteWorkspaceId(session.workspaceId)) {
         // A confirmed-missing daemon session is proof the remote PTY is gone, so the in-flight
@@ -2675,12 +2952,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             processState: "running",
             cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
+            ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
             lastOutputSequence: null,
-            lifecycle: "running",
-            reconnectLifecycle: "idle",
+            lifecycle: action.pendingAttachment ? session.lifecycle : "running",
+            reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
             reconnectError: null,
             backendUnavailableReason: null,
-            reconnectRequestId: null,
+            reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
             ...(shouldClearAgent
               ? {
                   agentType: null,
@@ -3351,6 +3629,10 @@ function isAmbiguousRendererTransportError(error: unknown): boolean {
 }
 
 async function closeBackendSession(session: TerminalSession | undefined, services: WorkspaceServices) {
+  if (session && localSplitIntent(session)) {
+    await cancelLocalSplit(session.id);
+    return;
+  }
   if (!session?.backendSessionId) return;
   try {
     await services.closeTerminal(session.backendSessionId);
@@ -3360,6 +3642,10 @@ async function closeBackendSession(session: TerminalSession | undefined, service
 }
 
 async function closeBackendSessionAndWait(session: TerminalSession | undefined, services: WorkspaceServices) {
+  if (session && localSplitIntent(session)) {
+    await cancelLocalSplit(session.id);
+    return;
+  }
   if (!session?.backendSessionId) return;
   const backendSessionId = session.backendSessionId;
   const exitPromise = services.waitForTerminalExit(backendSessionId, LAST_TAB_EXIT_TIMEOUT_MS);

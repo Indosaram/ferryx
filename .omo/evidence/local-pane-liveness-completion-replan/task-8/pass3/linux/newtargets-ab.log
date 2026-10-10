@@ -1,0 +1,3 @@
+AB start=2026-10-04T10:52:14Z load=5.54 4.65 6.54
+AB t=ipc_hardening_contract side=cand native=101 | test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+AB t=ipc_hardening_contract side=base native=101 | test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s

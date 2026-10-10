@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.activity.test.tsx
+
+ RUN  v3.2.7 /home/indo/ferryx-pane-completion/base-pass2-d82b35e4/ui
+
+(node:1042230) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/components/Sidebar.activity.test.tsx (4 tests | 4 failed) 5ms
+   × Sidebar project activity > shows project attention for unseen done without a bell unread flag 4ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar project activity > shows the aggregated running count and attention state on each registered project header 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar project activity > keeps the per-project add-worktree action outside the project's activity row button 0ms
+     → Cannot read properties of undefined (reading 'clear')
+   × Sidebar project activity > does not invent project activity for idle worktrees 0ms
+     → Cannot read properties of undefined (reading 'clear')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.activity.test.tsx > Sidebar project activity > shows project attention for unseen done without a bell unread flag
+ FAIL  src/components/Sidebar.activity.test.tsx > Sidebar project activity > shows the aggregated running count and attention state on each registered project header
+ FAIL  src/components/Sidebar.activity.test.tsx > Sidebar project activity > keeps the per-project add-worktree action outside the project's activity row button
+ FAIL  src/components/Sidebar.activity.test.tsx > Sidebar project activity > does not invent project activity for idle worktrees
+TypeError: Cannot read properties of undefined (reading 'clear')
+ ❯ src/components/Sidebar.activity.test.tsx:43:31
+     41| }
+     42| 
+     43| beforeEach(() => localStorage.clear());
+       |                               ^
+     44| afterEach(cleanup);
+     45| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  10:10:46
+   Duration  1.33s (transform 208ms, setup 100ms, collect 613ms, tests 5ms, environment 243ms, prepare 50ms)
+
+error: script "test" exited with code 1

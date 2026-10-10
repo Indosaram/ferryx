@@ -6,6 +6,8 @@ import {
   quoteRemotePath,
   registerRemoteProject,
   toRegisteredProject,
+  listRemoteWorktrees,
+  type RemoteWorktree,
   type RegisterRemoteProjectRequest,
   type RegisteredRemoteProject,
 } from "./remoteProject";
@@ -196,5 +198,18 @@ describe("remoteProject adapter", () => {
     expect(quoteRemotePath("C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\my file.txt", "windows")).toBe(
       '"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-paste\\u1\\my file.txt"',
     );
+  });
+
+  it("returns remote worktrees containing path property", async () => {
+    const worktree: RemoteWorktree = {
+      path: "/home/ubuntu/repo/wt-1",
+      head: "abcdef1",
+      branch: "orca/main/wt-1",
+      bare: false,
+      detached: false,
+    };
+    invokeMock.mockResolvedValueOnce([worktree]);
+    const result = await listRemoteWorktrees("ssh:test");
+    expect(result[0].path).toBe("/home/ubuntu/repo/wt-1");
   });
 });
