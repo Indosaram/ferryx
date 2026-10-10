@@ -394,7 +394,7 @@ test("runHostScript: macbook runs locally via bash -s and uname succeeds", async
     posix: "uname",
   });
   assert.equal(result.exitCode, 0);
-  assert.equal(result.stdout.trim(), "Darwin");
+  assert.equal(result.stdout.trim(), type());
 });
 
 test("runHostScript: macbook fails closed on script non-zero exit", async () => {
@@ -461,8 +461,8 @@ process.exit(res.status ?? 0);
     assert.ok(call.args.includes("-o"));
     assert.ok(call.args.includes("BatchMode=yes"));
     assert.ok(call.args.includes("ConnectTimeout=10"));
-    assert.ok(call.args.includes("ServerAliveInterval=5"));
-    assert.ok(call.args.includes("ServerAliveCountMax=2"));
+    assert.ok(call.args.includes("ServerAliveInterval=30"));
+    assert.ok(call.args.includes("ServerAliveCountMax=20"));
     assert.ok(call.args.includes("omaki"));
     assert.ok(call.args.includes("bash"));
     assert.ok(call.args.includes("-s"));
@@ -520,8 +520,8 @@ process.exit(0);
     assert.ok(call.args.includes("-o"));
     assert.ok(call.args.includes("BatchMode=yes"));
     assert.ok(call.args.includes("ConnectTimeout=10"));
-    assert.ok(call.args.includes("ServerAliveInterval=5"));
-    assert.ok(call.args.includes("ServerAliveCountMax=2"));
+    assert.ok(call.args.includes("ServerAliveInterval=30"));
+    assert.ok(call.args.includes("ServerAliveCountMax=20"));
     assert.ok(call.args.includes("maho-win"));
     assert.ok(call.args.includes("powershell"));
     assert.ok(call.args.includes("-NoProfile"));
