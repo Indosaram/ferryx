@@ -98,6 +98,29 @@ fn adopt_transferred_ownership(
     Ok(())
 }
 
+/// Rolls back a handover whose CommitHandover did not land (the predecessor recorded no
+/// retirement): the adopted sessions are relinquished first, then the predecessor is told to
+/// abort. The abort is what resumes the readers it paused for the export; without it the
+/// predecessor keeps serving every session with its output frozen.
+async fn release_after_unconfirmed_commit<R, A>(
+    relinquish: R,
+    abort: impl FnOnce() -> A,
+) -> Result<(), String>
+where
+    R: std::future::Future<Output = Result<(), String>>,
+    A: std::future::Future<Output = Result<DaemonResponse, String>>,
+{
+    relinquish.await?;
+    match abort().await {
+        Ok(DaemonResponse::AbortHandoverOk) => {}
+        response => tracing::warn!(
+            ?response,
+            "Predecessor did not confirm AbortHandover after the failed commit"
+        ),
+    }
+    Ok(())
+}
+
 /// Drops the ownership records a successor installed for sessions it handed back to the
 /// predecessor: a relinquished session must not leave this daemon claiming its workspace.
 fn release_adopted_ownership(
@@ -136,6 +159,34 @@ mod pane_reader_rollback_tests {
         }).await.unwrap();
         result.unwrap();
         assert!(relinquished.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn failed_commit_rollback_tells_the_predecessor_to_resume_after_relinquishing() {
+        let steps = std::sync::Mutex::new(Vec::new());
+        release_after_unconfirmed_commit(
+            async {
+                steps.lock().unwrap().push("relinquish");
+                Ok(())
+            },
+            || async {
+                steps.lock().unwrap().push("abort");
+                Ok(DaemonResponse::AbortHandoverOk)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*steps.lock().unwrap(), ["relinquish", "abort"]);
+    }
+
+    #[tokio::test]
+    async fn failed_commit_rollback_keeps_the_predecessor_frozen_when_relinquish_fails() {
+        let result = release_after_unconfirmed_commit(
+            async { Err("reader still owns handle".into()) },
+            || async { panic!("predecessor must remain frozen") },
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -3232,11 +3283,16 @@ impl DaemonServer {
                             if decision == Some(super::handover_transaction::HandoverState::Retired) {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
                             } else {
-                                for session_id in &adopted_sessions {
-                                    self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
-                                        .await.map_err(|error| error.to_string())?;
-                                    release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
-                                }
+                                release_after_unconfirmed_commit(async {
+                                    for session_id in &adopted_sessions {
+                                        self.terminal_service.pty_manager().relinquish_transferred_session(session_id)
+                                            .await.map_err(|error| error.to_string())?;
+                                        release_adopted_ownership(&self.session_metadata, std::slice::from_ref(session_id));
+                                    }
+                                    Ok(())
+                                }, || async {
+                                    legacy_peer.send_request(&DaemonRequest::AbortHandover).await
+                                }).await?;
                                 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                                 {
                                     if let Some(channel) = crate::daemon::qa_producers::channel().await {
@@ -3633,7 +3689,11 @@ impl DaemonServer {
                             Err(error) => daemon_error(format!("Legacy peer remote session retry failed: {error}")),
                         },
                         None => match self.validate_session_ssh_target(&session_id).await {
-                            Err(e) => daemon_error(e.to_string()),
+                            Err(e) => DaemonResponse::Error {
+                                message: e.message,
+                                code: Some(e.code.to_string()),
+                                details: e.details,
+                            },
                             Ok(()) => match self.terminal_service.remote().retry(&session_id) {
                                 Ok(()) => DaemonResponse::RetryRemoteSessionOk,
                                 Err(failure) => DaemonResponse::RemoteSessionError { failure },
@@ -3655,21 +3715,47 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) => {
-                    match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => daemon_error(e.to_string()),
-                        Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
-                        Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                    match (!self.terminal_service.remote().contains(&session_id))
+                        .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
+                        .flatten()
+                    {
+                        Some(peer) => match peer.send_request(&DaemonRequest::RemoteWrite { session_id, generation, data }).await {
+                            Ok(response) => response,
+                            Err(error) => daemon_error(format!("Legacy peer remote write failed: {error}")),
+                        },
+                        None => match self.validate_session_ssh_target(&session_id).await {
+                            Err(e) => DaemonResponse::Error {
+                                message: e.message,
+                                code: Some(e.code.to_string()),
+                                details: e.details,
+                            },
+                            Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
+                                Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
+                                Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                            }
                         }
                     }
                 }
                 Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) => {
                     self.record_desktop_geometry(&session_id, cols, rows);
-                    match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => daemon_error(e.to_string()),
-                        Ok(()) => match self.terminal_service.remote().resize(&session_id, generation, cols, rows) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
-                        Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                    match (!self.terminal_service.remote().contains(&session_id))
+                        .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
+                        .flatten()
+                    {
+                        Some(peer) => match peer.send_request(&DaemonRequest::RemoteResize { session_id, generation, cols, rows }).await {
+                            Ok(response) => response,
+                            Err(error) => daemon_error(format!("Legacy peer remote resize failed: {error}")),
+                        },
+                        None => match self.validate_session_ssh_target(&session_id).await {
+                            Err(e) => DaemonResponse::Error {
+                                message: e.message,
+                                code: Some(e.code.to_string()),
+                                details: e.details,
+                            },
+                            Ok(()) => match self.terminal_service.remote().resize(&session_id, generation, cols, rows) {
+                                Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
+                                Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                            }
                         }
                     }
                 },
@@ -8660,5 +8746,252 @@ mod instance_lock_deadline_tests {
         drop(reader);
         drop(write_half);
         let _ = server_task.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn regression_daemon_remote_spawn_2_remote_write_resize_forward_to_legacy_peer() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("fx-legacy")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        // LegacyPeer opens a fresh connection (with its own handshake) for every request.
+        let peer_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<DaemonRequest>(&line).unwrap() {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: DAEMON_PROTOCOL_VERSION,
+                                pid: 1,
+                                epoch: 1,
+                                binary_path: None,
+                                binary_mtime_ms: None,
+                                daemon_version: None,
+                                capabilities: Vec::new(),
+                                admission_time_unix_ms: None,
+                            },
+                            DaemonRequest::RemoteWrite { .. } => DaemonResponse::WriteOk,
+                            DaemonRequest::RemoteResize { .. } => DaemonResponse::ResizeOk,
+                            _ => panic!("unexpected request forwarded to the legacy peer"),
+                        };
+                        let mut json = serde_json::to_string(&response).unwrap();
+                        json.push('\n');
+                        writer.write_all(json.as_bytes()).await.unwrap();
+                        let _ = writer.flush().await;
+                    }
+                });
+            }
+        });
+
+        let legacy_peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket,
+            vec![session_id.clone()],
+        ));
+        server.session_router.add_legacy_peer(legacy_peer);
+
+        let (mut client_tx, server_rx) = tokio::io::duplex(4096);
+        let s = server.clone();
+        let server_handler = tokio::spawn(async move {
+            s.handle_client(server_rx).await;
+        });
+
+        let hs = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token: None,
+        };
+        let mut hs_json = serde_json::to_string(&hs).unwrap();
+        hs_json.push('\n');
+        client_tx.write_all(hs_json.as_bytes()).await.unwrap();
+        client_tx.flush().await.unwrap();
+
+        let (client_r, mut client_w) = tokio::io::split(client_tx);
+        let mut client_lines = tokio::io::BufReader::new(client_r).lines();
+        let _ = client_lines.next_line().await.unwrap();
+
+        let write_req = DaemonRequest::RemoteWrite {
+            session_id: session_id.clone(),
+            generation: 1,
+            data: b"hello".to_vec(),
+        };
+        let mut json = serde_json::to_string(&write_req).unwrap();
+        json.push('\n');
+        client_w.write_all(json.as_bytes()).await.unwrap();
+        client_w.flush().await.unwrap();
+
+        let resp_line = client_lines.next_line().await.unwrap().unwrap();
+        let resp: DaemonResponse = serde_json::from_str(&resp_line).unwrap();
+        assert!(matches!(resp, DaemonResponse::WriteOk));
+
+        let resize_req = DaemonRequest::RemoteResize {
+            session_id: session_id.clone(),
+            generation: 1,
+            cols: 120,
+            rows: 40,
+        };
+        let mut json = serde_json::to_string(&resize_req).unwrap();
+        json.push('\n');
+        client_w.write_all(json.as_bytes()).await.unwrap();
+        client_w.flush().await.unwrap();
+
+        let resp_line = client_lines.next_line().await.unwrap().unwrap();
+        let resp: DaemonResponse = serde_json::from_str(&resp_line).unwrap();
+        assert!(matches!(resp, DaemonResponse::ResizeOk));
+
+        drop(client_w);
+        drop(client_lines);
+        let _ = server_handler.await;
+        peer_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn regression_daemon_remote_spawn_8_retry_remote_session_preserves_structured_error() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("fx-legacy")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        let peer_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<DaemonRequest>(&line).unwrap() {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: DAEMON_PROTOCOL_VERSION,
+                                pid: 1,
+                                epoch: 1,
+                                binary_path: None,
+                                binary_mtime_ms: None,
+                                daemon_version: None,
+                                capabilities: Vec::new(),
+                                admission_time_unix_ms: None,
+                            },
+                            DaemonRequest::RetryRemoteSession { .. } => DaemonResponse::Error {
+                                message: "ssh host unreachable".to_string(),
+                                code: Some("SSH_UNREACHABLE".to_string()),
+                                details: None,
+                            },
+                            _ => panic!("unexpected request forwarded to the legacy peer"),
+                        };
+                        let mut json = serde_json::to_string(&response).unwrap();
+                        json.push('\n');
+                        writer.write_all(json.as_bytes()).await.unwrap();
+                        let _ = writer.flush().await;
+                    }
+                });
+            }
+        });
+
+        let legacy_peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket,
+            vec![session_id.clone()],
+        ));
+        server.session_router.add_legacy_peer(legacy_peer);
+
+        let (mut client_tx, server_rx) = tokio::io::duplex(4096);
+        let s = server.clone();
+        let server_handler = tokio::spawn(async move {
+            s.handle_client(server_rx).await;
+        });
+
+        #[cfg(not(unix))]
+        let token = Some(server.transport_token.clone());
+        #[cfg(unix)]
+        let token = None;
+
+        let hs = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token,
+        };
+        let mut hs_json = serde_json::to_string(&hs).unwrap();
+        hs_json.push('\n');
+        client_tx.write_all(hs_json.as_bytes()).await.unwrap();
+        client_tx.flush().await.unwrap();
+
+        let (client_r, mut client_w) = tokio::io::split(client_tx);
+        let mut client_lines = tokio::io::BufReader::new(client_r).lines();
+        let _ = client_lines.next_line().await.unwrap();
+
+        let retry_req = DaemonRequest::RetryRemoteSession {
+            session_id,
+        };
+        let mut json = serde_json::to_string(&retry_req).unwrap();
+        json.push('\n');
+        client_w.write_all(json.as_bytes()).await.unwrap();
+        client_w.flush().await.unwrap();
+
+        let resp_line = client_lines.next_line().await.unwrap().unwrap();
+        let resp: DaemonResponse = serde_json::from_str(&resp_line).unwrap();
+        match resp {
+            DaemonResponse::Error { code, .. } => {
+                assert_eq!(code.as_deref(), Some("SSH_UNREACHABLE"), "RetryRemoteSession must preserve structured error code");
+            }
+            other => panic!("expected DaemonResponse::Error with code, got: {other:?}"),
+        }
+
+        let local_id = uuid::Uuid::new_v4().to_string();
+        let missing_project = format!("ssh:{}", uuid::Uuid::new_v4());
+        server.session_service.session_metadata.write().insert(
+            local_id.clone(),
+            crate::daemon::session_service::StoredSessionMeta {
+                machine_session: None,
+                client_request_id: "retry-local-validation".into(),
+                workspace_id: missing_project.clone(),
+                worktree: None,
+                cwd: dir.path().to_owned(),
+                provider_claim: None,
+                spawn_fingerprint: crate::daemon::session_service::SpawnRequestFingerprint {
+                    workspace_id: missing_project,
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                    provider_claim: None,
+                    startup: None,
+                    requested_session_id: None,
+                },
+            },
+        );
+        let mut json = serde_json::to_string(&DaemonRequest::RetryRemoteSession {
+            session_id: local_id,
+        }).unwrap();
+        json.push('\n');
+        client_w.write_all(json.as_bytes()).await.unwrap();
+        client_w.flush().await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2), client_lines.next_line(),
+        ).await.unwrap().unwrap().unwrap();
+        match serde_json::from_str::<DaemonResponse>(&response).unwrap() {
+            DaemonResponse::Error { code, .. } => {
+                assert_eq!(code.as_deref(), Some("WORKSPACE_NOT_FOUND"));
+            }
+            other => panic!("expected local validation error, got: {other:?}"),
+        }
+
+        drop(client_w);
+        drop(client_lines);
+        let _ = server_handler.await;
+        peer_task.abort();
     }
 }
