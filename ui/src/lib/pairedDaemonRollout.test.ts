@@ -24,7 +24,6 @@ it("new local accepts an older epoch with fewer capabilities but never dispatche
 
 it.each([
   [{ apiVersion: 0, daemonEpoch: "1", capabilities: [] }, "INVALID_REQUEST"],
-  [{ capabilities: ["directoryBrowseV1", "futureV9"] }, "UNSUPPORTED_CAPABILITY"],
   [{ accessScope: "mirror" }, "UNSUPPORTED_CAPABILITY"],
   [{ machineId: "other-machine" }, "CROSS_HOST_RESULT"],
 ] as const)("failed renegotiation revokes prior admission: %j", async (peer, code) => {
@@ -37,5 +36,22 @@ it.each([
   await expect(f.adapter.directories()).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
   expect(f.invoke).toHaveBeenCalledTimes(count);
   expect(f.adapter.context.hostId).toBe(f.host.hostId);
+  expect(f.store.getState().hosts[f.host.hostId].grantScope).toBe("machine");
+});
+
+// ef736d94 accepts additive capabilities while gating operations on known capabilities.
+it("additive renegotiation preserves admission without enabling unsupported operations", async () => {
+  const f = fixture();
+  await f.adapter.capabilities();
+  await expect(f.adapter.directories()).resolves.toMatchObject({ path: "/" });
+  const peer = { capabilities: ["directoryBrowseV1", "futureV9"] };
+  f.peer(peer);
+  await expect(f.adapter.capabilities()).resolves.toMatchObject(peer);
+  await expect(f.adapter.directories()).resolves.toMatchObject({ path: "/" });
+  const count = f.invoke.mock.calls.length;
+  await expect(f.adapter.projects()).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+  expect(f.invoke).toHaveBeenCalledTimes(count);
+  expect(count).toBe(4);
+  expect(f.adapter.context).toEqual({ hostId: f.host.hostId, generation: "7" });
   expect(f.store.getState().hosts[f.host.hostId].grantScope).toBe("machine");
 });
