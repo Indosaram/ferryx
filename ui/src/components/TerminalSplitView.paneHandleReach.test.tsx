@@ -80,14 +80,15 @@ describe("pane handle reachability over a native terminal", () => {
     const terminal = screen.getByTestId("native-terminal-pane");
     const leaf = screen.getByTestId("pane-leaf");
 
-    expect(handle).toHaveClass("h-3");
+    // 8bb936f4 expands the hover toolbar and its hotspot to fit Copy Debug Info.
+    expect(handle).toHaveClass("h-5");
     expect(handle).toHaveClass("opacity-0", "pointer-events-none");
     expect(terminal.style.marginTop).toBe("");
     expect(terminal.style.height).toBe("");
     expect(terminal).toHaveClass("h-full");
 
-    // When: the pointer reaches the last pixel of the 16px hotspot.
-    fireEvent.mouseMove(leaf, { clientY: 16 });
+    // When: the pointer reaches the last pixel of the 20px hotspot.
+    fireEvent.mouseMove(leaf, { clientY: 20 });
     // Then: only the overlay changes; a handle press never reaches terminal mouse input.
     expect(handle).toHaveClass("opacity-100", "pointer-events-auto");
     expect(terminal.contains(handle)).toBe(false);
@@ -97,7 +98,7 @@ describe("pane handle reachability over a native terminal", () => {
     expect(terminal.style.marginTop).toBe("");
     expect(terminal.style.height).toBe("");
 
-    fireEvent.mouseMove(leaf, { clientY: 17 });
+    fireEvent.mouseMove(leaf, { clientY: 21 });
     expect(handle).toHaveClass("opacity-0", "pointer-events-none");
   });
 
