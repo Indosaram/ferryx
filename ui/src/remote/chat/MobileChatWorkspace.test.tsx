@@ -1,7 +1,6 @@
 /**
  * Workspace presentation regressions (plan task 12).
  *
- * AUTHORED, NOT EXECUTED: the run is deferred to the post-merge gate.
  *
  * The workspace no longer mounts a terminal: chat is the default at every width and the
  * terminal is an explicit mode the owner switches to, so the drawer scenarios this suite used
@@ -22,6 +21,17 @@ describe("MobileChatWorkspace", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("switching the owner replaces both optimistic messages and the controlled draft", () => {
+    const { rerender } = render(<MobileChatWorkspace
+      messages={[{ id: "pending-a", role: "user", content: "OPTIMISTIC_A_MARKER", timestamp: 1 }]}
+      draft="A_DRAFT_MARKER" onSendMessage={vi.fn()}
+    />);
+    expect(screen.getByText("OPTIMISTIC_A_MARKER")).toBeInTheDocument();
+    rerender(<MobileChatWorkspace messages={[]} draft="B_DRAFT_MARKER" onSendMessage={vi.fn()} />);
+    expect(screen.queryByText("OPTIMISTIC_A_MARKER")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("B_DRAFT_MARKER");
   });
 
   it("1. renders a quiet empty state with context line and no starter prompts", () => {

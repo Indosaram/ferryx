@@ -4,9 +4,7 @@
  * Every route this lane reads is answered explicitly below, including `/api/v1/capabilities` -
  * the one answer that carries the published owner authority the reference-chat target is built
  * from. A route left to the catch-all leaves the lane with no target, and a scenario that then
- * fails describes this fixture rather than the product. This repair lane authored the fixture
- * without executing it: the file's first run is the post-merge batch gate, so nothing here is a
- * test receipt.
+ * fails describes this fixture rather than the product.
  *
  * This suite used to drive the legacy `/api/v1/agent-history` poll and the chat's own raw
  * terminal socket. Both are gone: the chat reads the frozen reference-chat history route and
@@ -156,7 +154,8 @@ function setWidth(width: number): void {
 describe("remoteAppChatFrames", () => {
   let originalInnerWidth: number;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await import("./chat/MobileChatWorkspace");
     originalInnerWidth = window.innerWidth;
     StubWebSocket.instances = [];
     localStorage.clear();
@@ -185,7 +184,7 @@ describe("remoteAppChatFrames", () => {
     expect(harness.calls.some((url) => url.includes("/api/v1/agent-history/"))).toBe(false);
   });
 
-  it("the chat lane opens no raw terminal socket", async () => {
+  it("raw PTY text and binary frames never leak into reference chat", async () => {
     setWidth(390);
     installFetch((url) => {
       if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
@@ -193,11 +192,51 @@ describe("remoteAppChatFrames", () => {
     });
     render(<RemoteApp />);
     await screen.findByTestId("assistant-reference-body");
-
-    await waitFor(() => {
-      // the workspace event socket is not a terminal socket
-      expect(StubWebSocket.instances.some((socket) => socket.url.includes("/api/v1/terminal/"))).toBe(false);
+    await act(async () => {
+      for (const socket of StubWebSocket.instances) {
+        socket.onmessage?.(new MessageEvent("message", { data: "PTY_NOISE_MARKER" }));
+        socket.onmessage?.(new MessageEvent("message", {
+          data: new TextEncoder().encode("PTY_NOISE_MARKER").buffer,
+        }));
+      }
     });
+    expect(StubWebSocket.instances.some((socket) => socket.url.includes("/api/v1/terminal/"))).toBe(false);
+    expect(document.body.textContent).not.toContain("PTY_NOISE_MARKER");
+    expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("steady");
+  });
+
+  it("an optimistic prompt and its late acknowledgement never leak across session switches", async () => {
+    setWidth(390);
+    let finishSubmit: ((response: Response) => void) | undefined;
+    const pendingSubmit = new Promise<Response>((resolve) => { finishSubmit = resolve; });
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) {
+        return jsonResponse(sessionState("sess-main", [{ id: "tab-second", sessionId: "sess-second", label: "second" }]));
+      }
+      if (url.includes("/history")) return jsonResponse(page([turn("assistant", url.includes("sess-second") ? "B1" : "A1")]));
+      return undefined;
+    });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).includes("/reference-chat/") && String(input).includes("/submit")
+        ? pendingSubmit : originalFetch(input, init)));
+    render(<RemoteApp />);
+    await screen.findByText("A1");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "OPTIMISTIC_A_MARKER" } });
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(await screen.findByText("OPTIMISTIC_A_MARKER")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /second/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+    await screen.findByText("B1");
+    expect(document.body.textContent).not.toContain("OPTIMISTIC_A_MARKER");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "B_DRAFT_MARKER" } });
+    await act(async () => {
+      finishSubmit?.(jsonResponse({ ok: true, data: { receipt: { requestId: "sent", stage: "accepted" } }, requestId: "sent" }));
+      await pendingSubmit;
+    });
+    expect(document.body.textContent).not.toContain("OPTIMISTIC_A_MARKER");
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("B_DRAFT_MARKER");
   });
 
   it("a non-native page is disclosed rather than rendered as native history", async () => {

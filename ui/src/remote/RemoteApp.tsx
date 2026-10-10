@@ -2709,6 +2709,7 @@ export const RemoteHostConnection: React.FC<{
   /* The draft and the held rows belong to the TARGET, not to this component instance: switching
      panes reads that target's own rows back, and never carries them across. */
   useEffect(() => {
+    resetChatLane();
     if (chatReferenceTarget === null) {
       setChatDraftText("");
       setChatHeld([]);
@@ -2718,7 +2719,7 @@ export const RemoteHostConnection: React.FC<{
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);
     setChatHeld([...referenceQueues.read(chatReferenceTarget)]);
-  }, [chatTargetKey]);
+  }, [chatTargetKey, resetChatLane]);
 
   /* The newest page. A late answer for another generation is dropped, and an identity refusal
      clears the lane rather than browsing another transcript. The provider session the owning
