@@ -653,7 +653,7 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
     : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
   const nsisBuild = plan.channels.nsisMigration
     ? `Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
-bun tauri build --bundles nsis
+bun tauri build --bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
 if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($nsis.Count)" }
 Copy-Item -LiteralPath $nsis[0].FullName -Destination (Join-Path $outDir 'Ferryx_x64-setup.exe')

@@ -532,6 +532,7 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
   assert.match(windows, /-ExePath/);
   assert.match(windows, /-SkipSigning/);
   assert.match(windows, /--bundles nsis/);
+  assert.match(windows, /--bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
   assert.doesNotMatch(windows, /signer sign/);
   assert.doesNotMatch(windows, /signer --help/);
 });
