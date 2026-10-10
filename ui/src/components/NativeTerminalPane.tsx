@@ -1237,12 +1237,12 @@ export function NativeTerminalPane({
   }, [measureGeometry, sessionId]);
 
   const restoreFocusIfLost = useCallback(() => {
-    if (!visible) return;
-    const active = typeof document !== "undefined" ? document.activeElement : null;
-    if (!active || active === document.body || !isEditableElement(active)) {
+    if (!visible || active === false) return;
+    const focusedElement = typeof document !== "undefined" ? document.activeElement : null;
+    if (!focusedElement || focusedElement === document.body || !isEditableElement(focusedElement)) {
       inputRef.current?.focus();
     }
-  }, [visible]);
+  }, [visible, active]);
 
   const setPreedit = useCallback((preedit: string | null) => {
     if (!visible || !isTauri() || !targetSessionId) {
