@@ -460,6 +460,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::UpgradeBinary { .. }
+            | DaemonRequest::RemoteSessionDetails { .. }
+            | DaemonRequest::RetryRemoteSession { .. }
     )
 }
 
@@ -1134,6 +1136,14 @@ impl DaemonClient {
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub async fn invalidate_cached_connections(&self) {
+        *self.connection.lock().await = None;
+        *self.interactive_connection.lock().await = None;
+        *self.spawn_connection.lock().await = None;
+        self.local_connections.lock().clear();
+        self.remote_connections.lock().clear();
     }
 
     async fn split_connect_until(
@@ -2093,7 +2103,7 @@ impl DaemonClient {
         }
 
         let temp_client = self.upgrade_rpc_client();
-        let connection_slot = Arc::clone(&self.connection);
+        let target_client = self.clone();
         let own_binary_path = own_exe.map(|p| p.to_string_lossy().to_string());
 
         tokio::spawn(async move {
@@ -2134,7 +2144,7 @@ impl DaemonClient {
                         "Daemon upgrade scheduled successfully. Invalidating cached connection."
                     );
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    *connection_slot.lock().await = None;
+                    target_client.invalidate_cached_connections().await;
                 }
                 Ok(DaemonResponse::UpgradeNotNeeded) => {
                     tracing::info!("Daemon reported upgrade not needed.");
@@ -3151,8 +3161,19 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::DescribeSessionOk { session, .. } => Ok(session),
-            DaemonResponse::Error { message, .. } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
+                let mut error = IpcError::new(
+                    code.as_deref()
+                        .map(IpcErrorCode::from_code_str)
+                        .unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(error)
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -3171,7 +3192,20 @@ impl DaemonClient {
             DaemonResponse::DescribeSessionOk { session, daemon_epoch } => {
                 Ok((session, daemon_epoch))
             }
-            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
+                let mut error = IpcError::new(
+                    code.as_deref()
+                        .map(IpcErrorCode::from_code_str)
+                        .unwrap_or(IpcErrorCode::InternalError),
+                    message,
+                );
+                error.details = details;
+                Err(error)
+            }
             _ => Err(IpcError::internal("Unexpected identity description response")),
         }
     }
@@ -3601,7 +3635,15 @@ impl DaemonClient {
                 let task = tokio::spawn(async move {
                     let _keepalive = write_half;
                     let mut stream_line = String::new();
-                    while let Ok(n) = reader.read_line(&mut stream_line).await {
+                    loop {
+                        let n = tokio::select! {
+                            biased;
+                            _ = tx.closed() => break,
+                            result = reader.read_line(&mut stream_line) => match result {
+                                Ok(n) => n,
+                                Err(_) => break,
+                            },
+                        };
                         if n == 0 {
                             break;
                         }
@@ -6400,6 +6442,19 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_session_details_and_retry_are_retry_safe() {
+        let details_req = DaemonRequest::RemoteSessionDetails {
+            session_id: "test-remote-session".into(),
+        };
+        assert!(request_is_retry_safe(&details_req));
+
+        let retry_req = DaemonRequest::RetryRemoteSession {
+            session_id: "test-remote-session".into(),
+        };
+        assert!(request_is_retry_safe(&retry_req));
+    }
+
+    #[test]
     fn test_protocol_mismatch_uses_stable_typed_code_and_versions() {
         let error = daemon_protocol_mismatch_error(DAEMON_PROTOCOL_VERSION, 2);
         assert_eq!(error.code, IpcErrorCode::DaemonProtocolMismatch);
@@ -6962,6 +7017,20 @@ mod tasklist_identity_tests {
 #[cfg(test)]
 mod local_split_transport_tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn stream_pair() -> (DaemonStream, DaemonStream) {
+        tokio::net::UnixStream::pair().unwrap()
+    }
+
+    #[cfg(not(unix))]
+    async fn stream_pair() -> (DaemonStream, DaemonStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (client, accepted) = tokio::join!(client, listener.accept());
+        (client.unwrap(), accepted.unwrap().0)
+    }
+
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncReadExt, AsyncWrite};
@@ -7605,6 +7674,258 @@ mod local_split_transport_tests {
         })
         .await
         .unwrap();
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_attach_stream_terminates_when_receiver_dropped() {
+        let fixture = Fixture::new().await;
+        let (attached_tx, attached_rx) = tokio::sync::oneshot::channel();
+        let action = async {
+            let attachment = fixture
+                .client
+                .attach("session-cancel-test", Some(10))
+                .await
+                .unwrap();
+            assert_eq!(attachment.session_id, "session-cancel-test");
+            assert_eq!(attachment.epoch, 7);
+            assert!(!attachment.stream_task.is_finished());
+            attached_tx.send(()).unwrap();
+            // Dropping the receiver channel must cause the stream task to exit promptly,
+            // even when the server sends no data and keeps the connection open.
+            drop(attachment.messages);
+            tokio::time::timeout(Duration::from_secs(2), attachment.stream_task)
+                .await
+                .expect("stream_task must terminate upon receiver drop without waiting for socket input")
+                .unwrap();
+        };
+        let peer = async {
+            let mut connection = fixture.accept(false).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Attach {
+                    ref session_id,
+                    after_sequence: Some(10),
+                } if session_id == "session-cancel-test"
+            ));
+            reply(
+                &mut connection,
+                json!({
+                    "type": "attachOk",
+                    "epoch": 7,
+                    "sessionId": "session-cancel-test",
+                    "startSequence": 10,
+                    "endSequence": 10,
+                    "gap": null,
+                    "history": "",
+                    "historySegments": [],
+                    "ptyCols": 80,
+                    "ptyRows": 24,
+                    "remoteGeneration": null,
+                }),
+            )
+            .await;
+            attached_rx.await.unwrap();
+            // Peer keeps connection open without sending bytes.
+            // When stream_task terminates, its write_half is dropped, so the peer sees EOF on read.
+            eof(&mut connection).await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_describe_session_preserves_structured_error_code_and_details() {
+        let fixture = Fixture::new().await;
+        let action = async {
+            // 1. describe_session preserves SESSION_NOT_FOUND code and details
+            let err = fixture
+                .client
+                .describe_session("missing-session")
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::SessionNotFound);
+            assert_eq!(
+                err.details.as_ref().unwrap()["sessionId"],
+                "missing-session"
+            );
+
+            // 2. describe_session_identity preserves SESSION_NOT_FOUND code and details
+            let err_ident = fixture
+                .client
+                .describe_session_identity("missing-session")
+                .await
+                .unwrap_err();
+            assert_eq!(err_ident.code, IpcErrorCode::SessionNotFound);
+            assert_eq!(
+                err_ident.details.as_ref().unwrap()["sessionId"],
+                "missing-session"
+            );
+        };
+        let peer = async {
+            let mut connection = fixture.accept(false).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::DescribeSession { ref session_id } if session_id == "missing-session"
+            ));
+            reply(
+                &mut connection,
+                json!({
+                    "type": "error",
+                    "message": "Session 'missing-session' not found",
+                    "code": "SESSION_NOT_FOUND",
+                    "details": {
+                        "source": "daemon_describe",
+                        "kind": "session_not_found",
+                        "sessionId": "missing-session",
+                    }
+                }),
+            )
+            .await;
+
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::DescribeSession { ref session_id } if session_id == "missing-session"
+            ));
+            reply(
+                &mut connection,
+                json!({
+                    "type": "error",
+                    "message": "Session 'missing-session' not found",
+                    "code": "SESSION_NOT_FOUND",
+                    "details": {
+                        "source": "daemon_describe",
+                        "kind": "session_not_found",
+                        "sessionId": "missing-session",
+                    }
+                }),
+            )
+            .await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_invalidation_clears_local_and_interactive_cached_connections() {
+        let fixture = Fixture::new().await;
+        let session_id = "test-upgrade-inval-session";
+
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+
+        let (reader, writer) = client_stream.into_split();
+        fixture.client.local_connections.lock().insert(
+            session_id.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader),
+                    writer,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        let remote_slot = Arc::new(RemoteSessionSlot {
+            connection: Mutex::new(None),
+            permits: parking_lot::Mutex::new(ClientQueuePermits {
+                allocated_entries: 0,
+                allocated_bytes: 0,
+            }),
+            active_refs: std::sync::atomic::AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+        });
+        fixture.client.remote_connections.lock().insert(
+            session_id.into(),
+            remote_slot,
+        );
+
+        assert!(!fixture.client.local_connections.lock().is_empty());
+        assert!(!fixture.client.remote_connections.lock().is_empty());
+
+        fixture.client.invalidate_cached_connections().await;
+
+        assert!(fixture.client.local_connections.lock().is_empty());
+        assert!(fixture.client.remote_connections.lock().is_empty());
+        assert!(fixture.client.connection.lock().await.is_none());
+        assert!(fixture.client.interactive_connection.lock().await.is_none());
+        assert!(fixture.client.spawn_connection.lock().await.is_none());
+
+        drop(server_stream);
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_invalidation_allows_subsequent_write_to_reconnect_freshly() {
+        let fixture = Fixture::new().await;
+        let session_id = "test-reconnect-session";
+
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+
+        let (reader, writer) = client_stream.into_split();
+        drop(server_stream);
+
+        fixture.client.local_connections.lock().insert(
+            session_id.into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader),
+                    writer,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+
+        fixture.client.invalidate_cached_connections().await;
+        assert!(fixture.client.local_connections.lock().is_empty());
+
+        let action = async {
+            let resp = fixture
+                .client
+                .send_interactive_request(DaemonRequest::Write {
+                    session_id: session_id.into(),
+                    data: b"fresh write".to_vec(),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(resp, DaemonResponse::WriteOk));
+        };
+
+        let peer = async {
+            let mut connection = fixture.accept(false).await;
+            assert!(matches!(
+                read_request(&mut connection).await,
+                DaemonRequest::Write { ref session_id, ref data }
+                    if session_id == "test-reconnect-session" && data == b"fresh write"
+            ));
+            reply(&mut connection, json!({ "type": "writeOk" })).await;
+        };
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(action, peer);
+        })
+        .await
+        .unwrap();
+
         drop(fixture.listener);
         fixture.root.close().unwrap();
     }

@@ -260,6 +260,19 @@ fn set_cloexec(fd: RawFd) -> Result<(), HandoverWireError> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIRST_FRAGMENT_TX: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_first_fragment_tx(tx: Option<std::sync::mpsc::SyncSender<usize>>) {
+    FIRST_FRAGMENT_TX.with(|slot| {
+        *slot.borrow_mut() = tx;
+    });
+}
+
 unsafe fn recv_header_with_control_capacity(
     fd: RawFd,
     header: &mut [u8; HANDOVER_HEADER_BYTES],
@@ -323,8 +336,18 @@ unsafe fn recv_header_with_control_capacity(
     for raw in raw_fds {
         received.push(unsafe { OwnedFd::from_raw_fd(raw) });
     }
-    if n < HANDOVER_HEADER_BYTES {
-        return Err(HandoverWireError::Closed);
+    let mut received_bytes = n;
+    #[cfg(test)]
+    if received_bytes < HANDOVER_HEADER_BYTES {
+        FIRST_FRAGMENT_TX.with(|slot| {
+            if let Some(tx) = slot.borrow_mut().take() {
+                let _ = tx.send(received_bytes);
+            }
+        });
+    }
+    while received_bytes < HANDOVER_HEADER_BYTES {
+        let read = recv_bytes(fd, &mut header[received_bytes..HANDOVER_HEADER_BYTES])?;
+        received_bytes += read;
     }
     Ok(())
 }
@@ -600,5 +623,119 @@ mod tests {
         let creds = peer_credentials(sender.as_raw_fd()).expect("credentials");
         assert_eq!(creds.uid, unsafe { libc::getuid() });
         assert_eq!(creds.gid, unsafe { libc::getgid() });
+    }
+
+    unsafe fn send_fragment_with_fds(
+        fd: RawFd,
+        fragment: &[u8],
+        fds: &[RawFd],
+    ) {
+        let mut iov: [libc::iovec; 1] = unsafe { std::mem::zeroed() };
+        iov[0].iov_base = fragment.as_ptr() as *mut libc::c_void;
+        iov[0].iov_len = fragment.len();
+
+        let mut _control_storage = Vec::<usize>::new();
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = iov.as_mut_ptr();
+        msg.msg_iovlen = 1;
+        if !fds.is_empty() {
+            let space = unsafe { libc::CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as _) } as usize;
+            let usize_len = (space + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+            _control_storage = vec![0usize; usize_len];
+            msg.msg_control = _control_storage.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = space as _;
+            let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = unsafe { libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as _) } as _;
+            let data = unsafe { libc::CMSG_DATA(cmsg) } as *mut RawFd;
+            for (index, value) in fds.iter().enumerate() {
+                unsafe { data.add(index).write(*value) };
+            }
+        }
+
+        loop {
+            let n = unsafe { libc::sendmsg(fd, &msg, 0) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("sendmsg failed: {err}");
+            }
+            assert_eq!(n as usize, fragment.len());
+            break;
+        }
+    }
+
+    #[test]
+    fn fragmented_header_read_reassembles_successfully() {
+        let (sender, receiver) = socketpair();
+        let frame = sample_frame(dev_null_fds(2));
+        let fd_values: Vec<RawFd> = frame.fds.iter().map(AsRawFd::as_raw_fd).collect();
+        let payload = serde_json::to_vec(&frame.payload).expect("payload");
+        let header = encode_header(
+            frame.kind,
+            &frame.transfer_id,
+            frame.frame_sequence,
+            frame.fds.len() as u16,
+            frame.flags,
+            payload.len() as u32,
+        )
+        .expect("header");
+
+        let (first_fragment_tx, first_fragment_rx) = std::sync::mpsc::sync_channel::<usize>(1);
+        set_first_fragment_tx(Some(first_fragment_tx));
+
+        let payload_len = payload.len();
+        let sender_thread = std::thread::spawn(move || {
+            // Send first fragment (30 bytes) with SCM fds
+            unsafe {
+                send_fragment_with_fds(sender.as_raw_fd(), &header[..30], &fd_values);
+            }
+
+            // Await exact receiver first-fragment consumption event before sending remainder
+            let received_first = first_fragment_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("receiver must signal receipt of first fragment before remainder is sent");
+            assert_eq!(received_first, 30);
+
+            // Now send second fragment (remaining 30 bytes of header)
+            let written2 = unsafe {
+                libc::write(
+                    sender.as_raw_fd(),
+                    header[30..].as_ptr() as *const libc::c_void,
+                    30,
+                )
+            };
+            assert_eq!(written2, 30);
+
+            // Send payload
+            let written_payload = unsafe {
+                libc::write(
+                    sender.as_raw_fd(),
+                    payload.as_ptr() as *const libc::c_void,
+                    payload_len,
+                )
+            };
+            assert_eq!(written_payload, payload_len as isize);
+        });
+
+        let got = recv_frame(receiver.as_raw_fd())
+            .expect("recv_frame must reassemble fragmented header");
+        set_first_fragment_tx(None);
+        sender_thread.join().expect("sender thread join");
+
+        assert_eq!(got.kind, frame.kind);
+        assert_eq!(got.transfer_id, frame.transfer_id);
+        assert_eq!(got.frame_sequence, frame.frame_sequence);
+        assert_eq!(got.payload, frame.payload);
+        assert_eq!(got.fds.len(), 2);
+        for fd in &got.fds {
+            assert!(is_cloexec(fd.as_raw_fd()), "FD_CLOEXEC must be set");
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let res = unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) };
+            assert_eq!(res, 0, "received SCM fd must be a valid open descriptor");
+        }
     }
 }

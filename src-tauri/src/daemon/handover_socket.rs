@@ -250,6 +250,7 @@ pub fn adopt_authority(
 pub struct SessionTransferMetadata {
     pub session_id: String,
     pub session_snapshot: crate::terminal::session::PtySessionSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_snapshot: Option<crate::terminal::output_hub::SessionHubSnapshot>,
     /// The exporting daemon's authoritative spawn record for this session, serialized verbatim
     /// (`daemon::session_service::StoredSessionMeta`). The export snapshot carries PTY-level
@@ -271,7 +272,7 @@ pub fn send_session(
     let snapshot = export.snapshot();
     let meta = SessionTransferMetadata {
         session_id,
-        hub_snapshot: snapshot.hub_snapshot.clone(),
+        hub_snapshot: None,
         session_snapshot: snapshot,
         owner,
     };
@@ -322,8 +323,11 @@ pub fn recv_session_with_owner(
     if frame.kind != KIND_SESSION {
         return Err(HandoverSocketError::UnexpectedMessageKind(frame.kind));
     }
-    let meta: SessionTransferMetadata = serde_json::from_value(frame.payload)
+    let mut meta: SessionTransferMetadata = serde_json::from_value(frame.payload)
         .map_err(|e| HandoverWireError::InvalidPayload(e))?;
+    if meta.session_snapshot.hub_snapshot.is_none() {
+        meta.session_snapshot.hub_snapshot = meta.hub_snapshot.take();
+    }
     let master_fd = frame.fds.into_iter().next().ok_or(
         HandoverSocketError::MissingRequiredDescriptor("pty_master_fd"),
     )?;
@@ -461,5 +465,74 @@ mod tests {
             Some("owner-record-incarnation")
         );
         assert_eq!(received, Some(owner));
+    }
+
+    /// Regression test for handover-4: A full 512 KiB terminal output hub ring buffer must not be
+    /// serialized twice, which would push the JSON frame past HANDOVER_MAX_PAYLOAD_BYTES (4 MiB)
+    /// and fail with PayloadTooLarge.
+    #[test]
+    fn test_send_session_large_hub_snapshot_does_not_exceed_payload_limit() {
+        use std::sync::Arc;
+        use crate::terminal::output_hub::{OutputChunk, SessionHubSnapshot};
+
+        let (sender, receiver) = UnixStream::pair().expect("socketpair");
+        let master: OwnedFd = File::open("/dev/null").expect("open /dev/null").into();
+
+        let chunk_size = 64 * 1024;
+        let mut chunks = Vec::new();
+        let chunk_data: Vec<u8> = (0..chunk_size).map(|i| (i % 256) as u8).collect();
+        let chunk_arc: Arc<[u8]> = chunk_data.into();
+        for i in 1..=12 {
+            chunks.push(OutputChunk {
+                sequence: i,
+                bytes: chunk_arc.clone(),
+                metrics_read_unix_micros: None,
+                replay_gap: None,
+            });
+        }
+
+        let hub_snapshot = SessionHubSnapshot {
+            capacity: 768 * 1024,
+            chunks,
+            next_sequence: 13,
+            bracketed_paste_enabled: false,
+            resize_ledger: Vec::new(),
+            replay_gap: None,
+            transport_owner: false,
+            retained_state: None,
+        };
+
+        let snapshot = crate::terminal::session::PtySessionSnapshot {
+            session_id: "large-hub-session".into(),
+            incarnation: Some("large-hub-incarnation".into()),
+            pid: Some(5432),
+            pgid: Some(5432),
+            cols: 80,
+            rows: 24,
+            worktree_path: None,
+            state: crate::terminal::PtySessionState::Running,
+            hub_snapshot: Some(hub_snapshot),
+            suspension_receipt: None,
+        };
+
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let export = crate::terminal::session::PtySessionExport::from_parts(snapshot, master);
+        let sending = std::thread::spawn(move || {
+            send_session(&sender, &transfer_id, 1, export, None)
+                .expect("send_session with 768 KiB hub snapshot must succeed");
+        });
+
+        let (received_export, _) = recv_session_with_owner(&receiver)
+            .expect("recv_session_with_owner")
+            .expect("a session");
+        sending.join().expect("sender thread");
+        assert_eq!(received_export.session_id, "large-hub-session");
+        let received_hub = received_export
+            .snapshot()
+            .hub_snapshot
+            .expect("hub snapshot must be preserved");
+        assert_eq!(received_hub.chunks.len(), 12);
+        let total_bytes: usize = received_hub.chunks.iter().map(|c| c.bytes.len()).sum();
+        assert_eq!(total_bytes, 768 * 1024);
     }
 }
