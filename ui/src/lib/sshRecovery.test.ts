@@ -164,66 +164,147 @@ describe("SSH recovery", () => {
       status: { sessionId: "stable", state: "connected", generation: 258 } });
     recovery.stop();
   });
-  /** The handler re-arms off the status stream, so let its awaits settle without wall-clock waiting. */
-  const drain = () => new Promise(resolve => setTimeout(resolve, 0));
+  function createMockSeams(overrides?: {
+    status?: (id: string) => Promise<any>;
+    onError?: (err: any) => void;
+  }) {
+    type Listener<T> = {
+      predicate: (val: T) => boolean;
+      resolve: (val: T) => void;
+      reject: (err: any) => void;
+      timer: ReturnType<typeof setTimeout>;
+    };
+    const dispatchListeners: Listener<any>[] = [];
+    const errorListeners: Listener<any>[] = [];
+
+    const notify = <T>(listeners: Listener<T>[], val: T) => {
+      for (let i = listeners.length - 1; i >= 0; i--) {
+        const l = listeners[i];
+        try {
+          if (l.predicate(val)) {
+            clearTimeout(l.timer);
+            listeners.splice(i, 1);
+            l.resolve(val);
+          }
+        } catch (err) {
+          clearTimeout(l.timer);
+          listeners.splice(i, 1);
+          l.reject(err);
+        }
+      }
+    };
+
+    const addWaiter = <T>(listeners: Listener<T>[], predicate: (val: T) => boolean, timeoutMs = 2000, desc = "event"): Promise<T> => {
+      return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = listeners.findIndex(l => l.timer === timer);
+          if (idx !== -1) listeners.splice(idx, 1);
+          reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${desc}`));
+        }, timeoutMs);
+        listeners.push({ predicate, resolve, reject, timer });
+      });
+    };
+
+    const dispatch = vi.fn((action: any) => {
+      notify(dispatchListeners, action);
+    });
+
+    const onError = vi.fn((err: any) => {
+      notify(errorListeners, err);
+      overrides?.onError?.(err);
+    });
+
+    const list = vi.fn(async () => {
+      return [{ sessionId: "stable", daemonEpoch: "new" }];
+    });
+
+    const status = vi.fn(async (id: string) => {
+      const res = overrides?.status ? await overrides.status(id) : parkedDetails("disconnected", 400);
+      return res;
+    });
+
+    return {
+      dispatch,
+      onError,
+      list,
+      status,
+      waitForSettled: (generation: number, timeoutMs?: number) =>
+        addWaiter(dispatchListeners, a => a?.daemonEpoch === "new" && a?.status?.generation === generation, timeoutMs, `settled status gen ${generation}`),
+      waitForError: (predicate: (err: any) => boolean = () => true, timeoutMs?: number) =>
+        addWaiter(errorListeners, predicate, timeoutMs, "onError"),
+    };
+  }
   const outageStream = () => {
     let emit: (status: any) => void = () => {};
-    const dispatch = vi.fn();
+    const seams = createMockSeams({
+      onError: error => { throw error; },
+      status: async () => parkedDetails("disconnected", 400),
+    });
     const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
     // Every re-probe still reports a park: the outage outlives each re-armed budget.
-    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+    const recovery = startSshRecovery({ sessions: [session], dispatch: seams.dispatch, onError: seams.onError,
       subscribe: async handler => { emit = handler; return () => {}; },
-      status: (async () => parkedDetails("disconnected", 400)) as any, retry,
-      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+      status: seams.status as any, retry,
+      list: seams.list,
     });
-    return { recovery, emit, retry, dispatch };
+    return { recovery, emit, retry, dispatch: seams.dispatch, seams };
   };
   const park = { sessionId: "stable", state: "disconnected" as const, generation: 5, failure: null, replayGap: null };
   const reconnect = { sessionId: "stable", state: "reconnecting" as const, generation: 6, failure: null, replayGap: null };
   it("re-arms on each new park and ignores repeats of the same one", async () => {
-    const { recovery, emit, retry } = outageStream();
+    const { recovery, emit, retry, seams } = outageStream();
     await recovery.subscribed;
+    const waitPark = seams.waitForSettled(400);
     emit(park);
-    await drain();
+    await waitPark;
     expect(retry).toHaveBeenCalledTimes(1);
     // A repeat of the same park is not a new outage.
+    const waitRepeat = seams.waitForSettled(5);
     emit(park);
-    await drain();
+    await waitRepeat;
     expect(retry).toHaveBeenCalledTimes(1);
+    const waitReconnect = seams.waitForSettled(6);
     emit(reconnect);
-    await drain();
+    await waitReconnect;
+    const waitPark2 = seams.waitForSettled(400);
     emit({ ...park, generation: 7 });
-    await drain();
+    await waitPark2;
     expect(retry).toHaveBeenCalledTimes(2);
     recovery.stop();
   });
   it("stops re-arming after the bounded number of automatic attempts", async () => {
-    const { recovery, emit, retry } = outageStream();
+    const { recovery, emit, retry, seams } = outageStream();
     await recovery.subscribed;
     for (let i = 0; i < 8; i += 1) {
+      const waitReconnect = seams.waitForSettled(10 + i * 2);
       emit({ ...reconnect, generation: 10 + i * 2 });
-      await drain();
+      await waitReconnect;
+      const waitPark = seams.waitForSettled(i < 5 ? 400 : 11 + i * 2);
       emit({ ...park, generation: 11 + i * 2 });
-      await drain();
+      await waitPark;
     }
     // A long outage must not keep dialing the host forever; the manual button remains.
     expect(retry).toHaveBeenCalledTimes(5);
     recovery.stop();
   });
   it("resets the re-arm budget once the transport recovers", async () => {
-    const { recovery, emit, retry } = outageStream();
+    const { recovery, emit, retry, seams } = outageStream();
     await recovery.subscribed;
     for (let i = 0; i < 6; i += 1) {
+      const waitReconnect = seams.waitForSettled(20 + i * 2);
       emit({ ...reconnect, generation: 20 + i * 2 });
-      await drain();
+      await waitReconnect;
+      const waitPark = seams.waitForSettled(i < 5 ? 400 : 21 + i * 2);
       emit({ ...park, generation: 21 + i * 2 });
-      await drain();
+      await waitPark;
     }
     expect(retry).toHaveBeenCalledTimes(5);
+    const waitConnected = seams.waitForSettled(60);
     emit({ sessionId: "stable", state: "connected", generation: 60, failure: null, replayGap: null });
-    await drain();
+    await waitConnected;
+    const waitRecoveredPark = seams.waitForSettled(400);
     emit({ ...park, generation: 61 });
-    await drain();
+    await waitRecoveredPark;
     expect(retry).toHaveBeenCalledTimes(6);
     recovery.stop();
   });
@@ -237,6 +318,114 @@ describe("SSH recovery", () => {
     await recovery.ready;
     expect(retry).not.toHaveBeenCalled();
     expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ status: { sessionId: "stable", state: "expired" } });
+    recovery.stop();
+  });
+
+  it("retains auto-rearm count across recovery re-instantiations and respects cap", async () => {
+    const sharedRearms = new Map<string, number>();
+    let emit1: (status: any) => void = () => {};
+    const seams1 = createMockSeams({
+      onError: error => { throw error; },
+      status: async () => parkedDetails("disconnected", 400),
+    });
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    const recovery1 = startSshRecovery({
+      sessions: [session],
+      dispatch: seams1.dispatch,
+      onError: seams1.onError,
+      subscribe: async handler => { emit1 = handler; return () => {}; },
+      status: seams1.status as any,
+      retry,
+      list: seams1.list,
+      rearms: sharedRearms,
+    });
+    await recovery1.subscribed;
+    for (let i = 0; i < 3; i++) {
+      const waitReconnect = seams1.waitForSettled(10 + i * 2);
+      emit1({ ...reconnect, generation: 10 + i * 2 });
+      await waitReconnect;
+      const waitPark = seams1.waitForSettled(400);
+      emit1({ ...park, generation: 11 + i * 2 });
+      await waitPark;
+    }
+    expect(retry).toHaveBeenCalledTimes(3);
+    recovery1.stop();
+
+    // Re-instantiate recovery effect with the same shared rearms map (e.g. held by sshRearmsRef)
+    let emit2: (status: any) => void = () => {};
+    const seams2 = createMockSeams({
+      onError: error => { throw error; },
+      status: async () => parkedDetails("disconnected", 500),
+    });
+    const recovery2 = startSshRecovery({
+      sessions: [session],
+      dispatch: seams2.dispatch,
+      onError: seams2.onError,
+      subscribe: async handler => { emit2 = handler; return () => {}; },
+      status: seams2.status as any,
+      retry,
+      list: seams2.list,
+      rearms: sharedRearms,
+    });
+    await recovery2.subscribed;
+    for (let i = 0; i < 4; i++) {
+      const waitReconnect = seams2.waitForSettled(20 + i * 2);
+      emit2({ ...reconnect, generation: 20 + i * 2 });
+      await waitReconnect;
+      const waitPark = seams2.waitForSettled(i < 2 ? 500 : 21 + i * 2);
+      emit2({ ...park, generation: 21 + i * 2 });
+      await waitPark;
+    }
+    // Must be capped at 5 total across re-instantiations, NOT 3 + 4 = 7
+    expect(retry).toHaveBeenCalledTimes(5);
+    recovery2.stop();
+  });
+
+  it("catches non-structured retry errors in rearmAndReprobe without unhandled rejection", async () => {
+    let emit: (status: any) => void = () => {};
+    const nonStructuredError = new Error("IPC transport disconnected unexpectedly");
+    const retry = vi.fn(async () => { throw nonStructuredError; });
+    const seams = createMockSeams({
+      status: async () => parkedDetails("disconnected", 400),
+    });
+    const { dispatch, onError } = seams;
+    const recovery = startSshRecovery({
+      sessions: [session],
+      dispatch,
+      onError,
+      subscribe: async handler => { emit = handler; return () => {}; },
+      status: seams.status as any,
+      retry,
+      list: seams.list,
+    });
+    await recovery.subscribed;
+    const waitError = seams.waitForError(err => err === nonStructuredError);
+    emit({ sessionId: "stable", state: "disconnected", generation: 10, failure: null, replayGap: null });
+    await waitError;
+    expect(retry).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(nonStructuredError);
+    recovery.stop();
+  });
+
+  it("re-arms exactly once during startup when details are initially missing", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    const disconnectedDetails = parkedDetails("disconnected", 1);
+    const status = vi.fn()
+      .mockResolvedValueOnce({ type: "remoteSessionDetailsOk", details: null, legacyDirectSsh: false })
+      .mockResolvedValue(disconnectedDetails);
+    const recovery = startSshRecovery({
+      sessions: [session],
+      dispatch,
+      onError: error => { throw error; },
+      subscribe: async () => () => {},
+      status: status as any,
+      retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    // Missing details should trigger startup rearm once, and not double-rearm in rearmAndReprobe
+    expect(retry).toHaveBeenCalledTimes(1);
     recovery.stop();
   });
 });

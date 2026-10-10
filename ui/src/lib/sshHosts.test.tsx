@@ -9,6 +9,7 @@ import {
   importSshConfig,
   listSshHosts,
   resetSshHostsCache,
+  subscribeSshHosts,
   testSshConnection,
   updateSshHost,
   useSshHosts,
@@ -366,6 +367,28 @@ describe("sshHosts library and useSshHosts hook", () => {
       expect(screen.queryByTestId("host-item-B-host-1")).toBeNull();
       expect(screen.getByTestId("host-item-A-host-2")).toBeInTheDocument();
       expect(screen.getByTestId("host-item-B-host-2")).toBeInTheDocument();
+    });
+
+    it("preserves active subscribers across resetSshHostsCache calls", async () => {
+      const listener = vi.fn();
+      const unsubscribe = subscribeSshHosts(listener);
+
+      // Verify listener works initially
+      invokeMock.mockResolvedValueOnce([mockHost1]);
+      await updateSshHost(mockHost1);
+      expect(listener).toHaveBeenCalledWith([mockHost1]);
+
+      // When: resetSshHostsCache() is called (e.g. from RemoteSection "Refresh All")
+      resetSshHostsCache();
+
+      // Then: the listener is still subscribed and receives subsequent notifications
+      listener.mockClear();
+      invokeMock.mockResolvedValueOnce([mockHost1, mockHost2]);
+      await updateSshHost(mockHost2);
+      expect(listener).toHaveBeenCalledWith([mockHost1, mockHost2]);
+
+      unsubscribe();
+      resetSshHostsCache({ clearListeners: true });
     });
   });
 });

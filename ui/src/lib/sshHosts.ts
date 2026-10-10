@@ -99,11 +99,13 @@ export function getCachedSshHosts(): SshHost[] | null {
   return cachedHosts;
 }
 
-export function resetSshHostsCache(): void {
+export function resetSshHostsCache(options?: { clearListeners?: boolean }): void {
   cachedHosts = null;
   inflightFetch = null;
   inventoryEpoch += 1;
-  listeners.clear();
+  if (options?.clearListeners) {
+    listeners.clear();
+  }
 }
 
 export function extractIpcErrorMessage(err: unknown, fallback: string): string {

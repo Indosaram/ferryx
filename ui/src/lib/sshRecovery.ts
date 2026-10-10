@@ -11,6 +11,7 @@ export function startSshRecovery(options: {
   status?: (id: string) => Promise<RemoteSessionStatusResponse>;
   retry?: (id: string) => Promise<unknown>;
   list?: () => Promise<Array<{ sessionId: string; daemonEpoch?: string | null }>>;
+  rearms?: Map<string, number>;
 }) {
   let stopped = false;
   let unlisten: (() => void) | undefined;
@@ -24,14 +25,14 @@ export function startSshRecovery(options: {
       ? { sessionId, state: result.details.state, generation: result.details.generation, failure: result.details.failure, replayGap: result.details.replayGap }
       : { sessionId, state: result.legacyDirectSsh ? "legacyLost" : "missing", generation: 0, failure: null, replayGap: null };
   /**
-   * Automatic re-arms allowed per outage. The daemon parks a transport in `disconnected` once its
-   * consecutive-failure budget is spent and never dials that session again, so an outage that
-   * outlives a single budget would leave the pane dead until the user clicks Reconnect. Re-arm on
-   * each observed park — the daemon emits one per park, so the cadence is its own — and stop after a
-   * bounded number of them so a long outage cannot keep dialing the host forever.
+   * Automatic re-arms allowed per outage. Current daemons keep redialing transport outages with a
+   * capped backoff, but a session can still sit in `disconnected` when an older daemon (before an
+   * upgrade handover) spent its retry budget, or when a non-transport failure stopped the loop.
+   * Re-arm on each observed park — the daemon emits one per park, so the cadence is its own — and
+   * stop after a bounded number of them so a persistent failure cannot keep dialing the host.
    */
   const MAX_AUTO_REARMS = 5;
-  const rearms = new Map<string, number>();
+  const rearms = options.rearms ?? new Map<string, number>();
   const rearm = async (sessionId: string) => {
     const used = rearms.get(sessionId) ?? 0;
     if (stopped || used >= MAX_AUTO_REARMS) return false;
@@ -60,9 +61,9 @@ export function startSshRecovery(options: {
    * the `disconnected` snapshot. A newer observation for the session wins and this probe is dropped.
    */
   const rearmAndReprobe = async (sessionId: string, before: SshRecoveryStatus) => {
-    if (!(await rearm(sessionId))) return;
-    if (stopped || latest.get(sessionId) !== before) return;
     try {
+      if (!(await rearm(sessionId))) return;
+      if (stopped || latest.get(sessionId) !== before) return;
       const result = await probe(sessionId);
       if (stopped || latest.get(sessionId) !== before) return;
       const status = toStatus(sessionId, result);
@@ -93,7 +94,9 @@ export function startSshRecovery(options: {
         // which is transient: a draining predecessor may still own it, or restore has not finished.
         // Ask the daemon to retry the session once and re-probe, so the startup snapshot records the
         // settled answer instead of a `missing` that never kills the remote process anyway.
+        let didStartupRearm = false;
         if (!result.details && !result.legacyDirectSsh) {
+          didStartupRearm = true;
           await rearm(sessionId);
           if (stopped || latest.get(sessionId) !== before) return;
           result = await probe(sessionId);
@@ -104,7 +107,7 @@ export function startSshRecovery(options: {
         apply(status);
         // The startup snapshot is the moment a parked transport is most likely to be seen again, so
         // re-arm it here rather than leaving the pane dead until a manual Reconnect.
-        if (status.state === "disconnected" && before?.state !== "disconnected") {
+        if (!didStartupRearm && status.state === "disconnected" && before?.state !== "disconnected") {
           await rearmAndReprobe(sessionId, status);
           return;
         }
