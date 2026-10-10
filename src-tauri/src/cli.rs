@@ -2920,6 +2920,7 @@ mod tests {
     fn headless_release_reasons_reach_private_bounded_sink() {
         // Given: a separate process with all writable locations inside this worktree.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&root).unwrap();
         let fixture = tempfile::tempdir_in(root).unwrap();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
         child
@@ -2993,6 +2994,7 @@ mod tests {
         for mode in ["init_failure", "write_failure"] {
             // Given: isolated production CLI lifecycle with a gated primary task.
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+            std::fs::create_dir_all(&root).unwrap();
             let fixture = tempfile::tempdir_in(root).unwrap();
             if mode == "init_failure" {
                 std::fs::write(fixture.path().join("logs"), b"not a directory").unwrap();
