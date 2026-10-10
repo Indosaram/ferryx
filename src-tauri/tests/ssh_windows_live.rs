@@ -201,18 +201,30 @@ async fn exercise_windows(
     .unwrap()?;
     let (mut history, mut events) = service.attach(&id).unwrap();
     let expected = format!("FXQA{root}");
-    let mut answered = 0;
-    let mut sent = false;
+    let input_ready = format!("FERRYX_INPUT_{}", uuid::Uuid::new_v4().simple());
+    let mut shell_initialized = false;
+    let mut readiness_sent = false;
+    let mut cwd_sent = false;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         while !String::from_utf8_lossy(&history).contains(&expected) {
-            let requests = history.windows(4).filter(|bytes| *bytes == b"\x1b[6n").count();
-            while answered < requests {
-                service.write_input(&id, b"\x1b[1;1R").unwrap();
-                answered += 1;
+            let output = String::from_utf8_lossy(&history);
+            if !shell_initialized && output.contains("\x1b[?9001h") {
+                shell_initialized = true;
             }
-            if !sent && String::from_utf8_lossy(&history).contains(&format!("{root}>")) {
-                service.write_input(&id, b"[Console]::WriteLine(([char]70+[string][char]88+[char]81+[char]65)+$PWD.Path)\r").unwrap();
-                sent = true;
+            if shell_initialized && !readiness_sent {
+                service
+                    .write_input(&id, format!("# {input_ready}\r").as_bytes())
+                    .unwrap();
+                readiness_sent = true;
+            }
+            if readiness_sent && !cwd_sent && output.contains(&input_ready) {
+                service
+                    .write_input(
+                        &id,
+                        b"[Console]::WriteLine(([char]70+[string][char]88+[char]81+[char]65)+$PWD.Path)\r",
+                    )
+                    .unwrap();
+                cwd_sent = true;
             }
             history.extend(events.recv().await.unwrap());
         }

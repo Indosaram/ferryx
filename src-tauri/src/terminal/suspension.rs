@@ -18,8 +18,10 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
+#[path = "suspension/unix.rs"]
 mod unix;
 #[cfg(windows)]
+#[path = "suspension/windows.rs"]
 pub mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
