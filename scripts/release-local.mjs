@@ -131,6 +131,7 @@ export function prepareRelease({
   commit = "HEAD",
   outDir,
   nsisMigration = false,
+  changelog = generateChangelog,
 }) {
   assertNotInCI("prepare");
 
@@ -276,12 +277,12 @@ export function prepareRelease({
   writeFileSync(join(resolvedOutDir, "source-inputs.json"), JSON.stringify(sourceInputs, null, 2) + "\n");
 
   try {
-    const changelog = generateChangelog({
+    const notes = changelog({
       repo: config.repo,
       tag,
       commitSha,
     });
-    writeFileSync(join(resolvedOutDir, "RELEASE_NOTES.md"), changelog);
+    writeFileSync(join(resolvedOutDir, "RELEASE_NOTES.md"), notes);
   } catch {
     // Fail-open: changelog generation failure never aborts prepare
   }
