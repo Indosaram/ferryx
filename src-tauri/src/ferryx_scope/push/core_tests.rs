@@ -17,11 +17,17 @@ fn revoke_and_endpoint_ownership_are_enforced() {
     let mut store = PushStore::default(); store.subscribe("d", sub(), false).unwrap();
     assert!(store.subscribe("foreign", sub(), false).is_err());
     assert!(store.unsubscribe("foreign", &sub().endpoint).is_err());
+    assert_eq!(store.pending(&event(), 0)[0].device_id, "d");
+    store.unsubscribe("d", &sub().endpoint).unwrap();
+    assert!(store.subscriptions.is_empty());
+    store.subscribe("d", sub(), false).unwrap();
     store.revoke("d"); assert!(store.subscriptions.is_empty()); assert!(store.pending(&event(), 0).is_empty());
 }
 #[test]
 fn endpoint_policy_rejects_ssrf_and_expiry_is_not_deliverable() {
     for url in ["http://fcm.googleapis.com/send/a", "https://127.0.0.1/a", "https://fcm.googleapis.com.evil.test/a", "https://user@fcm.googleapis.com/a", "https://fcm.googleapis.com:444/a", "https://fcm.googleapis.com/a#x"] { assert!(validate_endpoint(url).is_err(), "{url}"); }
     assert!(validate_endpoint(&sub().endpoint).is_ok());
+    let mut invalid = sub(); invalid.endpoint = "https://127.0.0.1/a".into();
+    assert!(PushStore::default().subscribe("d", invalid, false).is_err());
     let mut store = PushStore::default(); let mut s = sub(); s.expiration_time = Some(10); store.subscribe("d", s, false).unwrap(); assert!(store.pending(&event(), 10).is_empty());
 }
