@@ -95,3 +95,223 @@ fn invalid_passwords_do_not_enter_store() {
     }
     assert!(require(&host).is_err());
 }
+
+#[test]
+fn askpass_prompt_argument_detection() {
+    assert!(is_askpass_prompt_args(&["ferryx-cli", "Password:"]));
+    assert!(is_askpass_prompt_args(&[
+        "ferryx",
+        "user@example.test's password: "
+    ]));
+    assert!(!is_askpass_prompt_args(&["ferryx-cli"]));
+    assert!(!is_askpass_prompt_args(&["ferryx-cli", "--daemon"]));
+    assert!(!is_askpass_prompt_args(&["ferryx-cli", "open", "file.txt"]));
+    assert!(!is_askpass_prompt_args(&[
+        "ferryx-cli",
+        "remote",
+        "pair",
+        "123456"
+    ]));
+}
+
+#[test]
+fn askpass_dispatch_returns_none_for_non_prompt_invocations() {
+    // Ordinary CLI and daemon launches without askpass prompt or port environment return None
+    assert_eq!(run_askpass_with(None, None, false), None);
+    // Even if prompt is given without askpass port, returns None (and reports diagnostic)
+    assert_eq!(run_askpass_with(None, None, true), None);
+}
+
+#[test]
+fn askpass_dispatch_serves_password_when_credentials_match() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let port = listener.local_addr().unwrap().port();
+    let expected_token = "secret-broker-token-1234";
+    let expected_password = "correct-horse-battery-staple";
+
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept connection");
+        let mut buf = vec![0u8; expected_token.len()];
+        socket.read_exact(&mut buf).expect("read token");
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), expected_token);
+        use std::io::Write;
+        socket
+            .write_all(expected_password.as_bytes())
+            .expect("write password");
+    });
+
+    let code = run_askpass_with(
+        Some(port.to_string()),
+        Some(expected_token.to_string()),
+        true,
+    );
+    server.join().expect("server thread finished");
+    assert_eq!(
+        code,
+        Some(0),
+        "run_askpass must return 0 on successful credential exchange"
+    );
+}
+
+#[test]
+fn askpass_cli_process_serves_password_when_credentials_match() {
+    use std::io::{BufReader, Read, Write};
+    use std::process::{Command, Stdio};
+
+    let cli_path = [
+        std::env::var_os("CARGO_BIN_EXE_ferryx-cli").map(std::path::PathBuf::from),
+        std::env::var_os("CARGO_TARGET_DIR").map(|t| {
+            std::path::PathBuf::from(t)
+                .join(format!("debug/ferryx-cli{}", std::env::consts::EXE_SUFFIX))
+        }),
+        Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/debug/ferryx-cli{}", std::env::consts::EXE_SUFFIX)),
+        ),
+        Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/ferryx-cli")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| p.is_file())
+    .expect("existing built ferryx-cli binary in target/debug");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let port = listener.local_addr().unwrap().port();
+    let expected_token = "secret-broker-token-1234";
+    let expected_password = "correct-horse-battery-staple";
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (broker_tx, broker_rx) = std::sync::mpsc::channel();
+
+    let server = std::thread::spawn(move || {
+        ready_tx.send(()).expect("broker readiness signal sent");
+        let (mut socket, _) = match listener.accept() {
+            Ok(conn) => conn,
+            Err(e) => {
+                let _ = broker_tx.send(Err(format!("accept failed: {e}")));
+                return;
+            }
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
+        let mut buf = vec![0u8; expected_token.len()];
+        if let Err(e) = socket.read_exact(&mut buf) {
+            let _ = broker_tx.send(Err(format!("read token failed: {e}")));
+            return;
+        }
+        if buf != expected_token.as_bytes() {
+            let _ = broker_tx.send(Err(format!(
+                "token mismatch: expected {expected_token}, got {:?}",
+                String::from_utf8_lossy(&buf)
+            )));
+            return;
+        }
+        if let Err(e) = socket.write_all(expected_password.as_bytes()) {
+            let _ = broker_tx.send(Err(format!("write password failed: {e}")));
+            return;
+        }
+        let _ = broker_tx.send(Ok(()));
+    });
+
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("broker listener ready before launch");
+
+    struct BrokerCleanup(u16, Option<std::thread::JoinHandle<()>>);
+    impl Drop for BrokerCleanup {
+        fn drop(&mut self) {
+            let _ = std::net::TcpStream::connect(("127.0.0.1", self.0));
+            if let Some(h) = self.1.take() {
+                let _ = h.join();
+            }
+        }
+    }
+    let mut broker_cleanup = BrokerCleanup(port, Some(server));
+
+    struct OwnedChild(Option<std::process::Child>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let mut command = Command::new(&cli_path);
+    command
+        .arg("Password:")
+        .env("FERRYX_SSH_ASKPASS_PORT", port.to_string())
+        .env("FERRYX_SSH_ASKPASS_TOKEN", expected_token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().expect("launch ferryx-cli askpass process");
+    let stdout = child.stdout.take().expect("capture child stdout");
+    let stderr = child.stderr.take().expect("capture child stderr");
+    let mut owned_child = OwnedChild(Some(child));
+
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let res = BufReader::new(stdout).read_to_end(&mut out).map(|_| out);
+        let _ = stdout_tx.send(res);
+    });
+
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut err = Vec::new();
+        let res = BufReader::new(stderr).read_to_end(&mut err).map(|_| err);
+        let _ = stderr_tx.send(res);
+    });
+
+    let stdout_bytes = stdout_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("child stdout await timed out")
+        .expect("read child stdout failed");
+
+    let stderr_bytes = stderr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("child stderr await timed out")
+        .expect("read child stderr failed");
+
+    stdout_reader.join().expect("stdout reader finished");
+    stderr_reader.join().expect("stderr reader finished");
+
+    let status = owned_child
+        .0
+        .as_mut()
+        .expect("owned child")
+        .wait()
+        .expect("wait for child process exit");
+    owned_child.0.take();
+
+    let broker_res = broker_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("broker connection await timed out");
+    assert!(
+        broker_res.is_ok(),
+        "broker exchange failed: {:?}",
+        broker_res.err()
+    );
+
+    broker_cleanup
+        .1
+        .take()
+        .expect("broker handle")
+        .join()
+        .expect("server thread finished");
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "ferryx-cli askpass process must exit 0, stderr: {}",
+        String::from_utf8_lossy(&stderr_bytes)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&stdout_bytes).trim_end_matches(['\r', '\n']),
+        expected_password,
+        "ferryx-cli askpass stdout must match expected credential"
+    );
+}

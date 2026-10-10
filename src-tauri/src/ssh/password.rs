@@ -195,8 +195,13 @@ pub fn environment(args: &[String]) -> Result<Vec<(String, String)>, IpcError> {
 /// OpenSSH invokes the askpass helper with exactly one password prompt argument.
 fn is_askpass_prompt() -> bool {
     let args: Vec<_> = std::env::args_os().collect();
+    is_askpass_prompt_args(&args)
+}
+
+pub(crate) fn is_askpass_prompt_args<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> bool {
     args.len() == 2
         && args[1]
+            .as_ref()
             .to_string_lossy()
             .to_ascii_lowercase()
             .contains("password")
@@ -209,13 +214,25 @@ fn report_askpass(message: &str) {
 }
 /// Must run before GUI/daemon initialization, including on Windows.
 pub fn run_askpass() -> Option<i32> {
-    let port = match std::env::var("FERRYX_SSH_ASKPASS_PORT") {
-        Ok(port) => port,
-        Err(_) => {
+    run_askpass_with(
+        std::env::var("FERRYX_SSH_ASKPASS_PORT").ok(),
+        std::env::var("FERRYX_SSH_ASKPASS_TOKEN").ok(),
+        is_askpass_prompt(),
+    )
+}
+
+pub(crate) fn run_askpass_with(
+    port: Option<String>,
+    token: Option<String>,
+    is_prompt: bool,
+) -> Option<i32> {
+    let port = match port {
+        Some(port) => port,
+        None => {
             // A prompt-shaped command line without our environment means ssh ran
             // the helper and the askpass variables did not reach it, which is the
             // Windows failure this diagnostics set exists to expose.
-            if is_askpass_prompt() {
+            if is_prompt {
                 report_askpass(
                     "FERRYX_SSH_ASKPASS_PORT is unset for an askpass invocation; ssh ran the \
                      helper without the askpass environment",
@@ -226,12 +243,12 @@ pub fn run_askpass() -> Option<i32> {
     };
     // An ordinary Ferryx child inheriting an SSH environment is not an askpass
     // invocation. OpenSSH supplies exactly one password prompt argument.
-    if !is_askpass_prompt() {
+    if !is_prompt {
         return None;
     }
     let status = (|| -> std::io::Result<()> {
         let port: u16 = port.parse().map_err(std::io::Error::other)?;
-        let token = std::env::var("FERRYX_SSH_ASKPASS_TOKEN").map_err(std::io::Error::other)?;
+        let token = token.ok_or_else(|| std::io::Error::other("missing token"))?;
         let mut stream = TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             Duration::from_secs(3),

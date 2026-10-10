@@ -818,6 +818,8 @@ pub struct BridgeConnection {
     stderr_fd: Option<RawFd>,
     stderr_capture: Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(test)]
+    pub(crate) stdout_eof_tx: Option<tokio::sync::oneshot::Sender<()>>,
     prefetched_bytes: Vec<u8>,
     captured_stderr_prefix: Vec<u8>,
     closed: bool,
@@ -1039,6 +1041,8 @@ impl BridgeConnection {
             stderr_fd,
             stderr_capture,
             stderr_task: Some(stderr_task),
+            #[cfg(test)]
+            stdout_eof_tx: None,
             prefetched_bytes: Vec::new(),
             captured_stderr_prefix: Vec::new(),
             closed: false,
@@ -1118,6 +1122,13 @@ impl BridgeConnection {
         let response = match read_frame_async(reader, timeout_dur).await {
             Ok(Some(v)) => v,
             Ok(None) => {
+                #[cfg(test)]
+                if let Some(tx) = self.stdout_eof_tx.take() {
+                    let _ = tx.send(());
+                }
+                if let Some(task) = self.stderr_task.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+                }
                 let stderr = self.check_stderr();
                 // Exit status is observable only through a locally owned handle; an imported
                 // connection reports `None` (unknown) rather than probing its recorded pid.
@@ -1616,6 +1627,8 @@ impl BridgeConnection {
                 stderr_fd: Some(stored_stderr_fd),
                 stderr_capture,
                 stderr_task: Some(stderr_task),
+                #[cfg(test)]
+                stdout_eof_tx: None,
                 prefetched_bytes: Vec::new(),
                 captured_stderr_prefix: Vec::new(),
                 closed: false,
@@ -1791,9 +1804,7 @@ impl SshBridgeClient {
         {
             let _ = control.close().await;
             let _ = reader.close().await;
-            return Err(BridgeError::Protocol(
-                "Reader connection handshake does not match control connection".into(),
-            ));
+            return Err(BridgeError::ConnectionClosed);
         }
 
         Ok(Self {
@@ -1864,9 +1875,7 @@ impl SshBridgeClient {
         {
             let _ = control.close().await;
             let _ = reader.close().await;
-            return Err(BridgeError::Protocol(
-                "Reader connection handshake does not match control connection".into(),
-            ));
+            return Err(BridgeError::ConnectionClosed);
         }
 
         Ok(Self {
@@ -2343,13 +2352,18 @@ impl DagSubscription {
         // only a frame that re-establishes the current inventory (`resync`) may
         // legally skip ahead; anything else is rejected so the caller drops the
         // subscription and re-subscribes for a fresh inventory.
-        if frame.sequence <= self.last_sequence {
+        if frame.sequence < self.last_sequence
+            || (frame.sequence == self.last_sequence && !frame.closed)
+        {
             return Err(BridgeError::Protocol(format!(
                 "DAG frame sequence regressed on subscription {}: last {}, got {}",
                 self.subscription_id, self.last_sequence, frame.sequence
             )));
         }
-        if frame.sequence != self.last_sequence + 1 && !frame.resync {
+        if frame.sequence != self.last_sequence + 1
+            && !frame.resync
+            && !(frame.closed && frame.sequence == self.last_sequence)
+        {
             return Err(BridgeError::Protocol(format!(
                 "DAG frame sequence gap on subscription {}: last {}, got {} without resync",
                 self.subscription_id, self.last_sequence, frame.sequence

@@ -1397,6 +1397,46 @@ async fn ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync() {
     client.close().await.expect("close client");
 }
 
+#[tokio::test]
+async fn ssh_bridge_dag_subscription_accepts_closed_frame_with_same_sequence() {
+    let fixture = TestFixture::new("dag-stream-closed");
+    let client = fixture.create_client().await;
+    client
+        .project_register("proj-closed", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+    std::fs::create_dir_all(fixture.project_dir.join(".omo/senpi-task/dag/runs"))
+        .expect("create runs dir");
+
+    let (mut subscription, first) = client
+        .dag_subscribe_on(fixture.spawn_bridge_connection(), "proj-closed")
+        .await
+        .expect("open dag subscription");
+    let id = subscription.id().to_string();
+    let current_seq = first.sequence;
+
+    // Terminal closed frame sent by remote helper preserves sequence without incrementing.
+    let closed_frame = DagFrame {
+        subscription_id: id.clone(),
+        sequence: current_seq,
+        runs: Vec::new(),
+        dropped: Vec::new(),
+        resync: false,
+        more: false,
+        closed: true,
+    };
+
+    let accepted = subscription
+        .accept_frame_for_test(closed_frame)
+        .expect("terminal closed frame with same sequence must be accepted");
+    assert!(accepted.closed);
+    assert_eq!(accepted.sequence, current_seq);
+    assert!(subscription.is_closed());
+
+    subscription.unsubscribe().await.expect("unsubscribe");
+    client.close().await.expect("close client");
+}
+
 /// A consumer that dies while parked inside a blocking `dag.next` must still be
 /// cleaned up. The helper observes EOF only when the blocked call returns, so
 /// release is bounded by the requested wait, not unbounded.
@@ -2345,4 +2385,160 @@ async fn ssh_bridge_supervised_stdio_direction_round_trip() {
         .expect("supervised stdio round trip timed out")
         .expect("read transport stdout");
     assert_eq!(&chunk, b"supervised-stdio\n");
+}
+
+#[tokio::test]
+async fn ssh_bridge_handshake_mismatch_returns_connection_closed() {
+    let fixture1 = TestFixture::new("handshake-mismatch-1");
+    let fixture2 = TestFixture::new("handshake-mismatch-2");
+
+    let control = fixture1.spawn_bridge_connection();
+    let reader = fixture2.spawn_bridge_connection();
+
+    let result = SshBridgeClient::from_connections(control, reader, &fixture1.host_id).await;
+    match result {
+        Err(BridgeError::ConnectionClosed) => {}
+        Err(other) => panic!("expected BridgeError::ConnectionClosed, got {other:?}"),
+        Ok(_) => panic!("mismatched connections must fail with ConnectionClosed, got Ok"),
+    }
+}
+
+/// On stdout EOF, `request()` must await `stderr_task` to completion (stderr EOF) before reading
+/// `check_stderr()` and calling `close()`, so trailing stderr written just before exit is not dropped.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn ssh_bridge_request_stdout_eof_awaits_stderr_drain() {
+    use std::io::Write;
+    use std::os::unix::io::FromRawFd;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let fifo_path = dir.path().join("ack.pipe");
+    let c_path =
+        std::ffi::CString::new(fifo_path.to_str().expect("fifo path string")).expect("cstring");
+    // SAFETY: c_path is a valid NUL-terminated path owned throughout the syscall.
+    let res = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(res, 0, "mkfifo failed");
+
+    // SAFETY: c_path remains valid; O_RDWR avoids a blocking open rendezvous.
+    let fifo_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    assert!(fifo_fd >= 0, "open fifo O_RDWR failed");
+    // SAFETY: open returned a fresh valid descriptor, transferred exactly once to File.
+    let mut fifo_file = unsafe { std::fs::File::from_raw_fd(fifo_fd) };
+
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "exec 1>&-; read -r _ < '{}'; printf 'Permission denied (publickey).\\n' >&2; exit 255",
+            fifo_path.display()
+        ));
+    let owner = prepare_test_owner(&mut command, None);
+    let child = command.spawn().expect("spawn supervisor");
+    let owner = owner.attach(&child).await.expect("attach owner");
+    let mut connection =
+        BridgeConnection::from_supervised_child(child, owner).expect("supervised connection");
+
+    let (eof_tx, eof_rx) = tokio::sync::oneshot::channel();
+    connection.stdout_eof_tx = Some(eof_tx);
+
+    let release_task = tokio::spawn(async move {
+        if matches!(tokio::time::timeout(Duration::from_secs(3), eof_rx).await, Ok(Ok(()))) {
+            let _ = fifo_file.write_all(b"go\n");
+            let _ = fifo_file.flush();
+        }
+    });
+
+    let result = connection
+        .request("ping", serde_json::json!({}), Duration::from_secs(5))
+        .await;
+
+    let _ = connection.close().await;
+    let _ = release_task.await;
+
+    match result {
+        Err(BridgeError::ProcessExited { stderr, .. }) => {
+            assert!(
+                stderr.contains("Permission denied"),
+                "expected stderr to contain 'Permission denied', got: {stderr:?}"
+            );
+        }
+        other => panic!("expected BridgeError::ProcessExited with stderr, got {other:?}"),
+    }
+}
+
+/// The supervisor must restore `FD_CLOEXEC` on all inherited spec descriptors before spawning the
+/// transport child. If `set_cloexec` is omitted, the child inherits duplicate descriptors (such
+/// as the raw stdout write end), preventing EOF detection when the child closes its stdio.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_supervisor_spec_descriptors_have_cloexec_restored() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // The transport child waits for a trigger on stdin, then closes stdout (fd 1) and parks on
+    // stdin again. If the supervisor failed to restore FD_CLOEXEC on `spec.stdout_fd`, the child
+    // retains the unclosed raw stdout descriptor, so `connection.reader` will never reach EOF
+    // while the child is alive.
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("read -r _ <&0; exec 1>&-; read -r _ <&0");
+
+    let owner = prepare_test_owner(&mut command, None);
+    let child = command.spawn().expect("spawn supervisor");
+    let supervisor_pid = child.id().expect("supervisor pid");
+    let owner = owner.attach(&child).await.expect("attach owner");
+    let transport_pid = owner.transport_pid().expect("transport pid");
+    let mut connection =
+        BridgeConnection::from_supervised_child(child, owner).expect("supervised connection");
+
+    assert!(process_exists(transport_pid), "transport must be running");
+    assert!(process_exists(supervisor_pid), "supervisor must be running");
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let reader = connection.reader.take().expect("connection reader");
+    let mut read_handle = tokio::spawn(async move {
+        let mut reader = reader;
+        let mut buf = [0u8; 1];
+        ready_tx.send(()).expect("notify reader subscription");
+        let res = reader.read(&mut buf).await;
+        (reader, res)
+    });
+
+    ready_rx.await.expect("wait for reader subscription");
+
+    let writer = connection.writer.as_mut().expect("connection writer");
+    writer
+        .write_all(b"close-stdout\n")
+        .await
+        .expect("write trigger to transport stdin");
+    writer.flush().await.expect("flush transport stdin");
+
+    let read_result = tokio::time::timeout(Duration::from_secs(5), &mut read_handle).await;
+    connection
+        .close()
+        .await
+        .expect("close supervised connection before asserting EOF");
+    if read_result.is_err() {
+        read_handle.abort();
+        let _ = read_handle.await;
+    }
+    let (returned_reader, _outcome) = match read_result {
+        Ok(Ok((r, Ok(0)))) => (r, ()),
+        Ok(Ok((_, Ok(n)))) => panic!("expected EOF on closed stdout, got {n} bytes"),
+        Ok(Ok((_, Err(e)))) => panic!("read stdout failed: {e}"),
+        Ok(Err(join_err)) => panic!("read task join failed: {join_err}"),
+        Err(_) => panic!(
+            "stdout EOF timed out while the transport was live; a pipe writer remained open"
+        ),
+    };
+    connection.reader = Some(returned_reader);
+
+    assert!(
+        !process_exists(transport_pid),
+        "transport {transport_pid} must exit after close"
+    );
+    assert!(
+        !process_exists(supervisor_pid),
+        "supervisor {supervisor_pid} must exit after close"
+    );
 }

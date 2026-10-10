@@ -1036,3 +1036,357 @@ fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
         );
     }
 }
+
+#[test]
+fn ssh_helper_setup_probe_locations_checks_qualified_before_default() {
+    let host = sample_host("qa-host-probe");
+    let env_posix = sample_posix_env("/home/testuser");
+    let locs = probe_locations(&host, &env_posix).expect("probe_locations posix");
+    assert_eq!(locs.len(), 2, "must include both qualified and default locations");
+
+    let expected_qualified = qualified_location(
+        &host,
+        &env_posix,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("qualified_location posix");
+    let expected_default = default_location(&host, &env_posix).expect("default_location posix");
+
+    assert_eq!(locs[0], expected_qualified, "first candidate must be version-qualified location");
+    assert_eq!(locs[1], expected_default, "second candidate must be unversioned default location");
+    assert!(locs[0].executable.contains("/.ferryx/versions/"));
+    assert!(!locs[1].executable.contains("/.ferryx/versions/"));
+
+    let env_win = sample_windows_env("C:\\Users\\testuser");
+    let locs_win = probe_locations(&host, &env_win).expect("probe_locations windows");
+    assert_eq!(locs_win.len(), 2, "must include qualified and default for windows");
+    let expected_win_qualified = qualified_location(
+        &host,
+        &env_win,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("qualified_location win");
+    let expected_win_default = default_location(&host, &env_win).expect("default_location win");
+    assert_eq!(locs_win[0], expected_win_qualified);
+    assert_eq!(locs_win[1], expected_win_default);
+}
+
+#[tokio::test]
+async fn ssh_helper_setup_probe_and_version_routing_qualified_present_default_absent() {
+    let host = sample_host("qa-host-probe-qualified");
+    let env_posix = sample_posix_env("/home/testuser");
+    let qualified_posix = qualified_location(
+        &host,
+        &env_posix,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("posix qualified_location");
+    let default_posix = default_location(&host, &env_posix).expect("posix default_location");
+    let quoted_qualified_posix = direct::quote_posix(&qualified_posix.executable);
+    let quoted_default_posix = direct::quote_posix(&default_posix.executable);
+
+    let mut posix_probed = Vec::new();
+    let state_posix = probe_ready_with(&host, &env_posix, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Sh);
+        if script.contains(&quoted_qualified_posix) {
+            posix_probed.push("qualified");
+            std::future::ready(Ok(b"FERRYX_HELPER_READY\n".to_vec()))
+        } else if script.contains(&quoted_default_posix) {
+            posix_probed.push("default");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({
+                    "exitCode": 127,
+                    "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+                }))))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(state_posix, HelperProbeState::Installed);
+    assert_eq!(
+        posix_probed,
+        vec!["qualified"],
+        "must find qualified helper on first probe and stop"
+    );
+
+    let mut posix_version_probed = Vec::new();
+    let version_posix = installed_version_with(&host, &env_posix, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Sh);
+        if script.contains(&quoted_qualified_posix) {
+            posix_version_probed.push("qualified");
+            std::future::ready(Ok(format!(
+                "ferryx-remote-helper {}\n",
+                crate::ssh::helper_runtime::process::HELPER_VERSION
+            )
+            .into_bytes()))
+        } else if script.contains(&quoted_default_posix) {
+            posix_version_probed.push("default");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({ "exitCode": 127 }))))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(
+        version_posix.as_deref(),
+        Some(crate::ssh::helper_runtime::process::HELPER_VERSION)
+    );
+    assert_eq!(posix_version_probed, vec!["qualified"]);
+
+    // Windows platform routing
+    let env_win = sample_windows_env("C:\\Users\\testuser");
+    let qualified_win = qualified_location(
+        &host,
+        &env_win,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("win qualified_location");
+    let default_win = default_location(&host, &env_win).expect("win default_location");
+    let quoted_qualified_win = runtime::powershell_data(&qualified_win.executable);
+    let quoted_default_win = runtime::powershell_data(&default_win.executable);
+
+    let mut win_probed = Vec::new();
+    let state_win = probe_ready_with(&host, &env_win, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Powershell);
+        if script.contains(&quoted_qualified_win) {
+            win_probed.push("qualified");
+            std::future::ready(Ok(b"FERRYX_HELPER_READY\n".to_vec()))
+        } else if script.contains(&quoted_default_win) {
+            win_probed.push("default");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({
+                    "exitCode": 127,
+                    "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+                }))))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(state_win, HelperProbeState::Installed);
+    assert_eq!(win_probed, vec!["qualified"]);
+
+    let mut win_version_probed = Vec::new();
+    let version_win = installed_version_with(&host, &env_win, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Powershell);
+        if script.contains(&quoted_qualified_win) {
+            win_version_probed.push("qualified");
+            std::future::ready(Ok(format!(
+                "ferryx-remote-helper {}\n",
+                crate::ssh::helper_runtime::process::HELPER_VERSION
+            )
+            .into_bytes()))
+        } else if script.contains(&quoted_default_win) {
+            win_version_probed.push("default");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({ "exitCode": 127 }))))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(
+        version_win.as_deref(),
+        Some(crate::ssh::helper_runtime::process::HELPER_VERSION)
+    );
+    assert_eq!(win_version_probed, vec!["qualified"]);
+}
+
+#[tokio::test]
+async fn ssh_helper_setup_probe_and_version_routing_qualified_missing_default_present() {
+    let host = sample_host("qa-host-probe-fallback");
+    let env_posix = sample_posix_env("/home/testuser");
+    let qualified_posix = qualified_location(
+        &host,
+        &env_posix,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("posix qualified_location");
+    let default_posix = default_location(&host, &env_posix).expect("posix default_location");
+    let quoted_qualified_posix = direct::quote_posix(&qualified_posix.executable);
+    let quoted_default_posix = direct::quote_posix(&default_posix.executable);
+
+    let mut posix_probed = Vec::new();
+    let state_posix = probe_ready_with(&host, &env_posix, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Sh);
+        if script.contains(&quoted_qualified_posix) {
+            posix_probed.push("qualified");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({
+                    "exitCode": 127,
+                    "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+                }))))
+        } else if script.contains(&quoted_default_posix) {
+            posix_probed.push("default");
+            std::future::ready(Ok(b"FERRYX_HELPER_READY\n".to_vec()))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(state_posix, HelperProbeState::Installed);
+    assert_eq!(
+        posix_probed,
+        vec!["qualified", "default"],
+        "must probe qualified first, then fall back to default"
+    );
+
+    let mut posix_version_probed = Vec::new();
+    let version_posix = installed_version_with(&host, &env_posix, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Sh);
+        if script.contains(&quoted_qualified_posix) {
+            posix_version_probed.push("qualified");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({ "exitCode": 127 }))))
+        } else if script.contains(&quoted_default_posix) {
+            posix_version_probed.push("default");
+            std::future::ready(Ok(b"ferryx-remote-helper 2026.908.1\n".to_vec()))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(version_posix.as_deref(), Some("2026.908.1"));
+    assert_eq!(
+        posix_version_probed,
+        vec!["qualified", "default"],
+        "must fall back to default version"
+    );
+
+    // Windows platform routing
+    let env_win = sample_windows_env("C:\\Users\\testuser");
+    let qualified_win = qualified_location(
+        &host,
+        &env_win,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("win qualified_location");
+    let default_win = default_location(&host, &env_win).expect("win default_location");
+    let quoted_qualified_win = runtime::powershell_data(&qualified_win.executable);
+    let quoted_default_win = runtime::powershell_data(&default_win.executable);
+
+    let mut win_probed = Vec::new();
+    let state_win = probe_ready_with(&host, &env_win, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Powershell);
+        if script.contains(&quoted_qualified_win) {
+            win_probed.push("qualified");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({
+                    "exitCode": 127,
+                    "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+                }))))
+        } else if script.contains(&quoted_default_win) {
+            win_probed.push("default");
+            std::future::ready(Ok(b"FERRYX_HELPER_READY\n".to_vec()))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(state_win, HelperProbeState::Installed);
+    assert_eq!(win_probed, vec!["qualified", "default"]);
+
+    let mut win_version_probed = Vec::new();
+    let version_win = installed_version_with(&host, &env_win, |executor, script, _budget| {
+        assert_eq!(executor, RemoteExecutor::Powershell);
+        if script.contains(&quoted_qualified_win) {
+            win_version_probed.push("qualified");
+            std::future::ready(Err(IpcError::new(IpcErrorCode::CliExecutableNotFound, "missing")
+                .with_details(serde_json::json!({ "exitCode": 127 }))))
+        } else if script.contains(&quoted_default_win) {
+            win_version_probed.push("default");
+            std::future::ready(Ok(b"ferryx-remote-helper 2026.908.1\n".to_vec()))
+        } else {
+            panic!("unexpected script: {script}");
+        }
+    })
+    .await;
+    assert_eq!(version_win.as_deref(), Some("2026.908.1"));
+    assert_eq!(win_version_probed, vec!["qualified", "default"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_upload_script_fails_and_does_not_corrupt_destination_on_decode_failure() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    let root_dir = dir.path().join("root");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(&root_dir).unwrap();
+
+    let exe_path = bin_dir.join("ferryx-remote-helper");
+    let existing_bytes = b"PRE_EXISTING_VALID_HELPER_BINARY";
+    std::fs::write(&exe_path, existing_bytes).unwrap();
+
+    let loc = HelperLocation {
+        executable: exe_path.to_str().unwrap().to_string(),
+        root: root_dir.to_str().unwrap().to_string(),
+    };
+
+    let script = build_posix_upload_script(&loc, b"");
+
+    let mut child = Command::new("sh")
+        .args(["-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        !output.status.success(),
+        "upload script must exit non-zero on decode failure"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(INSTALL_READY_MARKER),
+        "script must not emit FERRYX_INSTALL_OK on decode failure"
+    );
+    assert_eq!(
+        std::fs::read(&exe_path).unwrap(),
+        existing_bytes,
+        "destination binary must not be corrupted by failed upload"
+    );
+}
+
+#[test]
+fn windows_upload_script_grants_acl_via_sid_with_domain_and_username_fallback() {
+    let loc = HelperLocation {
+        executable: "C:\\Users\\t\\.ferryx\\bin\\ferryx-remote-helper.exe".to_string(),
+        root: "C:\\Users\\t\\.ferryx\\helper\\h".to_string(),
+    };
+    let script = build_windows_upload_script(&loc, b"TEST_PAYLOAD");
+    assert!(
+        script.contains("WindowsIdentity]::GetCurrent()"),
+        "script must resolve WindowsIdentity for SID-based ACL grant"
+    );
+    assert!(
+        script.contains("$identity.User.Value"),
+        "script must use identity SID value"
+    );
+    assert!(
+        script.contains("\"$($userAcc):(F)\""),
+        "grant argument must delimit the variable before the permission colon"
+    );
+    assert!(
+        script.contains("$env:USERDOMAIN"),
+        "script must support domain-qualified fallback"
+    );
+    assert!(
+        script.contains("$env:USERNAME"),
+        "script must maintain legacy username fallback"
+    );
+}

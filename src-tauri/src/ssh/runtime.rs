@@ -593,4 +593,59 @@ mod tests {
             .and_then(|v| v.as_i64());
         assert_ne!(exit_code, Some(255));
     }
+
+    #[tokio::test]
+    async fn exit_code_255_aborts_detection_immediately_without_probing_other_executors() {
+        let mut probed = Vec::new();
+        let failure = detect_with(
+            &probe_host(),
+            None,
+            |executor, _, _| {
+                probed.push(executor);
+                std::future::ready(Err(error(
+                    IpcErrorCode::IoError,
+                    "execution",
+                    "fatal transport error",
+                )
+                .with_details(serde_json::json!({ "exitCode": 255 }))))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            probed,
+            [RemoteExecutor::Powershell],
+            "Exit code 255 must abort on the first executor rather than probing other shells"
+        );
+        let details = failure.details.unwrap();
+        assert_eq!(details["exitCode"], 255);
+    }
+
+    #[tokio::test]
+    async fn transport_timeout_without_exit_code_falls_through_to_all_executors() {
+        let mut probed = Vec::new();
+        let _ = detect_with(
+            &probe_host(),
+            None,
+            |executor, _, _| {
+                probed.push(executor);
+                std::future::ready(Err(error(
+                    IpcErrorCode::IoError,
+                    "transport",
+                    "SSH operation timed out",
+                )))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            probed,
+            [
+                RemoteExecutor::Powershell,
+                RemoteExecutor::Pwsh,
+                RemoteExecutor::Sh
+            ],
+            "Step timeout with no exit code falls through and tries all candidate executors"
+        );
+    }
 }

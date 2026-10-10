@@ -77,7 +77,7 @@ pub fn ssh_plan(
         },
         "StrictHostKeyChecking=yes",
         "UpdateHostKeys=no",
-        "ConnectTimeout=5",
+        "ConnectTimeout=3",
         "ConnectionAttempts=1",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=2",

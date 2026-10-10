@@ -401,8 +401,15 @@ fn run_supervisor(spec_json: &str) -> i32 {
     }
 
     // The transport must not inherit the lease read end or the report write end: the lease is the
-    // owner's death note and the report fd is consumed here.
-    for (name, fd) in [("lease", spec.lease_fd), ("report", spec.report_fd)] {
+    // owner's death note and the report fd is consumed here. The stdio descriptors are duplicated
+    // to 0, 1, 2 by Command so their original descriptors must also be closed on exec.
+    for (name, fd) in [
+        ("lease", spec.lease_fd),
+        ("report", spec.report_fd),
+        ("stdin", spec.stdin_fd),
+        ("stdout", spec.stdout_fd),
+        ("stderr", spec.stderr_fd),
+    ] {
         if let Err(e) = set_cloexec(fd) {
             return supervisor_failure(&format!("cannot protect {name} descriptor {fd}: {e}"));
         }
@@ -426,6 +433,9 @@ fn run_supervisor(spec_json: &str) -> i32 {
         Ok(child) => child,
         Err(e) => return supervisor_failure(&format!("spawn {} failed: {e}", spec.program)),
     };
+    // Command retains its configured stdio handles after spawn. Only the transport may
+    // hold these pipe ends while the supervisor watches the lease.
+    drop(command);
     report_pid(spec.report_fd, child.id());
 
     loop {

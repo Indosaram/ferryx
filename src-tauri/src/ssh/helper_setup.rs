@@ -503,34 +503,32 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
     }
 }
 
+pub fn probe_locations(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+) -> Result<Vec<HelperLocation>, IpcError> {
+    let mut locations = Vec::with_capacity(2);
+    if let Ok(qualified) = qualified_location(
+        host,
+        environment,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    ) {
+        locations.push(qualified);
+    }
+    locations.push(default_location(host, environment)?);
+    Ok(locations)
+}
+
 /// Bounded (<=15s), non-installing readiness check for the helper binary.
 ///
-/// Only tests existence (plus executability on POSIX) at `default_location`:
-/// it never writes, never installs, and never executes or spawns the helper,
+/// Tests existence (plus executability on POSIX) at candidate locations:
+/// first checks `qualified_location` for the current bundled helper version,
+/// falling back to unversioned `default_location` for legacy installs.
+/// It never writes, never installs, and never executes or spawns the helper,
 /// so no persistent remote process can linger. Remote platform dispatch and
 /// the bounded exec helper mirror `ensure_started`.
-pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
-    let location = match default_location(host, environment) {
-        Ok(location) => location,
-        Err(_) => return HelperProbeState::Unknown,
-    };
-    probe_ready_at_location(host, environment, &location).await
-}
-
-pub async fn probe_ready_at(
-    host: &SshHost,
-    environment: &RemoteEnvironment,
-    location: &HelperLocation,
-) -> HelperProbeState {
-    probe_ready_at_location(host, environment, location).await
-}
-
-async fn probe_ready_at_location(
-    host: &SshHost,
-    environment: &RemoteEnvironment,
-    location: &HelperLocation,
-) -> HelperProbeState {
-    let script = match environment.platform {
+fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation) -> String {
+    match environment.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
              if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
@@ -544,15 +542,67 @@ async fn probe_ready_at_location(
              [Console]::WriteLine('FERRYX_HELPER_READY')",
             runtime::powershell_data(&location.executable)
         ),
-    };
-    let plan = match direct::ssh_plan(host, environment.executor.command(&script), false) {
-        Ok(plan) => plan,
-        Err(_) => return HelperProbeState::Unknown,
-    };
-    match direct::bounded_output(&plan, Duration::from_secs(10)).await {
+    }
+}
+
+pub(super) async fn probe_ready_at_with<F, Fut>(
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+    mut run: F,
+) -> HelperProbeState
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let script = probe_ready_script(environment, location);
+    match run(environment.executor, script, Duration::from_secs(10)).await {
         Ok(stdout) => classify_probe_result(Ok(&stdout)),
         Err(err) => classify_probe_result(Err(&err)),
     }
+}
+
+pub(super) async fn probe_ready_with<F, Fut>(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    mut run: F,
+) -> HelperProbeState
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let locations = match probe_locations(host, environment) {
+        Ok(locs) => locs,
+        Err(_) => return HelperProbeState::Unknown,
+    };
+    let mut last_state = HelperProbeState::Missing;
+    for location in &locations {
+        let state = probe_ready_at_with(environment, location, &mut run).await;
+        if state == HelperProbeState::Installed {
+            return HelperProbeState::Installed;
+        }
+        last_state = state;
+    }
+    last_state
+}
+
+pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
+    probe_ready_with(host, environment, |executor, script, timeout| async move {
+        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+        direct::bounded_output(&plan, timeout).await
+    })
+    .await
+}
+
+pub async fn probe_ready_at(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> HelperProbeState {
+    probe_ready_at_with(environment, location, |executor, script, timeout| async move {
+        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+        direct::bounded_output(&plan, timeout).await
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,11 +633,7 @@ pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
     None
 }
 
-pub async fn installed_version_at(
-    host: &SshHost,
-    env: &RemoteEnvironment,
-    location: &HelperLocation,
-) -> Option<String> {
+fn installed_version_script(env: &RemoteEnvironment, location: &HelperLocation) -> String {
     let script = match env.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
@@ -602,16 +648,61 @@ pub async fn installed_version_at(
             runtime::powershell_data(&location.executable)
         ),
     };
-    let plan = direct::ssh_plan(host, env.executor.command(&script), false).ok()?;
-    match direct::bounded_output(&plan, Duration::from_secs(10)).await {
+    script
+}
+
+pub(super) async fn installed_version_at_with<F, Fut>(
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+    mut run: F,
+) -> Option<String>
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let script = installed_version_script(env, location);
+    match run(env.executor, script, Duration::from_secs(10)).await {
         Ok(stdout) => parse_installed_version_output(&stdout),
         Err(_) => None,
     }
 }
 
+pub(super) async fn installed_version_with<F, Fut>(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    mut run: F,
+) -> Option<String>
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let locations = probe_locations(host, env).ok()?;
+    for location in &locations {
+        if let Some(version) = installed_version_at_with(env, location, &mut run).await {
+            return Some(version);
+        }
+    }
+    None
+}
+
+pub async fn installed_version_at(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> Option<String> {
+    installed_version_at_with(env, location, |executor, script, timeout| async move {
+        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+        direct::bounded_output(&plan, timeout).await
+    })
+    .await
+}
+
 pub async fn installed_version(host: &SshHost, env: &RemoteEnvironment) -> Option<String> {
-    let location = default_location(host, env).ok()?;
-    installed_version_at(host, env, &location).await
+    installed_version_with(host, env, |executor, script, timeout| async move {
+        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+        direct::bounded_output(&plan, timeout).await
+    })
+    .await
 }
 
 /// Parses a calver-style version like "2026.917.1" into comparable numeric parts.
@@ -674,6 +765,8 @@ pub fn build_posix_upload_script(location: &HelperLocation, binary_bytes: &[u8])
          (base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl enc -base64 -d 2>/dev/null) << 'FERRYX_HELPER_PAYLOAD_EOF' > \"$tmp\"\n\
 {}\
 FERRYX_HELPER_PAYLOAD_EOF\n\
+         decode_ok=$?; \
+         if [ \"$decode_ok\" -ne 0 ] || [ ! -s \"$tmp\" ]; then rm -f \"$tmp\"; exit 1; fi; \
          chmod 700 \"$tmp\" && \
          daemon_pid=\"\" && \
          if [ -f \"$root/endpoint.json\" ]; then \
@@ -714,7 +807,10 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              $tmp = \"$dest.tmp.\" + [System.Guid]::NewGuid().ToString('N'); \
              $b64 = '{}'; \
              [System.IO.File]::WriteAllBytes($tmp, [System.Convert]::FromBase64String($b64.Trim())); \
-             $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1; \
+             $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); \
+             $userAcc = if ($identity.User) {{ '*' + $identity.User.Value }} else {{ \"$($env:USERDOMAIN)\\$($env:USERNAME)\" }}; \
+             $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($userAcc):(F)\" 2>&1; \
+             if ($LASTEXITCODE -ne 0) {{ $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1 }}; \
              if ($LASTEXITCODE -ne 0) {{ throw \"Failed to set private ACL on helper binary: $aclRes\" }}; \
              $epPath = Join-Path $root 'endpoint.json'; \
              $daemonProc = $null; \
