@@ -1,7 +1,82 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useId } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFailed, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* never print the raw value */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      lines.push(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
+/** Freeze the report now and emit it only if the test fails - for boundaries that normally pass. */
+function captureOnFailure(label: string, ...mocks: unknown[]): void {
+  const frozen = buildFailureTrace(label, ...mocks);
+  onTestFailed(() => {
+    for (const line of frozen) emitLine(line);
+  });
+}
+
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
@@ -10,6 +85,38 @@ import { normalizeRemoteWorkspaceState, RemoteWorkspaceMirror, type RemoteContex
 import { remoteHostStore } from "../state/remoteHostStore";
 import { clearRemoteAuthToken, setRemoteAuthToken } from "../lib/remoteClient";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
+
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  // Timer-free readiness, then switch ONLY when the chat surface is actually showing.
+  //
+  // Flushing the pending microtasks inside act() is the exact readiness step - it lets the mocked
+  // state read settle - and it must NOT be a polling wait: several tests here run under
+  // vi.useFakeTimers(), where a polling helper never sees its own timers fire and hangs the test.
+  //
+  // The switch is idempotent on purpose. Calling it twice must not toggle back to chat (a caller
+  // that already switched would otherwise silently end up in chat and fail a terminal assertion for
+  // the wrong reason), and a screen that legitimately offers no switch - the sign-in screen a magic
+  // link lands on - must not fail here: the test's own terminal assertion decides that.
+  await act(async () => {});
+  // Already showing the terminal: clicking the switch again would toggle back to chat.
+  if (screen.queryByTestId("remote-terminal") !== null || screen.queryByTestId("remote-terminal-grid") !== null) {
+    return;
+  }
+  // The sign-in screen legitimately offers no switch and no terminal; the caller's own assertion
+  // decides that case.
+  if (screen.queryByRole("heading", { name: /sign in to ferryx/i }) !== null) return;
+  // Anything else must offer the switch, so this throws loudly instead of silently leaving chat up.
+  // Deliberately NOT keyed on the chat surface: it is a lazily imported chunk, so on the first
+  // render of a file it is absent - keying on it made a necessary switch a silent no-op.
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+  });
+}
+
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -52,12 +159,78 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+/**
+ * The chat lane's own reads. Chat is the default surface, so these fire on mount in every test in
+ * this file - and a mock that answers by CALL ORDER would hand them the workspace states a test
+ * wrote for its own terminal sequence. They are answered by URL instead, so the terminal lane's
+ * request order stays exactly what each test wrote.
+ */
+function chatLaneFixture(url: string): Response | null {
+  if (url.includes("/api/v1/capabilities")) {
+    // A truthful capabilities answer from a gateway that publishes no daemon incarnation, which
+    // leaves the chat lane idle: these tests are about the terminal, not about chat polling.
+    return jsonResponse({ apiVersion: 1, machineId: "mach-1", platform: "linux" });
+  }
+  if (url.includes("/api/v1/sessions")) {
+    return jsonResponse({ sessions: [] });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/history")) {
+    return jsonResponse({
+      source: "claude-transcript",
+      availability: "native",
+      turns: [],
+      cursor: null,
+      hasMore: false,
+      generation: "gen-1",
+      unavailableReason: null,
+    });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/prompt")) {
+    return jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+  }
+  return null;
+}
+
+/** One recorded call: the URL it asked for and the init it carried. */
+interface RecordedCall {
+  readonly url: string;
+  readonly init: RequestInit | undefined;
+}
+
+function recordedCalls(mock: unknown): RecordedCall[] {
+  const calls = (mock as { mock: { calls: unknown[][] } }).mock.calls;
+  return calls.map((args) => ({
+    url: String(args[0] instanceof Request ? (args[0] as Request).url : args[0]),
+    init: args[1] as RequestInit | undefined,
+  }));
+}
+
+/**
+ * Spy counts and ordinals are scoped to the endpoints that carry the terminal contract, so a
+ * request made by another lane can never change what "called twice" or "the 2nd call" means.
+ * `stateReads` is the no-extra-read assertion's own counter: the selection flow must not add one.
+ */
+function stateReads(mock: unknown): RecordedCall[] {
+  return recordedCalls(mock).filter((call) => call.url.includes("/api/v1/workspace/state"));
+}
+
+function selectCalls(mock: unknown): RecordedCall[] {
+  return recordedCalls(mock).filter((call) => call.url.includes("/api/v1/workspace/select"));
+}
+
+/** The workspace-state and selection calls together, in the order they were made. */
+function workspaceCalls(mock: unknown): RecordedCall[] {
+  return recordedCalls(mock).filter((call) => /\/api\/v1\/workspace\/(state|select)/.test(call.url));
+}
+
 function ticketed(inner: typeof fetch): typeof fetch {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes("/api/v1/socket-ticket")) {
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
     }
+    const lane = chatLaneFixture(url);
+    if (lane !== null) return lane;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }
@@ -366,13 +539,20 @@ describe("selection request lifetime", () => {
     vi.useFakeTimers();
     try {
       const host = await mountSelectionHost();
+      await switchToTerminalMode();
       const target = within(await openWorktreeSheet()).getByRole("tab", { name: "dev" });
       await act(async () => {
         fireEvent.click(target);
         await host.postA.promise;
       });
       expect(target).toBeDisabled();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+      try {
+        expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+      } catch (error) {
+        // Snapshot at the failure boundary, before afterEach cleanup clears the DOM and the mocks.
+        emitFailureTrace("selection lifetime: releases when the request never settles", globalThis.fetch);
+        throw error;
+      }
       await act(async () => { await vi.advanceTimersByTimeAsync(5999); });
       expect(target).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
@@ -397,10 +577,11 @@ describe("selection request lifetime", () => {
     { outcome: "success", acceptedB: false },
     { outcome: "http-failure", acceptedB: false },
     { outcome: "network-failure", acceptedB: false },
-  ])("ignores an obsolete selection response while a newer selection is pending", async ({ outcome, acceptedB }) => {
+  ])("ignores an obsolete selection response while a newer selection is pending ($outcome, acceptedB=$acceptedB)", async ({ outcome, acceptedB }) => {
     vi.useFakeTimers();
     try {
       const host = await mountSelectionHost();
+      await switchToTerminalMode();
       const sheet = await openWorktreeSheet();
       await act(async () => {
         fireEvent.click(within(sheet).getByRole("tab", { name: "dev" }));
@@ -414,7 +595,12 @@ describe("selection request lifetime", () => {
       });
       const targetB = within(await openWorktreeSheet()).getByRole("tab", { name: "editor" });
       expect(targetB).toBeEnabled();
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      try {
+        expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      } catch (error) {
+        emitFailureTrace(`selection lifetime: obsolete response (${outcome}, acceptedB=${acceptedB})`, globalThis.fetch);
+        throw error;
+      }
       await act(async () => {
         fireEvent.click(targetB);
         await host.postB.promise;
@@ -471,6 +657,7 @@ describe("Remote UI Components", () => {
     });
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); });
@@ -496,6 +683,7 @@ describe("Remote UI Components", () => {
     const request = vi.fn<typeof fetch>(async (_input, init) => init?.method === "POST" ? response.promise : jsonResponse(focusedState));
     vi.stubGlobal("fetch", ticketed(request));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     await openWorktreeSheet();
     const button = screen.getByRole("button", { name: "New terminal tab" });
     await act(async () => { fireEvent.click(button); fireEvent.click(button); });
@@ -544,6 +732,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
+    await switchToTerminalMode();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
     // Disconnect drops the session token, so the same mount renders the login
     // screen; a hook declared below that early return changes the hook count.
@@ -572,6 +761,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
@@ -590,6 +780,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
@@ -618,6 +809,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
@@ -639,10 +831,12 @@ describe("Remote UI Components", () => {
 
     // Picking a worktree dismisses the selector instead of leaving it stuck open.
     expect(screen.queryByRole("dialog", { name: /Workspace context/i })).toBeNull();
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "/api/v1/workspace/select",
-      expect.objectContaining({
+    // Scoped to the terminal contract: the selection POST is the 2nd of the workspace calls
+    // (the first is the initial state read), whatever any other lane requests.
+    expect(workspaceCalls(fetchMock)).toHaveLength(2);
+    expect(workspaceCalls(fetchMock)[1]).toMatchObject({
+      url: "/api/v1/workspace/select",
+      init: expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
         body: JSON.stringify({
@@ -650,7 +844,7 @@ describe("Remote UI Components", () => {
           worktreeSlug: "feature/remote-safe",
         }),
       }),
-    );
+    });
 
     await act(async () => {
       selectionResponse.resolve(jsonResponse({ accepted: true }));
@@ -693,6 +887,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     expect(eventSocket().url).toMatch(/\/api\/v1\/events\?ticket=ui-test-ticket$/);
@@ -704,9 +899,11 @@ describe("Remote UI Components", () => {
       }),
     );
 
-    // The selection POST is in flight; the desktop has not confirmed yet.
+    // The selection POST is in flight; the desktop has not confirmed yet. Counted per endpoint,
+    // so the assertion says exactly what it means: one state read and one selection POST.
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(stateReads(fetchMock)).toHaveLength(1);
+      expect(selectCalls(fetchMock)).toHaveLength(1);
     });
 
     act(() => {
@@ -793,7 +990,9 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
+    captureOnFailure("refreshes the mirrored terminal on unsolicited focus", fetchMock);
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
       "focused-terminal",
@@ -837,6 +1036,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     act(() => {
@@ -881,6 +1081,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
     act(() => {
@@ -911,6 +1112,7 @@ describe("Remote UI Components", () => {
     );
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByText("No focused terminal")).toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
@@ -936,9 +1138,14 @@ describe("Remote UI Components", () => {
 
     render(<RemoteApp />);
 
-    const header = await screen.findByRole("banner");
-    expect(header).toHaveTextContent("Ferryx Remote");
-    expect(header.textContent?.toLowerCase()).not.toContain("orca");
+    // Chat is the default surface and renders its own <header>, so the app shell's header is no
+    // longer the only banner landmark. Every banner is checked, which is stricter than before.
+    const banners = await screen.findAllByRole("banner");
+    expect(banners.length).toBeGreaterThan(0);
+    expect(banners.some((banner) => banner.textContent?.includes("Ferryx Remote"))).toBe(true);
+    for (const banner of banners) {
+      expect(banner.textContent?.toLowerCase()).not.toContain("orca");
+    }
   });
 
   it("sets browser document.title to active tab or terminal title on initial authenticated load", async () => {
@@ -1131,6 +1338,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-tab-1");
@@ -1149,10 +1357,11 @@ describe("Remote UI Components", () => {
     // Traverse to next tab (tab-2)
     fireEvent.click(nextBtn);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "/api/v1/workspace/select",
-      expect.objectContaining({
+    // The traversal's own selections, scoped to the terminal contract's endpoints so their
+    // order is the order the test drove, not the order any other lane happened to request in.
+    expect(selectCalls(fetchMock)[0]).toMatchObject({
+      url: "/api/v1/workspace/select",
+      init: expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
         body: JSON.stringify({
@@ -1161,7 +1370,7 @@ describe("Remote UI Components", () => {
           tabId: "tab-2",
         }),
       }),
-    );
+    });
 
     // Simulate desktop focus event
     act(() => {
@@ -1194,10 +1403,9 @@ describe("Remote UI Components", () => {
     // Traverse to next tab (tab-3)
     fireEvent.click(nextBtn);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      4,
-      "/api/v1/workspace/select",
-      expect.objectContaining({
+    expect(selectCalls(fetchMock)[1]).toMatchObject({
+      url: "/api/v1/workspace/select",
+      init: expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
           workspaceId: "ferryx-ui",
@@ -1205,7 +1413,7 @@ describe("Remote UI Components", () => {
           tabId: "tab-3",
         }),
       }),
-    );
+    });
 
     act(() => {
       eventSocket().onmessage?.(
@@ -1236,10 +1444,9 @@ describe("Remote UI Components", () => {
     // Traverse back to previous tab (tab-2)
     fireEvent.click(prevBtn);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      6,
-      "/api/v1/workspace/select",
-      expect.objectContaining({
+    expect(selectCalls(fetchMock)[2]).toMatchObject({
+      url: "/api/v1/workspace/select",
+      init: expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
           workspaceId: "ferryx-ui",
@@ -1247,7 +1454,7 @@ describe("Remote UI Components", () => {
           tabId: "tab-2",
         }),
       }),
-    );
+    });
 
     act(() => {
       eventSocket().onmessage?.(
@@ -1297,6 +1504,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1378,6 +1586,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
       "data-session-id",
@@ -1569,6 +1778,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1599,6 +1809,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const tablist = await openWorktreeSheet();
     // One entry is enough to render the list, and no mirrored terminal is required to browse it.
@@ -1669,6 +1880,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1716,6 +1928,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -1774,6 +1987,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
@@ -1857,6 +2071,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -1912,6 +2127,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -1967,6 +2183,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
 
@@ -2028,6 +2245,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     fireEvent.click(within(await openWorktreeSheet()).getByRole("tab", { name: /dev server/i }));
     const firstInstanceId = screen.getByTestId("remote-terminal").getAttribute("data-instance-id");
@@ -2088,25 +2306,24 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(stateReads(fetchMock)).toHaveLength(1);
+    expect(selectCalls(fetchMock)).toHaveLength(0);
 
     const tablist = await openWorktreeSheet();
     fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
 
     // Wait for POST to complete
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(selectCalls(fetchMock)).toHaveLength(1);
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("/api/v1/workspace/select"),
-      expect.anything(),
-    );
+    expect(selectCalls(fetchMock)[0].url).toContain("/api/v1/workspace/select");
 
-    // Crucial check: selection flow must NOT immediately call /api/v1/workspace/state
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Crucial check: selection flow must NOT immediately call /api/v1/workspace/state. The
+    // counter is scoped to that endpoint, so no other lane's request can mask a stray read.
+    expect(stateReads(fetchMock)).toHaveLength(1);
 
     // Desktop confirms selection via WebSocket event
     act(() => {
@@ -2126,16 +2343,12 @@ describe("Remote UI Components", () => {
 
     // Now confirmation fetch is triggered
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(stateReads(fetchMock)).toHaveLength(2);
     });
     // The confirmation refresh is authenticated, so it carries a bearer header.
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining("/api/v1/workspace/state"),
-      expect.objectContaining({
-        headers: { Authorization: "Bearer test-token" },
-      }),
-    );
+    expect(stateReads(fetchMock)[1].init).toMatchObject({
+      headers: { Authorization: "Bearer test-token" },
+    });
   });
 
   it("clears optimistic session override and reverts when confirmation times out", async () => {
@@ -2166,6 +2379,7 @@ describe("Remote UI Components", () => {
       vi.stubGlobal("WebSocket", EventWebSocket);
 
       render(<RemoteApp />);
+    await switchToTerminalMode();
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -2216,6 +2430,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "session-editor");
@@ -2260,6 +2475,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2291,6 +2507,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2319,6 +2536,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2374,6 +2592,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -2474,6 +2693,7 @@ describe("Remote UI Components", () => {
 
     try {
       render(<RemoteApp />);
+    await switchToTerminalMode();
 
       // RemoteApp must prioritize /login?code=... at page origin and mount AccountLoginPage
       // while consume promise is pending:

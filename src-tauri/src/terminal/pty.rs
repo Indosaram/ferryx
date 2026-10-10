@@ -18,8 +18,56 @@ use uuid::Uuid;
 
 pub(crate) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How many bounded reader waits one close can apply: stage 1, which lets the stream end the reader,
+/// the stage-2 cancellation fallback, and the bounded join that follows them.
+const READER_WAIT_STAGES: u32 = 3;
+/// The poll a bounded REAP takes inside a close. `poll_reap_bounded` sleeps
+/// `LIFECYCLE_POLL_INTERVAL.min(this)`, so a reap can return up to this long after the deadline it
+/// was given - which is why `close_fence_for` sums it once per reap it covers.
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// The poll a bounded READER wait takes. `await_reader_finished` sleeps
+/// `LIFECYCLE_POLL_INTERVAL.min(this)`, and it can return up to this long after its own deadline
+/// for the same reason `REAP_POLL_INTERVAL` can, so `close_fence_for` sums it once per
+/// reader wait it covers.
+const READER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// The bounded wait the close applies to the master release it hands to the blocking pool. The pool
+/// is a thread budget rather than a duration bound, so the release needs a bound of its own to be
+/// observable at all.
+const MASTER_RELEASE_TIMEOUT: Duration = READER_SHUTDOWN_TIMEOUT;
 const TERM_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The worst case ONE close can spend before it leaves the registry, for the TERM grace that close
+/// was invoked with: the grace phase itself, the KILL+reap phase, the observed master release, the
+/// bounded reader waits, and the poll quantization those waits add to their own deadlines.
+///
+/// The concurrent-close fence must never be shorter than the close it waits on, or a second close
+/// reports a timeout for a close that does happen. The grace phase is a CALLER PARAMETER and not a
+/// module property - `close_session` passes `TERM_GRACE_TIMEOUT`, the machine close path passes 5 s -
+/// so the bound is a function of the grace rather than a constant derived from the default one: a
+/// constant would describe one path and be short by the difference on every other.
+///
+/// The phase deadlines alone are still not an upper bound. Every bounded wait tests its deadline only
+/// AFTER taking a poll, so it can return up to one poll interval past the deadline it was given, and
+/// one close applies four such waits: the two bounded reaps (`poll_reap_bounded`, the TERM grace
+/// phase and the KILL escalation) at `REAP_POLL_INTERVAL`, and the two bounded reader waits
+/// (`await_reader_finished`, the stream stage and the cancellation stage) at
+/// `READER_WAIT_POLL_INTERVAL`. Those overshoots are summed here, one per wait the sum above
+/// covers, because a fence that stops at the deadlines expires before a close that spends its whole
+/// bound can leave the registry. The master release and the reader join are `timeout`s over a
+/// handle, which wake on their own deadline, so they contribute no poll of their own.
+///
+/// What this cannot bound is work the CALLER owns: `authorize` runs on the close path but is not
+/// one of the close's phases, so a caller whose closure is slow can still outlast the fence. That is
+/// a property of the caller, not something this bound can derive.
+fn close_fence_for(grace: Duration) -> Duration {
+    grace
+        + KILL_REAP_TIMEOUT
+        + MASTER_RELEASE_TIMEOUT
+        + READER_SHUTDOWN_TIMEOUT * READER_WAIT_STAGES
+        + REAP_POLL_INTERVAL * 2
+        + READER_WAIT_POLL_INTERVAL * 2
+}
 
 /// Decides a UTF-8 `LANG` override for PTY children whose inherited environment selects
 /// no character-type locale at all (e.g. a launchd-spawned GUI daemon without LANG).
@@ -530,11 +578,15 @@ impl PtyManager {
         drop(pair.slave);
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
+        // Taken while the master is still in hand: the session keeps it for the whole of its life,
+        // so a close can end the reader even after a failed export took the master away.
+        let reader_interrupt = pair.master.interrupt_handle();
         let session = Arc::new(PtySession::new(PtySessionConfig {
             input,
             id: session_id.clone(),
             incarnation: Some(incarnation),
             master: pair.master,
+            reader_interrupt,
             child,
             writer,
             reader,
@@ -542,6 +594,9 @@ impl PtyManager {
             rows,
             tx,
             worktree_path,
+            // Empty: the grace a concurrent close has to cover is recorded by the close that claims
+            // the session, not by the session itself.
+            close_grace: Arc::new(Mutex::new(None)),
         }));
 
         if let Some(hub) = self.output_hub.read().clone() {
@@ -602,7 +657,10 @@ impl PtyManager {
                     Ok(None) => {}
                     Err(error) => {
                         session.mark_failed(error.to_string());
+                        // Tearing the session down: give the master up so the console host can
+                        // flush, then end the reader with the cancellation as the bounded fallback.
                         session.close_io();
+                        let _ = Self::end_reader_after_close(&session).await;
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -622,8 +680,12 @@ impl PtyManager {
             return;
         }
 
+        // The child has exited, so its stream is settling. Giving up the master lets the console
+        // host flush whatever it still holds and exit, and the reader delivers that tail and ends on
+        // the stream; the cancellation inside is the bounded fallback for a host that never exits,
+        // never the first move.
         session.close_io();
-        let _ = Self::join_reader_bounded(&session).await;
+        let _ = Self::end_reader_after_close(&session).await;
         session.mark_exited(Some(code));
         session.close_output();
         self.remove_from_registry(session_id);
@@ -643,12 +705,99 @@ impl PtyManager {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(PtyError::Other(format!("PTY reader task failed: {error}"))),
             Err(_) => {
-                reader_task.abort();
+                // A queued blocking reader must still run its stop check and publish completion.
+                // Aborting it before the pool starts it leaves reader_finished false forever.
                 Err(PtyError::Other(
                     "Timed out waiting for PTY reader shutdown".into(),
                 ))
             }
         }
+    }
+
+    /// End the reader of a session whose I/O has already been closed, keeping the output the console
+    /// host may still be holding.
+    ///
+    /// The order is the contract. `close_io` gives up the master first, and dropping the master is
+    /// what runs `ClosePseudoConsole` - the operation that lets the host flush its tail and exit. The
+    /// reader stays armed through that, delivers the tail, and ends on the stream, all within the
+    /// bound below. The cancellation is only the fallback for the case this seam exists for, a host
+    /// that never exits and a read the kernel owns forever; applying it first would disarm the reader
+    /// before the one operation that can still produce output, which is how a tail gets truncated.
+    /// Progress is read from the READER'S OWN FLAG, never from the join's result. A spawned session
+    /// hands its reader handle to the lifecycle watcher at startup, so `join_reader_bounded` has
+    /// nothing to take and returns `Ok` at once - reading that as "the reader ended" let a close
+    /// report success while the reader was still parked, and a parked reader holds the last output
+    /// sender, so the exit record could never be written.
+    async fn end_reader_after_close(session: &Arc<PtySession>) -> Result<(), PtyError> {
+        // The release `close_io` handed to the blocking pool is observed first, and bounded: it is
+        // what runs `ClosePseudoConsole`, the operation that lets the console host flush its tail and
+        // exit, so a release the pool never ran is both a failure of its own and the reason a reader
+        // would have nothing left to end on. Observing it here is what makes that reported instead of
+        // read as a completed teardown.
+        let release_error = Self::await_master_release(session).await.err();
+
+        // Stage 1: the stream ends the reader. The master is already given up, so the host can flush
+        // its tail and exit, and the reader delivers that tail and finishes.
+        let reader_error = if Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await {
+            let _ = Self::join_reader_bounded(session).await;
+            None
+        } else {
+            // Stage 2: the host never exited and the read is one the kernel still owns. Cancel,
+            // bounded - never the first move, because it would disarm the reader before the one
+            // operation that can still produce output.
+            session.request_reader_stop();
+            let ended = Self::await_reader_finished(session, READER_SHUTDOWN_TIMEOUT).await;
+            let _ = Self::join_reader_bounded(session).await;
+            if ended {
+                None
+            } else {
+                Some(PtyError::Other(
+                    "Timed out waiting for PTY reader shutdown".into(),
+                ))
+            }
+        };
+
+        match (release_error, reader_error) {
+            // The release is the earlier and the more fundamental of the two failures, and a pool
+            // that never ran it is also what leaves a reader with nothing to end it, so it is the
+            // one reported when both fail.
+            (Some(release), _) => Err(release),
+            (None, Some(reader)) => Err(reader),
+            (None, None) => Ok(()),
+        }
+    }
+
+    /// Wait, bounded, for the master release this close handed to the blocking pool, and report a
+    /// release that never ran.
+    ///
+    /// `close_io` gives the master up on the runtime's blocking seam. That seam is a thread budget
+    /// and not a duration bound: a pool whose blocking threads are all busy leaves the release queued
+    /// with the master alive, and a pool that is shutting down never runs it at all. Neither outcome
+    /// can be told from a completed release through a discarded handle, which is why the close
+    /// observes the handle it kept and reports the failure instead.
+    async fn await_master_release(session: &Arc<PtySession>) -> Result<(), PtyError> {
+        match session.observe_master_release(MASTER_RELEASE_TIMEOUT).await {
+            // Nothing was handed to the pool: no master was left to drop, or there was no runtime to
+            // enter and the drop ran inline on the caller. Both are complete.
+            None => Ok(()),
+            Some(true) => Ok(()),
+            Some(false) => Err(PtyError::Other(
+                "The PTY master release did not complete: the blocking pool never ran it".into(),
+            )),
+        }
+    }
+
+    /// Observe the reader's finished flag, bounded. The reader sets it as its last act, so this
+    /// reports the same event `join_reader_bounded` waits for, without needing the handle.
+    async fn await_reader_finished(session: &Arc<PtySession>, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !session.is_reader_finished() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(READER_WAIT_POLL_INTERVAL)).await;
+        }
+        true
     }
 
     async fn poll_reap_bounded(
@@ -665,7 +814,7 @@ impl PtyManager {
             if tokio::time::Instant::now() >= deadline {
                 return Ok(None);
             }
-            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(Duration::from_millis(50))).await;
+            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(REAP_POLL_INTERVAL)).await;
         }
     }
 
@@ -685,6 +834,11 @@ impl PtyManager {
             return Ok(());
         };
 
+        // Recorded BEFORE the session is claimed, so whichever close wins the race has already
+        // published the grace it is about to run: the loser's fence reads the winner's grace and not
+        // its own, and a loser's shorter grace can never shrink the bound the winner needs.
+        session.note_close_grace(grace);
+
         if !session.begin_closing() {
             if matches!(
                 session.state(),
@@ -695,12 +849,32 @@ impl PtyManager {
                 return Ok(());
             }
 
-            let deadline = tokio::time::Instant::now() + READER_SHUTDOWN_TIMEOUT;
+            // The close this waits on is the one that CLAIMS the session, and the claim can land after
+            // this fence is armed - so the bound is re-derived on every poll from the grace the claim
+            // recorded, always measured from the same start, which makes it grow or stay and never
+            // shrink. A fence sized from the waiting call's own grace, or from the module default, is
+            // short whenever the close in flight runs a longer one: a 1 s `close_session` waiting on a
+            // 5 s machine close would report a timeout for a close that does happen.
+            let started = tokio::time::Instant::now();
+            let mut deadline = started + close_fence_for(grace);
             while tokio::time::Instant::now() < deadline {
                 if !self.has_session(session_id) {
                     return Ok(());
                 }
+                let in_flight = session.close_grace().unwrap_or(grace);
+                let bound = started + close_fence_for(in_flight);
+                if bound > deadline {
+                    deadline = bound;
+                }
                 tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+            }
+            // The loop's last look at the registry is taken BEFORE its final poll, so it can precede
+            // the deadline by up to one `LIFECYCLE_POLL_INTERVAL` - and a session that leaves the
+            // registry inside that window would be reported as a timeout for a close that happened.
+            // The registry is therefore read once more here, at the moment the deadline has actually
+            // passed and the report is about to be made.
+            if !self.has_session(session_id) {
+                return Ok(());
             }
             return Err(PtyError::Other(format!(
                 "Timed out waiting for concurrent close of session '{session_id}'"
@@ -772,9 +946,14 @@ impl PtyManager {
             }
         }
 
+        // The child has been reaped above (or was already gone). Giving up the master now lets the
+        // console host flush what it still holds, and the reader delivers that tail and ends on the
+        // stream; the cancellation inside is the bounded fallback, not the first move. Requesting it
+        // here instead would disarm the reader before the only operation that can produce more
+        // output.
         session.close_io();
 
-        if let Err(reader_error) = Self::join_reader_bounded(&session).await {
+        if let Err(reader_error) = Self::end_reader_after_close(&session).await {
             if first_error.is_none() {
                 first_error = Some(reader_error);
             }
@@ -1057,6 +1236,114 @@ fn validate_transfer_identity(expected: &PtySessionSnapshot, actual: &PtySession
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// Wall-clock bounds in this module are anti-hang devices, never a grade of how fast a loaded host
+    /// is: each one waits on a state that either arrives or never does, so load can stretch the wait
+    /// while a regression never arrives at all. Generous enough that a host at load average 100 still
+    /// passes, and still finite, so a regression reports instead of hanging the suite.
+    const LOAD_TOLERANT_BOUND: Duration = Duration::from_secs(60);
+
+    /// The report a close makes when the KILL reap it runs after a TERM phase the child survives misses
+    /// its own 1 s budget. That budget is a production wall-clock bound and no test may widen it, and a
+    /// loaded host can miss it without any behaviour changing: the child was still killed and reaped.
+    /// Tests that pin a phase of the close accept this report too, and assert the outcome that close
+    /// exists to produce - the child gone, the reader ended, the registry clean - themselves, which is
+    /// what keeps the tolerance from hiding a regression.
+    const REAP_DEADLINE_REPORT: &str = "Timed out reaping killed PTY session";
+
+    /// A close a test expects to complete: `Ok`, or the KILL reap deadline a loaded host can miss. Any
+    /// other failure still fails the calling test.
+    fn assert_close_completed(result: Result<(), PtyError>, context: &str) {
+        if let Err(error) = result {
+            let message = error.to_string();
+            assert!(message.contains(REAP_DEADLINE_REPORT), "{context}: {message}");
+        }
+    }
+
+    /// A close a test expects to report a bounded failure naming `phase`: that report, or the KILL reap
+    /// deadline that can legitimately preempt it on a loaded host. Reporting SUCCESS is the regression
+    /// this guards, and it still fails here.
+    fn assert_close_reported_phase(result: Result<(), PtyError>, phase: &str, context: &str) {
+        let error = result.expect_err(context);
+        let message = error.to_string();
+        assert!(
+            message.contains(phase) || message.contains(REAP_DEADLINE_REPORT),
+            "{context}: expected a report naming '{phase}', got: {message}"
+        );
+    }
+
+    /// Await a session's own end, bounded: the KILL escalation a close runs exists to produce it, and a
+    /// close that reports the reap deadline still produces it a moment later, so the outcome is awaited
+    /// rather than read at the instant the close returned. `is_alive` polls the child, which is what
+    /// lets a reap nobody else is watching be observed at all.
+    fn wait_until_session_ended(session: &PtySession) -> bool {
+        let deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while session.is_alive() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// Whether the process this test spawned is still RUNNING.
+    ///
+    /// `kill(pid, 0)` answers "does this pid exist", which is a different question: a child the close
+    /// killed but whose exit the host has not finished completing - and one nothing has reaped - keeps
+    /// answering it for as long as the machine takes, so a wait built on it measures the host rather
+    /// than the close. The kernel's own process state answers the question the tests are asking; `ps`
+    /// is the portable door to it from here (production reads the same field through `kinfo_proc` and
+    /// `procfs`, which are private to the session module).
+    fn child_is_running(pid: u32) -> bool {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        let state = match std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "state="])
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            // The probe itself FAILED - `ps` is missing, not executable, or refused to run. That is
+            // "cannot tell", and it must NOT be folded into the empty answer below: answering "not
+            // running" for a host that cannot answer at all lets every wait built on this helper
+            // report a stop it never observed, and the close tests pass with no evidence. Reporting
+            // the child as still running sends that wait to its deadline instead, where the test
+            // fails and says so.
+            Err(_) => return true,
+        };
+        // A probe that RAN and printed nothing is a different answer from a probe that failed:
+        // `ps -p <pid> -o state=` prints nothing when the pid does not exist, so an empty answer from
+        // a successful probe means `ps` no longer sees the pid at all. `Z` is a zombie and `E` is a
+        // process trying to exit; neither is running.
+        !(state.is_empty() || state.starts_with('Z') || state.starts_with('E'))
+    }
+
+    /// Wait, bounded, for a child this test spawned to stop RUNNING, reaping it when the kernel has it
+    /// ready for reaping - the test is its parent, so nothing else will.
+    ///
+    /// This is what a test asserts when it says the close left no shell behind. A shell that really
+    /// survived the close is running, not a zombie or an exiting process, so that regression still
+    /// fails here; what no longer fails is a host that is slow to finish a kill it did deliver.
+    fn wait_until_child_stopped(pid: u32) -> bool {
+        let deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        loop {
+            let mut status: libc::c_int = 0;
+            let reaped = unsafe {
+                libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG)
+            };
+            if reaped == pid as libc::pid_t {
+                return true;
+            }
+            if !child_is_running(pid) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     #[tokio::test]
     async fn pane_liveness_reader_rollback_rejected_identity_keeps_source_usable() {
         let source = super::PtyManager::new();
@@ -1158,6 +1445,81 @@ mod tests {
         let _ = manager.close_session(&session_id);
     }
 
+    /// The other half of the same lifecycle: a session whose export FAILED is still this daemon's
+    /// to close, and that close must end its reader instead of leaving one parked behind.
+    ///
+    /// On Windows this is the case the retained interrupt handle exists for: the master is already
+    /// gone, so nothing left on the session can reach the reader without it.
+    #[tokio::test]
+    async fn a_session_whose_export_failed_still_closes_and_ends_its_reader() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // Force the export to fail the way it fails in the field: the master descriptor is gone.
+        session.close_io();
+        let failed = manager.export_session(&session_id);
+        assert!(failed.is_err(), "exporting a session with no master must fail");
+        assert!(
+            !session.is_reader_finished(),
+            "a failed export must leave the reader running"
+        );
+
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        assert_close_completed(close, "a session whose export failed must still close");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+
+        // The reader holds the last output sender, so this channel closing is the exact moment the
+        // reader thread exited - an event to await, not a delay to wait out.
+        let ended = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "close left the reader running");
+        assert!(session.is_reader_finished(), "close must end the session's reader");
+    }
+
+    /// Regression: a close must end the reader even when it does not own the reader's join handle.
+    ///
+    /// The lifecycle watcher takes that handle at startup for every spawned session, so the close
+    /// path's join has nothing to take and returns immediately. Reading that as "the reader ended"
+    /// let a close report success while the reader was still parked - and a parked reader holds the
+    /// last output sender, so the exit record was never written and the machine lifecycle timed out.
+    #[tokio::test]
+    async fn a_close_ends_the_reader_even_when_the_join_handle_was_taken() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // Stand in for the lifecycle watcher: take the handle before the close, exactly as
+        // `start_lifecycle_watcher` does, and keep it out of the close path's reach. Dropping a
+        // JoinHandle detaches, so the reader keeps running - which is the point.
+        let taken = session.take_reader_task();
+        assert!(taken.is_some(), "a spawned session's reader handle is takeable");
+
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        assert_close_completed(close, "close must not report a reader that would not stop");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+        assert!(
+            session.is_reader_finished(),
+            "close must end the reader even when the join handle was taken from it"
+        );
+        let ended = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "close left the reader holding the output sender");
+        drop(taken);
+    }
+
     /// A SUCCESSFUL export pauses the reader so the successor can own the stream, WITHOUT
     /// setting reader_finished so the lifecycle watcher does not kill the child process.
     #[tokio::test]
@@ -1179,8 +1541,10 @@ mod tests {
         // Write input to trigger reader activity so it observes pause_requested
         manager.write_input(&session_id, b"\n").expect("write input to session");
 
-        // Bounded 5s wait polling every 20ms for session.is_reader_paused()
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // Await the reader's own act - it parks only once the export and the input have reached it -
+        // under a bound that reports a regression instead of hanging on one, not one that grades a
+        // loaded host.
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         let mut paused = false;
         while tokio::time::Instant::now() < deadline {
             if session.is_reader_paused() {
@@ -1189,7 +1553,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(paused, "reader should pause within 5s after export and input");
+        assert!(paused, "the reader never parked after the export and the input");
 
         drop(export);
         let _ = manager.close_session(&session_id).await;
@@ -1253,7 +1617,7 @@ mod tests {
 
         let mut accumulated = Vec::new();
         let mut marker_found = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
                 Ok(Some(chunk)) => {
@@ -1284,36 +1648,46 @@ mod tests {
         let _ = manager.close_session(&session_id).await;
     }
 
-    /// Runs `body` on a private runtime and reports how long that runtime took to shut down.
-    /// An ordinary runtime drop waits for every blocking task without a bound, so a reader
-    /// thread that outlives its session would hang the test instead of failing it.
-    fn shutdown_elapsed_after<F: std::future::Future<Output = ()>>(body: F) -> Duration {
+    /// Runs `body` on a private runtime whose shutdown is bounded, so a reader thread that outlives its
+    /// session reports instead of hanging the test. The shutdown's own duration is deliberately NOT
+    /// asserted: it measures how fast a loaded host is, not whether the reader was released, and the
+    /// caller asserts the release itself.
+    fn with_bounded_runtime<T, F: std::future::Future<Output = T>>(body: F) -> T {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build test runtime");
-        rt.block_on(body);
-        let start = std::time::Instant::now();
-        rt.shutdown_timeout(Duration::from_secs(3));
-        start.elapsed()
+        let outcome = rt.block_on(body);
+        rt.shutdown_background();
+        outcome
     }
 
     #[test]
     fn closing_an_exported_session_releases_its_paused_reader() {
-        let elapsed = shutdown_elapsed_after(async {
+        // The event this test exists to observe is the reader's own end: the close releases the park the
+        // reader is waiting on, the reader returns from it and finishes, and the output channel - held
+        // by the reader alone once the close gives its own sender up - closes. Both are asserted, so a
+        // close that leaves the park unreleased fails here instead of merely taking longer.
+        let (released, reader_finished) = with_bounded_runtime(async {
             let manager = PtyManager::new();
-            let (session_id, _rx) = manager
+            let (session_id, mut rx) = manager
                 .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
                 .expect("spawn PTY session");
+            let session = manager.get_session(&session_id).expect("session registered");
             let _export = manager.export_session(&session_id).expect("export succeeds");
-            manager
-                .close_session(&session_id)
-                .await
-                .expect("close exported session");
+            let close = manager.close_session(&session_id).await;
+            assert_close_completed(close, "close exported session");
+            let released = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+                while rx.recv().await.is_some() {}
+            })
+            .await
+            .is_ok();
+            (released, session.is_reader_finished())
         });
+        assert!(reader_finished, "close left the paused reader running");
         assert!(
-            elapsed < Duration::from_secs(2),
-            "a paused reader outlived its closed session: runtime shutdown took {elapsed:?}"
+            released,
+            "a paused reader outlived its closed session: its output channel never closed"
         );
     }
 
@@ -1337,7 +1711,7 @@ mod tests {
             // The tty echo wakes the reader so it reaches the pause point and parks. A parked
             // reader raises no event, so its flag is the only thing to wait on.
             manager.write_input(&session_id, b"\n").expect("write input");
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
             while !session.is_reader_paused() {
                 assert!(
                     tokio::time::Instant::now() < deadline,
@@ -1350,7 +1724,7 @@ mod tests {
             manager.remove_from_registry(&session_id);
             drop(session);
             drop(export);
-            let released = tokio::time::timeout(Duration::from_secs(5), async {
+            let released = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
                 while rx.recv().await.is_some() {}
             })
             .await
@@ -1395,15 +1769,33 @@ mod tests {
             .expect("spawn sibling session");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let started = tokio::time::Instant::now();
         let close_result =
-            tokio::time::timeout(Duration::from_secs(6), manager.close_session(&stubborn_id))
+            tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&stubborn_id))
                 .await
                 .expect("close must be bounded");
-        close_result.expect("TERM-resistant close should escalate and succeed");
-
-        assert!(started.elapsed() < Duration::from_secs(6));
-        assert!(stubborn_session.is_reaped(), "closed child must be reaped");
+        // The escalation this test guards is proven by the child's own state below, not by the
+        // close's return: the KILL reap runs on a 1 s production budget a loaded host can miss, and
+        // the close reports that deadline rather than `Ok` when it does. The enclosing bound is what
+        // keeps the close from hanging, so its duration is not measured again here.
+        //
+        // Reaping is asserted HERE, on the close's own success and before anything below polls the
+        // child: `wait_until_session_ended` reads the child through `is_alive`, which reaps an exited
+        // child as a side effect, so an assertion taken after that wait cannot tell a child this
+        // close reaped from one nobody did.
+        match close_result {
+            Ok(()) => assert!(
+                stubborn_session.is_reaped(),
+                "a close that reports success must have reaped its child"
+            ),
+            Err(error) => assert_close_completed(
+                Err(error),
+                "TERM-resistant close should escalate and succeed",
+            ),
+        }
+        assert!(
+            wait_until_session_ended(&stubborn_session),
+            "closed child must be reaped"
+        );
         assert!(!manager.has_session(&stubborn_id));
         assert!(manager.has_session(&sibling_id));
         assert!(manager.is_alive(&sibling_id).expect("sibling state"));
@@ -1427,12 +1819,26 @@ mod tests {
             .expect("send interrupt through PTY");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        tokio::time::timeout(Duration::from_secs(6), manager.close_session(&session_id))
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
             .await
-            .expect("close after interrupt must be bounded")
-            .expect("close after interrupt must succeed after escalation");
+            .expect("close after interrupt must be bounded");
+        // As in the TERM-resistant close above: the reap is asserted on the close's own success,
+        // before the wait below polls - and therefore reaps - the child itself.
+        match close {
+            Ok(()) => assert!(
+                session.is_reaped(),
+                "a close that reports success must have reaped its child"
+            ),
+            Err(error) => assert_close_completed(
+                Err(error),
+                "close after interrupt must succeed after escalation",
+            ),
+        }
 
-        assert!(session.is_reaped(), "closed shell must be reaped");
+        assert!(
+            wait_until_session_ended(&session),
+            "closed shell must be reaped"
+        );
         assert!(!manager.has_session(&session_id));
     }
 
@@ -1598,7 +2004,7 @@ mod tests {
             .expect("write input to predecessor");
 
         let mut pre_handover_found = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         while tokio::time::Instant::now() < deadline {
             if let Some(att) = predecessor_hub.subscribe(&session_id) {
                 let text = String::from_utf8_lossy(&att.0);
@@ -1623,9 +2029,9 @@ mod tests {
         assert!(export.hub_snapshot.is_some(), "exported session must have hub snapshot");
         assert!(export.master_raw_fd >= 0, "duplicated master fd must be valid");
 
-        // Export now pauses the predecessor's reader, so calling stop_reader is no longer needed
-        // (and calling stop_reader would set reader_finished, re-arming the watcher that kills
-        // the transferred child ~1.25s later).
+        // Export now pauses the predecessor's reader, so calling stop_reader is no longer needed -
+        // and calling it would stop that reader for good (a stop request plus an abort), which is
+        // what re-arms the watcher that closes the session and kills the transferred child.
         pred_pump.abort();
 
         // 4. Setup successor manager with its own TerminalOutputHub
@@ -1680,7 +2086,7 @@ mod tests {
             .expect("write input to adopted session");
 
         let mut post_handover_found = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         while tokio::time::Instant::now() < deadline {
             if let Some(att) = successor_hub.subscribe(&session_id) {
                 let text = String::from_utf8_lossy(&att.0);
@@ -1726,7 +2132,7 @@ mod tests {
             .expect("send kill signal to adopted process");
 
         let mut observed_exit = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         while tokio::time::Instant::now() < deadline {
             if !adopted_session.is_alive() {
                 observed_exit = true;
@@ -1767,7 +2173,7 @@ mod tests {
         let shell_pid = session.pid().expect("shell pid");
 
         // Wait until the job owns the terminal from a group other than the shell's.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
         let job_group = loop {
             if let Ok(Some(group)) = session.foreground_process_group() {
                 if group != shell_pid {
@@ -1797,20 +2203,26 @@ mod tests {
             .adopt_transferred_session(master_fd, snapshot)
             .expect("adopt session");
 
-        tokio::time::timeout(Duration::from_secs(8), successor.close_session(&session_id))
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, successor.close_session(&session_id))
             .await
-            .expect("close must be bounded")
-            .expect("close must reap the adopted shell");
+            .expect("close must be bounded");
+        assert_close_completed(close, "close must reap the adopted shell");
 
         assert!(!successor.has_session(&session_id));
-        assert!(
-            !crate::terminal::session::AdoptedProcess { pid: shell_pid, process_group: None }
-                .is_alive(),
-            "the adopted shell must be gone after close"
-        );
+        // The shell and its job are proven gone by their own process state, under a bound that reports
+        // a regression instead of grading a loaded host: a close that reported the reap deadline still
+        // killed them, and a close that signalled only one group leaves the other alive indefinitely.
+        let shell = crate::terminal::session::AdoptedProcess { pid: shell_pid, process_group: None };
+        let deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while shell.is_alive() {
+            if std::time::Instant::now() >= deadline {
+                panic!("the adopted shell must be gone after close");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         // The job ignores the SIGHUP a dying session leader sends, so it only goes away if
         // Close signalled the foreground group as well.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
         let job = crate::terminal::session::AdoptedProcess {
             pid: job_group,
             process_group: None,
@@ -1842,7 +2254,7 @@ mod tests {
 
         child.kill().expect("kill child");
         // Deliberately not reaped: the child stays a zombie of this process.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
         while adopted.is_alive() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1851,5 +2263,561 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         child.wait().expect("reap child");
+    }
+
+    /// The master release is OBSERVED and BOUNDED, and a release the blocking pool never runs is
+    /// REPORTED rather than read as a completed close.
+    ///
+    /// The pool is a thread budget, not a duration bound: with every blocking thread busy the release
+    /// sits in the queue and the master stays alive with its ConPTY handle open. The release seam used
+    /// to discard the handle it created, so that condition was indistinguishable from a release that
+    /// had run - which is exactly what the observation added here removes.
+    #[test]
+    fn a_master_release_the_blocking_pool_never_runs_is_reported() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build the test runtime");
+        // Occupy the single blocking thread for the whole test, so every blocking task the close
+        // hands to the pool - the master release among them - queues instead of running. The occupier
+        // also reports when it lets the thread go, so the test can prove the pool was free before the
+        // runtime was dropped: a runtime dropped while the thread is still held shutdown-drops the
+        // closures it queued, which is the very path this test exists to exercise.
+        let (occupied_tx, occupied_rx) = std::sync::mpsc::channel();
+        let (free_tx, free_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        rt.spawn_blocking(move || {
+            let _ = occupied_tx.send(());
+            let _ = free_rx.recv();
+            let _ = released_tx.send(());
+        });
+        occupied_rx.recv().expect("the only blocking thread is occupied");
+
+        let (result, session, child_pid) = rt.block_on(async {
+            let manager = PtyManager::new();
+            let (session_id, _rx) = manager
+                .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+                .expect("spawn PTY session");
+            let session = manager.get_session(&session_id).expect("session registered");
+            let child_pid = session.pid().expect("a spawned session records its child pid");
+            (manager.close_session(&session_id).await, session, child_pid)
+        });
+        free_tx.send(()).expect("free the blocking pool");
+        released_rx
+            .recv_timeout(LOAD_TOLERANT_BOUND)
+            .expect("the blocking thread must be released before the runtime is dropped");
+
+        assert_close_reported_phase(
+            result,
+            "master release",
+            "a close whose master release the pool never ran must report it, not report success",
+        );
+
+        // The pool runs the closures it was holding as soon as the thread is free, and the session
+        // reader is one of them: prove it ended rather than assume it, so the runtime is not dropped
+        // under a reader that never ran.
+        let reader_deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while !session.is_reader_finished() {
+            assert!(
+                std::time::Instant::now() < reader_deadline,
+                "the reader the pool was holding never ran"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The close killed and reaped the child itself; prove it is gone, by the pid this test
+        // recorded at spawn - never by a pattern.
+        assert!(
+            wait_until_child_stopped(child_pid),
+            "the close left the spawned shell running"
+        );
+    }
+
+    /// The concurrent-close fence must cover the WHOLE close it waits on, not only the reader stages.
+    ///
+    /// A second close waits for the first to leave the registry, and that happens only after the TERM
+    /// grace phase, the KILL+reap phase, the observed master release and the reader stages. A fence
+    /// derived from the reader stages alone is shorter than the close it observes, so a second close
+    /// reports a timeout against a close that is still legitimately in progress.
+    #[tokio::test]
+    async fn a_concurrent_close_waits_out_the_whole_reap_and_reader_path() {
+        let manager = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("trap '' TERM; echo TRAP_READY; while true; do sleep 1; done");
+        let (session_id, mut rx) = manager
+            .spawn(cmd, 80, 24)
+            .expect("spawn TERM-resistant session");
+        let child_pid = manager
+            .get_session(&session_id)
+            .expect("session registered")
+            .pid()
+            .expect("a spawned session records its child pid");
+
+        // Await the marker the child prints AFTER installing its TERM trap: an event, not a delay.
+        // Without the trap the child would die on the first signal and the close would never reach
+        // the reap phases this fence has to cover.
+        let announced = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            let mut seen = String::new();
+            while let Some(chunk) = rx.recv().await {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                if seen.contains("TRAP_READY") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("the child must announce its trap within the bound");
+        assert!(announced, "the child never announced its installed TERM trap");
+
+        // The first close spends a whole grace phase refusing to die; the second arrives while it is
+        // still in that phase and must wait for it rather than time out against it.
+        let authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync> = Arc::new(|| Ok(()));
+        let started = tokio::time::Instant::now();
+        let (first, second) = tokio::join!(
+            manager.close_authorized(&session_id, Duration::from_secs(6), authorize),
+            manager.close_session(&session_id),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_secs(6),
+            "the first close must spend its whole TERM grace phase, not {elapsed:?}"
+        );
+        // `Ok`, or the KILL reap deadline a loaded host can miss: the child's own state below is what
+        // proves the escalation, and the second close below is what proves the fence.
+        assert_close_completed(first, "the first close must escalate and succeed");
+        second.expect("a second close must not time out against a close still in progress");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+
+        // The close killed and reaped the child itself; prove it is gone rather than leave it behind,
+        // by the pid this test recorded at spawn - never by a pattern.
+        assert!(
+            wait_until_child_stopped(child_pid),
+            "the close left the spawned shell running"
+        );
+    }
+
+    /// F-1: a concurrent close is fenced for the close ACTUALLY in flight, not for its own grace and
+    /// not for the module default.
+    ///
+    /// The grace phase is a caller parameter, so a bound derived from the default one is short by the
+    /// difference on every path that passes a longer one - here the production machine-close grace of
+    /// 5 s, whose close cannot leave the registry before it has spent that whole phase. The waiting
+    /// close is a plain `close_session` (1 s grace), so this is also the case a fence sized from the
+    /// grace of the caller that arms it gets wrong.
+    ///
+    /// The bound itself is pinned by `the_close_fence_tracks_the_grace_the_close_runs_with`; this test
+    /// drives the concurrent path end to end, and it is not by itself the pre-fix regression, because
+    /// a fast reader lets the pre-fix 10 s constant outlast a 5 s grace.
+    #[tokio::test]
+    async fn a_concurrent_close_covers_the_grace_of_the_close_in_flight() {
+        let manager = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("trap '' TERM; echo TRAP_READY; while true; do sleep 1; done");
+        let (session_id, mut rx) = manager
+            .spawn(cmd, 80, 24)
+            .expect("spawn a TERM-resistant session");
+
+        // Await the marker the child prints AFTER installing its TERM trap: an event, not a delay.
+        // Without the trap the child would die on the first signal and the close would never reach the
+        // grace phase this fence has to cover.
+        let announced = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            let mut seen = String::new();
+            while let Some(chunk) = rx.recv().await {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                if seen.contains("TRAP_READY") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("the child must announce its trap within the bound");
+        assert!(announced, "the child never announced its installed TERM trap");
+
+        // The production machine-close grace, so this exercises the same phase length the fence has to
+        // cover on that path: a bound derived from the DEFAULT grace is 5 s short here.
+        let grace = Duration::from_secs(5);
+
+        let authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync> = Arc::new(|| Ok(()));
+        let started = tokio::time::Instant::now();
+        let (first, second) = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            tokio::join!(
+                manager.close_authorized(&session_id, grace, authorize),
+                manager.close_session(&session_id),
+            )
+        })
+        .await
+        .expect("both closes must be bounded");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= grace,
+            "the first close must spend its whole TERM grace phase, not {elapsed:?}"
+        );
+        // `Ok`, or the KILL reap deadline a loaded host can miss, exactly as in the whole-reap test:
+        // the second close below is what carries this fence.
+        assert_close_completed(first, "the first close must escalate and succeed");
+        second.expect(
+            "a second close must cover the grace of the close in flight, not its own or the default",
+        );
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+    }
+    /// A concurrent close must cover a close that spends its WHOLE bound, not only the phase deadlines
+    /// that bound is nominally made of.
+    ///
+    /// The second close waits for the first to leave the registry, and the first leaves only after its
+    /// TERM grace phase, the observed master release and both bounded reader stages. This test pins
+    /// every one of those to its own bound, so the close in flight outlives the pre-v3 fence constant
+    /// (10 s) and the second close can only return `Ok` if the fence is derived from the grace that
+    /// close actually runs - recorded by the close itself - rather than from the waiting call's own 1 s
+    /// or from a constant. On the pre-v3 constant, and on a fence sized from the waiting call's grace,
+    /// the second close reports `Timed out waiting for concurrent close` instead.
+    ///
+    /// This is `#[test]` rather than `#[tokio::test]` because it builds and enters its own runtime:
+    /// the close's master release and its reader are handed to the blocking pool, and occupying that
+    /// pool's only thread is what pins those phases instead of letting them finish in milliseconds.
+    ///
+    /// The child cannot announce its installed TERM trap through the pane - the reader that would
+    /// deliver the marker is queued on the pool this test occupies - so it announces through a file,
+    /// and the wait for that file is a bounded poll of the child's own act, never a fixed delay.
+    #[test]
+    fn a_concurrent_close_covers_a_close_that_spends_its_whole_fence() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build the test runtime");
+        // Occupy the pool's only blocking thread BEFORE the session exists, so the reader this spawn
+        // queues is one the pool never runs: a reader that never reads cannot end, and that is what
+        // forces both reader stages of the close to their bound. The occupier reports when it lets the
+        // thread go, so the test can prove the pool was free before the runtime was dropped.
+        let (occupied_tx, occupied_rx) = std::sync::mpsc::channel();
+        let (free_tx, free_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        rt.spawn_blocking(move || {
+            let _ = occupied_tx.send(());
+            let _ = free_rx.recv();
+            let _ = released_tx.send(());
+        });
+        occupied_rx.recv().expect("the only blocking thread is occupied");
+
+        // The readiness marker: the trap is installed before the child creates it, so its appearance
+        // is the event that says a TERM will be survived. Removed first so a stale file cannot pass
+        // for this child's own act.
+        let marker = std::env::temp_dir().join(format!(
+            "ferryx-close-fence-{}-{:?}.ready",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let marker_arg = marker.to_string_lossy().into_owned();
+
+        let (manager, session_id, session, child_pid, first, second, elapsed) = rt.block_on(async {
+            let manager = PtyManager::new();
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg("trap '' TERM; touch \"$1\"; while true; do sleep 1; done");
+            cmd.arg("ferryx-close-fence");
+            cmd.arg(&marker_arg);
+            let (session_id, _rx) = manager
+                .spawn(cmd, 80, 24)
+                .expect("spawn a TERM-resistant session");
+            let session = manager.get_session(&session_id).expect("session registered");
+            let child_pid = session.pid().expect("a spawned session records its child pid");
+
+            // Subscribed to BEFORE the closes and bounded: the child's own act, never a delay.
+            let ready_deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+            while !marker.exists() {
+                assert!(
+                    std::time::Instant::now() < ready_deadline,
+                    "the child never announced its installed TERM trap"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            // A 6 s grace, not the 5 s machine one: the close has to outlive the PRE-V3 constant
+            // (10 s) on its pinned phases alone, and 6 s of grace plus the 2 s observed master release
+            // and the two 2 s reader stages is what does that.
+            let grace = Duration::from_secs(6);
+            let authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync> = Arc::new(|| Ok(()));
+            let started = tokio::time::Instant::now();
+            let (first, second) = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+                tokio::join!(
+                    manager.close_authorized(&session_id, grace, authorize),
+                    manager.close_session(&session_id),
+                )
+            })
+            .await
+            .expect("both closes must be bounded");
+            let elapsed = started.elapsed();
+            (manager, session_id, session, child_pid, first, second, elapsed)
+        });
+
+        // Free the blocking thread, then prove the pool released it before the runtime is dropped: a
+        // runtime dropped while its only blocking thread is held shutdown-drops the closures it
+        // queued, which is not the path this test measures.
+        free_tx.send(()).expect("free the blocking pool");
+        released_rx
+            .recv_timeout(LOAD_TOLERANT_BOUND)
+            .expect("the blocking thread must be released before the runtime is dropped");
+
+        // The close in flight cannot leave the registry before its pinned phases elapse: the TERM
+        // grace it was given, the observed master release and the two bounded reader stages. This
+        // lower bound is what makes the second close's `Ok` a statement about the fence rather than
+        // about how fast the host happens to be.
+        assert!(
+            elapsed >= Duration::from_secs(12),
+            "the close in flight must spend its whole bound, not {elapsed:?}"
+        );
+        // The saturated pool also leaves the release this close queued unrun, so that close reports
+        // it: asserted rather than discarded, so a change to that report fails here instead of
+        // passing silently.
+        assert_close_reported_phase(
+            first,
+            "master release",
+            "a close whose master release the pool never ran must report it",
+        );
+        second.expect(
+            "a second close must cover a close that spends its whole bound, not time out against it",
+        );
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+
+        // The pool runs what it was holding as soon as the thread is free, the queued reader among
+        // it: prove it ended rather than assume it, so the runtime is not dropped under a reader that
+        // never ran.
+        let reader_deadline = std::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while !session.is_reader_finished() {
+            assert!(
+                std::time::Instant::now() < reader_deadline,
+                "the reader the pool was holding never ran"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The close killed and reaped the child itself; prove it is gone by the pid this test
+        // recorded at spawn - never by a pattern.
+        assert!(
+            wait_until_child_stopped(child_pid),
+            "the close left the spawned shell running"
+        );
+
+        // The readiness marker is this test's own artifact: remove it rather than leave it behind.
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// The fence is a function of the grace the close runs with, not a constant: a constant derived
+    /// from the default grace is short by exactly that difference on every other path, which is how a
+    /// second close came to report a timeout for a machine close that does happen.
+    ///
+    /// This is the regression that FAILS on the pre-fix code. There the bound was the module constant
+    /// - `TERM_GRACE_TIMEOUT + KILL_REAP_TIMEOUT + MASTER_RELEASE_TIMEOUT + READER_SHUTDOWN_TIMEOUT *
+    /// READER_WAIT_STAGES` = 10 s - with no function of the grace at all, so the second assertion
+    /// below, which requires 14.14 s for the 5 s machine grace, cannot be satisfied by it.
+    ///
+    /// The poll quantization of the bounded waits is part of that sum: dropping those terms from
+    /// `close_fence_for` (14 s here) fails the second assertion too, which is what keeps the
+    /// allowance from being removed without a test noticing.
+    #[test]
+    fn the_close_fence_tracks_the_grace_the_close_runs_with() {
+        let default_fence = close_fence_for(TERM_GRACE_TIMEOUT);
+        let machine_fence = close_fence_for(Duration::from_secs(5));
+        assert_eq!(
+            machine_fence - default_fence,
+            Duration::from_secs(5) - TERM_GRACE_TIMEOUT,
+            "the fence must move with the grace it is derived from"
+        );
+        assert_eq!(
+            machine_fence,
+            Duration::from_secs(5)
+                + KILL_REAP_TIMEOUT
+                + MASTER_RELEASE_TIMEOUT
+                + READER_SHUTDOWN_TIMEOUT * READER_WAIT_STAGES
+                + REAP_POLL_INTERVAL * 2
+                + READER_WAIT_POLL_INTERVAL * 2,
+            "the fence must cover every phase the close runs after its grace phase"
+        );
+    }
+
+    /// F-2: a master release the pool CANCELS is not a release.
+    ///
+    /// In the pinned tokio, `spawn_blocking` returns its handle unchanged when the pool is already
+    /// shutting down, but `spawn_task` has already shutdown()-ed the task: the closure - and with it
+    /// the master - is dropped inline on the thread that called it, and the handle resolves with a
+    /// cancellation. Reading `is_ok()` off that wait reported a release that never ran as an observed
+    /// one, on the very thread the seam exists to keep free.
+    #[tokio::test]
+    async fn a_master_release_the_pool_cancels_is_not_reported_as_a_release() {
+        let manager = PtyManager::new();
+        let (session_id, _rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+        let child_pid = session.pid().expect("a spawned session records its child pid");
+
+        // A pool that is ALREADY shutting down. Entering its handle makes it the current runtime for
+        // the release below, so the release is handed to a pool that can only cancel it.
+        let cancelled_pool = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build the shutting-down runtime");
+        let handle = cancelled_pool.handle().clone();
+        cancelled_pool.shutdown_background();
+
+        {
+            let _entered = handle.enter();
+            session.close_io();
+        }
+
+        // Observed from a live runtime: the cancelled handle resolves at once, and the report must not
+        // read that cancellation as the pool having run the release.
+        let observed = tokio::time::timeout(
+            LOAD_TOLERANT_BOUND,
+            session.observe_master_release(MASTER_RELEASE_TIMEOUT),
+        )
+        .await
+        .expect("the observation must be bounded");
+        assert_eq!(
+            observed,
+            Some(false),
+            "a master release the pool cancelled must not be reported as a release that happened"
+        );
+
+        // The child is this session's own and the master is already gone, so the close is what ends
+        // it. The result is ASSERTED rather than discarded, and the child is proven gone by the pid
+        // this test recorded at spawn - never by a pattern - so a failing close fails this test
+        // instead of being swallowed with a shell left behind.
+        let closed = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("the close must be bounded");
+        assert_close_completed(
+            closed,
+            "a session whose master release the pool cancelled must still close",
+        );
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+
+        assert!(
+            wait_until_child_stopped(child_pid),
+            "the close left the spawned shell running"
+        );
+    }
+
+    /// F-4: `stop_reader` must wake a reader parked by an export, not leave a thread nothing can wake.
+    ///
+    /// The park waits on `pause_released` and no longer observes `reader_finished`, so a stop that only
+    /// set that flag left the parked reader parked forever while `is_reader_finished()` already
+    /// reported true - a close would pass its first stage on the flag without ever ending the thread,
+    /// and a parked reader holds the last output sender, which is the chain the pause split exists to
+    /// break.
+    #[tokio::test]
+    async fn stopping_a_paused_reader_wakes_it_instead_of_leaving_it_parked() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // A successful export pauses the reader, and the echo of this input is what returns its read so
+        // it reaches the pause point and parks there.
+        let _export = manager.export_session(&session_id).expect("export succeeds");
+        session.write_input(b"\n").expect("wake the reader");
+
+        let parked_deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while !session.is_reader_paused() {
+            assert!(
+                tokio::time::Instant::now() < parked_deadline,
+                "the reader never parked at its pause point"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Out of the registry first: the lifecycle watcher closes a session whose reader flag is set,
+        // and that close releases the park itself, which would answer the question this test asks
+        // instead of letting the stop do it. The output sender this session holds is given up here too,
+        // so the channel below closes on the READER sender alone, which is the reader thread.
+        manager.remove_from_registry(&session_id);
+        session.close_output();
+        session.stop_reader();
+
+        // The child is signalled through the session itself, so a failing run cannot leave a shell
+        // behind; the parked reader is not reading, so this does not touch the park under test.
+        session.kill().expect("kill the child");
+        // Deliberately NOT waiting here for the child to be observed as exited. That wait measures the
+        // HOST, not this test: the signal has already been sent above, and a child the kernel has not
+        // finished tearing down - one parked in an uninterruptible syscall on a host at load average
+        // 100 - keeps `poll_exit_code()` at `Ok(None)` for as long as that takes, which is a property of
+        // the machine and not of `stop_reader`. The observable this test exists for is the reader's own
+        // end, asserted below, and that does not depend on the child: `stop_reader` releases the park,
+        // the reader returns from it and finishes, and the last output sender - the session gave up its
+        // own above - drops with it.
+
+        // The reader holds the last output sender, so this channel closing is the exact moment its
+        // thread exited - an event to await, not a delay to wait out.
+        let ended = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "stop_reader left a parked reader that nothing will wake"
+        );
+    }
+
+    /// C1: a pause release must not be readable as the reader's end.
+    ///
+    /// `close_io` releases a reader parked by an export, and that release used to set
+    /// `reader_finished` - the very flag `end_reader_after_close` stage 1 reads as proof the reader
+    /// thread ended - so a session closed while paused could pass stage 1 on the release alone, with
+    /// the reader still running. The release is now its own signal, and only the reader's own end sets
+    /// that flag.
+    #[tokio::test]
+    async fn a_pause_release_is_not_readable_as_the_readers_end() {
+        let manager = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // The reader issues its first read before anything pauses it. `sleep 30` writes nothing, so
+        // that read stays blocked and the reader can reach neither its pause point nor its own end:
+        // the flag asserted below can only have been set by the release.
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while session.reader_phase() != "before-read" {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the reader never issued its first read"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // A successful export pauses the reader so a successor can own the stream.
+        let export = manager.export_session(&session_id).expect("export succeeds");
+
+        // The release runs inside `close_io`, exactly where the close path applies it.
+        session.close_io();
+        assert!(
+            !session.is_reader_finished(),
+            "the pause release was reported as the reader's end while the reader was still running"
+        );
+
+        // The session still closes, and the reader really ends there: the release did not strand it.
+        drop(export);
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        assert_close_completed(close, "a session released while paused must still close");
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+        assert!(
+            session.is_reader_finished(),
+            "the close must end the reader the release had unblocked"
+        );
     }
 }

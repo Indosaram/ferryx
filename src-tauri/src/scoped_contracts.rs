@@ -180,6 +180,15 @@ pub enum ScopeErrorCode {
     InventoryIncomplete,
     PayloadTooLarge,
     CaptureUnsupported,
+    /// The mutation may have happened and its outcome cannot be determined.
+    ///
+    /// The accept-then-unknown state the reference contract needs (section 3): a writer
+    /// deadline or a transport loss AFTER the write was dispatched is a typed, non-retryable
+    /// outcome, never a failure to replay automatically. The variant carries an explicit rename
+    /// so the wire string is the acronym the contract names, independent of how the enum's
+    /// SCREAMING_SNAKE_CASE rule treats the acronym boundary.
+    #[serde(rename = "OPERATION_OUTCOME_UNKNOWN")]
+    OperationOutcomeUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

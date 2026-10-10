@@ -1,0 +1,8 @@
+{"type":"session","id":"sess-omo-partial","cwd":"/home/dev/app"}
+not json at all
+{"type":"message","message":{"role":"user","content":"kept"}}
+[]
+42
+{"type":"message","message":{"role":"user","content":"   "}}
+{"type":"message","message":{"role":"assistant","content":"plain string content"}}
+{"type":"message"

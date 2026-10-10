@@ -1,0 +1,12 @@
+{"type":"session","id":"sess-omo-0001","cwd":"/home/dev/app","timestamp":"2026-10-06T10:00:00.000Z"}
+{"type":"message","id":"m1","timestamp":"2026-10-06T10:00:05.000Z","message":{"role":"user","content":"add a retry to the uploader"}}
+{"type":"message","id":"m2","timestamp":"2026-10-06T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"read the uploader first"},{"type":"text","text":"I'll look at the uploader."},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"src/uploader.ts"}}]}}
+{"type":"message","id":"m3","timestamp":"2026-10-06T10:00:10.000Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","isError":false,"content":"export function upload() {}\n"}}
+{"type":"message","id":"m4","timestamp":"2026-10-06T10:00:20.000Z","message":{"role":"assistant","content":[{"type":"toolCall","toolCallId":"call-2","name":"task","intent":"wire the retry","toolInput":{"task_summary":"wire the retry","tasks":[{"task_summary":"wire the retry"}]}}]}}
+{"type":"message","id":"m5","timestamp":"2026-10-06T10:00:21.000Z","message":{"role":"toolResult","toolCallId":"call-2","toolName":"task","details":{"items":[{"task_id":"t-77","task_summary":"wire the retry"}]},"content":"started"}}
+{"type":"custom_message","customType":"omo-senpi:wake","display":false,"timestamp":"2026-10-06T10:02:00.000Z","details":[{"customType":"senpi-task.completion","details":[{"task_id":"t-77","status":"completed","name":"task-77","agent_type":"executor","resolved_model":{"display":"deepseek-v4.1-flash"},"duration_ms":98000,"run_stats":{"turns":12,"tool_calls":30,"total_tokens":42000},"final_response":"retry wired and covered"}]}]}
+{"type":"custom_message","customType":"info","timestamp":"2026-10-06T10:02:05.000Z","content":"<system-notice>\nbuild finished\n</system-notice>"}
+{"type":"compaction","summary":"Earlier work established the uploader layout.","timestamp":"2026-10-06T10:03:00.000Z"}
+{"type":"message","id":"m6","timestamp":"2026-10-06T10:03:10.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Continuing from the summary."}],"stopReason":"stop"}}
+{"type":"message","id":"m7","timestamp":"2026-10-06T10:03:20.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Woken by a monitor."}],"stopReason":"stop"}}
+{"type":"message","id":"m8","display":false,"timestamp":"2026-10-06T10:03:30.000Z","message":{"role":"user","content":"hidden"}}

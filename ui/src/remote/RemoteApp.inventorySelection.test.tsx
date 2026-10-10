@@ -410,6 +410,7 @@ describe("RemoteApp machine inventory selection", () => {
     act(() => {
       fireEvent.click(row);
     });
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
 
     await waitFor(() => {
       expect(harness.terminalPaths().length).toBeGreaterThan(0);
@@ -487,6 +488,7 @@ describe("RemoteApp machine inventory selection", () => {
     act(() => {
       fireEvent.click(row);
     });
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
     await waitFor(() => {
       expect(harness.terminalPaths().some((path) => path.includes(SID_SECOND))).toBe(true);
     });

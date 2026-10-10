@@ -203,6 +203,7 @@ async function pickSession(sessionId: string) {
   act(() => {
     fireEvent.click(row);
   });
+  fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
 }
 
 async function pickWorktree() {
@@ -215,6 +216,7 @@ async function pickWorktree() {
   act(() => {
     fireEvent.click(matches[0]);
   });
+  fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
 }
 
 async function eventsSocket(): Promise<MockSocket> {

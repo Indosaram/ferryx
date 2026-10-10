@@ -1,5 +1,6 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+
 import { RemoteApp } from "./RemoteApp";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -52,6 +53,12 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
   vi.stubGlobal("fetch", ticketed(fetcher));
   let unmount = () => {};
   await act(async () => { unmount = render(<RemoteApp />).unmount; });
+  // Chat is the default surface: the mirrored terminal is asked for explicitly.
+  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  await act(async () => {});
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+  });
   expect(screen.getByTestId("session").textContent).toBe("before-outage");
   const first = EventSocket.instances[0];
   if (!first) throw new Error("Missing initial event socket");

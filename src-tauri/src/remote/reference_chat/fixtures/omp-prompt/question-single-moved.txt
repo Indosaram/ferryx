@@ -1,0 +1,9 @@
+Which file should I open?
+
+╭────────────────────────────────────────╮
+│   src/main.rs                          │
+│   ui/src/App.tsx                       │
+│ ❯ crates/core/src/lib.rs (Recommended) │
+│   Other (type your own)                │
+╰────────────────────────────────────────╯
+  enter select · ↑/↓ move · esc cancel

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 import { RemoteTerminal } from "./RemoteTerminal";
@@ -8,6 +8,65 @@ import { FALLBACK_PREFERENCES, resetTerminalPreferencesCache, saveTerminalSettin
 
 const runtime = vi.hoisted(() => ({ desktop: false, invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => runtime.desktop, invoke: runtime.invoke }));
+
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* never print the raw value */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      lines.push(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -113,7 +172,18 @@ it("migrates real scoped auth and loads only the selected host's preferences acr
     machineId, relayOrigin: relay, displayName: machineId, deviceToken: `${machineId}-device`, lastSeenAt: 1, directHints: [],
   });
   await act(async () => { render(<RemoteApp />); });
-  await bounded(local.arrived.promise);
+  // The terminal (and its preferences request) is only mounted once the terminal mode is chosen.
+  // Timer-free readiness: flush the mocked state read, then read the switch synchronously.
+  await act(async () => {});
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+  });
+  try {
+    await bounded(local.arrived.promise);
+  } catch (error) {
+    emitFailureTrace("preferences: local host signal", globalThis.fetch);
+    throw error;
+  }
   expect(getRemoteAuthToken()).toBeNull();
   expect(getRemoteAuthToken(`local:${origin}`)).toBe("legacy-device");
   await release(local, 17, "#112233");

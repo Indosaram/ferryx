@@ -1,0 +1,14 @@
+
+● Results table follows:
+────────────────────────────────────────
+  run   AR
+────────────────────────────────────────
+  a     0.66
+────────────────────────────────────────
+ Bash command
+   rm -rf junk
+   Delete the junk directory
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+ Esc to cancel · Tab to amend

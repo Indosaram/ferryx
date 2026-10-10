@@ -1,0 +1,13 @@
+  It’s dangerous to code alone. Take a prompt.
+
+  Advanced Reasoning
+  ⚠ Consumes usage limits faster
+
+
+  1. Max    For difficult problems when
+            quality matters more than speed ·
+            higher usage
+› 2. Ultra  For demanding work using multiple
+            agents · highest usage
+
+  enter apply · s session · esc back

@@ -1,3 +1,16 @@
+/**
+ * Reference-chat frame regressions (plan task 12).
+ *
+ * Every route this lane reads is answered explicitly below, including `/api/v1/capabilities` -
+ * the one answer that carries the published owner authority the reference-chat target is built
+ * from. A route left to the catch-all leaves the lane with no target, and a scenario that then
+ * fails describes this fixture rather than the product.
+ *
+ * This suite used to drive the legacy `/api/v1/agent-history` poll and the chat's own raw
+ * terminal socket. Both are gone: the chat reads the frozen reference-chat history route and
+ * never opens a terminal socket, so each scenario below keeps its INTENT against the route that
+ * exists now. The raw socket is exercised by the explicit terminal mode, not by the chat.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
@@ -5,11 +18,16 @@ import { RemoteApp } from "./RemoteApp";
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
     sessionId,
+    onBack,
   }: {
     sessionId: string;
+    onBack?: () => void;
   }) => (
     <div data-testid="remote-terminal" data-session-id={sessionId}>
       Mirrored terminal {sessionId}
+      <button type="button" data-testid="remote-terminal-back" onClick={onBack}>
+        Back to chat
+      </button>
     </div>
   ),
 }));
@@ -23,16 +41,6 @@ function jsonResponse(body: unknown, ok = true, status: number | null = null): R
   } as unknown as Response;
 }
 
-function ticketed(inner: typeof fetch): typeof fetch {
-  return vi.fn<typeof fetch>(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes("/api/v1/socket-ticket")) {
-      return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
-    }
-    return inner(input, init);
-  }) as unknown as typeof fetch;
-}
-
 class StubWebSocket {
   static instances: StubWebSocket[] = [];
   readonly url: string;
@@ -43,66 +51,114 @@ class StubWebSocket {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
-
   constructor(url: string) {
     this.url = url;
     StubWebSocket.instances.push(this);
   }
 }
 
-const remoteState = {
-  activeContext: {
-    workspaceId: "ferryx",
-    worktreeSlug: "main",
-    worktreeLabel: "main",
-    activeTabId: "tab-main",
-    activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
-    terminalTabs: [
-      { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-    ],
-  },
-};
+const DAEMON_EPOCH = "18446744073709551615";
 
-const agentHistoryPage = {
-  sessionId: "sess-main",
-  items: [
-    { ordinal: 0, role: "user", text: "what changed in the parser?", id: "u1" },
-    { ordinal: 1, role: "assistant", text: "The parser now streams line by line.", id: "a1" },
-  ],
-  nextCursor: null,
-  partial: false,
-  warnings: [],
-};
+// The owner authority the gateway publishes beside the epoch, on the same incarnation lifetime.
+// Deliberately not the workspace id the state below carries ("ferryx"): the reference-chat target
+// is built from the PUBLISHED owner, so a fixture that omits it leaves the lane with no target at
+// all - which is how this suite failed before the answer in `installFetch` existed.
+const REFERENCE_OWNER_ID = "owner-pub-1";
 
-function routedFetch(historyResponse: Response) {
-  return vi.fn<typeof fetch>(async (input) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes("/api/v1/agent-history/")) return historyResponse;
-    return jsonResponse(remoteState);
-  });
+function sessionState(sessionId: string, extraTabs: { id: string; sessionId: string; label: string }[] = []) {
+  return {
+    activeContext: {
+      workspaceId: "ferryx",
+      worktreeSlug: "main",
+      worktreeLabel: "main",
+      activeTabId: "tab-main",
+      activeTerminal: { sessionId, title: "claude", running: true },
+      terminalTabs: [
+        { id: "tab-main", sessionId, label: "claude", agentType: "claude", activityState: "idle", worktreeLabel: "main" },
+        ...extraTabs.map((tab) => ({ ...tab, agentType: "claude", activityState: "idle", worktreeLabel: "main" })),
+      ],
+    },
+  };
 }
 
-async function selectPaneFromWorktreeSheet(name: RegExp) {
-  const existing = screen.queryByRole("tablist", { name: /terminal tabs/i });
-  let sheet = existing;
-  if (!sheet) {
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-    });
-    sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
-  }
-  fireEvent.click(within(sheet).getByRole("tab", { name }));
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+/** A native reference page: the frozen shape the route answers with. */
+function page(turns: unknown[], overrides: Record<string, unknown> = {}) {
+  return {
+    source: "claude-transcript",
+    availability: "native",
+    turns,
+    cursor: null,
+    hasMore: false,
+    generation: "gen-1",
+    unavailableReason: null,
+    ...overrides,
+  };
+}
+
+const turn = (role: "user" | "assistant", text: string, extra: Record<string, unknown> = {}) => ({
+  role,
+  parts: [{ kind: "text", text }],
+  startedAt: "2026-10-06T00:00:00Z",
+  ...extra,
+});
+
+function installFetch(handler: (url: string, init?: RequestInit) => Response | undefined) {
+  const calls: string[] = [];
+  const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    calls.push(url);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
+    }
+    if (url.includes("/api/v1/capabilities")) {
+      // The lane builds its target from this answer: the epoch the route compares a target
+      // against, and the owner authority published on the same incarnation. A gateway that omits
+      // either leaves the lane with no target, so it is answered here rather than by the
+      // catch-all below.
+      return jsonResponse({
+        apiVersion: 1,
+        machineId: "mach-1",
+        daemonEpoch: DAEMON_EPOCH,
+        referenceOwnerId: REFERENCE_OWNER_ID,
+        platform: "linux",
+      });
+    }
+    if (url.includes("/api/v1/sessions")) {
+      // The host's inventory names every pane it serves, with the incarnation that serves it:
+      // the lane binds a pane's target by that epoch, so an omitted pane cannot be read at all.
+      return jsonResponse({
+        sessions: [
+          { sessionId: "sess-main", daemonEpoch: DAEMON_EPOCH, running: true },
+          { sessionId: "sess-second", daemonEpoch: DAEMON_EPOCH, running: true },
+        ],
+      });
+    }
+    const handled = handler(url, init);
+    if (handled) return handled;
+    if (url.includes("/reference-chat/") && url.includes("/prompt")) {
+      return jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+    }
+    return jsonResponse({});
   });
+  vi.stubGlobal("fetch", impl as unknown as typeof fetch);
+  return { calls };
+}
+
+const historyFor = (body: unknown) => (url: string) =>
+  url.includes("/reference-chat/") && url.includes("/history") ? jsonResponse(body) : undefined;
+
+function setWidth(width: number): void {
+  Object.defineProperty(window, "innerWidth", { value: width, configurable: true, writable: true });
 }
 
 describe("remoteAppChatFrames", () => {
   let originalInnerWidth: number;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await import("./chat/MobileChatWorkspace");
     originalInnerWidth = window.innerWidth;
     StubWebSocket.instances = [];
+    localStorage.clear();
     localStorage.setItem("ferryx_remote_token", "test-token");
     vi.stubGlobal("WebSocket", StubWebSocket);
   });
@@ -114,634 +170,292 @@ describe("remoteAppChatFrames", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the conversation from the agent-history API, one bubble per turn", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const request = routedFetch(jsonResponse(agentHistoryPage));
-    vi.stubGlobal("fetch", ticketed(request));
-
+  it("renders the conversation from the reference history route, one bubble per turn", async () => {
+    setWidth(390);
+    const harness = installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(page([turn("user", "what changed in the parser?"), turn("assistant", "The parser now streams line by line.")]))(url);
+    });
     render(<RemoteApp />);
 
-    const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
-    fireEvent.click(chatViewButton);
-
-    const userBubble = await screen.findByTestId("user-message-bubble");
-    expect(userBubble.textContent).toContain("what changed in the parser?");
-
-    const assistantBody = await screen.findByTestId("assistant-message-body");
-    expect(assistantBody.textContent).toContain("The parser now streams line by line.");
-
-    const historyCalls = request.mock.calls.filter(([input]) =>
-      String(input instanceof Request ? input.url : input).includes("/api/v1/agent-history/"),
-    );
-    expect(historyCalls.length).toBeGreaterThan(0);
+    expect(await screen.findByTestId("user-message-bubble")).toHaveTextContent("what changed in the parser?");
+    // a reference turn's prose is drawn by the reference body, never by the legacy body
+    expect(await screen.findByTestId("assistant-reference-body")).toHaveTextContent("The parser now streams line by line.");
+    expect(harness.calls.some((url) => url.includes("/api/v1/agent-history/"))).toBe(false);
   });
 
-  it("terminal output never becomes a chat message", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const request = routedFetch(jsonResponse(agentHistoryPage));
-    vi.stubGlobal("fetch", ticketed(request));
-
-    render(<RemoteApp />);
-
-    const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
-    fireEvent.click(chatViewButton);
-
-    await screen.findByTestId("user-message-bubble");
-
-    await waitFor(() => {
-      const socket = StubWebSocket.instances.find((s) => s.url.includes("/api/v1/terminal/"));
-      expect(socket).toBeDefined();
-      expect(socket?.binaryType).toBe("arraybuffer");
+  it("raw PTY text and binary frames never leak into reference chat", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(page([turn("assistant", "steady")]))(url);
     });
-
-    const socket = StubWebSocket.instances.find((s) => s.url.includes("/api/v1/terminal/"))!;
-
-    const bytes = new TextEncoder().encode(
-      "\x1b]777;ferryx;" +
-        JSON.stringify({ kind: "output", sequence: "1" }) +
-        "\x07" +
-        "PTY_NOISE_MARKER",
-    );
-    const blob = new Blob([bytes]);
-
+    render(<RemoteApp />);
+    await screen.findByTestId("assistant-reference-body");
     await act(async () => {
-      socket.onmessage?.({ data: blob } as MessageEvent);
+      for (const socket of StubWebSocket.instances) {
+        socket.onmessage?.(new MessageEvent("message", { data: "PTY_NOISE_MARKER" }));
+        socket.onmessage?.(new MessageEvent("message", {
+          data: new TextEncoder().encode("PTY_NOISE_MARKER").buffer,
+        }));
+      }
     });
-
+    expect(StubWebSocket.instances.some((socket) => socket.url.includes("/api/v1/terminal/"))).toBe(false);
     expect(document.body.textContent).not.toContain("PTY_NOISE_MARKER");
-    expect((await screen.findByTestId("assistant-message-body")).textContent).toContain(
-      "The parser now streams line by line.",
-    );
+    expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("steady");
   });
 
-  it("a missing transcript renders a quiet empty state, not an error", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    vi.stubGlobal(
-      "fetch",
-      ticketed(routedFetch(jsonResponse({ error: "TRANSCRIPT_NOT_FOUND" }, false, 404))),
-    );
-
+  it("an optimistic prompt and its late acknowledgement never leak across session switches", async () => {
+    setWidth(390);
+    let finishSubmit: ((response: Response) => void) | undefined;
+    const pendingSubmit = new Promise<Response>((resolve) => { finishSubmit = resolve; });
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) {
+        return jsonResponse(sessionState("sess-main", [{ id: "tab-second", sessionId: "sess-second", label: "second" }]));
+      }
+      if (url.includes("/history")) return jsonResponse(page([turn("assistant", url.includes("sess-second") ? "B1" : "A1")]));
+      return undefined;
+    });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).includes("/reference-chat/") && String(input).includes("/submit")
+        ? pendingSubmit : originalFetch(input, init)));
     render(<RemoteApp />);
-
-    const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
-    fireEvent.click(chatViewButton);
-
-    const workspace = await screen.findByTestId("mobile-chat-workspace");
-    expect(workspace).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(document.body.textContent).not.toMatch(/error|failed/i);
+    await screen.findByText("A1");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "OPTIMISTIC_A_MARKER" } });
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(await screen.findByText("OPTIMISTIC_A_MARKER")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /second/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
+    await screen.findByText("B1");
+    expect(document.body.textContent).not.toContain("OPTIMISTIC_A_MARKER");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "B_DRAFT_MARKER" } });
+    await act(async () => {
+      finishSubmit?.(jsonResponse({ ok: true, data: { receipt: { requestId: "sent", stage: "accepted" } }, requestId: "sent" }));
+      await pendingSubmit;
+    });
+    expect(document.body.textContent).not.toContain("OPTIMISTIC_A_MARKER");
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("B_DRAFT_MARKER");
   });
 
-  it("the terminal socket is still opened for input and the running signal", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    vi.stubGlobal("fetch", ticketed(routedFetch(jsonResponse(agentHistoryPage))));
-
+  it("a non-native page is disclosed rather than rendered as native history", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(
+        page([], { source: "scrollback", availability: "scrollback", unavailableReason: "no native reader" }),
+      )(url);
+    });
     render(<RemoteApp />);
-
-    const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
-    fireEvent.click(chatViewButton);
 
     await waitFor(() => {
-      const socket = StubWebSocket.instances.find((s) => s.url.includes("/api/v1/terminal/"));
-      expect(socket).toBeDefined();
-      expect(socket?.binaryType).toBe("arraybuffer");
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/terminal output/i);
     });
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
   });
 
-  it("the poll appends only new turns without duplicating or dropping earlier ones", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const first = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "first user turn", id: "u0" },
-        { ordinal: 1, role: "assistant", text: "first assistant turn", id: "a1" },
-      ],
-      nextCursor: 0,
-      partial: true,
-      warnings: [],
-    };
-    const extended = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "first user turn", id: "u0" },
-        { ordinal: 1, role: "assistant", text: "first assistant turn", id: "a1" },
-        { ordinal: 2, role: "user", text: "second user turn", id: "u2" },
-        { ordinal: 3, role: "assistant", text: "second assistant turn", id: "a3" },
-      ],
-      nextCursor: 0,
-      partial: true,
-      warnings: [],
-    };
-    let historyCalls = 0;
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) {
-        historyCalls += 1;
-        return jsonResponse(historyCalls === 1 ? first : extended);
+  it("an identity refusal clears the transcript and never browses another one", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      if (url.includes("/reference-chat/") && url.includes("/history")) {
+        return jsonResponse({ error: { code: "UNAUTHORIZED" } }, false, 401);
       }
-      return jsonResponse(remoteState);
+      return undefined;
     });
-    vi.stubGlobal("fetch", ticketed(request));
+    render(<RemoteApp />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+    });
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+  });
+
+  it("the newest read appends new turns without duplicating or dropping earlier ones", async () => {
+    setWidth(390);
+    let reads = 0;
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      if (url.includes("/reference-chat/") && url.includes("/history")) {
+        reads += 1;
+        return jsonResponse(
+          reads === 1
+            ? page([turn("user", "first user turn"), turn("assistant", "first assistant turn")])
+            : page([
+                turn("user", "first user turn"),
+                turn("assistant", "first assistant turn"),
+                turn("user", "second user turn"),
+                turn("assistant", "second assistant turn"),
+              ]),
+        );
+      }
+      return undefined;
+    });
 
     vi.useFakeTimers();
     try {
       await act(async () => {
         render(<RemoteApp />);
       });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
       await act(async () => {});
-
-      expect(historyCalls).toBe(1);
-      const initialBubbles = screen.getAllByTestId("user-message-bubble");
-      expect(initialBubbles).toHaveLength(1);
-      expect(initialBubbles[0].textContent).toContain("first user turn");
+      expect(reads).toBe(1);
+      expect(screen.getAllByTestId("user-message-bubble")).toHaveLength(1);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
 
-      expect(historyCalls).toBe(2);
+      expect(reads).toBe(2);
       const userBubbles = screen.getAllByTestId("user-message-bubble");
       expect(userBubbles).toHaveLength(2);
-      expect(userBubbles[0].textContent).toContain("first user turn");
-      expect(userBubbles[1].textContent).toContain("second user turn");
-
-      const assistantBodies = screen.getAllByTestId("assistant-message-body");
-      expect(assistantBodies).toHaveLength(2);
-      expect(assistantBodies[0].textContent).toContain("first assistant turn");
-      expect(assistantBodies[1].textContent).toContain("second assistant turn");
-
+      expect(userBubbles[0]).toHaveTextContent("first user turn");
+      expect(userBubbles[1]).toHaveTextContent("second user turn");
       expect(screen.getAllByText("first user turn")).toHaveLength(1);
       expect(screen.getAllByText("first assistant turn")).toHaveLength(1);
-      expect(screen.getAllByText("second user turn")).toHaveLength(1);
-      expect(screen.getAllByText("second assistant turn")).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("a response carrying partial: true and a non-null nextCursor must NOT cause a backwards request", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const paged = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "oldest turn", id: "u0" },
-        { ordinal: 1, role: "assistant", text: "newest turn", id: "a1" },
-      ],
-      nextCursor: 0,
-      partial: true,
-      warnings: [],
-    };
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) return jsonResponse(paged);
-      return jsonResponse(remoteState);
+  it("a paginated page does not make the newest read fetch backwards on its own", async () => {
+    setWidth(390);
+    const harness = installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      if (url.includes("/reference-chat/") && url.includes("/history")) {
+        return jsonResponse(
+          page([turn("user", "oldest turn"), turn("assistant", "newest turn")], {
+            cursor: { streamId: "dev:ino", offset: 4096 },
+            hasMore: true,
+          }),
+        );
+      }
+      return undefined;
     });
-    vi.stubGlobal("fetch", ticketed(request));
 
     vi.useFakeTimers();
     try {
       await act(async () => {
         render(<RemoteApp />);
       });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
       await act(async () => {});
-
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
         await vi.advanceTimersByTimeAsync(3000);
       });
 
-      const historyRequests = request.mock.calls
-        .map(([input]) => String(input instanceof Request ? input.url : input))
-        .filter((url) => url.includes("/api/v1/agent-history/"));
-      expect(historyRequests.length).toBeGreaterThanOrEqual(3);
-      for (const url of historyRequests) {
-        expect(url).not.toContain("cursor=");
-      }
+      const paged = harness.calls.filter((url) => url.includes("cursor="));
+      expect(paged).toHaveLength(0);
+      // the control offers the older page instead of fetching it silently
+      expect(screen.getByTestId("reference-older-button")).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("switching sessions does not retain the previous conversation", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const sessionAItems = [
-      { ordinal: 0, role: "user", text: "A0", id: "a0" },
-      { ordinal: 1, role: "assistant", text: "A1", id: "a1" },
-      { ordinal: 2, role: "user", text: "A2", id: "a2" },
-      { ordinal: 3, role: "assistant", text: "A3", id: "a3" },
-    ];
-    const sessionBItems = [
-      { ordinal: 0, role: "user", text: "B0", id: "b0" },
-      { ordinal: 1, role: "assistant", text: "B1", id: "b1" },
-    ];
-    const twoTabState = {
-      activeContext: {
-        workspaceId: "ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-        activeTabId: "tab-main",
-        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
-        terminalTabs: [
-          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-        ],
-      },
-    };
-    let historyCalls = 0;
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) {
-        historyCalls += 1;
-        if (url.includes("sess-second")) {
-          return jsonResponse({ sessionId: "sess-second", items: sessionBItems, nextCursor: null, partial: false, warnings: [] });
-        }
-        return jsonResponse({ sessionId: "sess-main", items: sessionAItems, nextCursor: null, partial: false, warnings: [] });
+  it("switching panes does not retain the previous conversation", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) {
+        return jsonResponse(sessionState("sess-main", [{ id: "tab-second", sessionId: "sess-second", label: "second" }]));
       }
-      return jsonResponse(twoTabState);
+      if (url.includes("/reference-chat/") && url.includes("/history")) {
+        return jsonResponse(
+          url.includes("sess-second")
+            ? page([turn("user", "B0"), turn("assistant", "B1")])
+            : page([turn("user", "A0"), turn("assistant", "A1")]),
+        );
+      }
+      return undefined;
     });
-    vi.stubGlobal("fetch", ticketed(request));
+    render(<RemoteApp />);
+    expect(await screen.findByText("A0")).toBeInTheDocument();
 
-    vi.useFakeTimers();
-    try {
-      await act(async () => {
-        render(<RemoteApp />);
-      });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      await act(async () => {});
-
-      expect(historyCalls).toBe(1);
-      const initialText = document.body.textContent;
-      expect(initialText).toContain("A0");
-      expect(initialText).toContain("A1");
-      expect(initialText).toContain("A2");
-      expect(initialText).toContain("A3");
-      expect(screen.getAllByTestId("user-message-bubble")).toHaveLength(2);
-      expect(screen.getAllByTestId("assistant-message-body")).toHaveLength(2);
-
-      await selectPaneFromWorktreeSheet(/second/i);
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3000);
-      });
-
-      expect(historyCalls).toBeGreaterThanOrEqual(3);
-      const switchedText = document.body.textContent;
-      expect(switchedText).toContain("B0");
-      expect(switchedText).toContain("B1");
-      expect(switchedText).not.toContain("A0");
-      expect(switchedText).not.toContain("A1");
-      expect(switchedText).not.toContain("A2");
-      expect(switchedText).not.toContain("A3");
-      expect(screen.getAllByTestId("user-message-bubble")).toHaveLength(1);
-      expect(screen.getAllByTestId("user-message-bubble")[0].textContent).toContain("B0");
-      expect(screen.getAllByTestId("assistant-message-body")).toHaveLength(1);
-      expect(screen.getAllByTestId("assistant-message-body")[0].textContent).toContain("B1");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("an optimistic prompt from the previous session does not leak into the new one", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const twoTabState = {
-      activeContext: {
-        workspaceId: "ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-        activeTabId: "tab-main",
-        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
-        terminalTabs: [
-          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-        ],
-      },
-    };
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) {
-        if (url.includes("sess-second")) {
-          return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
-        }
-        return jsonResponse({
-          sessionId: "sess-main",
-          items: [
-            { ordinal: 0, role: "user", text: "A0", id: "a0" },
-            { ordinal: 1, role: "assistant", text: "A1", id: "a1" },
-          ],
-          nextCursor: null,
-          partial: false,
-          warnings: [],
-        });
-      }
-      return jsonResponse(twoTabState);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
     });
-    vi.stubGlobal("fetch", ticketed(request));
-
-    vi.useFakeTimers();
-    try {
-      await act(async () => {
-        render(<RemoteApp />);
-      });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      await act(async () => {});
-      expect(screen.getAllByTestId("user-message-bubble")).toHaveLength(1);
-
-      fireEvent.change(screen.getByTestId("chat-composer-textarea"), {
-        target: { value: "LEAK_PROBE_PROMPT" },
-      });
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("send-button"));
-      await act(async () => {});
-      expect(document.body.textContent).toContain("LEAK_PROBE_PROMPT");
-      expect(screen.queryByTestId("stop-button")).not.toBeNull();
-
-      await selectPaneFromWorktreeSheet(/second/i);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3000);
-      });
-
-      expect(document.body.textContent).not.toContain("LEAK_PROBE_PROMPT");
-      expect(screen.queryAllByTestId("user-message-bubble")).toHaveLength(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  it("an optimistic prompt sent after switching sessions survives the new session's polls", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const twoTabState = {
-      activeContext: {
-        workspaceId: "ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-        activeTabId: "tab-main",
-        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
-        terminalTabs: [
-          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-        ],
-      },
-    };
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) {
-        if (url.includes("sess-second")) {
-          return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
-        }
-        return jsonResponse({
-          sessionId: "sess-main",
-          items: [
-            { ordinal: 0, role: "user", text: "A0", id: "a0" },
-            { ordinal: 1, role: "assistant", text: "A1", id: "a1" },
-          ],
-          nextCursor: null,
-          partial: false,
-          warnings: [],
-        });
-      }
-      return jsonResponse(twoTabState);
+    const sheet = screen.getByRole("tablist", { name: /terminal tabs/i });
+    await act(async () => {
+      fireEvent.click(within(sheet).getByRole("tab", { name: /second/i }));
     });
-    vi.stubGlobal("fetch", ticketed(request));
-
-    vi.useFakeTimers();
-    try {
-      await act(async () => {
-        render(<RemoteApp />);
-      });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      await act(async () => {});
-
-      await selectPaneFromWorktreeSheet(/second/i);
-      expect(screen.queryAllByTestId("user-message-bubble")).toHaveLength(0);
-
-      fireEvent.change(screen.getByTestId("chat-composer-textarea"), {
-        target: { value: "SURVIVES_PROBE_PROMPT" },
-      });
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("send-button"));
-      await act(async () => {});
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3000);
-      });
-
-      const bubbles = screen.getAllByTestId("user-message-bubble");
-      expect(bubbles).toHaveLength(1);
-      expect(bubbles[0].textContent).toContain("SURVIVES_PROBE_PROMPT");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  it("switching sessions does not carry the running state into the new session", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const twoTabState = {
-      activeContext: {
-        workspaceId: "ferryx",
-        worktreeSlug: "main",
-        worktreeLabel: "main",
-        activeTabId: "tab-main",
-        activeTerminal: { sessionId: "sess-main", title: "terminal", running: true },
-        terminalTabs: [
-          { id: "tab-main", sessionId: "sess-main", label: "terminal", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-          { id: "tab-second", sessionId: "sess-second", label: "second", agentType: "shell", activityState: "idle", worktreeLabel: "main" },
-        ],
-      },
-    };
-    const request = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes("/api/v1/agent-history/")) {
-        if (url.includes("sess-second")) {
-          return jsonResponse({ sessionId: "sess-second", items: [], nextCursor: null, partial: false, warnings: [] });
-        }
-        return jsonResponse({
-          sessionId: "sess-main",
-          items: [
-            { ordinal: 0, role: "user", text: "A0", id: "a0" },
-            { ordinal: 1, role: "assistant", text: "A1", id: "a1" },
-          ],
-          nextCursor: null,
-          partial: false,
-          warnings: [],
-        });
-      }
-      return jsonResponse(twoTabState);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Close worktree list/i }));
     });
-    vi.stubGlobal("fetch", ticketed(request));
 
-    vi.useFakeTimers();
-    try {
-      await act(async () => {
-        render(<RemoteApp />);
-      });
-      fireEvent.click(screen.getByTestId("remote-view-mode-chat"));
-      await act(async () => {});
-
-      fireEvent.change(screen.getByTestId("chat-composer-textarea"), {
-        target: { value: "RUNNING_PROBE_PROMPT" },
-      });
-      await act(async () => {});
-      fireEvent.click(screen.getByTestId("send-button"));
-      await act(async () => {});
-      expect(screen.queryByTestId("stop-button")).not.toBeNull();
-
-      await selectPaneFromWorktreeSheet(/second/i);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3000);
-      });
-
-      expect(screen.queryByTestId("stop-button")).toBeNull();
-      expect(screen.queryByTestId("send-button")).not.toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    await waitFor(() => {
+      expect(screen.getByText("B0")).toBeInTheDocument();
+    });
+    expect(document.body.textContent).not.toContain("A0");
   });
 
-  it("distinguishes composition: toolResult records belong in worked-for disclosure rather than assistant message bodies", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const syntheticTranscript = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "what is the diff?", id: "u0" },
-        { ordinal: 1, role: "toolResult", text: "git diff --stat: src/main.rs +10 -2", id: "t1" },
-        { ordinal: 2, role: "toolResult", text: "cargo check: 0 errors", id: "t2" },
-        { ordinal: 3, role: "toolResult", text: "codesign -dvv dump", id: "t3" },
-        { ordinal: 4, role: "toolResult", text: "web search: results 1..5", id: "t4" },
-        { ordinal: 5, role: "toolResult", text: "plist comment xml", id: "t5" },
-        { ordinal: 6, role: "assistant", text: "Here is the summary of changes.", id: "a6" },
-        { ordinal: 7, role: "assistant", text: "Everything builds cleanly.", id: "a7" },
-      ],
-      nextCursor: null,
-      partial: false,
-      warnings: [],
-    };
-    const request = routedFetch(jsonResponse(syntheticTranscript));
-    vi.stubGlobal("fetch", ticketed(request));
-
+  it("tool parts render in the work disclosure, not as assistant prose", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(
+        page([
+          {
+            role: "assistant",
+            startedAt: "2026-10-06T00:00:00Z",
+            parts: [
+              { kind: "tool", name: "bash", summary: "git diff --stat", input: "git diff --stat", output: "src/main.rs +10 -2" },
+              { kind: "text", text: "Here is the summary of changes." },
+            ],
+          },
+        ]),
+      )(url);
+    });
     render(<RemoteApp />);
 
-    const chatViewButton = await screen.findByTestId("remote-view-mode-chat");
-    fireEvent.click(chatViewButton);
-
-    // 1. User message bubble
-    const userBubbles = await screen.findAllByTestId("user-message-bubble");
-    expect(userBubbles).toHaveLength(1);
-    expect(userBubbles[0].textContent).toContain("what is the diff?");
-
-    // 2. Assistant message bodies count equals 1 (the final assistant prose record), earlier prose moves inside the fold
-    const assistantBodies = await screen.findAllByTestId("assistant-message-body");
-    expect(assistantBodies).toHaveLength(1);
-    expect(assistantBodies[0].textContent).toContain("Everything builds cleanly.");
-    expect(assistantBodies[0].textContent).not.toContain("Here is the summary of changes.");
-
-    // 3. Composition check: none of the 5 toolResult strings appear inside assistant message bodies
-    const toolTexts = [
-      "git diff --stat: src/main.rs +10 -2",
-      "cargo check: 0 errors",
-      "codesign -dvv dump",
-      "web search: results 1..5",
-      "plist comment xml",
-    ];
-    for (const body of assistantBodies) {
-      for (const toolText of toolTexts) {
-        expect(body.textContent).not.toContain(toolText);
-      }
-    }
-
-    // 4. worked-for-toggle exists on the turn
-    const toggle = await screen.findByTestId("worked-for-toggle");
-    expect(toggle).toBeInTheDocument();
-    expect(toggle.textContent).toMatch(/Worked for/);
-
-    // 5. Tool text and folded earlier prose are NOT visible in the DOM before expanding the disclosure
-    for (const toolText of toolTexts) {
-      expect(screen.queryByText(toolText)).not.toBeInTheDocument();
-    }
-    expect(screen.queryByText("Here is the summary of changes.")).not.toBeInTheDocument();
-
-    // 6. Tool text and folded earlier prose ARE retrievable after expanding the disclosure
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(await screen.findByText("Here is the summary of changes.")).toBeInTheDocument();
-    const workRows = await screen.findAllByTestId("work-row");
-    for (const row of workRows) {
-      if (row.tagName === "BUTTON" && row.getAttribute("aria-expanded") === "false") {
-        fireEvent.click(row);
-      }
-    }
-    for (const toolText of toolTexts) {
-      expect(await screen.findByText(toolText)).toBeInTheDocument();
-    }
+    expect(await screen.findByTestId("assistant-reference-body")).toHaveTextContent("Here is the summary of changes.");
+    const toolRow = screen.getByTestId("reference-tool-part");
+    expect(toolRow).toHaveTextContent("git diff --stat");
+    // the tool output lives inside the row, not in the turn's prose
+    expect(screen.getByTestId("assistant-reference-body").textContent).not.toContain("src/main.rs +10 -2");
   });
 
-  it("drops assistant records with empty text so they do not render empty bubbles", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const emptyProseTranscript = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "run checks", id: "u0" },
-        { ordinal: 1, role: "assistant", text: "", id: "a1" },
-        { ordinal: 2, role: "assistant", text: "   ", id: "a2" },
-        { ordinal: 3, role: "toolResult", text: "checks passed", id: "t3" },
-        { ordinal: 4, role: "assistant", text: "Finished successfully.", id: "a4" },
-      ],
-      nextCursor: null,
-      partial: false,
-      warnings: [],
-    };
-    const request = routedFetch(jsonResponse(emptyProseTranscript));
-    vi.stubGlobal("fetch", ticketed(request));
-
+  it("a turn's skill part is drawn by the turn's skill list, outside the work rows", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(
+        page([
+          {
+            role: "assistant",
+            startedAt: "2026-10-06T00:00:00Z",
+            parts: [
+              { kind: "skill", skill: { name: "superwiki-mail-otp", evidence: "invocation", status: "loaded" } },
+              { kind: "text", text: "Read the skill." },
+            ],
+          },
+        ]),
+      )(url);
+    });
     render(<RemoteApp />);
 
-    fireEvent.click(await screen.findByTestId("remote-view-mode-chat"));
-
-    // Exactly 1 prose body ("Finished successfully."), empty assistant records (a1, a2) did not produce empty bubbles
-    const assistantBodies = await screen.findAllByTestId("assistant-message-body");
-    expect(assistantBodies).toHaveLength(1);
-    expect(assistantBodies[0].textContent).toContain("Finished successfully.");
-    expect(screen.getByTestId("worked-for-toggle")).toBeInTheDocument();
+    const skills = await screen.findByTestId("reference-turn-skills");
+    expect(skills).toHaveTextContent("superwiki-mail-otp");
+    expect(skills).toHaveTextContent(/Skill invoked/);
+    // the chip is not repeated inside the inline part list
+    expect(screen.getAllByTestId("reference-skill")).toHaveLength(1);
   });
 
-  it("derives worked-for duration from record timestamps across toolResults and assistant turn", async () => {
-    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
-    const timedTranscript = {
-      sessionId: "sess-main",
-      items: [
-        { ordinal: 0, role: "user", text: "please run tests", id: "u0" },
-        {
-          ordinal: 1,
-          role: "toolResult",
-          text: "test results: 12 passed",
-          id: "t1",
-          timestamp: "2026-09-25T02:00:00.000Z",
-        },
-        {
-          ordinal: 2,
-          role: "assistant",
-          text: "All 12 tests passed successfully.",
-          id: "a2",
-          timestamp: "2026-09-25T02:01:30.000Z",
-        },
-      ],
-      nextCursor: null,
-      partial: false,
-      warnings: [],
-    };
-    const request = routedFetch(jsonResponse(timedTranscript));
-    vi.stubGlobal("fetch", ticketed(request));
-
+  it("abandoned branches are disclosed once for the page, never once per turn", async () => {
+    setWidth(390);
+    installFetch((url) => {
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(sessionState("sess-main"));
+      return historyFor(
+        page([
+          turn("assistant", "kept turn one", { abandoned: { count: 1, branches: 1 } }),
+          turn("assistant", "kept turn two", { abandoned: { count: 2, branches: 2 } }),
+        ]),
+      )(url);
+    });
     render(<RemoteApp />);
 
-    fireEvent.click(await screen.findByTestId("remote-view-mode-chat"));
-
-    const assistantBodies = await screen.findAllByTestId("assistant-message-body");
-    expect(assistantBodies).toHaveLength(1);
-    expect(assistantBodies[0].textContent).toContain("All 12 tests passed successfully.");
-
-    const toggle = await screen.findByTestId("worked-for-toggle");
-    expect(toggle).toBeInTheDocument();
-    expect(toggle.textContent).toContain("Worked for 1m 30s");
-    expect(toggle.textContent).not.toContain("Worked for 0s");
+    await screen.findByText("kept turn two");
+    const disclosures = screen.getAllByTestId("reference-abandoned");
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]).toHaveTextContent(/3 earlier turns on 3 branches/);
   });
 });

@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"gjc-torn","cwd":"/home/dev/project"}
+{"type":"message","id":"u1","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"run the checks"}]}}
+{MALFORMED JSON LINE
+{"type":"message","id":"a1","timestamp":"2026-10-06T10:00:01.000Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","text":"thinking about it"},{"type":"text","text":"Starting now."}]}}
+{"type":"message","id":"a2","timestamp":"2026-10-06T10:00:02.000Z","message":{"role":"assistant","stopReason":"error","errorMessage":"401 Authentication Failed","content":[]}}
+{"type":"message","id":"u2","timestamp":"2026-10-06T10:00:03.000Z","message":{"role":"user","content":[{"type":"text","text":"retry"}]}}
+{"type":"message","id":"a3","timestamp":"2026-10-06T10:00:04.000Z","message":{"role":"assist

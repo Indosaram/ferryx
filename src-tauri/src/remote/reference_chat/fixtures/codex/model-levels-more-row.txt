@@ -1,0 +1,17 @@
+
+  >_ [OC] (v0.160.1)
+     ~/app
+  permissions: YOLO mode
+
+  Hello, you. Got an idea?
+
+  Select Reasoning Level for GPT-6-Astra
+
+
+  1. Low                         Fast responses with lighter reasoning
+  2. Medium (default) (current)  Balances speed and reasoning depth for everyday tasks
+  3. High                        Greater reasoning depth for complex problems
+  4. Extra high                  Extra high reasoning depth for complex problems
+› 5. More reasoning…             Max and Ultra consume usage limits faster
+
+  enter select · esc back

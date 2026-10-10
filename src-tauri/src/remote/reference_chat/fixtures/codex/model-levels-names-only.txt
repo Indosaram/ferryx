@@ -1,0 +1,17 @@
+
+  >_ [OC] (v0.160.1)
+     ~/app
+  permissions: YOLO mode
+
+  Hello, you. Got an idea?
+
+  Select Reasoning Level for GPT-6-Astra
+
+
+  1. Low
+› 2. Medium (default) (current)
+  3. High
+  4. Extra high
+  5. More reasoning…
+
+  enter default · s session · esc back

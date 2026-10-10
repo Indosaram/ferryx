@@ -24,6 +24,7 @@ use crate::terminal::{AttachmentSnapshot, OutputChunk, SessionAttachment, Termin
 use crate::worktree::{parse_host_scoped_session_id, CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
+        rejection::QueryRejection,
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path as AxumPath, Query, State,
     },
@@ -3552,6 +3553,42 @@ pub(super) fn authenticate_machine_request(
         .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))
 }
 
+/// The identity fields the capability document publishes for reference-chat clients.
+///
+/// `referenceHostId` is the owning host's OWN reference-chat identity — `FERRYX_HOST_ID` where
+/// the deployment sets one, `local` otherwise ([`reference_files::reference_host_id`]) — and it
+/// is the only host id a reference-chat target may name. It is published as its own field on
+/// purpose: `machineId` is the host's pairing identity, a different value, and a client that
+/// substituted one for the other would name a host this gateway refuses.
+///
+/// `referenceOwnerId` is the gateway incarnation's OWN reference-chat owner identity, minted at
+/// construction and stable for that incarnation. It is published for the same reason the host id
+/// is: a target must name the owner this gateway will compare against, and the value must not be
+/// inferable from the caller's own request.
+///
+/// Pure and explicit: the caller supplies all three ids, so the field names and the separation
+/// between them are testable without touching the process environment.
+fn reference_chat_capability_identity(
+    machine_id: &str,
+    reference_host_id: &str,
+    reference_owner_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "machineId".to_string(),
+        serde_json::Value::String(machine_id.to_string()),
+    );
+    fields.insert(
+        "referenceHostId".to_string(),
+        serde_json::Value::String(reference_host_id.to_string()),
+    );
+    fields.insert(
+        "referenceOwnerId".to_string(),
+        serde_json::Value::String(reference_owner_id.to_string()),
+    );
+    fields
+}
+
 async fn get_capabilities(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -3562,9 +3599,11 @@ async fn get_capabilities(
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let device = authenticate_machine_request(&state, &headers)?;
     let browser_caps = state.browser_backend().capabilities().await;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+    // The reference-chat host id this host publishes for itself. A mutation target names it;
+    // `machineId` is a different value and never stands in for it.
+    let reference_host_id = crate::remote::reference_chat::files::reference_host_id();
+    let mut document = serde_json::json!({
         "apiVersion": 1,
-        "machineId": identity.machine_id,
         "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
         "platform": std::env::consts::OS,
         "accessScope": device.access_scope,
@@ -3590,7 +3629,15 @@ async fn get_capabilities(
             "maxFps": browser_caps.max_fps,
         },
         "limits": { "directoryEntries": 1000, "terminalSessions": 64 }
-    }))).into_response())
+    });
+    if let Some(fields) = document.as_object_mut() {
+        fields.extend(reference_chat_capability_identity(
+            &identity.machine_id,
+            &reference_host_id,
+            &state.reference_owner_id,
+        ));
+    }
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(document)).into_response())
 }
 
 pub(super) async fn load_gateway_identity(
@@ -4758,6 +4805,1356 @@ async fn remote_method_not_allowed() -> Response {
     machine_error(StatusCode::METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
 }
 
+
+// =============================================================================================
+// Reference chat (plan task 13) — the authored lanes, registered on the EXISTING gateway
+// =============================================================================================
+//
+// Every route below runs on the same listener as the rest of `create_remote_router`, behind the
+// same bearer token and the same per-device permission, and binds its target to the owning host
+// + backend session + daemon incarnation the caller names. Nothing here opens a second listener,
+// mounts the control router, resizes a pane, signals a process or starts a provider.
+//
+// Route table (frozen contract section 3; the relay allowlist mirrors it in `relay_server.rs`):
+//
+//   GET    /api/v1/reference-chat/{sessionId}/history
+//   GET    /api/v1/reference-chat/{sessionId}/screen
+//   GET    /api/v1/reference-chat/{sessionId}/prompt
+//   POST   /api/v1/reference-chat/{sessionId}/submit
+//   POST   /api/v1/reference-chat/{sessionId}/stop
+//   POST   /api/v1/reference-chat/{sessionId}/answer
+//   POST   /api/v1/reference-chat/{sessionId}/files
+//   GET    /api/v1/reference-chat/{sessionId}/files/{fileId}
+//   DELETE /api/v1/reference-chat/{sessionId}/files/{fileId}
+//
+// A read carries its target in the query (hostId, ownerId, epoch, backendSessionId,
+// providerSessionId, registryId, limit, cursor, cursorStream); a mutation carries the frozen
+// MutationEnvelope (`{requestId, target, params}`) plus the optional providerSessionId/registryId
+// the contract adds "only where identified". `payload` is accepted as an alias for `params` so
+// either spelling of the plan's prose round-trips.
+//
+// Ownership boundary this layer does NOT invent: a session whose transcript lives on a
+// paired/SSH host is served by THAT host's own gateway, which is what the relay path forwards
+// to. This gateway refuses such a read with a typed UNSUPPORTED rather than substituting a
+// local file for another host's conversation.
+
+use crate::remote::reference_chat::files as reference_files;
+use crate::remote::reference_chat::history as reference_history;
+use crate::remote::reference_chat::input::{self as reference_input, ReferenceInputClock};
+use crate::remote::reference_chat::prompts as reference_prompts;
+use crate::remote::reference_chat::screen as reference_screen;
+use crate::remote::reference_chat::types as reference_types;
+use crate::scoped_contracts::{
+    AttachmentReceipt, ScopeError, ScopeErrorCode, ATTACHMENT_MAX_FILE_BYTES,
+};
+use futures_util::future::BoxFuture;
+
+/// The largest mutation envelope a reference-chat route reads off the wire.
+///
+/// The file lane's payload is base64 over ATTACHMENT_MAX_FILE_BYTES, so the envelope bound is
+/// derived from that frozen limit rather than declared again; every other mutation is far below
+/// it. The read is bounded by axum::body::to_bytes, never by an unbounded buffer.
+const REFERENCE_CHAT_MUTATION_MAX_BYTES: usize =
+    (ATTACHMENT_MAX_FILE_BYTES as usize / 3) * 4 + 64 * 1024;
+
+/// How much of the original session file the prompt detectors may read.
+///
+/// The ask records they match are the tail of a live, appended file; the history reader owns the
+/// transcript window itself, and this bound exists only so a prompt read cannot pull a whole
+/// multi-megabyte store into memory.
+const REFERENCE_PROMPT_SESSION_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// One staged reference-chat file, as the file routes address it.
+struct ReferenceStagedFile {
+    target_key: String,
+    dir: PathBuf,
+    path: PathBuf,
+    display_name: String,
+    receipt: AttachmentReceipt,
+    staged_at_ms: u64,
+}
+
+/// Process-local state every reference-chat route shares.
+///
+/// There is deliberately ONE input queue: submit, Stop and prompt answers only serialize against
+/// each other while they take the same per-target step, and a second queue instance would
+/// silently not order against the first. The answer ledger lives beside it for the same reason.
+#[derive(Default)]
+struct ReferenceChatRuntime {
+    input: reference_input::ReferenceInputQueue,
+    answers: reference_prompts::ReferencePromptAnswers,
+    staged: parking_lot::Mutex<std::collections::HashMap<String, ReferenceStagedFile>>,
+}
+
+fn reference_chat_runtime() -> &'static ReferenceChatRuntime {
+    static RUNTIME: std::sync::OnceLock<ReferenceChatRuntime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(ReferenceChatRuntime::default)
+}
+
+/// The query a reference-chat read binds its target with.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceChatReadQuery {
+    #[serde(default)]
+    host_id: Option<String>,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    epoch: Option<String>,
+    #[serde(default)]
+    backend_session_id: Option<String>,
+    #[serde(default)]
+    provider_session_id: Option<String>,
+    /// The registry entry the pane runs, as the inventory publishes it.
+    #[serde(default)]
+    registry_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<u64>,
+    #[serde(default)]
+    cursor_stream: Option<String>,
+}
+
+/// The frozen mutation envelope plus the identity fields the contract adds where identified.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceChatMutation<P> {
+    request_id: String,
+    #[serde(default)]
+    target: Option<crate::scoped_contracts::TargetRef>,
+    #[serde(default)]
+    provider_session_id: Option<String>,
+    #[serde(default)]
+    registry_id: Option<String>,
+    #[serde(alias = "payload")]
+    params: P,
+}
+
+/// The authenticated context one reference-chat read runs in.
+struct ReferenceChatRead {
+    device: DeviceInfo,
+    target: reference_types::ReferenceTargetRef,
+    identity: reference_history::ReferenceHistoryIdentity,
+}
+
+/// The original session's own record, as the prompt detectors need it.
+///
+/// OmO's folded widget is matched against the calls the session file recorded, so the route
+/// reads that file — the same store the history reader resolves — and hands it in. A pane with
+/// no resolvable store gets an empty session, which makes the folded forms refuse rather than
+/// guess.
+struct ReferenceChatPromptSession {
+    jsonl: Option<String>,
+    agent_status: Option<String>,
+}
+
+impl ReferenceChatPromptSession {
+    fn borrow(&self) -> reference_prompts::ReferencePromptSession<'_> {
+        reference_prompts::ReferencePromptSession {
+            session_jsonl: self.jsonl.as_deref(),
+            agent_status: self.agent_status.as_deref(),
+        }
+    }
+}
+
+/// reference_prompts::ReferenceAnswerScreenReader over the authenticated backend's own
+/// segmented history.
+///
+/// It attaches read-only, rebuilds the pane's screen in a fresh mirror and never resizes,
+/// scrolls or writes: the only backend methods it calls are describe_session and
+/// attach_with_sequence.
+struct ReferenceGatewayScreenReader {
+    backend: Arc<dyn RemoteSessionBackend>,
+}
+
+impl reference_prompts::ReferenceAnswerScreenReader for ReferenceGatewayScreenReader {
+    fn read_screen<'a>(
+        &'a self,
+        target: &'a reference_types::ReferenceTargetRef,
+    ) -> BoxFuture<'a, Result<reference_types::ReferenceScreenSnapshot, String>> {
+        Box::pin(async move {
+            let session_id = target.target.backend_session_id.as_str();
+            let details = self.backend.describe_session(session_id).await?;
+            let attachment = self.backend.attach_with_sequence(session_id, None).await?;
+            let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
+                .map_err(|error| error.to_string())?;
+            // A replay gap means the history could not be reconstructed: the snapshot is marked
+            // gapped rather than rendered from a hole.
+            let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
+                None
+            } else {
+                Some(
+                    attachment
+                        .snapshot
+                        .history_segments
+                        .iter()
+                        .map(|segment| segment.bytes.clone())
+                        .collect(),
+                )
+            };
+            reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+        })
+    }
+}
+
+/// The HTTP status a frozen ScopeErrorCode maps to on this gateway.
+fn reference_chat_status(code: ScopeErrorCode) -> StatusCode {
+    match code {
+        ScopeErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        ScopeErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ScopeErrorCode::Forbidden | ScopeErrorCode::ProviderOwned => StatusCode::FORBIDDEN,
+        ScopeErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ScopeErrorCode::TargetExpired => StatusCode::GONE,
+        ScopeErrorCode::ControlConflict
+        | ScopeErrorCode::RequestConflict
+        | ScopeErrorCode::OperationOutcomeUnknown => StatusCode::CONFLICT,
+        ScopeErrorCode::Unsupported | ScopeErrorCode::CaptureUnsupported => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ScopeErrorCode::InventoryIncomplete => StatusCode::SERVICE_UNAVAILABLE,
+        ScopeErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        ScopeErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
+    }
+}
+
+/// The wire string a frozen ScopeErrorCode carries.
+fn reference_chat_wire_code(code: ScopeErrorCode) -> &'static str {
+    match code {
+        ScopeErrorCode::InvalidRequest => "INVALID_REQUEST",
+        ScopeErrorCode::Unauthorized => "UNAUTHORIZED",
+        ScopeErrorCode::Forbidden => "FORBIDDEN",
+        ScopeErrorCode::NotFound => "NOT_FOUND",
+        ScopeErrorCode::TargetExpired => "TARGET_EXPIRED",
+        ScopeErrorCode::ControlConflict => "CONTROL_CONFLICT",
+        ScopeErrorCode::RequestConflict => "REQUEST_CONFLICT",
+        ScopeErrorCode::ProviderOwned => "PROVIDER_OWNED",
+        ScopeErrorCode::Unsupported => "UNSUPPORTED",
+        ScopeErrorCode::Timeout => "TIMEOUT",
+        ScopeErrorCode::InventoryIncomplete => "INVENTORY_INCOMPLETE",
+        ScopeErrorCode::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+        ScopeErrorCode::CaptureUnsupported => "CAPTURE_UNSUPPORTED",
+        // The lane's own constant is the authority for this acronym; the enum's explicit
+        // rename attribute carries the same string.
+        ScopeErrorCode::OperationOutcomeUnknown => {
+            crate::remote::reference_chat::types::REFERENCE_OUTCOME_UNKNOWN_CODE
+        }
+    }
+}
+
+/// A typed scope refusal, before it becomes a response.
+fn reference_chat_scope(code: ScopeErrorCode, message: impl Into<String>) -> ScopeError {
+    ScopeError {
+        code,
+        message: message.into(),
+        retryable: matches!(
+            code,
+            ScopeErrorCode::Timeout | ScopeErrorCode::InventoryIncomplete
+        ),
+        details: serde_json::Value::Null,
+    }
+}
+
+/// The machine error envelope every other route on this gateway answers with.
+fn reference_chat_error(code: ScopeErrorCode, message: impl Into<String>) -> Response {
+    let message = message.into();
+    machine_error_with_details(
+        reference_chat_status(code),
+        reference_chat_wire_code(code),
+        &message,
+        serde_json::Map::new(),
+    )
+}
+
+/// A refusal that carries a frozen ScopeError.
+fn reference_chat_refusal(error: &ScopeError) -> Response {
+    reference_chat_error(error.code, error.message.clone())
+}
+
+/// The read query a reference-chat read binds its target with.
+///
+/// The route binds the extractor's outcome so that a malformed query answers with the same
+/// frozen machine envelope every other refusal on this surface uses, rather than axum's own
+/// bodyless rejection.
+fn reference_chat_read_query(
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+) -> Result<ReferenceChatReadQuery, Response> {
+    query.map(|Query(query)| query).map_err(|rejection| {
+        reference_chat_refusal(&reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            format!("the read query is not readable: {rejection}"),
+        ))
+    })
+}
+
+/// The frozen ScopeResult success shape a mutation answers with.
+fn reference_chat_result_ok(request_id: &str, data: serde_json::Value) -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "ok": true, "data": data, "requestId": request_id })),
+    )
+        .into_response()
+}
+
+/// The frozen ScopeResult failure shape a mutation answers with.
+///
+/// The mutation's own state travels here — including the accept-then-unknown
+/// OPERATION_OUTCOME_UNKNOWN, which is never retryable and never replayed automatically.
+fn reference_chat_result_failure(request_id: &str, error: &ScopeError) -> Response {
+    let status = reference_chat_status(error.code);
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "ok": false,
+            "error": {
+                "code": reference_chat_wire_code(error.code),
+                "message": error.message,
+                "retryable": error.retryable,
+                "details": serde_json::Value::Null,
+            },
+            "requestId": request_id,
+        })),
+    )
+        .into_response()
+}
+
+/// The owning target a reference-chat request binds.
+///
+/// The fences this gateway can verify are enforced here: the session must be live on this host,
+/// the daemon incarnation must be the one the caller names, and a caller-named host must be this
+/// host. ownerId is carried as part of the identity tuple the caller fences its own view with;
+/// the gateway refuses an empty one rather than inventing a second owner concept it cannot
+/// verify.
+fn reference_chat_target(
+    session_id: &str,
+    host_id: Option<&str>,
+    owner_id: Option<&str>,
+    epoch: Option<&str>,
+    provider_session_id: Option<&str>,
+    daemon_owner: &str,
+    daemon_epoch: u64,
+) -> Result<reference_types::ReferenceTargetRef, ScopeError> {
+    if session_id.trim().is_empty() {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::Unauthorized,
+            "a reference-chat target names no backend session",
+        ));
+    }
+    let host = match host_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(named) => {
+            let own = reference_files::reference_host_id();
+            if named != own {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::Forbidden,
+                    format!("that host id is not this host's reference-chat host id: {named}"),
+                ));
+            }
+            named.to_string()
+        }
+        None => reference_files::reference_host_id(),
+    };
+    let owner = match owner_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(named) => named.to_string(),
+        None => {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::InvalidRequest,
+                "a reference-chat target names no owner id",
+            ))
+        }
+    };
+    // The owner is this gateway incarnation's own identity, not a label the caller supplies: a
+    // target naming any other value is refused exactly as a foreign incarnation is, so no route
+    // can be served for an owner the gateway did not publish.
+    if owner != daemon_owner {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::TargetExpired,
+            format!(
+                "the request names owner {owner}; this gateway serves owner {daemon_owner}"
+            ),
+        ));
+    }
+    let epoch_value = match epoch.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(text) => match text.parse::<u64>() {
+            Ok(value) if value.to_string() == text => value,
+            _ => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "epoch must be a canonical decimal u64",
+                ))
+            }
+        },
+        None => {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::InvalidRequest,
+                "a reference-chat target names no daemon incarnation",
+            ))
+        }
+    };
+    if epoch_value != daemon_epoch {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::TargetExpired,
+            format!(
+                "the request names daemon incarnation {epoch_value}; this gateway is at {daemon_epoch}"
+            ),
+        ));
+    }
+    let target = crate::scoped_contracts::TargetRef {
+        host_id: host,
+        owner_id: owner,
+        epoch: crate::scoped_contracts::Epoch(epoch_value),
+        backend_session_id: session_id.to_string(),
+    };
+    Ok(
+        match provider_session_id.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(provider) => {
+                reference_types::ReferenceTargetRef::with_provider_session(target, provider)
+            }
+            None => reference_types::ReferenceTargetRef::without_provider_session(target),
+        },
+    )
+}
+
+/// The target's owning identity, from this gateway's own daemon records.
+async fn reference_chat_identity(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+    registry_id: Option<&str>,
+) -> reference_history::ReferenceHistoryIdentity {
+    let session_id = target.target.backend_session_id.as_str();
+    let mut identity = reference_history::ReferenceHistoryIdentity::new(
+        target.clone(),
+        registry_id.unwrap_or("").to_string(),
+    );
+    if let Ok(details) = state.session_backend.describe_session(session_id).await {
+        if let Some(path) = details.worktree_path {
+            identity = identity.with_cwd(path.to_string_lossy());
+        }
+    }
+    if let Some(services) = state.machine_services.as_ref() {
+        if let Some(provider) = services.sessions.session_provider_session(session_id) {
+            if let Some(path) = provider.transcript_path {
+                identity = identity.with_provider_transcript_path(path);
+            }
+            identity = identity.with_agent_session_id(provider.id);
+        }
+    }
+    identity
+}
+
+/// Refuse a target that is not a live session of this gateway.
+async fn reference_chat_ensure_live(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> Result<(), ScopeError> {
+    if !crate::agent_transcript::is_valid_session_id(session_id) {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            "the session id is not a session id",
+        ));
+    }
+    if !state
+        .session_backend
+        .list_sessions()
+        .await
+        .iter()
+        .any(|id| id == session_id)
+    {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::NotFound,
+            "no live session has that id on this host",
+        ));
+    }
+    Ok(())
+}
+
+/// Authenticate, fence the target, and resolve the owning identity for one read.
+///
+/// Authentication precedes every path/query rejection, exactly as the other adapters in this
+/// module do.
+async fn reference_chat_read_context(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    session_id: &str,
+    query: &ReferenceChatReadQuery,
+    registry_required: bool,
+) -> Result<ReferenceChatRead, Response> {
+    let device = authenticate_machine_request(state, headers)?;
+    if let Some(named) = query
+        .backend_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if named != session_id {
+            return Err(reference_chat_error(
+                ScopeErrorCode::Forbidden,
+                "the query names a different backend session than the route",
+            ));
+        }
+    }
+    let target = reference_chat_target(
+        session_id,
+        query.host_id.as_deref(),
+        query.owner_id.as_deref(),
+        query.epoch.as_deref(),
+        query.provider_session_id.as_deref(),
+        state.reference_owner_id.as_str(),
+        state
+            .daemon_epoch
+            .load(std::sync::atomic::Ordering::Acquire),
+    )
+    .map_err(|error| reference_chat_refusal(&error))?;
+    reference_chat_ensure_live(state, session_id)
+        .await
+        .map_err(|error| reference_chat_refusal(&error))?;
+    let registry_id = query
+        .registry_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if registry_required && registry_id.is_none() {
+        return Err(reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the request names no registry id for this pane",
+        ));
+    }
+    let identity = reference_chat_identity(state, &target, registry_id).await;
+    Ok(ReferenceChatRead { device, target, identity })
+}
+
+/// The authenticated target of one mutation, from the frozen envelope.
+async fn reference_chat_mutation_context<P>(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    session_id: &str,
+    body: &ReferenceChatMutation<P>,
+) -> Result<(DeviceInfo, reference_types::ReferenceTargetRef), Response> {
+    let device = authenticate_machine_request(state, headers)?;
+    if body.request_id.trim().is_empty() {
+        return Err(reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "a mutation names no request id",
+        ));
+    }
+    let named = body.target.as_ref().ok_or_else(|| {
+        reference_chat_error(ScopeErrorCode::InvalidRequest, "a mutation names no target")
+    })?;
+    if named.backend_session_id != session_id {
+        return Err(reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "the mutation target names a different backend session than the route",
+        ));
+    }
+    let named_epoch = named.epoch.0.to_string();
+    let target = reference_chat_target(
+        session_id,
+        Some(named.host_id.as_str()),
+        Some(named.owner_id.as_str()),
+        Some(named_epoch.as_str()),
+        body.provider_session_id.as_deref(),
+        state.reference_owner_id.as_str(),
+        state
+            .daemon_epoch
+            .load(std::sync::atomic::Ordering::Acquire),
+    )
+    .map_err(|error| reference_chat_refusal(&error))?;
+    reference_chat_ensure_live(state, session_id)
+        .await
+        .map_err(|error| reference_chat_refusal(&error))?;
+    Ok((device, target))
+}
+
+/// The reauthorization a mutation re-runs before every write it dispatches.
+///
+/// A token revoked mid-flight must stop the transaction; this closure is what input.rs asks
+/// before the first byte and again before the Enter.
+fn reference_chat_authorize(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+) -> Box<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
+    let token = extract_token(headers);
+    let auth = Arc::clone(&state.auth_manager);
+    Box::new(move || {
+        let token = token.clone().ok_or_else(|| {
+            reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's token is gone")
+        })?;
+        let device = auth.validate_token(&token).map_err(|_| {
+            reference_chat_scope(
+                ScopeErrorCode::Unauthorized,
+                "the caller's device is no longer authorized",
+            )
+        })?;
+        if device.permission != DevicePermission::Control {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::Forbidden,
+                "the caller's device may no longer control this machine",
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// This host's transcript root, as the history reader resolves stores against.
+fn reference_chat_history_home(state: &Arc<RemoteGatewayState>) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = state.agent_history_home.read().clone() {
+        return Some(home);
+    }
+    let _ = state;
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// The other live sessions that may share this pane's cwd.
+async fn reference_chat_siblings(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> Vec<reference_history::ReferenceHistorySibling> {
+    let mut siblings = Vec::new();
+    for other in state.session_backend.list_sessions().await {
+        if other == session_id {
+            continue;
+        }
+        let cwd = state
+            .session_backend
+            .describe_session(&other)
+            .await
+            .ok()
+            .and_then(|details| details.worktree_path)
+            .map(|path| path.to_string_lossy().into_owned());
+        siblings.push(reference_history::ReferenceHistorySibling { session_id: other, cwd });
+    }
+    siblings
+}
+
+/// Is this session's transcript on another host?
+///
+/// A remote session's store entry carries its own host; this gateway must not read, guess or
+/// substitute a local file for it.
+async fn reference_chat_session_is_remote(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> bool {
+    let Some(services) = state.machine_services.clone() else {
+        return false;
+    };
+    let store = services.sessions.remote_sessions_store_path().to_path_buf();
+    let Ok(raw) = crate::ipc::run_blocking(move || {
+        std::fs::read_to_string(store)
+            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+    })
+    .await
+    else {
+        return false;
+    };
+    crate::agent_transcript::remote_target_from_store(&raw, session_id).is_some()
+}
+
+/// The cursor a read names, or the refusal that keeps a cursor from being re-anchored.
+fn reference_chat_cursor(
+    query: &ReferenceChatReadQuery,
+) -> Result<Option<reference_types::ReferenceHistoryCursor>, ScopeError> {
+    let Some(offset) = query.cursor else {
+        return Ok(None);
+    };
+    let stream_id = query
+        .cursor_stream
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            reference_chat_scope(
+                ScopeErrorCode::InvalidRequest,
+                "a cursor must name the stream it was minted against",
+            )
+        })?;
+    Ok(Some(reference_types::ReferenceHistoryCursor {
+        stream_id: stream_id.to_string(),
+        offset,
+    }))
+}
+
+/// The pane's screen, rebuilt from the authenticated backend's own segmented history.
+async fn reference_chat_snapshot_screen(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+) -> Result<reference_types::ReferenceScreenSnapshot, ScopeError> {
+    let session_id = target.target.backend_session_id.as_str();
+    let details = state
+        .session_backend
+        .describe_session(session_id)
+        .await
+        .map_err(|message| reference_chat_scope(ScopeErrorCode::NotFound, message))?;
+    let attachment = state
+        .session_backend
+        .attach_with_sequence(session_id, None)
+        .await
+        .map_err(|message| reference_chat_scope(ScopeErrorCode::Timeout, message))?;
+    let mut mirror = RemoteTerminalMirror::new(details.cols, details.rows)
+        .map_err(|error| reference_chat_scope(ScopeErrorCode::Unsupported, error.to_string()))?;
+    let segments: Option<Vec<Vec<u8>>> = if attachment.snapshot.gap.is_some() {
+        None
+    } else {
+        Some(
+            attachment
+                .snapshot
+                .history_segments
+                .iter()
+                .map(|segment| segment.bytes.clone())
+                .collect(),
+        )
+    };
+    reference_screen::snapshot_reference_screen(&mut mirror, segments.as_deref())
+        .map_err(|message| reference_chat_scope(ScopeErrorCode::Unsupported, message))
+}
+
+/// The original session's own record for the prompt detectors.
+async fn reference_chat_prompt_session(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+) -> ReferenceChatPromptSession {
+    let agent_status = state.machine_services.as_ref().and_then(|services| {
+        services
+            .sessions
+            .session_activity_state(&identity.target.target.backend_session_id)
+    });
+    ReferenceChatPromptSession {
+        jsonl: reference_chat_session_jsonl(state, identity).await,
+        agent_status,
+    }
+}
+
+/// The tail of the original session file, when this host holds one for the target.
+async fn reference_chat_session_jsonl(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+) -> Option<String> {
+    let home = reference_chat_history_home(state)?;
+    let siblings = reference_chat_siblings(state, &identity.target.target.backend_session_id).await;
+    let stream =
+        reference_history::resolve_reference_history_stream(&home, identity, &siblings).ok()?;
+    let path = stream.file_path()?.to_path_buf();
+    let bytes = crate::ipc::run_blocking(move || {
+        std::fs::read(&path).map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+    })
+    .await
+    .ok()?;
+    let bounded = if bytes.len() > REFERENCE_PROMPT_SESSION_MAX_BYTES {
+        &bytes[bytes.len() - REFERENCE_PROMPT_SESSION_MAX_BYTES..]
+    } else {
+        bytes.as_slice()
+    };
+    // Lossy on purpose: the window may start mid-character, and the partial first record is not
+    // a record the detectors may match anyway.
+    Some(String::from_utf8_lossy(bounded).into_owned())
+}
+
+/// The prompt the pane is holding, when this route's own screen read saw one.
+async fn reference_chat_blocked_prompt(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+    registry_id: Option<&str>,
+) -> Option<String> {
+    let agent = registry_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let snapshot = reference_chat_snapshot_screen(state, target).await.ok()?;
+    if !snapshot.is_answerable() {
+        return None;
+    }
+    let identity = reference_chat_identity(state, target, Some(agent)).await;
+    let session = reference_chat_prompt_session(state, &identity).await;
+    let prompt = reference_prompts::detect_reference_prompt_in_session(
+        agent,
+        &snapshot.text,
+        &session.borrow(),
+    )?;
+    Some(prompt.id)
+}
+
+/// The response one ordered input transaction produces.
+///
+/// The result envelope is the frozen ScopeResult: an accepted write is Accepted (the writer took
+/// the bytes — never providerRead), a refusal that typed nothing is a typed failure, and an
+/// undetermined outcome is OPERATION_OUTCOME_UNKNOWN, held rather than replayed.
+fn reference_chat_input_response(
+    request_id: &str,
+    outcome: reference_input::ReferenceInputOutcome,
+) -> Response {
+    match outcome {
+        reference_input::ReferenceInputOutcome::Accepted { receipt } => {
+            reference_chat_result_ok(request_id, serde_json::json!({ "receipt": receipt }))
+        }
+        reference_input::ReferenceInputOutcome::NotTyped { error } => {
+            reference_chat_result_failure(request_id, &error)
+        }
+        reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. } => {
+            reference_chat_result_failure(
+                request_id,
+                &ScopeError {
+                    code: ScopeErrorCode::OperationOutcomeUnknown,
+                    message,
+                    retryable: false,
+                    details: serde_json::Value::Null,
+                },
+            )
+        }
+    }
+}
+
+/// The staged-file registry key: this target's own file, never another pane's.
+fn reference_chat_staged_key(
+    target: &reference_types::ReferenceTargetRef,
+    attachment_id: &str,
+) -> String {
+    format!(
+        "{}\u{1f}{attachment_id}",
+        reference_types::reference_draft_key(target)
+    )
+}
+
+/// Drop the staged files nothing has referenced for the frozen TTL, and their directories.
+fn reference_chat_prune_staged(runtime: &ReferenceChatRuntime) {
+    let now = reference_input::SystemReferenceClock.now_ms();
+    let ttl = reference_files::reference_unreferenced_ttl_ms();
+    let mut expired = Vec::new();
+    {
+        let mut staged = runtime.staged.lock();
+        staged.retain(|_, entry| {
+            let stale = now.saturating_sub(entry.staged_at_ms) > ttl;
+            if stale {
+                expired.push(entry.dir.clone());
+            }
+            !stale
+        });
+    }
+    for dir in expired {
+        let _ = reference_files::reference_cancel_staged_file(&dir);
+    }
+}
+
+/// Read one bounded mutation envelope off the wire, after authentication.
+async fn reference_chat_mutation_body<P: serde::de::DeserializeOwned>(
+    request: axum::extract::Request,
+    state: &Arc<RemoteGatewayState>,
+) -> Result<(HeaderMap, P), Response> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    authenticate_machine_request(state, &headers)?;
+    let bytes = axum::body::to_bytes(body, REFERENCE_CHAT_MUTATION_MAX_BYTES)
+        .await
+        .map_err(|_| {
+            reference_chat_error(
+                ScopeErrorCode::PayloadTooLarge,
+                "the mutation envelope is larger than one mutation may carry",
+            )
+        })?;
+    let parsed = serde_json::from_slice::<P>(&bytes).map_err(|error| {
+        reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            format!("the mutation envelope is not readable: {error}"),
+        )
+    })?;
+    Ok((headers, parsed))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------------------------
+
+/// GET /api/v1/reference-chat/{sessionId}/history
+async fn reference_chat_history(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let limit = match reference_history::normalize_reference_history_limit(
+        query
+            .limit
+            .unwrap_or(reference_history::REFERENCE_HISTORY_DEFAULT_LIMIT),
+    ) {
+        Ok(limit) => limit,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    let cursor = match reference_chat_cursor(&query) {
+        Ok(cursor) => cursor,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    if reference_chat_session_is_remote(&state, &session_id).await {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this session's transcript lives on its paired host; read it through that host's own \
+             reference-chat route",
+        );
+    }
+    let Some(home) = reference_chat_history_home(&state) else {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this host's transcript root is unknown",
+        );
+    };
+    let siblings = reference_chat_siblings(&state, &session_id).await;
+    let stream = match reference_history::resolve_reference_history_stream(
+        &home,
+        &read.identity,
+        &siblings,
+    ) {
+        Ok(stream) => stream,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    match reference_history::read_reference_history_page(
+        &stream,
+        &read.identity,
+        limit,
+        cursor.as_ref(),
+    )
+    .await
+    {
+        Ok(page) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+        Err(error) => reference_chat_refusal(&error),
+    }
+}
+
+/// GET /api/v1/reference-chat/{sessionId}/screen
+async fn reference_chat_screen(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    match reference_chat_snapshot_screen(&state, &read.target).await {
+        Ok(snapshot) => ([(header::CACHE_CONTROL, "no-store")], Json(snapshot)).into_response(),
+        Err(error) => reference_chat_refusal(&error),
+    }
+}
+
+/// GET /api/v1/reference-chat/{sessionId}/prompt
+///
+/// The card is detected in the pane's own session record and remembered, so the answer route can
+/// plan against the same card the user saw. A screen with no prompt is a successful read with a
+/// null prompt, not an error.
+async fn reference_chat_prompt(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let snapshot = match reference_chat_snapshot_screen(&state, &read.target).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    if !snapshot.is_answerable() {
+        return reference_chat_error(
+            ScopeErrorCode::RequestConflict,
+            "the pane's screen could not be reconstructed, so no card may be answered from it",
+        );
+    }
+    let session = reference_chat_prompt_session(&state, &read.identity).await;
+    let agent = read.identity.registry_id.clone();
+    let prompt = reference_prompts::detect_reference_prompt_in_session(
+        &agent,
+        &snapshot.text,
+        &session.borrow(),
+    );
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "prompt": prompt,
+            "screenRevision": snapshot.revision,
+            "cols": snapshot.cols,
+            "rows": snapshot.rows,
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mutations
+// ---------------------------------------------------------------------------------------------
+
+/// POST /api/v1/reference-chat/{sessionId}/submit
+async fn reference_chat_submit(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let (headers, body) = match reference_chat_mutation_body::<
+        ReferenceChatMutation<reference_types::ReferenceSubmitPayload>,
+    >(request, &state)
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    let (device, target) =
+        match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot type into a pane",
+        );
+    }
+    let runtime = reference_chat_runtime();
+    // The pane's OWN bracketed-paste mode, as this host's output hub recorded it: the shaping in
+    // input.rs is normative and must not assume a mode the pane never enabled.
+    let bracketed_paste = state
+        .terminal_service
+        .output_hub()
+        .is_bracketed_paste_enabled(&session_id);
+    let blocked_prompt =
+        reference_chat_blocked_prompt(&state, &target, body.registry_id.as_deref()).await;
+    let authorize = reference_chat_authorize(&state, &headers);
+    let clock = reference_input::SystemReferenceClock;
+    let submit = reference_input::ReferenceSubmitRequest {
+        target: &target,
+        request_id: &body.request_id,
+        payload: &body.params,
+        bracketed_paste,
+        blocked_prompt: blocked_prompt.as_deref(),
+        arrived_at_ms: clock.now_ms(),
+        last_typed_at_ms: None,
+        authorize: &*authorize,
+    };
+    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+    let outcome = runtime.input.submit(&submit, &writer, &clock).await;
+    reference_chat_input_response(&body.request_id, outcome)
+}
+
+/// POST /api/v1/reference-chat/{sessionId}/stop
+async fn reference_chat_stop(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let (headers, body) = match reference_chat_mutation_body::<
+        ReferenceChatMutation<reference_types::ReferenceStopPayload>,
+    >(request, &state)
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    let (device, target) =
+        match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot stop a pane's turn",
+        );
+    }
+    let runtime = reference_chat_runtime();
+    let authorize = reference_chat_authorize(&state, &headers);
+    // Over HTTP the caller's liveness is the request itself: a caller that has gone does not
+    // reach the write, and the reauthorization above is what a revoked caller trips.
+    let alive = || true;
+    let stop = reference_input::ReferenceStopRequest {
+        target: &target,
+        request_id: &body.request_id,
+        payload: &body.params,
+        authorize: &*authorize,
+        alive: &alive,
+    };
+    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+    let outcome = runtime.input.stop(&stop, &writer).await;
+    reference_chat_input_response(&body.request_id, outcome)
+}
+
+/// POST /api/v1/reference-chat/{sessionId}/answer
+///
+/// The answer runs inside the SAME per-target step as submit and Stop, through the one shared
+/// queue: the fresh screen read, the card's re-detection and every key are one operation, which
+/// is what keeps a Stop from landing between them.
+async fn reference_chat_answer(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let (headers, body) = match reference_chat_mutation_body::<
+        ReferenceChatMutation<reference_types::ReferencePromptAnswerPayload>,
+    >(request, &state)
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    let (device, target) =
+        match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot answer a prompt",
+        );
+    }
+    let runtime = reference_chat_runtime();
+    let identity = reference_chat_identity(&state, &target, body.registry_id.as_deref()).await;
+    let prompt_session = reference_chat_prompt_session(&state, &identity).await;
+    let authorize = reference_chat_authorize(&state, &headers);
+    let alive = || true;
+    let answer = reference_prompts::ReferenceAnswerRequest {
+        target: &target,
+        request_id: &body.request_id,
+        payload: &body.params,
+        session: prompt_session.borrow(),
+        authorize: &*authorize,
+        alive: &alive,
+    };
+    let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
+    let screen = ReferenceGatewayScreenReader {
+        backend: Arc::clone(&state.session_backend),
+    };
+    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+    let clock = reference_input::SystemReferenceClock;
+    let outcome = runtime
+        .answers
+        .answer(&answer, &step, &screen, &writer, &clock)
+        .await;
+    reference_chat_input_response(&body.request_id, outcome)
+}
+
+/// POST /api/v1/reference-chat/{sessionId}/files
+///
+/// The bytes are staged on the OWNING host — this gateway — into the lane's owner-private
+/// staging root, and the receipt names the host, an opaque id, the digest, the size and the media
+/// type. No path is minted for the client: the mention the agent receives is built from the
+/// staged file's own name.
+async fn reference_chat_stage_file(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let (headers, body) = match reference_chat_mutation_body::<
+        ReferenceChatMutation<reference_types::ReferenceFileStagePayload>,
+    >(request, &state)
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    let (device, target) =
+        match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot stage a file for a pane",
+        );
+    }
+    let runtime = reference_chat_runtime();
+    reference_chat_prune_staged(runtime);
+    let target_key = reference_types::reference_draft_key(&target);
+    let (existing_files, existing_turn_bytes) = {
+        let staged = runtime.staged.lock();
+        staged
+            .values()
+            .filter(|entry| entry.target_key == target_key)
+            .fold((0usize, 0u64), |(count, bytes), entry| {
+                (count + 1, bytes + entry.receipt.size_bytes)
+            })
+    };
+    if let Err(code) = reference_files::reference_file_bounds_check(
+        body.params.size_bytes,
+        existing_files,
+        existing_turn_bytes,
+    ) {
+        return reference_chat_refusal(&reference_chat_scope(
+            code,
+            "the staged set for this target is at its limit",
+        ));
+    }
+    let payload = body.params.clone();
+    let staged = crate::ipc::run_blocking(move || {
+        Ok::<_, crate::ipc::error::IpcError>(reference_files::stage_reference_file(&payload))
+    })
+    .await;
+    let receipt = match staged {
+        Ok(Ok(receipt)) => receipt,
+        Ok(Err(code)) => {
+            return reference_chat_refusal(&reference_chat_scope(
+                code,
+                "the file could not be staged on this host",
+            ))
+        }
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::Unsupported,
+                "the staging thread did not finish",
+            )
+        }
+    };
+    let dir = reference_files::reference_staging_base_dir().join(&receipt.receipt.attachment_id);
+    let path = dir.join(&receipt.display_name);
+    runtime.staged.lock().insert(
+        reference_chat_staged_key(&target, &receipt.receipt.attachment_id),
+        ReferenceStagedFile {
+            target_key,
+            dir,
+            path,
+            display_name: receipt.display_name.clone(),
+            receipt: receipt.receipt.clone(),
+            staged_at_ms: reference_input::SystemReferenceClock.now_ms(),
+        },
+    );
+    reference_chat_result_ok(
+        &body.request_id,
+        serde_json::json!({
+            "receipt": receipt.receipt,
+            "displayName": receipt.display_name,
+            "mentionText": receipt.mention_text,
+        }),
+    )
+}
+
+/// GET /api/v1/reference-chat/{sessionId}/files/{fileId}
+async fn reference_chat_preview_file(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath((session_id, file_id)): AxumPath<(String, String)>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let runtime = reference_chat_runtime();
+    let entry = {
+        let staged = runtime.staged.lock();
+        staged
+            .get(&reference_chat_staged_key(&read.target, &file_id))
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    entry.display_name.clone(),
+                    entry.receipt.clone(),
+                )
+            })
+    };
+    let Some((path, display_name, receipt)) = entry else {
+        return reference_chat_error(
+            ScopeErrorCode::NotFound,
+            "no staged file of that id belongs to this target",
+        );
+    };
+    let bytes = crate::ipc::run_blocking(move || {
+        std::fs::read(&path)
+            .map_err(|error| crate::ipc::error::IpcError::internal(error.to_string()))
+    })
+    .await;
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::NotFound,
+                "the staged file is no longer readable",
+            )
+        }
+    };
+    use base64::Engine as _;
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "receipt": receipt,
+            "displayName": display_name,
+            "sizeBytes": bytes.len(),
+            "contentBase64": content,
+        })),
+    )
+        .into_response()
+}
+
+/// DELETE /api/v1/reference-chat/{sessionId}/files/{fileId}
+///
+/// Deletion is always explicit and never implicit: a failed send deletes nothing, and only this
+/// route removes a staged file.
+async fn reference_chat_delete_file(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath((session_id, file_id)): AxumPath<(String, String)>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
+    {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    if read.device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot delete a staged file",
+        );
+    }
+    let runtime = reference_chat_runtime();
+    let entry = runtime
+        .staged
+        .lock()
+        .remove(&reference_chat_staged_key(&read.target, &file_id));
+    let Some(entry) = entry else {
+        return reference_chat_error(
+            ScopeErrorCode::NotFound,
+            "no staged file of that id belongs to this target",
+        );
+    };
+    let dir = entry.dir;
+    let _ = crate::ipc::run_blocking(move || {
+        reference_files::reference_cancel_staged_file(&dir);
+        Ok::<_, crate::ipc::error::IpcError>(())
+    })
+    .await;
+    (
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store")],
+    )
+        .into_response()
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -4798,6 +6195,41 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/agent-history/{sessionId}",
             get(get_agent_history),
+        )
+        // Reference chat (plan task 13). The same authenticated gateway, the same listener and
+        // the same bearer/permission policy as every route above; no control router is mounted
+        // and nothing here resizes a pane or signals a process.
+        .route(
+            "/api/v1/reference-chat/{sessionId}/history",
+            get(reference_chat_history),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/screen",
+            get(reference_chat_screen),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/prompt",
+            get(reference_chat_prompt),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/submit",
+            post(reference_chat_submit),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/stop",
+            post(reference_chat_stop),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/answer",
+            post(reference_chat_answer),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/files",
+            post(reference_chat_stage_file),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/files/{fileId}",
+            get(reference_chat_preview_file).delete(reference_chat_delete_file),
         )
         .route(
             "/api/v1/workspace/projects",
@@ -5295,6 +6727,19 @@ mod p20_insecure_relay_tests;
 #[cfg(test)]
 #[path = "preference_http_tests.rs"]
 mod preference_http_tests;
+
+// The capability document's reference-chat host identity is a cross-task contract (task 12
+// consumes `referenceHostId` for its mutation target), so its regression source lives beside
+// this module rather than inside it.
+#[cfg(test)]
+#[path = "capability_tests.rs"]
+mod capability_tests;
+
+// A malformed read query must answer the frozen machine envelope on the read routes this module
+// serves, so its regression source lives beside this module too.
+#[cfg(test)]
+#[path = "reference_chat_query_tests.rs"]
+mod reference_chat_query_tests;
 
 #[cfg(test)]
 mod tests {

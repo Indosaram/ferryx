@@ -1,0 +1,8 @@
+  Select Model and Effort
+
+
+› 1. Custom  Model (current)
+  2. GPT-6-Sol
+  3. GPT-6-Luna
+
+  enter select · esc back

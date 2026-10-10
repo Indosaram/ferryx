@@ -1,0 +1,11 @@
+Which file should I open?
+
+╭──────────────────────────╮
+│ ❯ src/main.rs            │
+│   Other (type your own)  │
+╰──────────────────────────╯
+  enter select · ↑/↓ move · esc cancel
+
+✓ Opened src/main.rs
+$ cargo check
+    Finished `dev` profile [unoptimized + debuginfo] target(s)

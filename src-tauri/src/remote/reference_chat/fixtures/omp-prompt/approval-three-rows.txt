@@ -1,0 +1,6 @@
+Allow tool: Bash
+
+❯ Approve
+  Deny
+  Approve
+  esc to cancel

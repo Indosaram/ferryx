@@ -1,7 +1,7 @@
 use crate::terminal::output_hub::{SessionHubSnapshot, TerminalOutputHub};
 use crate::terminal::PtyError;
 use parking_lot::{Mutex, RwLock};
-use portable_pty::{Child, MasterPty, PtySize};
+use portable_pty::{Child, MasterPty, PtySize, ReaderInterrupt};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -389,6 +389,9 @@ pub(crate) struct PtySessionConfig {
     pub id: String,
     pub incarnation: Option<String>,
     pub master: Box<dyn MasterPty + Send>,
+    /// The same master's reader-interruption handle, taken before the master was boxed, so the
+    /// session keeps it for the whole of its life rather than only while the master is present.
+    pub reader_interrupt: Option<Arc<dyn ReaderInterrupt>>,
     pub child: Box<dyn Child + Send + Sync>,
     pub writer: Box<dyn Write + Send>,
     pub reader: Box<dyn Read + Send>,
@@ -402,6 +405,58 @@ pub(crate) struct PtySessionConfig {
     /// the PTY session preserves session listing and CWD validation without abusing the
     /// exclusive writer lease used by agent/destructive-operation safety.
     pub worktree_path: Option<PathBuf>,
+    /// The TERM grace the close that claims this session will run, shared with the session so a
+    /// concurrent close can size its fence for the close actually in flight rather than for its own
+    /// grace. Both constructors start it empty: a session that is not closing has no close to cover.
+    pub close_grace: Arc<Mutex<Option<Duration>>>,
+}
+
+/// Where a PTY reader thread currently is. Diagnostic only: written by the reader loop and read
+/// by tests and failure messages; it changes no behavior. A parked thread reports the phase it was
+/// entering when it stopped, which is what locates a stall the boolean `reader_finished` cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtyReaderPhase {
+    Starting,
+    BeforeRead,
+    AfterRead,
+    BeforeSend,
+    AfterSend,
+    Finished,
+}
+
+impl PtyReaderPhase {
+    pub(crate) fn as_raw(self) -> u64 {
+        match self {
+            PtyReaderPhase::Starting => 0,
+            PtyReaderPhase::BeforeRead => 1,
+            PtyReaderPhase::AfterRead => 2,
+            PtyReaderPhase::BeforeSend => 3,
+            PtyReaderPhase::AfterSend => 4,
+            PtyReaderPhase::Finished => 5,
+        }
+    }
+
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        match raw {
+            1 => PtyReaderPhase::BeforeRead,
+            2 => PtyReaderPhase::AfterRead,
+            3 => PtyReaderPhase::BeforeSend,
+            4 => PtyReaderPhase::AfterSend,
+            5 => PtyReaderPhase::Finished,
+            _ => PtyReaderPhase::Starting,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            PtyReaderPhase::Starting => "starting",
+            PtyReaderPhase::BeforeRead => "before-read",
+            PtyReaderPhase::AfterRead => "after-read",
+            PtyReaderPhase::BeforeSend => "before-send",
+            PtyReaderPhase::AfterSend => "after-send",
+            PtyReaderPhase::Finished => "finished",
+        }
+    }
 }
 
 pub struct PtySession {
@@ -414,12 +469,29 @@ pub struct PtySession {
     incarnation: Option<String>,
     suspension_receipt: Mutex<Option<SuspensionReceiptWire>>,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    /// The reader-interruption handle, taken from the master while it was still present.
+    ///
+    /// Retained separately from `master` on purpose: a session gives its master up - after a failed
+    /// handover export the master is already gone - and must still be able to end its reader when it
+    /// finally closes. A platform whose reader needs no handle yields `None` and behaves as before.
+    reader_interrupt: Arc<Mutex<Option<Arc<dyn ReaderInterrupt>>>>,
+    /// The master release this session handed to the runtime's blocking pool, if the release went
+    /// off-thread. Kept so the close can OBSERVE that release and bound it: the pool is a thread
+    /// budget and not a duration bound, so an unobserved handle cannot tell a release that ran from
+    /// one that is still queued - or from one the pool never ran at all.
+    master_release: Arc<Mutex<Option<JoinHandle<()>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     child: Arc<Mutex<Option<ProcessHandle>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
+    /// Set when this session begins closing, so its reader stops instead of issuing another
+    /// blocking read. Deliberately separate from `reader_finished`, which means "the reader thread
+    /// has returned" and is consumed by the lifecycle watcher.
+    reader_stop_requested: Arc<AtomicBool>,
+    /// The reader's own phase, diagnostics only (see `PtyReaderPhase`).
+    reader_phase: Arc<AtomicU64>,
     reaped: Arc<AtomicBool>,
     /// Epoch millis of the last PTY output chunk read from the child (0 = none).
     last_output_at: Arc<AtomicU64>,
@@ -429,6 +501,21 @@ pub struct PtySession {
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
     pause_requested: Arc<AtomicBool>,
     reader_paused: Arc<AtomicBool>,
+    /// Set when a teardown releases a reader parked by `pause_reader`.
+    ///
+    /// Deliberately NOT `reader_finished`: releasing a parked reader is not the reader's end, and the
+    /// close path reads `reader_finished` as proof that the reader thread returned, so writing the
+    /// release into that flag let a close pass stage 1 with the reader still parked.
+    pause_released: Arc<AtomicBool>,
+    reader_park: Arc<(Mutex<()>, parking_lot::Condvar)>,
+    /// The TERM grace the close that claimed this session is running, kept at the MAXIMUM over every
+    /// close that claimed it.
+    ///
+    /// The concurrent-close fence has to cover the close it waits on, and that close's grace phase is
+    /// a caller parameter rather than a module constant: a fence sized from the waiting call's own
+    /// grace is still short whenever the two callers pass different ones, and a 1 s `close_session`
+    /// waiting on a 5 s machine close is exactly that case. Empty until a close claims the session.
+    close_grace: Arc<Mutex<Option<Duration>>>,
     #[cfg(unix)]
     relinquish_wake: Option<std::os::unix::net::UnixStream>,
 }
@@ -454,6 +541,7 @@ fn last_output_age_from(last_output_millis: u64) -> Option<u64> {
 
 impl PtySession {
     pub(crate) fn new(config: PtySessionConfig) -> Self {
+        let reader_interrupt = Arc::new(Mutex::new(config.reader_interrupt));
         let output_tx = Arc::new(Mutex::new(Some(config.tx)));
         let reader_tx = output_tx
             .lock()
@@ -474,6 +562,8 @@ impl PtySession {
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_stop_requested = Arc::new(AtomicBool::new(false));
+        let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
         let last_output_at = Arc::clone(&reader_last_output_at);
         let task_last_output_at = Arc::clone(&last_output_at);
@@ -481,36 +571,65 @@ impl PtySession {
         let reader_paused = Arc::new(AtomicBool::new(false));
         let pause_requested_task = Arc::clone(&pause_requested);
         let reader_paused_task = Arc::clone(&reader_paused);
+        let pause_released = Arc::new(AtomicBool::new(false));
+        let pause_released_task = Arc::clone(&pause_released);
+        let reader_park = Arc::new((Mutex::new(()), parking_lot::Condvar::new()));
+        let reader_park_task = Arc::clone(&reader_park);
+        let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
+        let reader_phase_task = Arc::clone(&reader_phase);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
-                if reader_finished_task.load(Ordering::Acquire) { break; }
-                if pause_requested_task.load(Ordering::Acquire) {
+                // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
+                // variable rather than an immediate `break` because one read carries at most one
+                // buffer: the read below keeps draining while bytes remain, and the loop ends on the
+                // read that reports the cancellation with nothing buffered. Breaking here instead
+                // would drop a tail larger than one buffer that the pipe is still holding.
+                let stopping = reader_stop_requested_task.load(Ordering::Acquire);
+                if pause_released_task.load(Ordering::Acquire) { break; }
+                if !stopping && pause_requested_task.load(Ordering::Acquire) {
+                    let mut park = reader_park_task.0.lock();
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
-                        && !reader_finished_task.load(Ordering::Acquire)
+                        && !pause_released_task.load(Ordering::Acquire)
                     {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        reader_park_task.1.wait(&mut park);
                     }
                     reader_paused_task.store(false, Ordering::Release);
                     // Released by teardown (`release_paused_reader`), not by a resume: the
-                    // descriptor may already belong to a successor daemon, so never read again.
-                    if reader_finished_task.load(Ordering::Acquire) {
+                    // descriptor may already belong to a successor daemon, so never read again. The
+                    // release is its own signal, so it is not mistaken for the reader's own end,
+                    // which is the flag this reader sets when it really returns.
+                    if pause_released_task.load(Ordering::Acquire) {
                         break;
                     }
                 }
 
+                reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
+                        reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        // Re-read the flag instead of the snapshot taken before this read: a stop
+                        // requested DURING the read is precisely what made it return, so the snapshot
+                        // is stale here and trusting it would issue one more read. The drain is
+                        // unaffected - a read that still has buffered bytes returns Ok, not this - and
+                        // a genuine EINTR with no stop still retries.
+                        if reader_stop_requested_task.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
+                    }
                     #[cfg(unix)]
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         use std::os::fd::AsRawFd;
@@ -528,6 +647,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
         Self {
@@ -539,12 +659,16 @@ impl PtySession {
             incarnation: config.incarnation,
             suspension_receipt: Mutex::new(None),
             master: Arc::new(Mutex::new(Some(config.master))),
+            reader_interrupt,
+            master_release: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(Some(config.writer))),
             child: Arc::new(Mutex::new(Some(ProcessHandle::Spawned(config.child)))),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
             worktree_path: config.worktree_path,
             reader_finished,
+            reader_stop_requested,
+            reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
@@ -553,6 +677,9 @@ impl PtySession {
             output_hub: Arc::new(RwLock::new(None)),
             pause_requested,
             reader_paused,
+            pause_released,
+            reader_park,
+            close_grace: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -674,6 +801,10 @@ impl PtySession {
         }
     }
 
+    /// Marks the session closing. Deliberately does NOT stop the reader: closing is entered before
+    /// the child is signalled, so stopping here would truncate output the process has not written
+    /// yet. The stop is requested by the close paths once the process that produced the output is
+    /// dead, and by `Drop` when the session is simply let go.
     pub(crate) fn begin_closing(&self) -> bool {
         let mut state = self.state.lock();
         match *state {
@@ -729,35 +860,83 @@ impl PtySession {
     }
 
     pub fn resume_reader(&self) -> bool {
-        self.pause_requested.swap(false, Ordering::AcqRel)
+        let _park = self.reader_park.0.lock();
+        let resumed = self.pause_requested.swap(false, Ordering::AcqRel);
+        self.reader_park.1.notify_all();
+        resumed
     }
 
     pub fn is_reader_paused(&self) -> bool {
         self.reader_paused.load(Ordering::Acquire)
     }
 
+    /// Record the TERM grace a close is about to run on this session.
+    ///
+    /// Called before the close claims the session, so the value is published whichever close wins the
+    /// race: a concurrent close reads it to size its fence, and keeping the maximum means a later
+    /// close's shorter grace can never shrink the bound an earlier, longer one needs. The closing
+    /// phase is claimed at most once (`begin_closing`), so the maximum is the grace of that close.
+    pub(crate) fn note_close_grace(&self, grace: Duration) {
+        let mut recorded = self.close_grace.lock();
+        *recorded = Some(match *recorded {
+            Some(existing) => existing.max(grace),
+            None => grace,
+        });
+    }
+
+    /// The TERM grace the close that claimed this session is running, if one has claimed it.
+    ///
+    /// `None` until a close records one; a caller that gets `None` still holds the session open and is
+    /// about to run a grace phase of its own, so it has nothing to wait on.
+    pub(crate) fn close_grace(&self) -> Option<Duration> {
+        *self.close_grace.lock()
+    }
+
     /// A reader parked by `pause_reader` never reads again on its own, so tearing the session
     /// down must release it, or its blocking thread outlives the session and stalls runtime
     /// shutdown. Only a paused reader is touched, and it exits without reading.
     pub(crate) fn release_paused_reader(&self) {
+        let _park = self.reader_park.0.lock();
         #[cfg(unix)]
         let relinquishing = self.relinquish_wake.is_some();
         #[cfg(not(unix))]
         let relinquishing = false;
-        if !relinquishing && !self.pause_requested.load(Ordering::Acquire) { return; }
-        self.reader_finished.store(true, Ordering::Release);
+        if !relinquishing && !self.pause_requested.load(Ordering::Acquire) {
+            return;
+        }
+        self.pause_released.store(true, Ordering::Release);
         self.pause_requested.store(false, Ordering::Release);
+        self.reader_park.1.notify_all();
         #[cfg(unix)]
         if let Some(wake) = &self.relinquish_wake {
-            let _ = std::io::Write::write_all(&mut &*wake, &[1]);
+            if let Err(error) = std::io::Write::write_all(&mut &*wake, &[1]) {
+                tracing::warn!(%error, "failed to wake relinquished PTY reader");
+            }
         }
     }
 
+    /// Stop this session's reader for good.
+    ///
+    /// Both halves are required, and the park is the half that is easy to miss: a reader parked by
+    /// `pause_reader` waits on `pause_released` and no longer observes `reader_finished`, so setting
+    /// the flag alone left the thread parked forever while `is_reader_finished()` already reported
+    /// true - a close would pass its first stage on that flag without the thread ever ending, and a
+    /// parked reader holds the last output sender. Releasing the park here is what makes "stopped"
+    /// mean the thread really ends.
+    ///
+    /// The other half is the same lesson where the reader is NOT parked. `abort()` cannot end a
+    /// `spawn_blocking` closure that has already started, so a reader blocked in `read()` needs the
+    /// stop request - the flag, and on Windows the retained interrupt that makes the read return - or
+    /// the abort ends nothing and only this function's own word said the reader had stopped. That is
+    /// also why this no longer sets `reader_finished` itself: the flag means the reader thread
+    /// returned, it is set by the reader as its own last act, and `Drop` - the other path that
+    /// stops a reader without waiting for a tail - does not set it either.
     pub fn stop_reader(&self) {
+        self.request_reader_stop();
+        self.release_paused_reader();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
         }
-        self.reader_finished.store(true, Ordering::Release);
     }
 
     pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
@@ -1187,14 +1366,114 @@ impl PtySession {
             .unwrap_or(true)
     }
 
+    /// Ask this session's reader to stop.
+    ///
+    /// Two halves, both required: the flag ends the loop once the read in flight returns, and on
+    /// Windows the master's cancellation event is what makes that read return. The flag alone
+    /// cannot end a read the kernel still owns, and the event alone would leave the loop waiting
+    /// for a read to answer it again.
+    pub(crate) fn request_reader_stop(&self) {
+        self.reader_stop_requested.store(true, Ordering::Release);
+        // The retained handle, not the master: this must work on a session that has already given
+        // its master up, which is exactly what a failed handover export leaves behind. Cloned out of
+        // the slot first so no lock is held across the request.
+        let interrupt = self.reader_interrupt.lock().clone();
+        if let Some(interrupt) = interrupt {
+            interrupt.request();
+        }
+    }
+
+    /// Arm a subscription to this session's outstanding-read gauge and wait on it, bounded.
+    ///
+    /// Test-only. It blocks, so the tests drive it on a blocking thread; production never waits on
+    /// this gauge.
+    #[cfg(all(test, windows))]
+    pub(crate) fn await_outstanding_reader_for_test(&self, timeout: Duration) -> bool {
+        let interrupt = self.reader_interrupt.lock().clone();
+        match interrupt {
+            Some(interrupt) => interrupt.await_outstanding_read(timeout),
+            None => false,
+        }
+    }
+
     pub(crate) fn close_output(&self) {
         self.output_tx.lock().take();
     }
 
+    /// The reader's current phase, for diagnostics only.
+    pub(crate) fn reader_phase(&self) -> &'static str {
+        PtyReaderPhase::from_raw(self.reader_phase.load(Ordering::Acquire)).as_str()
+    }
+
     pub(crate) fn close_io(&self) {
         self.writer.lock().take();
-        self.master.lock().take();
+        self.release_master();
         self.release_paused_reader();
+    }
+
+    /// Give up the master, handing the drop to the runtime's blocking pool.
+    ///
+    /// Dropping the master runs `ClosePseudoConsole`, which waits for the console host to exit and
+    /// flushes the output the host still holds - the operation that can still produce the last bytes
+    /// of a pane. It can also wait on a client that has stopped reading, so the thread that drops it
+    /// must be one nothing else depends on: the close path has to stay free to apply the bounded
+    /// cancellation, and the reader is the thread that lets the host finish. The slot is emptied
+    /// synchronously, so a caller that checks for a live master (export, resize) sees it gone at
+    /// once - only the drop itself is off-thread.
+    ///
+    /// The handle the pool returns is KEPT, because the pool is a thread budget and not a duration
+    /// bound. A pool whose blocking threads are all busy leaves the drop queued with the master alive,
+    /// and a pool that is shutting down never runs it at all - in that case the pool has already
+    /// dropped the closure on the thread that called `spawn_blocking`, which is the very reactor this
+    /// seam exists to keep free. Neither outcome is visible through a discarded handle, so the close
+    /// observes the handle it kept (`observe_master_release`) and reports a release that did not
+    /// happen instead of reading it as a completed one. The cancelled case RESOLVES that handle rather
+    /// than leaving it pending, which is why the observation reads the closure's own result: a handle
+    /// that finished is not a closure that ran.
+    fn release_master(&self) {
+        let master = self.master.lock().take();
+        let Some(master) = master else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let release = handle.spawn_blocking(move || drop(master));
+            *self.master_release.lock() = Some(release);
+            return;
+        }
+        // Outside a runtime this thread is not a reactor, so dropping it here cannot block one: the
+        // caller waits and the release is complete when this returns, which is why nothing is left
+        // for `observe_master_release` to observe.
+        tracing::debug!("releasing PTY master on the calling thread (no runtime is entered)");
+        drop(master);
+    }
+
+    /// Wait, bounded, for the master release this session handed to the blocking pool.
+    ///
+    /// `None` when nothing was handed over: no master was left to drop, or there was no runtime to
+    /// enter and the drop already ran inline on the caller. `Some(true)` only when the pool RAN the
+    /// drop within `timeout`. `Some(false)` when it did not, which is two conditions rather than one:
+    /// a pool whose blocking threads are all busy leaves the release queued with the master alive, and
+    /// a pool that is already shutting down cancels the task and drops the closure - and the master
+    /// with it - inline on the thread that called `spawn_blocking`, which is the very reactor this
+    /// seam exists to keep free. The cancelled handle still RESOLVES, so the wait must read its result
+    /// and not merely whether it finished, or that inline drop would be reported as a release that
+    /// happened on the pool.
+    ///
+    /// The handle is taken out of its slot, so two callers cannot wait on the same release and a
+    /// release that was already observed is not waited on twice.
+    pub(crate) async fn observe_master_release(&self, timeout: Duration) -> Option<bool> {
+        let release = self.master_release.lock().take()?;
+        match tokio::time::timeout(timeout, release).await {
+            // The closure ran: the master was dropped on the pool's own thread.
+            Ok(Ok(())) => Some(true),
+            // The wait finished without the closure running. `spawn_blocking` returns its handle
+            // unchanged when the pool is already shutting down, but `spawn_task` has shutdown()-ed the
+            // task by then, so the handle resolves with a cancellation instead of a run: the drop
+            // happened inline on the caller. A pool that is merely saturated never resolves the handle
+            // at all and lands in the timeout arm below. Neither is a release.
+            Ok(Err(_)) => Some(false),
+            Err(_) => Some(false),
+        }
     }
 
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
@@ -1308,6 +1587,9 @@ impl PtySession {
         let reader = master_pty
             .try_clone_reader()
             .map_err(|e| PtyError::IoError(format!("Failed to clone reader: {e}")))?;
+        // Taken before the master moves into the session, so an adopted session can end its reader
+        // just as a spawned one can.
+        let reader_interrupt = master_pty.interrupt_handle();
 
         let writer = master_pty
             .take_writer()
@@ -1341,6 +1623,8 @@ impl PtySession {
             .map_err(|error| PtyError::IoError(error.to_string()))?;
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_stop_requested = Arc::new(AtomicBool::new(false));
+        let reader_stop_requested_task = Arc::clone(&reader_stop_requested);
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
         let last_output_at = Arc::clone(&reader_last_output_at);
         let task_last_output_at = Arc::clone(&last_output_at);
@@ -1348,37 +1632,63 @@ impl PtySession {
         let reader_paused = Arc::new(AtomicBool::new(false));
         let pause_requested_task = Arc::clone(&pause_requested);
         let reader_paused_task = Arc::clone(&reader_paused);
+        let pause_released = Arc::new(AtomicBool::new(false));
+        let pause_released_task = Arc::clone(&pause_released);
+        let reader_park = Arc::new((Mutex::new(()), parking_lot::Condvar::new()));
+        let reader_park_task = Arc::clone(&reader_park);
+        let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
+        let reader_phase_task = Arc::clone(&reader_phase);
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
-                if reader_finished_task.load(Ordering::Acquire) { break; }
-                if pause_requested_task.load(Ordering::Acquire) {
+                // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
+                // variable rather than an immediate `break` because one read carries at most one
+                // buffer: the read below keeps draining while bytes remain, and the loop ends on the
+                // read that reports the cancellation with nothing buffered. Breaking here instead
+                // would drop a tail larger than one buffer that the pipe is still holding.
+                let stopping = reader_stop_requested_task.load(Ordering::Acquire);
+                if pause_released_task.load(Ordering::Acquire) { break; }
+                if !stopping && pause_requested_task.load(Ordering::Acquire) {
+                    let mut park = reader_park_task.0.lock();
                     reader_paused_task.store(true, Ordering::Release);
                     while pause_requested_task.load(Ordering::Acquire)
-                        && !reader_finished_task.load(Ordering::Acquire)
+                        && !pause_released_task.load(Ordering::Acquire)
                     {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        reader_park_task.1.wait(&mut park);
                     }
                     reader_paused_task.store(false, Ordering::Release);
                     // Released by teardown (`release_paused_reader`), not by a resume: the
-                    // descriptor may already belong to a successor daemon, so never read again.
-                    if reader_finished_task.load(Ordering::Acquire) {
+                    // descriptor may already belong to a successor daemon, so never read again. The
+                    // release is its own signal, so it is not mistaken for the reader's own end,
+                    // which is the flag this reader sets when it really returns.
+                    if pause_released_task.load(Ordering::Acquire) {
                         break;
                     }
                 }
 
+                reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
+                        reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        // Re-read the flag rather than the snapshot taken before this read: a stop
+                        // requested during the read is what made it return.
+                        if reader_stop_requested_task.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         let mut poll = [libc::pollfd {
                             fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0,
@@ -1396,6 +1706,7 @@ impl PtySession {
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
+            reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
         });
 
         let child_handle = snapshot.pid.map(|pid| {
@@ -1414,12 +1725,16 @@ impl PtySession {
                 receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()))),
             incarnation: snapshot.incarnation,
             master: Arc::new(Mutex::new(Some(master_pty))),
+            reader_interrupt: Arc::new(Mutex::new(reader_interrupt)),
+            master_release: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(Some(writer))),
             child: Arc::new(Mutex::new(child_handle)),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
             worktree_path: snapshot.worktree_path,
             reader_finished,
+            reader_stop_requested,
+            reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(snapshot.state)),
@@ -1428,6 +1743,9 @@ impl PtySession {
             output_hub: Arc::new(RwLock::new(None)),
             pause_requested,
             reader_paused,
+            pause_released,
+            reader_park,
+            close_grace: Arc::new(Mutex::new(None)),
         };
 
         Ok((session, rx))
@@ -1437,7 +1755,13 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         self.writer.lock().take();
-        self.master.lock().take();
+        // A session dropped without an explicit close must still not leave its reader parked on the
+        // pipe: the blocking thread would outlive the session and hold runtime shutdown open. Drop
+        // cannot wait for a tail and it closes the output channel a few lines below, so there is no
+        // consumer left for one: the cancellation is the only thing that can end the read here, and
+        // it is applied directly instead of after a drain.
+        self.request_reader_stop();
+        self.release_master();
         self.release_paused_reader();
         self.output_tx.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
@@ -1663,4 +1987,141 @@ mod tests {
 
         let _ = session.kill();
     }
+}
+
+/// The cancellable Windows reader, exercised through the same public API the daemon uses: a real
+/// ConPTY pair, its real output pipe, and the master's cancellation event.
+///
+/// Every read that could block is driven on its own thread and observed through a bounded channel
+/// wait, so a reader that fails to return FAILS the test instead of hanging the suite.
+#[cfg(all(test, windows))]
+mod windows_reader_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySystem};
+
+    fn size() -> PtySize {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    /// A read issued after cancellation must return, and must not be read as EOF. The handle is
+    /// what is retained, so the request goes through it rather than through the master.
+    #[test]
+    fn a_reader_cancelled_before_its_read_returns_instead_of_reading() {
+        let system = native_pty_system();
+        let pair = system.openpty(size()).expect("a ConPTY pair");
+        let mut reader = pair.master.try_clone_reader().expect("a reader");
+        let handle = pair
+            .master
+            .interrupt_handle()
+            .expect("a cancellable master offers a handle");
+
+        handle.request();
+        let mut buf = [0u8; 64];
+        let error = reader
+            .read(&mut buf)
+            .expect_err("a cancelled reader must not block on a read");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+
+        // Idempotent: asking twice is not an error, and the reader stays cancelled.
+        handle.request();
+        let mut buf = [0u8; 64];
+        assert!(
+            reader.read(&mut buf).is_err(),
+            "a second read after cancellation must return an error rather than block"
+        );
+    }
+
+    /// The hole this seam exists for: a session that has already given its master up - exactly what
+    /// a failed handover export leaves behind - must still be able to end its reader when it closes.
+    /// The master is gone, so only the retained handle can reach that reader, and here the stream is
+    /// never going to end on its own, so the cancellation is what returns the parked read.
+    ///
+    /// The "closing must not stop the reader" half of the contract is asserted on unix, where it is
+    /// deterministic (`a_failed_export_leaves_the_session_readable_by_the_predecessor`). Asserting it
+    /// here would race the console host exiting and closing the pipe by itself, which is a correct
+    /// way for this reader to end - a legitimate EOF, not a failure of the seam.
+    #[tokio::test]
+    async fn a_session_whose_master_is_gone_can_still_end_its_reader() {
+        let manager = crate::terminal::PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("cmd.exe"), 80, 24)
+            .expect("spawn a ConPTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // ARMED BEFORE THE CLOSE: the gauge is subscribed to on a blocking thread, which waits on
+        // the state itself - a read the kernel owns, right now - instead of polling for it.
+        assert!(
+            await_session_outstanding_read(&session).await,
+            "the reader never parked in a read the kernel owns"
+        );
+
+        // The master goes away the way a failed export takes it, leaving the reader parked on a
+        // pipe whose write end the console host still holds. Whether the host then exits by itself
+        // or never does, this close must end the reader, and the assertions below are what prove it.
+        session.close_io();
+
+        session.request_reader_stop();
+
+        // The reader holds the last output sender, so this channel closing is the exact moment the
+        // reader thread exited - an event to await, not a delay to wait out.
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "a close after a failed export left the reader running"
+        );
+        assert!(
+            session.is_reader_finished(),
+            "the reader must report finished once its read was ended"
+        );
+    }
+
+    /// The close regression itself, on the platform it was found on: closing must end the reader
+    /// rather than wait out a shutdown timeout, and the session must leave the registry.
+    #[tokio::test]
+    async fn closing_a_session_ends_its_reader_and_reports_no_timeout() {
+        let manager = crate::terminal::PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("cmd.exe"), 80, 24)
+            .expect("spawn a ConPTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+        // ARMED BEFORE THE CLOSE, and driven off the runtime because the subscription blocks.
+        assert!(
+            await_session_outstanding_read(&session).await,
+            "the reader never parked in a read the kernel owns"
+        );
+
+        tokio::time::timeout(Duration::from_secs(20), manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded")
+            .expect("close must not report a reader that would not stop");
+
+        assert!(!manager.has_session(&session_id), "a closed session leaves the registry");
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "close left the reader running");
+        assert!(session.is_reader_finished(), "close must end the session's reader");
+    }
+}
+
+/// Subscribe to a session's outstanding-read gauge and wait for it, bounded.
+///
+/// The wait blocks, so it runs on a blocking thread: the test thread is a runtime thread, and the
+/// subscription is on the state itself rather than a poll loop, which is what keeps this a
+/// subscription and not a spin.
+#[cfg(all(test, windows))]
+async fn await_session_outstanding_read(session: &Arc<PtySession>) -> bool {
+    let session = Arc::clone(session);
+    tokio::task::spawn_blocking(move || session.await_outstanding_reader_for_test(Duration::from_secs(10)))
+        .await
+        .expect("the subscription thread ends")
 }

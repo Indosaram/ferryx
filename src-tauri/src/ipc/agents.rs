@@ -421,18 +421,24 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
     if agent_type.eq_ignore_ascii_case("gjc") {
         return gjc_session_id_from_path(&normalized);
     }
-    let marker = match agent_type {
-        "claude" => "/.claude/projects/",
-        "codex" => "/.codex/sessions/",
-        "copilot" => "/.copilot/session-state/",
-        "cursor" => "/.cursor/chats/",
-        "kimi" => "/.kimi/sessions/",
-        "omo" => "/.omo/sessions/",
-        "pi" => "/.pi/",
-        "antigravity" => "/.gemini/antigravity-cli/conversations/",
+    let markers: &[&str] = match agent_type {
+        "claude" => &["/.claude/projects/"],
+        "codex" => &["/.codex/sessions/"],
+        "copilot" => &["/.copilot/session-state/"],
+        "cursor" => &["/.cursor/chats/"],
+        "kimi" => &["/.kimi/sessions/"],
+        // omo writes its own store under `~/.omo/agent/sessions/` today and used the flat
+        // `~/.omo/sessions/` before that. Both are this reader's own store - the transcript
+        // reader and the resume-cwd search scan both - so both spellings identify an omo
+        // transcript, and neither is a guess at another program's file.
+        "omo" => &["/.omo/agent/sessions/", "/.omo/sessions/"],
+        "pi" => &["/.pi/"],
+        "antigravity" => &["/.gemini/antigravity-cli/conversations/"],
         _ => return None,
     };
-    if !normalized.contains(marker) {
+    // A provider may own more than one store spelling (omo does, above), so this is a set of
+    // accepted roots rather than one string.
+    if !markers.iter().any(|marker| normalized.contains(*marker)) {
         return None;
     }
     uuid_from_session_path(&normalized)
@@ -1045,6 +1051,51 @@ mod tests {
             Some("11111111-2222-3333-4444-555555555555".to_string())
         );
         assert_eq!(extract_session_id_from_path("opencode", "/tmp/id"), None);
+    }
+
+    #[test]
+    fn session_discovery_accepts_both_omo_store_spellings() {
+        let id = "01a112e9-02b1-7857-b11d-967060362583";
+        // The current layout: the agent dir carries a `sessions` segment.
+        assert_eq!(
+            extract_session_id_from_path(
+                "omo",
+                &format!("/Users/me/.omo/agent/sessions/--repo--/2026-10-07T09-00-00.000Z_{id}.jsonl"),
+            ),
+            Some(id.to_string())
+        );
+        // The legacy flat layout, which the same reader and the resume-cwd search both scan.
+        assert_eq!(
+            extract_session_id_from_path(
+                "omo",
+                &format!("/Users/me/.omo/sessions/--repo--/2026-10-07T09-00-00.000Z_{id}.jsonl"),
+            ),
+            Some(id.to_string())
+        );
+        // A Windows spelling normalizes its separators before the marker test.
+        assert_eq!(
+            extract_session_id_from_path(
+                "omo",
+                &format!(r"C:\Users\me\.omo\agent\sessions\--repo--\2026-10-07T09-00-00.000Z_{id}.jsonl"),
+            ),
+            Some(id.to_string())
+        );
+        // The reader's own store root is still required: an unrelated .omo path is not a transcript.
+        assert_eq!(
+            extract_session_id_from_path(
+                "omo",
+                &format!("/Users/me/.omo/cache/{id}.jsonl"),
+            ),
+            None
+        );
+        // And a file the omo store holds but whose name carries no UUID is not one either.
+        assert_eq!(
+            extract_session_id_from_path(
+                "omo",
+                "/Users/me/.omo/agent/sessions/--repo--/2026-10-07T09-00-00.000Z_not-a-uuid.jsonl",
+            ),
+            None
+        );
     }
 
     #[test]

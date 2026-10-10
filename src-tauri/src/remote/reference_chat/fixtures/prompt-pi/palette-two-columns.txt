@@ -1,0 +1,12 @@
+────────────────────────────────────────
+
+ /model
+ → settings                        Open settings menu
+   model                           Select model
+   tree                            Navigate session tree
+   (1/51)
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+────────────────────────────────────────
+────────────────────────────────────────
+/tmp/app
+0.0%/215k (auto)                                        some-model • medium

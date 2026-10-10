@@ -1,0 +1,16 @@
+──────────────────────────────
+
+ Login
+
+ Choose how to sign in.
+
+ → Sign in with an account
+   Sign in with an API key
+
+ ↑↓ navigate  enter select  escape/ctrl+c
+ cancel
+──────────────────────────────
+/tmp/pr
+0.0%/215k (auto)  vllm-flash/Qwen3.8-Flash-Nex
+Some later output
+and more

@@ -1,6 +1,93 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* never print the raw value */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      lines.push(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
 import { RemoteApp } from "./RemoteApp";
+
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  // Timer-free readiness. The mode switch lives in the header's status cluster, which mounts once
+  // the paired host's token and the first state read have landed; a bare render can reach this
+  // point before that. Flushing the pending microtasks inside act() is the exact readiness step -
+  // it lets the mocked read settle - and it must NOT be a polling wait: several tests here (and in
+  // sibling suites) run under vi.useFakeTimers(), where a polling helper never sees its own timers
+  // fire and hangs the test instead of switching it. A switch that is genuinely missing now throws
+  // loudly here rather than silently leaving chat up.
+  await act(async () => {});
+  const toggle = screen.getByTestId("remote-view-mode-terminal");
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+}
+
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -57,12 +144,46 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+/**
+ * The chat lane's own reads. Chat is the default surface, so these fire on mount in every test in
+ * this file - and a mock that answers by CALL ORDER would hand them the workspace states a test
+ * wrote for its own terminal sequence. They are answered by URL instead, so the terminal lane's
+ * request order stays exactly what each test wrote.
+ */
+function chatLaneFixture(url: string): Response | null {
+  if (url.includes("/api/v1/capabilities")) {
+    // A truthful capabilities answer from a gateway that publishes no daemon incarnation, which
+    // leaves the chat lane idle: these tests are about attention and swiping, not chat polling.
+    return jsonResponse({ apiVersion: 1, machineId: "mach-1", platform: "linux" });
+  }
+  if (url.includes("/api/v1/sessions")) {
+    return jsonResponse({ sessions: [] });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/history")) {
+    return jsonResponse({
+      source: "claude-transcript",
+      availability: "native",
+      turns: [],
+      cursor: null,
+      hasMore: false,
+      generation: "gen-1",
+      unavailableReason: null,
+    });
+  }
+  if (url.includes("/reference-chat/") && url.includes("/prompt")) {
+    return jsonResponse({ prompt: null, screenRevision: "rev-1", cols: 80, rows: 24 });
+  }
+  return null;
+}
+
 function ticketed(inner: typeof fetch): typeof fetch {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes("/api/v1/socket-ticket")) {
       return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
     }
+    const lane = chatLaneFixture(url);
+    if (lane !== null) return lane;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }
@@ -227,6 +348,7 @@ describe("RemoteAttention Affordance", () => {
 
     try {
       render(<RemoteApp />);
+    await switchToTerminalMode();
       await act(async () => {
         await signal(Promise.all([initialRead.promise, socketReady.promise]));
       });
@@ -286,6 +408,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
     await openWorktreeSheet();
 
@@ -331,6 +454,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -385,6 +509,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -452,6 +577,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -476,6 +602,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -508,6 +635,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -569,6 +697,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     await screen.findByTestId("remote-terminal");
 
@@ -618,6 +747,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
 
@@ -665,6 +795,7 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const terminal = await screen.findByTestId("remote-terminal");
 
@@ -708,8 +839,16 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     const { unmount } = render(<RemoteApp />);
+    await switchToTerminalMode();
 
-    const terminalFirst = await screen.findByTestId("remote-terminal");
+    let terminalFirst: HTMLElement;
+    try {
+      terminalFirst = await screen.findByTestId("remote-terminal");
+    } catch (error) {
+      // Snapshot at the failure boundary, before afterEach cleanup clears the DOM and the mocks.
+      emitFailureTrace("swiping past the last tab is a no-op", fetchMock);
+      throw error;
+    }
 
     // Clear initial load fetch calls
     fetchMock.mockClear();
@@ -742,6 +881,9 @@ describe("RemoteAttention Affordance", () => {
     vi.stubGlobal("fetch", ticketed(fetchMockLast));
 
     render(<RemoteApp />);
+    // The second half is a fresh mount, and chat is the default at every width, so the terminal
+    // must be asked for again before it can be swiped.
+    await switchToTerminalMode();
 
     const terminalLast = await screen.findByTestId("remote-terminal");
 

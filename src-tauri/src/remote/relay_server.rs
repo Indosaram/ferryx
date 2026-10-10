@@ -1806,7 +1806,22 @@ async fn host_http_handler(
     if !allowed_http_route(request.method(), &path) {
         return Err(StatusCode::FORBIDDEN);
     }
-    validate_http_query(&path, request.uri().query())?;
+    // A refused query answers with the frozen machine envelope every other refusal on this
+    // surface uses, so the caller sees a typed INVALID_REQUEST instead of the bodyless 400 a
+    // bare `StatusCode` becomes. Only the reference-chat routes took that shape in this batch;
+    // every other route keeps the parent's bodyless 400, which is the shape the machine's own
+    // handlers still answer on those paths.
+    if let Err(status) = validate_http_query(&path, request.uri().query()) {
+        if reference_chat_http_path(&path) {
+            return Ok(crate::remote::server::machine_error_with_details(
+                status,
+                "INVALID_REQUEST",
+                "the forwarded query is not admissible on this route",
+                serde_json::Map::new(),
+            ));
+        }
+        return Err(status);
+    }
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
     }
@@ -1820,7 +1835,15 @@ async fn host_http_handler(
         None => uri_path.to_owned(),
     };
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, 64 * 1024)
+    // The generic forwarded-body bound is 64 KiB. The reference-chat file lane carries a
+    // base64 image, so its paths get the bound derived from the frozen attachment limit —
+    // and only those paths, which allowed_http_route has already admitted above.
+    let body_limit = if reference_chat_http_path(&path) {
+        REFERENCE_CHAT_RELAY_BODY_MAX
+    } else {
+        64 * 1024
+    };
+    let body = to_bytes(body, body_limit)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     proxy_http(
@@ -1887,7 +1910,7 @@ async fn browser_identify_http_handler(
     .await
 }
 
-fn allowed_http_route(method: &Method, path: &str) -> bool {
+pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     if parts.iter().any(|part| {
         part.is_empty()
@@ -1918,8 +1941,28 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["push", "subscribe" | "unsubscribe"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
+            // Reference chat (plan task 13). The relay only admits the frozen route table;
+            // the machine's own gateway authenticates, fences the target and enforces the
+            // read-only policy, exactly as it does for a direct caller.
+            | ("GET", ["reference-chat", _, "history" | "screen" | "prompt"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
+            | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             | ("GET", ["attach"])
     )
+}
+
+/// How large a forwarded body one reference-chat route may carry.
+///
+/// The file lane's stage payload is base64 over the frozen ATTACHMENT_MAX_FILE_BYTES, which the
+/// generic 64 KiB forwarded-body bound would refuse before the machine ever saw it. The bound is
+/// derived from that frozen limit and applies only to the reference-chat paths the allowlist
+/// above already admits.
+const REFERENCE_CHAT_RELAY_BODY_MAX: usize =
+    (crate::scoped_contracts::ATTACHMENT_MAX_FILE_BYTES as usize / 3) * 4 + 64 * 1024;
+
+/// Is this forwarded path one of the reference-chat routes?
+fn reference_chat_http_path(path: &str) -> bool {
+    path.starts_with("reference-chat/")
 }
 
 fn decode_http_query_component(value: &str) -> Result<String, StatusCode> {
@@ -1945,7 +1988,7 @@ fn decode_http_query_component(value: &str) -> Result<String, StatusCode> {
     String::from_utf8(decoded).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
-fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode> {
+pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode> {
     let Some(query) = query else {
         return Ok(());
     };
@@ -1964,6 +2007,20 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
             return Err(StatusCode::BAD_REQUEST);
         }
     }
+    // The fields the host's own `ReferenceChatReadQuery` declares. `history`, `screen`,
+    // `prompt` and the staged-file routes all deserialize that one struct, so a field it
+    // accepts must not be refused here.
+    let reference_chat_read_fields: &[&str] = &[
+        "hostId",
+        "ownerId",
+        "epoch",
+        "backendSessionId",
+        "providerSessionId",
+        "registryId",
+        "limit",
+        "cursor",
+        "cursorStream",
+    ];
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
         ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
@@ -1975,6 +2032,12 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
         // Chat history pages by limit/cursor. Without this the relay answers 400 and the
         // remote chat view stays empty even though the machine serves the route.
         ["agent-history", _] => &["limit", "cursor"],
+        // Reference chat. A read names its whole target in the query; `history`, `screen`,
+        // `prompt` and the staged-file routes all deserialize the host's own
+        // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
+        // travels in its own envelope body, so its query must stay empty.
+        ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
+        ["reference-chat", _, "files", _] => reference_chat_read_fields,
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -5555,6 +5618,119 @@ mod tests {
         .await;
         // Then routing succeeds and the offline machine is reported, not forbidden.
         assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_reference_chat_read_admits_every_field_the_host_declares() {
+        // The host's own `ReferenceChatReadQuery` declares these; every reference-chat read
+        // route deserializes it, so the relay must not refuse a query the host accepts.
+        let query = "hostId=local&ownerId=owner&epoch=1&backendSessionId=s&providerSessionId=p\
+                     &registryId=codex&limit=50&cursor=3&cursorStream=codex-transcript:abc";
+        for suffix in ["history", "screen", "prompt", "files/attachment-1"] {
+            let path = format!("reference-chat/session-1/{suffix}");
+            assert!(
+                validate_http_query(&path, Some(query)).is_ok(),
+                "{path} must admit every field the host's read query declares"
+            );
+            assert!(
+                validate_http_query(&path, Some("repoPath=/etc/passwd")).is_err(),
+                "{path} must still refuse a field the contract does not define"
+            );
+        }
+    }
+
+    /// Widening the allowlist changes the response SHAPE, never the admission decisions.
+    #[test]
+    fn the_reference_chat_allowlist_still_refuses_what_it_always_refused() {
+        let path = "reference-chat/session-1/screen";
+        // A field the contract does not define.
+        assert_eq!(
+            validate_http_query(path, Some("repoPath=/etc/passwd")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A field with no `=`.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=owner&epoch")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A bad `%` escape.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=%GG")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // The same field twice.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=a&ownerId=b")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // An oversized query.
+        let oversized = format!("ownerId={}", "a".repeat(17 * 1024));
+        assert_eq!(
+            validate_http_query(path, Some(&oversized)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // A control character in a value.
+        assert_eq!(
+            validate_http_query(path, Some("ownerId=%00")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // The frozen route table still denies everything outside it.
+        assert!(!allowed_http_route(&Method::GET, "reference-chat/session-1"));
+        assert!(!allowed_http_route(
+            &Method::GET,
+            "reference-chat/session-1/secret"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_query_answers_with_the_machine_envelope() {
+        // A bare `StatusCode` error becomes a bodyless 400, which is what a caller on this
+        // surface must never see.
+        let state = test_state(vec![]);
+        let path = "reference-chat/session-1/screen";
+        let request = Request::builder()
+            .uri(format!("/host/machine/api/v1/{path}?repoPath=/etc/passwd"))
+            .body(Body::empty())
+            .unwrap();
+        let response = host_http_handler(
+            State(state),
+            AxumPath(("machine".into(), path.into())),
+            None,
+            request,
+        )
+        .await
+        .expect("a refused query is a response, not a bare status");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("the refusal carries a JSON envelope");
+        assert_eq!(parsed["error"]["code"].as_str(), Some("INVALID_REQUEST"));
+        assert_eq!(parsed["error"]["retryable"].as_bool(), Some(false));
+        assert!(parsed["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    /// F-5: the machine envelope is the reference-chat batch's contract only. Every other
+    /// route keeps the parent's bodyless 400, which is the shape the machine's own handlers
+    /// still answer for the same malformed query.
+    #[tokio::test]
+    async fn a_refused_query_outside_reference_chat_stays_a_bodyless_400() {
+        let state = test_state(vec![]);
+        let path = "fs/directories";
+        let request = Request::builder()
+            .uri(format!("/host/machine/api/v1/{path}?repoPath=/etc/passwd"))
+            .body(Body::empty())
+            .unwrap();
+        let result = host_http_handler(
+            State(state),
+            AxumPath(("machine".into(), path.into())),
+            None,
+            request,
+        )
+        .await;
+        let Err(status) = result else {
+            panic!("a non-reference-chat refusal must not carry the machine envelope");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

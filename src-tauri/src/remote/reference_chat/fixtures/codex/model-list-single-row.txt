@@ -1,0 +1,13 @@
+
+  >_ [OC] (v0.160.1)
+     ~/app
+  permissions: YOLO mode
+
+  Hello, you. Got an idea?
+
+  Select Model and Effort
+
+
+› 1. GPT-6.1-Sol (default)  Latest workhorse model for coding and everyday work.
+
+  enter select · esc back

@@ -1,0 +1,7 @@
+Which file should I open?
+
+╭──────────────────────────╮
+│ ❯ src/main.rs            │
+│   ui/src/App.tsx         │
+╰──────────────────────────╯
+  enter select · ↑/↓ move · esc cancel

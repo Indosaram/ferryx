@@ -85,14 +85,20 @@ describe("mobile remote entry", () => {
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
   });
 
-  it("desktop viewport still opens the terminal", async () => {
+  it("desktop viewport opens the chat first and the terminal on request", async () => {
     Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true, writable: true });
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(threadsState))));
 
     render(<RemoteApp />);
 
-    expect(await screen.findByTestId("remote-terminal")).toBeInTheDocument();
+    // Chat is the default surface at every width; the terminal is an explicit mode.
+    expect(await screen.findByTestId("mobile-chat-workspace")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(screen.queryByTestId("thread-row-tab-claude")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+    expect(await screen.findByTestId("remote-terminal")).toBeInTheDocument();
+    expect(screen.queryByTestId("mobile-chat-workspace")).not.toBeInTheDocument();
   });
 
   it("desktop viewport keeps the view switching affordances", async () => {
@@ -101,7 +107,7 @@ describe("mobile remote entry", () => {
 
     render(<RemoteApp />);
 
-    expect(await screen.findByTestId("remote-terminal")).toBeInTheDocument();
+    await screen.findByTestId("mobile-chat-workspace");
     expect(screen.getByTestId("remote-view-mode-chat")).toBeInTheDocument();
     expect(screen.getByTestId("remote-view-mode-terminal")).toBeInTheDocument();
   });

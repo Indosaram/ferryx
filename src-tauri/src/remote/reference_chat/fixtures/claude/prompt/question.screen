@@ -1,0 +1,16 @@
+
+☐ Dataset
+
+Which evaluation dataset should we use?
+
+❯ 1. LM-O
+     Occlusion benchmark.
+  2. YCB-V
+     Household objects.
+  3. T-LESS
+     Texture-less objects.
+  4. Type something.
+────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

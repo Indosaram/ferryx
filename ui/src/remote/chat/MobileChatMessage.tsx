@@ -12,9 +12,18 @@ import {
   AttachmentList,
   ChatAttachment,
   ChatWorkItem,
+  ReferenceAbandonedBranchDisclosure,
+  ReferencePartList,
+  ReferencePartRenderContext,
+  ReferenceTurnSkills,
   ThinkingBlock,
   ToolCallCard,
 } from "./MobileChatComponents";
+import type {
+  ReferenceAbandonedBranch,
+  ReferencePart,
+  ReferenceTurnSource,
+} from "./referenceTypes";
 
 export interface MobileChatMessageProps {
   id: string;
@@ -29,6 +38,17 @@ export interface MobileChatMessageProps {
   activityState?: ActivityState;
   durationLabel?: string;
   className?: string;
+  /**
+   * Herdr reference rich parts (plan task 5). When present they are the turn's body:
+   * `content` and `toolCalls` are the legacy path and are not drawn together with them.
+   */
+  referenceParts?: readonly ReferencePart[];
+  /** Turns a `/tree` walked away from, disclosed rather than dropped in silence. */
+  referenceAbandoned?: ReferenceAbandonedBranch | null;
+  /** `runtime` marks a turn the agent's runtime put in the user's seat; nobody typed it. */
+  referenceSource?: ReferenceTurnSource | null;
+  /** Where a part's bytes live when the page does not carry them. */
+  referenceContext?: ReferencePartRenderContext;
 }
 
 interface CodeBlockProps {
@@ -186,6 +206,10 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   approvalAction,
   activityState,
   durationLabel,
+  referenceParts,
+  referenceAbandoned,
+  referenceSource,
+  referenceContext,
   className,
 }) => {
   const isUser = role === "user";
@@ -194,7 +218,23 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
   const [copyFailed, setCopyFailed] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workExpanded, setWorkExpanded] = useState(false);
-  const hasProse = Boolean(content && content.trim().length > 0);
+  // A rich turn's prose lives in its `text` parts; the legacy path keeps it in `content`.
+  const richParts = referenceParts ?? [];
+  const hasRichParts = richParts.length > 0;
+  const richText = hasRichParts
+    ? richParts
+        .filter((part) => part.kind === "text")
+        .map((part) => part.text)
+        .join("\n\n")
+    : "";
+  const copyText = hasRichParts && content.trim().length === 0 ? richText : content;
+  const hasProse = Boolean(copyText && copyText.trim().length > 0);
+  // A skill chip is drawn by the turn's skill list, never inside the parts drawn in order: the
+  // reference filters `skill` out of the parts it renders (`ChatView.tsx:322`).
+  const visibleParts = richParts.filter((part) => part.kind !== "skill");
+  // A user turn's bubble already holds its prose; only its other parts are drawn below it.
+  const userExtraParts = visibleParts.filter((part) => part.kind !== "text");
+  const isRuntime = referenceSource === "runtime";
 
   useEffect(() => {
     return () => {
@@ -208,7 +248,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
     if (timerRef.current) {
       clearTimeout(timerRef.current);
     }
-    const ok = await copyTextToClipboard(content);
+    const ok = await copyTextToClipboard(copyText);
     setCopied(ok);
     if (!ok) setCopyFailed(true);
     timerRef.current = setTimeout(() => {
@@ -255,12 +295,21 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
           data-testid="user-message-bubble"
           className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
-          <p className="whitespace-pre-wrap">{content}</p>
+          <p className="whitespace-pre-wrap">{hasRichParts && content.trim().length === 0 ? richText : content}</p>
           {attachments.length > 0 && (
             <AttachmentList attachments={attachments} className="mt-1" />
           )}
+          {userExtraParts.length > 0 && (
+            <ReferencePartList
+              parts={userExtraParts}
+              context={referenceContext}
+              timestamp={timestamp}
+              className="mt-1"
+            />
+          )}
         </div>
         {metaRow}
+        <ReferenceTurnSkills parts={richParts} />
       </div>
     );
   }
@@ -272,6 +321,14 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         className
       )}
     >
+      {referenceAbandoned && (
+        <ReferenceAbandonedBranchDisclosure abandoned={referenceAbandoned} />
+      )}
+
+      <ReferenceTurnSkills parts={richParts} />
+
+      {isRuntime && <span className="sr-only">Runtime message</span>}
+
       {durationLabel && (
         <button
           type="button"
@@ -290,7 +347,8 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         </button>
       )}
 
-      {(!durationLabel || workExpanded) &&
+      {!hasRichParts &&
+        (!durationLabel || workExpanded) &&
         toolCalls &&
         toolCalls.length > 0 && (
           <WorkRowsContainer count={toolCalls.length}>
@@ -304,7 +362,15 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
           </WorkRowsContainer>
         )}
 
-      {hasProse && (
+      {hasRichParts ? (
+        <div data-testid="assistant-reference-body" className="w-full">
+          <ReferencePartList
+            parts={visibleParts}
+            context={referenceContext}
+            timestamp={timestamp}
+          />
+        </div>
+      ) : hasProse ? (
         <div
           data-testid="assistant-message-body"
           className="w-full text-chat-foreground leading-relaxed text-base break-words select-text"
@@ -372,7 +438,7 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
             <AttachmentList attachments={attachments} className="mt-2" />
           )}
         </div>
-      )}
+      ) : null}
 
       {approvalAction && (
         <div className="w-full mt-1.5">

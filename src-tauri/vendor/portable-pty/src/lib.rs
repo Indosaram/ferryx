@@ -44,6 +44,8 @@ use libc;
 #[cfg(feature = "serde_support")]
 use serde_derive::*;
 use std::io::Result as IoResult;
+use std::sync::Arc;
+use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::prelude::{AsRawHandle, RawHandle};
 
@@ -86,6 +88,54 @@ impl Default for PtySize {
     }
 }
 
+/// A handle that ends a reader's blocking read without the master that produced it.
+///
+/// Obtained from [MasterPty::interrupt_handle] while the master is still present. Contract for
+/// every implementation:
+/// * Idempotent, and safe to call before any read was issued or after the reader finished.
+/// * Must not close the writer, resize the pane, or terminate the child.
+/// * A read in flight must return once this is called. The call itself is not required to be
+///   synchronous with that return, but it must not leave a read that can block forever.
+/// * Scoped to the readers cloned from THIS master: cancelling one master must never end another
+///   master's read.
+pub trait ReaderInterrupt: Send + Sync {
+    /// Ask this master's readers to stop waiting. Safe to call from any thread.
+    ///
+    /// Caller contract, which the interruption cannot enforce on its own: once this returns, a read
+    /// on a reader cloned from this master reports [std::io::ErrorKind::Interrupted] instead of
+    /// blocking, and it keeps doing so for the life of that reader, because the request is sticky.
+    /// A caller must therefore treat that error as terminal for that reader rather than as a
+    /// retryable `EINTR`: a loop that retries on `Interrupted` without also stopping will spin at
+    /// full speed. (The session's reader loop checks its own stop flag before retrying, so it
+    /// terminates; this note exists so no other caller has to rediscover that.)
+    fn request(&self);
+
+    /// How many reads of this master are outstanding right now: reads the kernel reported pending
+    /// and has not reaped yet.
+    ///
+    /// A gauge, not a running total - it falls again when the operation is reaped - and it counts the
+    /// state the kernel owns rather than the instant a read was issued, so it can be read as "the
+    /// kernel owns a read right now". It exists as a test seam for exactly that, in place of inferring
+    /// a read from elapsed time. Implementations without a cancellable reader report 0.
+    fn outstanding_read_count(&self) -> u64 {
+        0
+    }
+
+    /// Block, for at most `timeout`, until a read of this master is outstanding; returns whether one
+    /// is.
+    ///
+    /// The subscription that goes with [ReaderInterrupt::outstanding_read_count]: a caller arms this
+    /// instead of polling the gauge. It waits on the state itself rather than on a notification, so it
+    /// cannot miss a rise that happened before it was called, and it never spins.
+    ///
+    /// It blocks, so it must be called from a thread that may block - never from a reactor.
+    /// Implementations without a cancellable reader report `false`.
+    fn await_outstanding_read(&self, timeout: Duration) -> bool {
+        let _ = timeout;
+        false
+    }
+}
+
 /// Represents the master/control end of the pty
 pub trait MasterPty: Downcast + Send {
     /// Inform the kernel and thus the child process that the window resized.
@@ -106,6 +156,25 @@ pub trait MasterPty: Downcast + Send {
     #[cfg(windows)]
     fn try_clone_input_handle(&self) -> Result<std::os::windows::io::OwnedHandle, Error> {
         anyhow::bail!("nonblocking input handle unavailable")
+    }
+
+    /// Private Ferryx extension: a handle that ends a read already in flight on a reader obtained
+    /// from [MasterPty::try_clone_reader], so a teardown can join that reader instead of leaking
+    /// the thread that issued the read.
+    ///
+    /// The handle is returned instead of the interruption being performed here because it has to
+    /// outlive this master: a session gives the master up (after a failed handover export the
+    /// master is already gone) and must still be able to end its reader when it finally closes.
+    /// Retaining the handle beside the master is what keeps that close possible.
+    ///
+    /// It is shared rather than owned so a caller can take it out of its slot and use it without
+    /// holding the lock that guards the slot - a blocking wait on the handle would otherwise be able
+    /// to deadlock against the very teardown it is waiting for.
+    ///
+    /// `None` (the default) means this platform's reader needs no handle: it terminates on its own
+    /// when the stream ends, which is how unix behaves today.
+    fn interrupt_handle(&self) -> Option<Arc<dyn ReaderInterrupt>> {
+        None
     }
 
     /// If applicable to the type of the tty, return the local process id

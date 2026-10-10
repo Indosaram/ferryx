@@ -1,0 +1,12 @@
+   Ask user · 30m
+  → 표시 위치    Submit
+   음성 사용량과 추정 비용을 어디에 보여줄까요?
+  → 1. 설정 > 음성 입력 (추천)
+  2. 설정 + 사이드바 미터
+  Type your own answer...
+  Submit (0/1 answered) — Enter advances
+  ↑↓ move  1-9 select  space select  enter next  tab next question  c comment  esc cancel
+ ────────────────
+ ~/dev/ferryx (main)
+ omo 5.1.19 ·  · 12.3k tokens
+$ grep -n 'Ask user' src/*.ts

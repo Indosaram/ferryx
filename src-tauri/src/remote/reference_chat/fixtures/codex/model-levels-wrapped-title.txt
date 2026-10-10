@@ -1,0 +1,10 @@
+  Select Reasoning Level for
+  GPT-5.6-Terra
+
+
+  1. Low
+› 2. Medium (default) (current)
+  3. High
+
+  enter default · s session ·
+  esc back

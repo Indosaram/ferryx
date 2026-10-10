@@ -1,4 +1,71 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* never print the raw value */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      lines.push(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { storeAccountSessionToken, clearStoredAccountSessionToken } from "./accountSession";
@@ -6,6 +73,19 @@ import * as attachTunnelModule from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
 import { remoteHostStore } from "../state/remoteHostStore";
 import { setRemoteAuthToken } from "../lib/remoteClient";
+
+/**
+ * Chat is the default surface at every width now (plan task 12), so a test that asserts the
+ * terminal asks for it explicitly through the mode switch the header always offers.
+ */
+async function switchToTerminalMode(): Promise<void> {
+  const toggle = screen.queryByTestId("remote-view-mode-terminal");
+  if (!toggle) return;
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+}
+
 
 class MockTestWebSocket {
   static readonly CONNECTING = 0;
@@ -349,6 +429,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(topContextTrigger).toBeDefined();
     expect(topContextTrigger.getAttribute("aria-expanded")).toBe("false");
 
+    // The body is the preselection placeholder here, and the header's status cluster - which owns
+    // the mode switch - is not rendered yet, so no terminal can be mounted whichever mode the app
+    // will end up in.
     expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
     expect(screen.queryByTestId("remote-terminal")).toBeNull();
     expect(screen.queryByTestId("account-worktrees-container")).toBeNull();
@@ -359,7 +442,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
         path.includes("/api/v1/workspace/select"),
       ),
     ).toBe(false);
-
+    // The header's status cluster, which owns the mode switch, is only rendered once a worktree
+    // is chosen (account preselection renders the collapsed picker alone). Asking for the
+    // terminal before that is a silent no-op - the switch does not exist yet - so the request is
+    // made below, after the selection has landed.
     act(() => {
       fireEvent.click(topContextTrigger);
     });
@@ -404,9 +490,26 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       expect.objectContaining({ machineId: "mach-phone-1" }),
     );
 
+    // The selection has landed, so the switch exists now: wait for it rather than assume it, then
+    // ask for the terminal. A switch that never appears fails here instead of silently leaving the
+    // chat surface up and reporting only a missing grid.
     await waitFor(() => {
-      expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
+      expect(screen.getByTestId("remote-view-mode-terminal")).toBeDefined();
     });
+    await switchToTerminalMode();
+
+    try {
+      await waitFor(() => {
+        expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
+      });
+    } catch (error) {
+      emitFailureTrace(
+        "accountSession: grid after worktree selection",
+        globalThis.fetch,
+        mockTunnelTransport.fetchLike,
+      );
+      throw error;
+    }
   });
 
   it("does not prematurely mount old terminal when chosen target is wsB while host state remains wsA", async () => {
@@ -481,6 +584,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     vi.stubGlobal("WebSocket", MockTestWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -505,6 +609,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
     expect(screen.getByLabelText("Current desktop context").textContent).toBe("wsA / main");
     expect(MockTestWebSocket.instances.some((s) => s.url.includes("sess-new-wsB"))).toBe(false);
+
+    await switchToTerminalMode();
 
     currentHostWorkspace = "wsB";
     currentHostSlug = "feature-b";
@@ -605,6 +711,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     vi.stubGlobal("WebSocket", MockTestWebSocket);
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
     act(() => {
@@ -644,6 +751,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     await act(async () => {
       heldStateRead.resolve();
     });
+
+    await switchToTerminalMode();
 
     await waitFor(() => {
       expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
@@ -876,6 +985,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -1124,6 +1234,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
+    await switchToTerminalMode();
 
     const topContextTrigger = await waitFor(() =>
       screen.getByRole("button", { name: /Change workspace context/i })
@@ -1428,7 +1539,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     );
     expect(calledSelect).toBe(false);
 
-    const chatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-chat"));
+    const chatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-terminal"));
     act(() => {
       fireEvent.click(chatBtn);
     });
@@ -1479,7 +1590,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       fireEvent.click(remountWorktreeBtn);
     });
 
-    const remountChatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-chat"));
+    const remountChatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-terminal"));
     act(() => {
       fireEvent.click(remountChatBtn);
     });
@@ -1859,7 +1970,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       fireEvent.click(worktreeOptionBtn);
     });
 
-    const chatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-chat"));
+    const chatBtn = await waitFor(() => screen.getByTestId("remote-view-mode-terminal"));
     act(() => {
       fireEvent.click(chatBtn);
     });
@@ -1871,16 +1982,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       );
     });
 
-    const composerTextarea = await waitFor(() =>
-      screen.getByRole("textbox", { name: "Ask the repo agent" }),
-    );
-
-    fireEvent.change(composerTextarea, { target: { value: "hello agent" } });
-
-    const sendBtn = screen.getByRole("button", { name: /Send message/i });
-    act(() => {
-      fireEvent.click(sendBtn);
-    });
+    const terminalInput = await screen.findByRole("textbox", { name: "Remote terminal input" });
+    fireEvent.input(terminalInput, { target: { value: "hello agent\n" } });
 
     expect(ArrayBuffer.isView(sentData)).toBe(true);
     expect(Object.prototype.toString.call(sentData)).toBe("[object Uint8Array]");

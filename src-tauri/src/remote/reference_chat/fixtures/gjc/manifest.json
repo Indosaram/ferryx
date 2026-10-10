@@ -1,0 +1,228 @@
+{
+  "family": "gjc",
+  "reader": "gjc-transcript",
+  "record_shape": "omp session shape (gjc writes omp's session shape; the reference reads it with parseOmpTranscript)",
+  "reference": {
+    "upstream": "devswha/herdr-web-ui",
+    "pin": "54e5a1f67090cb09552d182e7e30dd0ecc314918",
+    "sources": [
+      {
+        "path": "server/conversation.ts",
+        "sha256": "c02267560aafdaf4a07a8c440f2c2d34d7379f0b4711acc934131145e7b5159d",
+        "note": "parseTurns routes gjc-transcript to parseOmpTranscript(text, Infinity); transcript resolution (gjc-runtime.ts) is task 3's lane"
+      },
+      {
+        "path": "server/transcript-records.ts",
+        "sha256": "e6a50c9b1e6523ed25e027d0c26493c5c5f4f573bfd22a04e03528e9e943099f",
+        "note": "the shared omp/omo/gjc record reader this family ports"
+      },
+      {
+        "path": "server/tool-output.ts",
+        "sha256": "b3d15563d25244fc69246648570f2fbff2cd3ae2f0532e22b21c2cc6eb76685b",
+        "note": "TOOL_OUTPUT_CHARS 4000 / WHOLE_OUTPUT_CHARS 16000 cut and output_ref/output_size"
+      },
+      {
+        "path": "server/gjc-runtime.ts",
+        "sha256": "29100a584b02129d12db61bcef16871a565654527387907f8767bc632492d01f",
+        "note": "resolution only: process identity, terminal breadcrumb, screen title; not read by this parser"
+      },
+      {
+        "path": "shared/protocol.ts",
+        "sha256": "418c140e1559ed14f19fcee641a69b99e29d77cc2011db347f66ef5b241059ea",
+        "note": "ConversationTurn/ConversationPart shapes"
+      },
+      {
+        "path": "docs/chat/herdr-port-contract.md",
+        "note": "Ferryx frozen contract: section 6 lane signatures, section 4 history types"
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "file": "normal.jsonl",
+      "criterion": "C1",
+      "exercises": [
+        "title",
+        "session",
+        "header_patch",
+        "message-user",
+        "message-assistant",
+        "content-text",
+        "content-thinking",
+        "content-tool-call",
+        "content-tool-result",
+        "message-tool-result",
+        "content-image",
+        "stop-reason-stop"
+      ]
+    },
+    {
+      "file": "malformed.jsonl",
+      "criterion": "C2",
+      "exercises": [
+        "malformed-line",
+        "stop-reason-error",
+        "message-assistant",
+        "content-thinking"
+      ]
+    },
+    {
+      "file": "reset.jsonl",
+      "criterion": "C3",
+      "exercises": [
+        "custom-context-clear",
+        "compaction",
+        "message-user",
+        "message-assistant"
+      ]
+    },
+    {
+      "file": "boundary.jsonl",
+      "criterion": "C4",
+      "exercises": [
+        "custom-message-notice",
+        "custom-message-omo-wake",
+        "message-hidden",
+        "custom-other",
+        "skill-invocation",
+        "content-tool-call"
+      ]
+    }
+  ],
+  "boundaries": [
+    "no task_result part: OmO's omo-senpi:wake belongs to the omo family (task 19)",
+    "no tool images and no user image parts: gjc's page carries no image ref",
+    "no abandoned-branch disclosure: gjc keeps no entry tree (pi does)",
+    "no prompt detector: the reference names none for gjc (contract section 1)",
+    "no turn cap in the family reader: the page bounds the turns, as the reference passes Infinity",
+    "no session resolution: which file belongs to the pane is task 3's resolver, never a cwd guess here"
+  ],
+  "variants": [
+    {
+      "name": "title",
+      "record": "{\"type\":\"title\",\"v\":1,\"title\":\"…\"}",
+      "effect": "session title header: chrome, not a turn",
+      "handled": false
+    },
+    {
+      "name": "session",
+      "record": "{\"type\":\"session\",\"version\":3,\"id\":\"…\",\"cwd\":\"…\"}",
+      "effect": "session header: chrome; the cwd and the session identity belong to the resolver (task 3), not to this reader",
+      "handled": false
+    },
+    {
+      "name": "header_patch",
+      "record": "{\"type\":\"header_patch\",\"patch\":{\"title\":\"…\",\"titleSource\":\"auto\"}}",
+      "effect": "a title gjc patched in later: chrome",
+      "handled": false
+    },
+    {
+      "name": "message-user",
+      "record": "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"…\"}]}}",
+      "effect": "user turn: a string content and its text blocks are read; a record whose user parts hold no text (an image only) is skipped",
+      "handled": true
+    },
+    {
+      "name": "message-assistant",
+      "record": "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[…],\"stopReason\":\"…\"}}",
+      "effect": "assistant turn: adjacent records merge while the one before them did not stop for good",
+      "handled": true
+    },
+    {
+      "name": "content-text",
+      "record": "{\"type\":\"text\",\"text\":\"…\"}",
+      "effect": "text part, in the order its turn holds it",
+      "handled": true
+    },
+    {
+      "name": "content-thinking",
+      "record": "{\"type\":\"thinking\",\"text\":\"…\"}",
+      "effect": "thinking part; the alternate `thinking` field is read too",
+      "handled": true
+    },
+    {
+      "name": "content-tool-call",
+      "record": "{\"type\":\"toolCall\",\"id\":\"…\",\"name\":\"bash\",\"arguments\":{…},\"intent\":\"…\"}",
+      "effect": "tool part: the summary is the call's intent, else the first interesting argument; the input is the pretty-printed arguments",
+      "handled": true
+    },
+    {
+      "name": "content-tool-result",
+      "record": "{\"type\":\"toolResult\",\"toolCallId\":\"…\",\"content\":[…]}",
+      "effect": "a result placed beside its call in the same record: folded into the tool part it answers",
+      "handled": true
+    },
+    {
+      "name": "message-tool-result",
+      "record": "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"…\",\"content\":[…],\"isError\":false}}",
+      "effect": "the result folded into the tool part it answers by toolCallId; isError marks that call failed",
+      "handled": true
+    },
+    {
+      "name": "content-image",
+      "record": "{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"…\"}",
+      "effect": "not carried: a tool image ref is one nothing can answer for gjc, and a user image-only record is skipped",
+      "handled": false
+    },
+    {
+      "name": "custom-message-notice",
+      "record": "{\"type\":\"custom_message\",\"customType\":\"async-result\",\"display\":true,\"content\":\"<system-notice>…</system-notice>\"}",
+      "effect": "gjc's background-job result: a user-seat notice turn with the envelope stripped and the customType kept as its source",
+      "handled": true
+    },
+    {
+      "name": "custom-context-clear",
+      "record": "{\"type\":\"custom\",\"customType\":\"context_clear\"}",
+      "effect": "reset: every turn recorded before it is dropped",
+      "handled": true
+    },
+    {
+      "name": "compaction",
+      "record": "{\"type\":\"compaction\",\"summary\":\"…\"}",
+      "effect": "compact part in the user seat: where the conversation was folded",
+      "handled": true
+    },
+    {
+      "name": "custom-other",
+      "record": "{\"type\":\"custom\",\"customType\":\"workflow-intent-diff\",\"data\":{…}}",
+      "effect": "an unknown custom record is not a turn",
+      "handled": false
+    },
+    {
+      "name": "custom-message-omo-wake",
+      "record": "{\"type\":\"custom_message\",\"customType\":\"omo-senpi:wake\",\"display\":false,\"details\":[…]}",
+      "effect": "OmO's background-task completion: the omo family (task 19) renders it as a taskResult card; this reader never invents one",
+      "handled": false
+    },
+    {
+      "name": "stop-reason-stop",
+      "record": "{\"message\":{…,\"stopReason\":\"stop\"}}",
+      "effect": "the turn stopped for good: the next assistant record opens a turn of its own",
+      "handled": true
+    },
+    {
+      "name": "stop-reason-error",
+      "record": "{\"message\":{…,\"stopReason\":\"error\",\"errorMessage\":\"…\"}}",
+      "effect": "a failed request becomes an `Error: …` text part instead of an empty answer",
+      "handled": true
+    },
+    {
+      "name": "message-hidden",
+      "record": "{\"type\":\"message\",\"display\":false,…}",
+      "effect": "a record the runtime hid (display:false) is not a turn",
+      "handled": false
+    },
+    {
+      "name": "malformed-line",
+      "record": "{MALFORMED JSON LINE",
+      "effect": "an unreadable line is skipped; the rest of the file still reads, including a torn tail while gjc appends",
+      "handled": false
+    },
+    {
+      "name": "skill-invocation",
+      "record": "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"The user explicitly invoked the \\\"…\\\" skill. …\"}]}}",
+      "effect": "skill invocation: the request under the envelope is the user's text and each skill the runtime loaded is its own skill part, in the order it named them (transcript-records.ts:259)",
+      "handled": true
+    }
+  ]
+}

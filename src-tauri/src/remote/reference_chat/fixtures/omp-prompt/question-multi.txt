@@ -1,0 +1,9 @@
+Pick the checks to run
+
+╭────────────────────────────────────────╮
+│   ☑ Lint                               │
+│ ❯ ☐ Unit tests                         │
+│   ☑ Typecheck                          │
+│   Other (type your own)                │
+╰────────────────────────────────────────╯
+  space/enter toggle · ↑/↓ move · esc cancel

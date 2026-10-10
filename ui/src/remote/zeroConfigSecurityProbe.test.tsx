@@ -1,11 +1,107 @@
 // Permanent security regressions derived from the 2026-09-10 final audit probes.
-import { act, cleanup, render } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, onTestFailed, vi } from "vitest";
+
+/**
+ * Failure-only diagnostics for the post-merge run: the fetch order (method + PATHNAME only) and the
+ * terminal-related selector state at the point of failure. Pathnames only - query strings can carry
+ * tickets and tokens - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls
+ * per mock. Registered through onTestFailed, so a passing test prints nothing and the original
+ * assertion error is untouched.
+ */
+/**
+ * Writes a diagnostic line straight to the process stdout. The JSON reporter does not implement
+ * onUserConsoleLog, so a console.log never reaches a --reporter=json receipt; process.stdout does.
+ */
+function emitLine(line: string): void {
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+}
+
+/**
+ * The report a failure should carry: the fetch order (method + PATHNAME only) and the presence of
+ * the selectors these suites look for. Pathnames only - query strings can carry tickets and tokens
+ * - and no header, body or DOM dump is ever read or printed. Bounded to 40 calls per mock.
+ */
+function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
+  const lines: string[] = [];
+  try {
+    mocks.forEach((mock, mockIndex) => {
+      const calls = (mock as { mock?: { calls?: unknown[][] } })?.mock?.calls ?? [];
+      const shown = calls.slice(0, 40).map((args, index) => {
+        const raw = String(args[0] instanceof Request ? args[0].url : args[0]);
+        let pathname = "(unparseable-url)";
+        try {
+          pathname = new URL(raw, "http://localhost").pathname;
+        } catch {
+          /* never print the raw value */
+        }
+        const init = args[1] as RequestInit | undefined;
+        return `${index + 1} ${(init?.method ?? "GET").toUpperCase()} ${pathname}`;
+      });
+      const more = calls.length > 40 ? ` (+${calls.length - 40} more)` : "";
+      lines.push(
+        `[ui-diag] ${label} | mock${mockIndex + 1} order (${calls.length}): ${shown.join(" | ") || "(none)"}${more}`,
+      );
+    });
+    const selectors = ["remote-view-mode-terminal", "remote-terminal", "remote-terminal-grid", "mobile-chat-workspace"]
+      .map((id) => `${id}=${document.querySelector(`[data-testid="${id}"]`) ? "present" : "absent"}`)
+      .join(", ");
+    const trigger = document.querySelector('button[aria-label="Change workspace context"]') ? "present" : "absent";
+    lines.push(`[ui-diag] ${label} | selectors: ${selectors}, context-trigger=${trigger}`);
+  } catch {
+    /* a diagnostic must never change the outcome of the test it reports on */
+  }
+  return lines;
+}
+
+/**
+ * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
+ * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
+ * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
+ * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
+ */
+function emitFailureTrace(label: string, ...mocks: unknown[]): void {
+  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
+}
+
+/** Freeze the report now and emit it only if the test fails - for boundaries that normally pass. */
+function captureOnFailure(label: string, ...mocks: unknown[]): void {
+  const frozen = buildFailureTrace(label, ...mocks);
+  onTestFailed(() => {
+    for (const line of frozen) emitLine(line);
+  });
+}
+
 import { remoteHostStore, remoteHostKey } from "../state/remoteHostStore";
 import { RemoteApp } from "./RemoteApp";
 
+/** A deadline that fails loudly and names what never arrived; never a synchronization delay. */
+async function bounded<T>(signal: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      signal,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${what}`)), 2000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 class Socket {
   static instances: Socket[] = [];
+  /**
+   * Waiters for the next terminal socket. The terminal is loaded lazily and the socket is opened
+   * asynchronously, so a caller must subscribe BEFORE the action that opens it and await the event,
+   * instead of reading Socket.instances immediately afterwards.
+   */
+  static waiters: Array<(socket: Socket) => void> = [];
   static readonly OPEN = 1;
   readyState = 0;
   binaryType = "arraybuffer";
@@ -15,7 +111,19 @@ class Socket {
   onmessage: ((event: MessageEvent) => void) | null = null;
   close = vi.fn();
   send = vi.fn();
-  constructor(readonly url: string) { Socket.instances.push(this); }
+  constructor(readonly url: string) {
+    Socket.instances.push(this);
+    if (url.includes("/terminal/")) {
+      const waiters = Socket.waiters;
+      Socket.waiters = [];
+      for (const resolve of waiters) resolve(this);
+    }
+  }
+
+  /** Resolves with the next terminal socket, whenever it opens. Subscribe before triggering. */
+  static whenTerminalOpened(): Promise<Socket> {
+    return new Promise<Socket>((resolve) => { Socket.waiters.push(resolve); });
+  }
 }
 
 function fetcher() {
@@ -51,6 +159,14 @@ async function mount(fetch: ReturnType<typeof fetcher>) {
 }
 
 beforeEach(() => {
+  // This file owns its inventory before it reads it. `remoteHostStore` is a module singleton
+  // whose `hosts` map hydrates from the persisted inventory at module load, and that inventory is
+  // shared with every other file in the run: `Sidebar.remote.test.tsx` writes its own `host-alpha`
+  // record through `setState` (which persists), and this file's first test then hydrates it. An
+  // exact host count is only meaningful against a store this file seeded, so start from the same
+  // empty state the teardown below already enforces after every test.
+  remoteHostStore.reset();
+  localStorage.clear();
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const cell = this.hasAttribute("data-terminal-cell-measure");
     return { x: 0, y: 0, top: 0, left: 0, right: cell ? 10 : 800, bottom: cell ? 20 : 400,
@@ -63,6 +179,7 @@ afterEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
   Socket.instances = [];
+  Socket.waiters = [];
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -107,6 +224,16 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
   paired();
   const fetch = fetcher();
   await mount(fetch);
+  // Chat is the default surface: the real terminal socket is only opened in terminal mode. The
+  // open is asynchronous, so subscribe to the exact event BEFORE triggering the switch and await
+  // it - reading Socket.instances straight after the click races the lazy terminal chunk.
+  const socketOpened = Socket.whenTerminalOpened();
+  await act(async () => {});
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
+  });
+  await bounded(socketOpened, "the terminal socket to open");
+  captureOnFailure("zero-config terminal socket URL", fetch);
   const socket = Socket.instances.find(({ url }) => url.includes("/terminal/"));
   expect(socket).toBeDefined();
   const url = new URL(socket!.url);

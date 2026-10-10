@@ -1,6 +1,25 @@
 import { remoteApiUrl } from "./remoteClient";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { ChatWorkItem, ToolCallCardProps, ToolStatus } from "./chat/MobileChatComponents";
+import {
+  referenceChatRoute,
+  referenceCursorMatches,
+  referenceHistoryDisclosure,
+  referenceHistoryIsNative,
+  referenceTargetKey,
+  sameReferenceTarget,
+  type ReferenceHistoryAvailability,
+  type ReferenceHistoryCursor,
+  type ReferenceHistoryPage,
+  type ReferenceHistorySource,
+  type ReferencePart,
+  type ReferencePartKind,
+  type ReferenceTargetRef,
+  type ReferenceTextPhase,
+  type ReferenceTurn,
+  type ReferenceTurnRole,
+  type ReferenceTurnSource,
+} from "./chat/referenceTypes";
 import type { TunnelResponse, TunnelTransport } from "./attachTunnel";
 
 /** A tool call made by an assistant record; its result arrives as a later `toolResult` record. */
@@ -622,4 +641,571 @@ export function capRetainedMessages(
     messages: messages.slice(messages.length - max),
     truncated: true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Reference native history (plan task 4)
+// ---------------------------------------------------------------------------
+//
+// The legacy `/api/v1/agent-history` path above keeps its existing callers and wire shape
+// untouched. Everything below is the explicit reference-chat path
+// (`docs/chat/herdr-port-contract.md` sections 2 and 4): it carries the frozen rich page —
+// source, availability, rich parts, cursor and generation — and fences every response
+// against the pane the caller actually asked for.
+//
+// Two outcomes must never be conflated:
+//   * an *unavailable* source (`scrollback`, `notStarted`) is a legitimate page the UI
+//     discloses; it is not an error and never a reason to read another transcript;
+//   * an auth, identity-mismatch or ambiguous-owner failure is a typed error.
+
+/** Default page size for a reference history read, matching the legacy client. */
+export const REFERENCE_HISTORY_PAGE_LIMIT = 200;
+
+/**
+ * A reference history read failed. `code` is the wire `ScopeErrorCode` where the server
+ * answered with one, or a transport/parse code from this module.
+ */
+export class ReferenceHistoryFetchError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ReferenceHistoryFetchError";
+    this.code = code;
+  }
+}
+
+/**
+ * Codes that mean *you may not read this transcript*. They are errors, never a fallback: an
+ * unavailable source arrives as a page with a disclosure instead.
+ */
+const REFERENCE_HISTORY_IDENTITY_ERRORS: readonly string[] = [
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "NOT_FOUND",
+  "TARGET_EXPIRED",
+  "REQUEST_CONFLICT",
+  "INVENTORY_INCOMPLETE",
+];
+
+/** Is this failure an auth / identity / ambiguity refusal rather than an unavailable source? */
+export function referenceHistoryErrorIsIdentity(code: string): boolean {
+  return REFERENCE_HISTORY_IDENTITY_ERRORS.includes(code);
+}
+
+/**
+ * What the caller asked for: the session, the pane identity, and the generation the answer
+ * must carry. A response failing this fence is discarded, never painted.
+ */
+export interface ReferenceHistoryFence {
+  readonly sessionId: string;
+  readonly target: ReferenceTargetRef;
+  readonly generation: string;
+}
+
+export function referenceHistoryFence(
+  sessionId: string,
+  target: ReferenceTargetRef,
+  generation: string,
+): ReferenceHistoryFence {
+  return { sessionId, target, generation };
+}
+
+/** A stable string form of the fence, for logs and request bookkeeping. */
+export function referenceHistoryFenceKey(fence: ReferenceHistoryFence): string {
+  return `${fence.sessionId}#${referenceTargetKey(fence.target)}#${fence.generation}`;
+}
+
+/**
+ * Is the response still the answer to the request? Session, pane identity (host, owner,
+ * epoch, backend session) and generation must all still match.
+ */
+export function isReferenceHistoryCurrent(
+  expected: ReferenceHistoryFence,
+  current: ReferenceHistoryFence,
+): boolean {
+  if (expected.sessionId !== current.sessionId) return false;
+  if (expected.generation !== current.generation) return false;
+  return sameReferenceTarget(expected.target, current.target);
+}
+
+export type ReferenceHistoryOutcome =
+  | { readonly kind: "current"; readonly page: ReferenceHistoryPage }
+  | { readonly kind: "stale" };
+
+/** Fence a completed read against the request: a late foreign generation is dropped. */
+export function fenceReferenceHistory(
+  expected: ReferenceHistoryFence,
+  response: { readonly page: ReferenceHistoryPage; readonly fence: ReferenceHistoryFence },
+): ReferenceHistoryOutcome {
+  return isReferenceHistoryCurrent(expected, response.fence)
+    ? { kind: "current", page: response.page }
+    : { kind: "stale" };
+}
+
+/**
+ * A cursor is only usable while it still names the live stream. A cursor minted against
+ * another stream is dropped here rather than re-anchored by the client.
+ */
+export function referenceHistoryCursorForStream(
+  cursor: ReferenceHistoryCursor,
+  liveStreamId: string,
+): ReferenceHistoryCursor | null {
+  return referenceCursorMatches(cursor, liveStreamId) ? cursor : null;
+}
+
+/** How the UI treats a page: paint it as native, or paint it with a disclosure. */
+export type ReferenceHistoryDisposition = "render" | "disclose";
+
+export function referenceHistoryDisposition(
+  page: ReferenceHistoryPage,
+): ReferenceHistoryDisposition {
+  return referenceHistoryIsNative(page) ? "render" : "disclose";
+}
+
+/** The disclosure text for a non-native page; `null` when nothing needs disclosing. */
+export function referenceHistoryNotice(page: ReferenceHistoryPage): string | null {
+  return referenceHistoryDisclosure(page);
+}
+
+export interface ReferenceHistoryQueryArgs {
+  readonly target: ReferenceTargetRef;
+  readonly limit?: number;
+  readonly cursor?: ReferenceHistoryCursor | null;
+}
+
+/**
+ * The query string binding a read to its target. `epoch` and `providerSessionId` travel with
+ * the request; the provider session is sent only where a reader identified one.
+ */
+export function referenceHistoryQuery(args: ReferenceHistoryQueryArgs): string {
+  const { hostId, ownerId, epoch, backendSessionId } = args.target.target;
+  const params = new URLSearchParams();
+  params.set("hostId", hostId);
+  params.set("ownerId", ownerId);
+  params.set("epoch", epoch);
+  params.set("backendSessionId", backendSessionId);
+  const providerSessionId = args.target.providerSessionId;
+  if (typeof providerSessionId === "string" && providerSessionId.trim().length > 0) {
+    params.set("providerSessionId", providerSessionId);
+  }
+  params.set("limit", String(args.limit ?? REFERENCE_HISTORY_PAGE_LIMIT));
+  if (args.cursor) {
+    params.set("cursor", String(args.cursor.offset));
+    params.set("cursorStream", args.cursor.streamId);
+  }
+  return params.toString();
+}
+
+function malformed(detail: string): never {
+  throw new ReferenceHistoryFetchError("MALFORMED_RESPONSE", detail);
+}
+
+function requireRecord(value: unknown, detail: string): Record<string, unknown> {
+  if (!isRecord(value)) malformed(`${detail} is not an object`);
+  return value;
+}
+
+function requireString(entry: Record<string, unknown>, key: string, detail: string): string {
+  const value = entry[key];
+  if (typeof value !== "string") malformed(`${detail}.${key} is not a string`);
+  return value;
+}
+
+function requireNumber(entry: Record<string, unknown>, key: string, detail: string): number {
+  const value = entry[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) malformed(`${detail}.${key} is not a number`);
+  return value;
+}
+
+function requireBoolean(entry: Record<string, unknown>, key: string, detail: string): boolean {
+  const value = entry[key];
+  if (typeof value !== "boolean") malformed(`${detail}.${key} is not a boolean`);
+  return value;
+}
+
+function requireEnum<T extends string>(
+  entry: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+  detail: string,
+): T {
+  const value = entry[key];
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    malformed(`${detail}.${key} is not one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+function optionalString(
+  entry: Record<string, unknown>,
+  key: string,
+  detail: string,
+): string | null | undefined {
+  const value = entry[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") malformed(`${detail}.${key} is not a string or null`);
+  return value;
+}
+
+function optionalNumber(
+  entry: Record<string, unknown>,
+  key: string,
+  detail: string,
+): number | null | undefined {
+  const value = entry[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    malformed(`${detail}.${key} is not a number or null`);
+  }
+  return value;
+}
+
+function optionalBoolean(
+  entry: Record<string, unknown>,
+  key: string,
+  detail: string,
+): boolean | null | undefined {
+  const value = entry[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "boolean") malformed(`${detail}.${key} is not a boolean or null`);
+  return value;
+}
+
+function optionalEnum<T extends string>(
+  entry: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+  detail: string,
+): T | null | undefined {
+  const value = entry[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    malformed(`${detail}.${key} is not one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+const REFERENCE_HISTORY_SOURCES: readonly ReferenceHistorySource[] = [
+  "claude-transcript",
+  "codex-transcript",
+  "omp-transcript",
+  "omo-transcript",
+  "gjc-transcript",
+  "pi-transcript",
+  "scrollback",
+];
+
+const REFERENCE_HISTORY_AVAILABILITIES: readonly ReferenceHistoryAvailability[] = [
+  "native",
+  "scrollback",
+  "notStarted",
+];
+
+const REFERENCE_TURN_ROLES: readonly ReferenceTurnRole[] = ["user", "assistant"];
+const REFERENCE_TURN_SOURCES: readonly ReferenceTurnSource[] = ["typed", "runtime"];
+const REFERENCE_PART_KINDS: readonly ReferencePartKind[] = [
+  "text",
+  "thinking",
+  "skill",
+  "tool",
+  "image",
+  "compact",
+  "notice",
+  "taskResult",
+];
+const REFERENCE_TEXT_PHASES: readonly ReferenceTextPhase[] = ["commentary", "finalAnswer"];
+const REFERENCE_SKILL_EVIDENCES = ["invocation", "instructions"] as const;
+const REFERENCE_SKILL_STATUSES = ["requested", "loaded", "failed"] as const;
+const REFERENCE_TASK_STATUSES = ["completed", "failed", "cancelled"] as const;
+
+function toReferenceImageRef(raw: unknown, detail: string): { mediaType: string; ref: string } {
+  const entry = requireRecord(raw, detail);
+  return {
+    mediaType: requireString(entry, "mediaType", detail),
+    ref: requireString(entry, "ref", detail),
+  };
+}
+
+function toReferenceSkillActivity(raw: unknown, detail: string) {
+  const entry = requireRecord(raw, detail);
+  const path = optionalString(entry, "path", detail);
+  return {
+    name: requireString(entry, "name", detail),
+    evidence: requireEnum(entry, "evidence", REFERENCE_SKILL_EVIDENCES, detail),
+    status: requireEnum(entry, "status", REFERENCE_SKILL_STATUSES, detail),
+    ...(path !== undefined ? { path } : {}),
+  };
+}
+
+function toReferenceTaskResult(raw: unknown, detail: string) {
+  const entry = requireRecord(raw, detail);
+  const agent = optionalString(entry, "agent", detail);
+  const model = optionalString(entry, "model", detail);
+  const durationMs = optionalNumber(entry, "durationMs", detail);
+  const turns = optionalNumber(entry, "turns", detail);
+  const toolCalls = optionalNumber(entry, "toolCalls", detail);
+  const tokens = optionalNumber(entry, "tokens", detail);
+  const resultCut = optionalBoolean(entry, "resultCut", detail);
+  return {
+    id: requireString(entry, "id", detail),
+    title: requireString(entry, "title", detail),
+    status: requireEnum(entry, "status", REFERENCE_TASK_STATUSES, detail),
+    result: requireString(entry, "result", detail),
+    ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(turns !== undefined ? { turns } : {}),
+    ...(toolCalls !== undefined ? { toolCalls } : {}),
+    ...(tokens !== undefined ? { tokens } : {}),
+    ...(resultCut !== undefined ? { resultCut } : {}),
+  };
+}
+
+function toReferencePart(raw: unknown, detail: string): ReferencePart {
+  const entry = requireRecord(raw, detail);
+  const kind = requireEnum(entry, "kind", REFERENCE_PART_KINDS, detail);
+  switch (kind) {
+    case "text": {
+      const phase = optionalEnum(entry, "phase", REFERENCE_TEXT_PHASES, detail);
+      return {
+        kind: "text",
+        text: requireString(entry, "text", detail),
+        ...(phase !== undefined ? { phase } : {}),
+      };
+    }
+    case "thinking":
+      return { kind: "thinking", text: requireString(entry, "text", detail) };
+    case "skill":
+      return {
+        kind: "skill",
+        skill: toReferenceSkillActivity(entry.skill, `${detail}.skill`),
+      };
+    case "tool": {
+      const error = optionalBoolean(entry, "error", detail);
+      const outputRef = optionalString(entry, "outputRef", detail);
+      const outputSize = optionalNumber(entry, "outputSize", detail);
+      const skill =
+        entry.skill === undefined || entry.skill === null
+          ? (entry.skill as null | undefined)
+          : toReferenceSkillActivity(entry.skill, `${detail}.skill`);
+      const images = Array.isArray(entry.images)
+        ? entry.images.map((image, index) =>
+            toReferenceImageRef(image, `${detail}.images[${index}]`),
+          )
+        : undefined;
+      return {
+        kind: "tool",
+        name: requireString(entry, "name", detail),
+        summary: requireString(entry, "summary", detail),
+        input: requireString(entry, "input", detail),
+        output: requireString(entry, "output", detail),
+        ...(error !== undefined ? { error } : {}),
+        ...(skill !== undefined ? { skill } : {}),
+        ...(outputRef !== undefined ? { outputRef } : {}),
+        ...(outputSize !== undefined ? { outputSize } : {}),
+        ...(images !== undefined ? { images } : {}),
+      };
+    }
+    case "image":
+      return {
+        kind: "image",
+        mediaType: requireString(entry, "mediaType", detail),
+        ref: requireString(entry, "ref", detail),
+      };
+    case "compact":
+      return { kind: "compact", text: requireString(entry, "text", detail) };
+    case "notice": {
+      const source = optionalString(entry, "source", detail);
+      return {
+        kind: "notice",
+        text: requireString(entry, "text", detail),
+        ...(source !== undefined ? { source } : {}),
+      };
+    }
+    case "taskResult": {
+      if (!Array.isArray(entry.tasks)) malformed(`${detail}.tasks is not an array`);
+      return {
+        kind: "taskResult",
+        tasks: entry.tasks.map((task, index) =>
+          toReferenceTaskResult(task, `${detail}.tasks[${index}]`),
+        ),
+      };
+    }
+  }
+}
+
+function toReferenceTurn(raw: unknown, detail: string): ReferenceTurn {
+  const entry = requireRecord(raw, detail);
+  const startedAt = optionalString(entry, "startedAt", detail);
+  const endedAt = optionalString(entry, "endedAt", detail);
+  const source = optionalEnum(entry, "source", REFERENCE_TURN_SOURCES, detail);
+  if (!Array.isArray(entry.parts)) malformed(`${detail}.parts is not an array`);
+  let abandoned: ReferenceTurn["abandoned"];
+  if (entry.abandoned === undefined || entry.abandoned === null) {
+    abandoned = entry.abandoned as null | undefined;
+  } else {
+    const branch = requireRecord(entry.abandoned, `${detail}.abandoned`);
+    const summary = optionalString(branch, "summary", `${detail}.abandoned`);
+    abandoned = {
+      count: requireNumber(branch, "count", `${detail}.abandoned`),
+      branches: requireNumber(branch, "branches", `${detail}.abandoned`),
+      ...(summary !== undefined ? { summary } : {}),
+    };
+  }
+  return {
+    role: requireEnum(entry, "role", REFERENCE_TURN_ROLES, detail),
+    parts: entry.parts.map((part, index) => toReferencePart(part, `${detail}.parts[${index}]`)),
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(endedAt !== undefined ? { endedAt } : {}),
+    ...(source !== undefined ? { source } : {}),
+    ...(abandoned !== undefined ? { abandoned } : {}),
+  };
+}
+
+/**
+ * Parse an untrusted reference history body into the frozen page DTO. Anything the contract
+ * does not allow is `MALFORMED_RESPONSE`; nothing is guessed or defaulted.
+ */
+export function parseReferenceHistoryPage(body: unknown): ReferenceHistoryPage {
+  const entry = requireRecord(body, "Reference history response body");
+  const source = requireEnum(entry, "source", REFERENCE_HISTORY_SOURCES, "Reference history response");
+  const availability = requireEnum(
+    entry,
+    "availability",
+    REFERENCE_HISTORY_AVAILABILITIES,
+    "Reference history response",
+  );
+  if (!Array.isArray(entry.turns)) malformed("Reference history response.turns is not an array");
+  const generation = requireString(entry, "generation", "Reference history response");
+  const hasMore = requireBoolean(entry, "hasMore", "Reference history response");
+  const unavailableReason = optionalString(entry, "unavailableReason", "Reference history response");
+  let cursor: ReferenceHistoryCursor | null | undefined;
+  if (entry.cursor === undefined) {
+    cursor = undefined;
+  } else if (entry.cursor === null) {
+    cursor = null;
+  } else {
+    const raw = requireRecord(entry.cursor, "Reference history response.cursor");
+    cursor = {
+      streamId: requireString(raw, "streamId", "Reference history response.cursor"),
+      offset: requireNumber(raw, "offset", "Reference history response.cursor"),
+    };
+  }
+  if (availability !== "native" && unavailableReason === undefined) {
+    malformed("Reference history response.unavailableReason is required when availability is not native");
+  }
+  return {
+    source,
+    availability,
+    turns: entry.turns.map((turn, index) =>
+      toReferenceTurn(turn, `Reference history response.turns[${index}]`),
+    ),
+    hasMore,
+    generation,
+    ...(cursor !== undefined ? { cursor } : {}),
+    ...(unavailableReason !== undefined ? { unavailableReason } : {}),
+  };
+}
+
+/** A completed read: the page plus the fence it must be checked against. */
+export interface ReferenceHistoryRead {
+  readonly page: ReferenceHistoryPage;
+  readonly fence: ReferenceHistoryFence;
+}
+
+function referenceHistoryStatusErrorCode(status: number): string {
+  switch (status) {
+    case 400:
+      return "INVALID_REQUEST";
+    case 401:
+      return "UNAUTHORIZED";
+    case 403:
+      return "FORBIDDEN";
+    case 404:
+      return "NOT_FOUND";
+    case 409:
+      return "REQUEST_CONFLICT";
+    case 410:
+      return "TARGET_EXPIRED";
+    default:
+      return "REQUEST_FAILED";
+  }
+}
+
+/**
+ * Read one page of reference native history for a target.
+ *
+ * A non-native page is a successful read carrying its disclosure; an auth or identity
+ * refusal throws `ReferenceHistoryFetchError` and is never converted into a page.
+ */
+export async function fetchReferenceHistory(args: {
+  baseUrl: string;
+  sessionId: string;
+  token: string;
+  target: ReferenceTargetRef;
+  limit?: number;
+  cursor?: ReferenceHistoryCursor | null;
+  signal?: AbortSignal;
+}): Promise<ReferenceHistoryRead> {
+  const { baseUrl, sessionId, token, signal } = args;
+  const query = referenceHistoryQuery({
+    target: args.target,
+    limit: args.limit,
+    cursor: args.cursor,
+  });
+  const path = `${referenceChatRoute(sessionId, "history")}?${query}`;
+  let response: Response;
+  try {
+    response = await fetch(remoteApiUrl(baseUrl, path), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new ReferenceHistoryFetchError(
+      "NETWORK_ERROR",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (response.ok) {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new ReferenceHistoryFetchError(
+        "MALFORMED_RESPONSE",
+        "Reference history response body is not valid JSON",
+      );
+    }
+    const page = parseReferenceHistoryPage(body);
+    return { page, fence: referenceHistoryFence(sessionId, args.target, page.generation) };
+  }
+  let errorCode: string | null = null;
+  try {
+    const text = await response.text();
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (isRecord(parsed)) {
+        if (isRecord(parsed.error) && typeof parsed.error.code === "string") {
+          errorCode = parsed.error.code;
+        } else if (typeof parsed.error === "string") {
+          errorCode = parsed.error;
+        }
+      }
+    } catch {}
+  } catch {}
+  if (errorCode !== null) {
+    throw new ReferenceHistoryFetchError(
+      errorCode,
+      `Reference history request failed with status ${response.status}`,
+    );
+  }
+  throw new ReferenceHistoryFetchError(
+    referenceHistoryStatusErrorCode(response.status),
+    `Reference history request failed with status ${response.status}`,
+  );
 }
