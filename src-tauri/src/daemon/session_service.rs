@@ -1531,10 +1531,12 @@ impl DaemonSessionService {
             if let Some(meta) = record.metadata {
                 self.session_metadata.write().insert(id.clone(), meta);
             }
-            self.terminal_service
-                .remote()
-                .restore(record.descriptor)
-                .map_err(|e| e.to_string())?;
+            if let Err(error) = self.terminal_service.remote().restore(record.descriptor) {
+                tracing::warn!(%id, %error, "Skipping failed remote session restore");
+                self.session_router.remove_workspace(&id);
+                self.session_metadata.write().remove(&id);
+                continue;
+            }
             self.watch_remote_session(&id)?;
         }
         Ok(())
@@ -1764,7 +1766,7 @@ impl DaemonSessionService {
     ) -> Result<String, SpawnError> {
         let environment = crate::ssh::runtime::detect(&host)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(SpawnError::Structured)?;
         if project
             .platform
             .unwrap_or(crate::ssh::runtime::RemotePlatform::Posix)
@@ -1780,7 +1782,7 @@ impl DaemonSessionService {
             worktree.as_ref(),
             cwd.as_deref(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(SpawnError::Structured)?;
         #[cfg(test)]
         let environment = {
             let mut environment = environment;
@@ -1791,7 +1793,7 @@ impl DaemonSessionService {
         };
         let helper = crate::ipc::ssh::ensure_qualified_ssh_helper(&host, &environment)
             .await
-            .map_err(|e| SpawnError::Other(e.to_string()))?;
+            .map_err(SpawnError::Structured)?;
         let relative = Self::remote_spawn_relative_path(&project.repo_root, &root);
         let config = crate::terminal::remote::RemoteSessionConfig {
             host,
@@ -1858,10 +1860,32 @@ impl DaemonSessionService {
             &project.workspace_id,
             Some(self.ssh_store_path.clone()),
         );
-        self.persist_remote_sessions_at(self.remote_sessions_path.clone())
-            .await?;
-        self.watch_remote_session(&id)?;
+        let committed = match self
+            .persist_remote_sessions_at(self.remote_sessions_path.clone())
+            .await
+        {
+            Ok(()) => self.watch_remote_session(&id),
+            Err(error) => Err(format!("Failed to persist remote session: {error}")),
+        };
+        self.abandon_uncommitted_remote_session(&id, committed).await?;
         Ok(id)
+    }
+
+    /// A remote target whose session could not be recorded or watched is unreachable for every
+    /// caller (the spawn reports failure), so it is stopped and forgotten instead of left running.
+    pub(super) async fn abandon_uncommitted_remote_session(
+        &self,
+        id: &str,
+        committed: Result<(), String>,
+    ) -> Result<(), SpawnError> {
+        let Err(error) = committed else {
+            return Ok(());
+        };
+        if let Err(close_error) = self.terminal_service.remote().close(id).await {
+            tracing::warn!(session_id = id, %close_error, "Failed to stop an uncommitted remote session");
+        }
+        self.release_session_ownership(id);
+        Err(SpawnError::Other(error))
     }
 
     /// Revokes a workspace binding and terminates every live session the
@@ -2191,7 +2215,9 @@ impl DaemonSessionService {
         let client_request_id = client_request_id.to_string();
         let max_machine_sessions = self.max_machine_sessions();
         let split_deadline = LOCAL_SPLIT_SPAWN.try_with(|deadline| (*deadline).into_std()).ok();
-        crate::ipc::run_blocking(move || {
+        let uncommitted = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let uncommitted_session = Arc::clone(&uncommitted);
+        let spawn_result = crate::ipc::run_blocking(move || {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
@@ -2374,7 +2400,7 @@ impl DaemonSessionService {
                     }
                     allowed
                 } else {
-                    default_cwd
+                    default_cwd.clone()
                 };
 
                 let mut cmd = match crate::terminal::shell::resolve_startup_command(
@@ -2431,8 +2457,10 @@ impl DaemonSessionService {
                         probe("sessionIntent");
                     }
                 }
+                // The process cwd is already on `cmd`; the session's worktree identity (root jail,
+                // FERRYX_WORKTREE_PATH, managed workspace id) belongs to the root, not the cwd.
                 let (session_id, mut lifecycle_rx) = terminal_service
-                    .spawn_in_worktree_with_id(raw_id, cmd, cols, rows, &mgr, &resolved_cwd)
+                    .spawn_in_worktree_with_id(raw_id, cmd, cols, rows, &mgr, &default_cwd)
                     .map_err(|e| SpawnError::Other(e.to_string()))?;
                 #[cfg(test)]
                 if machine.is_some() {
@@ -2704,13 +2732,25 @@ impl DaemonSessionService {
                     }
                 });
 
-                persisted?;
+                if let Err(error) = persisted {
+                    // The caller never learns this session's id, so it is handed back for
+                    // teardown instead of being left running with nobody able to reach it.
+                    *uncommitted_session.lock() = Some(session_id);
+                    return Err(error.into());
+                }
                 Ok(session_id)
             })();
             Ok(result)
         })
         .await
-        .map_err(|error| SpawnError::Other(error.to_string()))?
+        .map_err(|error| SpawnError::Other(error.to_string()))?;
+        let uncommitted_to_close = uncommitted.lock().take();
+        if let Some(session_id) = uncommitted_to_close {
+            if let Err(error) = self.handle_close(&session_id).await {
+                tracing::warn!(%session_id, %error, "Failed to close a spawned session whose journal commit failed");
+            }
+        }
+        spawn_result
     }
 
     pub(super) async fn validate_session_ssh_target(
@@ -2735,7 +2775,13 @@ impl DaemonSessionService {
         session_id: &str,
     ) -> Result<(), crate::terminal::PtyError> {
         let remote = self.terminal_service.remote().contains(session_id);
-        self.terminal_service.close_session(session_id).await?;
+        let closed = self.terminal_service.close_session(session_id).await;
+        // A failed local close leaves the session running, so it keeps its ownership for a
+        // retry. A remote close forgets the session even when its target could not be stopped
+        // (host unreachable or target already gone), so its ownership must be released too.
+        if closed.is_err() && !remote {
+            return closed;
+        }
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
         if remote {
@@ -2743,7 +2789,7 @@ impl DaemonSessionService {
                 .await
                 .map_err(crate::terminal::PtyError::Other)?;
         }
-        Ok(())
+        closed
     }
 
     pub(super) async fn handle_hibernate(
@@ -2771,8 +2817,8 @@ impl DaemonSessionService {
     }
 
     pub(super) fn session_is_live(&self, session_id: &str) -> bool {
-        if self.terminal_service.remote().contains(session_id) {
-            return true;
+        if let Some(details) = self.terminal_service.remote().details(session_id) {
+            return details.state != crate::terminal::remote::RemoteConnectionState::Expired;
         }
         self.terminal_service
             .get_session(session_id)
@@ -3162,5 +3208,40 @@ mod tests {
             None,
             "a session with no live proxy actor must not report an incarnation"
         );
+    }
+
+    #[tokio::test]
+    async fn regression_local_pty_create_2_subdirectory_spawn_preserves_worktree_root() {
+        let server = Arc::new(crate::daemon::server::DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git").args(["init"]).current_dir(repo.path()).output();
+        let sub = repo.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let session_id = server
+            .handle_spawn(
+                "req-sub-cwd",
+                "default",
+                None,
+                Some(sub.to_str().unwrap().to_string()),
+                80,
+                24,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let session = server.terminal_service.get_session(&session_id).unwrap();
+        let canonical_repo = std::fs::canonicalize(repo.path()).unwrap();
+        assert_eq!(
+            session.worktree_path(),
+            Some(canonical_repo),
+            "session worktree_path must be the workspace root, not the subdirectory"
+        );
+        let _ = server.handle_close(&session_id).await;
     }
 }

@@ -550,8 +550,8 @@ mod spawn_owner_tests {
     /// typed `HANDOVER_BUSY` outcome naming the guard, and the same handover succeeds once
     /// that spawn completes.
     #[cfg(unix)]
-    #[test]
-    fn a_blocked_handover_reports_busy_and_succeeds_on_retry_after_the_spawn_completes() {
+    #[tokio::test]
+    async fn a_blocked_handover_reports_busy_and_succeeds_on_retry_after_the_spawn_completes() {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
         let terminals = Arc::new(TerminalService::default());

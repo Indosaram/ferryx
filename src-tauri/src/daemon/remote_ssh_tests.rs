@@ -1173,3 +1173,189 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
     wait_remote_connected(&daemon, &session_id).await;
     daemon.handle_close(&session_id).await.unwrap();
 }
+
+#[tokio::test]
+async fn regression_handover_2_restore_remote_sessions_skips_invalid_record_and_keeps_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+
+    let invalid_desc = serde_json::json!({
+        "backendSessionId": "invalid-remote-session",
+        "target": {"hostId":"mismatched-host","ownerId":"owner","epoch":"1","backendSessionId":"target1"},
+        "config": {"host":{"id":"host1","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "req-invalid",
+        "remoteCursor": "1",
+        "cols": 80,
+        "rows": 24
+    });
+
+    let valid_desc = serde_json::json!({
+        "backendSessionId": "valid-remote-session",
+        "target": {"hostId":"host2","ownerId":"owner","epoch":"1","backendSessionId":"target2"},
+        "config": {"host":{"id":"host2","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:efgh","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "req-valid",
+        "remoteCursor": "2",
+        "cols": 80,
+        "rows": 24
+    });
+
+    std::fs::write(
+        &durable,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "timestamp": 0,
+            "activeWorkspaceId": "",
+            "workspaces": {},
+            "remoteSessions": [
+                {"descriptor": invalid_desc, "metadata": null},
+                {"descriptor": valid_desc, "metadata": null}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let daemon = DaemonServer::new();
+    let res = daemon.restore_remote_sessions_at(durable).await;
+    assert!(res.is_ok(), "restore_remote_sessions_at should not fail the entire restore: {res:?}");
+    assert!(
+        daemon.terminal_service.remote().contains("valid-remote-session"),
+        "the valid remote session following an invalid one must be restored"
+    );
+    assert!(
+        !daemon.terminal_service.remote().contains("invalid-remote-session"),
+        "the invalid remote session must not be present"
+    );
+}
+
+#[tokio::test]
+async fn regression_daemon_remote_spawn_5_session_is_live_false_for_expired_remote_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+
+    let desc = serde_json::json!({
+        "backendSessionId": "expired-remote-session",
+        "target": {"hostId":"host-exp","ownerId":"owner","epoch":"1","backendSessionId":"target-exp"},
+        "config": {"host":{"id":"host-exp","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:exp","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "req-exp",
+        "remoteCursor": "1",
+        "cols": 80,
+        "rows": 24
+    });
+
+    std::fs::write(
+        &durable,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "timestamp": 0,
+            "activeWorkspaceId": "",
+            "workspaces": {},
+            "remoteSessions": [{"descriptor": desc, "metadata": null}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let daemon = DaemonServer::new();
+    daemon.restore_remote_sessions_at(durable).await.unwrap();
+    assert!(daemon.session_service.session_is_live("expired-remote-session"));
+
+    let entry = daemon.terminal_service.remote().entry_for_test("expired-remote-session").unwrap();
+    {
+        let mut s = entry.state.lock();
+        s.details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+    }
+    assert!(
+        !daemon.session_service.session_is_live("expired-remote-session"),
+        "session_is_live must return false for an Expired remote session"
+    );
+}
+
+#[tokio::test]
+async fn regression_daemon_remote_spawn_3_close_with_unreachable_host_forgets_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+    // Nothing listens on 127.0.0.1:1, so the target can never be reached to stop it.
+    let desc = serde_json::json!({
+        "backendSessionId": "unreachable-remote-session",
+        "target": {"hostId":"host-down","ownerId":"owner","epoch":"1","backendSessionId":"target-down"},
+        "config": {"host":{"id":"host-down","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:down","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "req-down",
+        "remoteCursor": "1",
+        "cols": 80,
+        "rows": 24
+    });
+    std::fs::write(
+        &durable,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "timestamp": 0,
+            "activeWorkspaceId": "",
+            "workspaces": {},
+            "remoteSessions": [{"descriptor": desc, "metadata": null}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let daemon = DaemonServer::new();
+    daemon.restore_remote_sessions_at(durable).await.unwrap();
+    let session_id = "unreachable-remote-session";
+    assert!(daemon.session_router.is_local_session(session_id));
+
+    let closed = daemon.handle_close(session_id).await;
+    assert!(closed.is_err(), "an unreachable target cannot be confirmed stopped");
+    assert!(
+        !daemon.terminal_service.remote().contains(session_id),
+        "a closed remote session must not stay in the runtime (and be restored and redialed)"
+    );
+    assert!(
+        !daemon.session_router.is_local_session(session_id),
+        "a closed remote session must release its daemon-side ownership"
+    );
+    // The pane can always be closed: a repeated close finds nothing left to stop.
+    daemon.handle_close(session_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn regression_daemon_remote_spawn_7_uncommitted_remote_session_is_stopped_and_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+    let desc = serde_json::json!({
+        "backendSessionId": "uncommitted-remote-session",
+        "target": {"hostId":"host-uncommitted","ownerId":"owner","epoch":"1","backendSessionId":"target-uncommitted"},
+        "config": {"host":{"id":"host-uncommitted","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:uncommitted","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "req-uncommitted",
+        "remoteCursor": "1",
+        "cols": 80,
+        "rows": 24
+    });
+    std::fs::write(
+        &durable,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "timestamp": 0,
+            "activeWorkspaceId": "",
+            "workspaces": {},
+            "remoteSessions": [{"descriptor": desc, "metadata": null}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let daemon = DaemonServer::new();
+    daemon.restore_remote_sessions_at(durable).await.unwrap();
+    let id = "uncommitted-remote-session";
+    assert!(daemon.terminal_service.remote().contains(id));
+
+    let result = daemon
+        .session_service
+        .abandon_uncommitted_remote_session(id, Err("disk full".into()))
+        .await;
+
+    assert!(result.is_err(), "the spawn must still report the commit failure");
+    assert!(
+        !daemon.terminal_service.remote().contains(id),
+        "a remote session nobody can reach must not keep running"
+    );
+    assert!(!daemon.session_router.is_local_session(id));
+}

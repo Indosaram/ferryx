@@ -194,3 +194,104 @@ async fn spawn_contention(expire: bool) {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// A PTY spawned for a machine request whose journal commit fails is unreachable (the caller
+/// never learns its id), so the failed spawn must tear it down instead of leaking it.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_pty_create_4_journal_commit_failure_tears_down_the_spawned_session() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (root, server, token, workspace) = crate::ipc::run_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        let server = DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        let state = server.remote_state();
+        let workspace = state
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .register_machine(root.path().join("project").to_str().unwrap())
+            .unwrap();
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "journal-commit-failure")
+            .unwrap();
+        Ok((root, server, token, workspace))
+    })
+    .await
+    .unwrap();
+    let state = server.remote_state().clone();
+    let service = state.machine_services.as_ref().unwrap().workspaces.clone();
+    let (_spawn_lock, terminals) = state
+        .machine_services
+        .as_ref()
+        .unwrap()
+        .sessions
+        .journal_spawn_probe_handles();
+    // Inject at persist after refresh: write_private_json repairs directory modes, so
+    // chmod is not a reliable write failure. A directory at the destination rejects
+    // the real atomic rename without bypassing the journal implementation.
+    let journal_path = root.path().join("data/machine-operations.v1.json");
+    let backup = journal_path.with_extension("backup");
+    let armed = Arc::new(AtomicBool::new(false));
+    let arm = Arc::clone(&armed);
+    *service.transaction_probe.write() = Some(Arc::new(move |phase| {
+        if phase == "sessionSpawned" {
+            arm.store(true, Ordering::SeqCst);
+        }
+    }));
+    let failed_write = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&failed_write);
+    let blocked_path = journal_path.clone();
+    let saved_path = backup.clone();
+    *service.journal.probe.write() = Some(Arc::new(move |phase| {
+        if phase == "persist" && armed.swap(false, Ordering::SeqCst) {
+            std::fs::rename(&blocked_path, &saved_path).unwrap();
+            std::fs::create_dir(&blocked_path).unwrap();
+            observed.store(true, Ordering::SeqCst);
+        }
+    }));
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let body = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(), "workspaceId": workspace, "cols": 80,
+        "rows": 24, "worktree": null, "inheritFromSessionId": null, "cwdRelative": null,
+        "startup": {"kind": "shell"}
+    });
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v1/sessions")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let response =
+        crate::remote::session_api::create(axum::extract::State(state.clone()), headers, request)
+            .await;
+    *service.transaction_probe.write() = None;
+    *service.journal.probe.write() = None;
+    if failed_write.load(Ordering::SeqCst) {
+        std::fs::remove_dir(&journal_path).unwrap();
+        std::fs::rename(&backup, &journal_path).unwrap();
+    }
+    let status = match &response {
+        Ok(response) | Err(response) => response.status(),
+    };
+    assert!(failed_write.load(Ordering::SeqCst), "the commit write failure was injected");
+    assert!(!status.is_success(), "a spawn whose journal commit failed reported {status}");
+    assert!(
+        terminals.list_sessions().is_empty(),
+        "the spawned PTY must not outlive the failed spawn: {:?}",
+        terminals.list_sessions()
+    );
+}
