@@ -705,7 +705,8 @@ impl PtyManager {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(PtyError::Other(format!("PTY reader task failed: {error}"))),
             Err(_) => {
-                reader_task.abort();
+                // A queued blocking reader must still run its stop check and publish completion.
+                // Aborting it before the pool starts it leaves reader_finished false forever.
                 Err(PtyError::Other(
                     "Timed out waiting for PTY reader shutdown".into(),
                 ))
