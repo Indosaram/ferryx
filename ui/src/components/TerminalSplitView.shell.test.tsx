@@ -36,16 +36,15 @@ vi.mock("../lib/nativeMenu", () => ({
   ),
 }));
 
-const lastTerminalPaneProps = vi.hoisted(() => ({ current: null as any }));
+const terminalPaneProps = vi.hoisted(() => ({ bySessionId: new Map<string, any>() }));
 
 vi.mock("./TerminalPane", () => ({
   TerminalPane: (props: any) => {
-    lastTerminalPaneProps.current = props;
+    terminalPaneProps.bySessionId.set(props.session?.id ?? "", props);
     return (
       <div
         data-testid="terminal-pane"
         data-session-id={props.session?.id}
-        onClick={() => props.onReconnect?.(props.session?.id)}
       />
     );
   },
@@ -99,6 +98,7 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
 
   beforeEach(() => {
     resetNotificationSettings();
+    terminalPaneProps.bySessionId.clear();
     // The browser OS is deliberately the opposite of the host: the shell profile menu must
     // follow the HOST platform the backend reports, never navigator.
     Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
@@ -313,8 +313,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         />,
       );
 
-      const pane = screen.getByTestId("terminal-pane");
-      fireEvent.click(pane);
+      await act(async () => {
+        await terminalPaneProps.bySessionId.get("session-local-plain").onReconnect("session-local-plain");
+      });
 
       expect(onReconnectLocalSession).toHaveBeenCalledWith("session-local-plain");
       expect(onReconnectAgentSession).not.toHaveBeenCalled();
@@ -358,8 +359,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         />,
       );
 
-      const pane = screen.getByTestId("terminal-pane");
-      fireEvent.click(pane);
+      await act(async () => {
+        await terminalPaneProps.bySessionId.get("session-agent").onReconnect("session-agent");
+      });
 
       expect(onReconnectAgentSession).toHaveBeenCalledWith("session-agent");
       expect(onReconnectLocalSession).not.toHaveBeenCalled();
@@ -401,8 +403,9 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         />,
       );
 
-      const pane = screen.getByTestId("terminal-pane");
-      fireEvent.click(pane);
+      await act(async () => {
+        await terminalPaneProps.bySessionId.get("session-local-fallback").onReconnect("session-local-fallback");
+      });
 
       expect(onOpenNewShell).toHaveBeenCalledWith("session-local-fallback");
       expect(onReconnectAgentSession).not.toHaveBeenCalled();
@@ -440,7 +443,7 @@ describe("TerminalSplitView Windows shell selection forwarding", () => {
         />,
       );
 
-      expect(lastTerminalPaneProps.current.onRefreshSessionIdentity).toBe(onRefreshSessionIdentity);
+      expect(terminalPaneProps.bySessionId.get("session-wire-test").onRefreshSessionIdentity).toBe(onRefreshSessionIdentity);
     });
   });
 });

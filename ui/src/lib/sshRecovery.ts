@@ -80,7 +80,7 @@ export function startSshRecovery(options: {
     void reconcile(status);
     // One park, one re-arm: repeats of the same `disconnected` observation are not new outages.
     if (status.state === "disconnected" && previous !== "disconnected") {
-      void rearmAndReprobe(status.sessionId, status);
+      void rearmAndReprobe(status.sessionId, status).catch(options.onError);
     }
   }).then(dispose => { if (stopped) dispose(); else unlisten = dispose; });
   const ready = subscribed.then(async () => {

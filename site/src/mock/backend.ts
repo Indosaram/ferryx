@@ -1,4 +1,9 @@
 import type { BrowserSessionSummary, BrowserState, DirtyState, Worktree, TerminalOutputPayload, TerminalLifecyclePayload } from '@ui/lib/types';
+import { setLocalSplitPersistence } from '@ui/lib/localSplitLifecycle';
+
+// The demo preview has no desktop daemon; register a no-op durable binding persistence handler
+// so NativeTerminalPane's attach flow can complete registration without throwing missingDurablePersistence.
+setLocalSplitPersistence(async () => {});
 
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
@@ -52,7 +57,27 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_worktree_create': return { ...worktrees[1], path: `../${request.worktree?.slug ?? 'new-worktree'}` };
     case 'cmd_worktree_delete': case 'cmd_worktree_delete_destructive': case 'cmd_worktree_resize': return undefined;
     case 'cmd_worktree_delete_preview': return { branch: request.worktree?.slug ?? 'feature/live-demo', head: 'd4e5f6a', upstream: null, merged: false, ahead: 0, behind: 0 };
-    case 'cmd_terminal_spawn': { const sessionId = id('terminal'); const s = { cwd: request.cwd || '.', line: '' }; sessions.set(sessionId, s); emitEvent('terminal_lifecycle', { sessionId, state: 'started', exitCode: null, reason: null } satisfies TerminalLifecyclePayload); emitOutput(sessionId, prompt(s)); return { sessionId }; }
+    case 'cmd_terminal_spawn': {
+      const sessionId = id('terminal');
+      const s = { cwd: request.cwd || '.', line: '' };
+      sessions.set(sessionId, s);
+      emitEvent('terminal_lifecycle', { sessionId, state: 'started', exitCode: null, reason: null } satisfies TerminalLifecyclePayload);
+      emitOutput(sessionId, prompt(s));
+      return {
+        sessionId,
+        daemonEpoch: 'demo-epoch',
+        session: {
+          sessionId,
+          workspaceId: request.workspaceId ?? 'ferryx-demo',
+          worktree: null,
+          cwd: s.cwd,
+          cols: 80,
+          rows: 24,
+          running: true,
+          incarnation: null,
+        },
+      };
+    }
     case 'cmd_terminal_list': return [...sessions].map(([sessionId, s]) => ({ sessionId, worktreePath: s.cwd }));
     case 'cmd_terminal_write': { const s = sessions.get(a.sessionId); if (!s) throw new Error(`Unknown terminal session: ${a.sessionId}`); for (const ch of String(a.data ?? '')) { if (ch === '\n' || ch === '\r') { const output = shell(s, s.line); emitOutput(a.sessionId, output ? `${ch}${output}\r\n${prompt(s)}` : `${ch}${prompt(s)}`); s.line = ''; } else if (ch === '\u007f') { s.line = s.line.slice(0, -1); } else if (ch !== '\b') { s.line += ch; emitOutput(a.sessionId, ch); } } return undefined; }
     case 'cmd_terminal_get_cwd': { const s = sessions.get(a.sessionId); return { cwd: s?.cwd ?? '.' }; }
@@ -61,7 +86,13 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_terminal_preferences': return { fontFamily: 'monospace', fontSize: 13, macosOptionAsAlt: false, cursorStyle: 'block', theme: {}, source: 'defaults', status: 'absent', sourcePath: null };
     // The web demo has no libghostty compositor; acknowledge the surface commands so
     // NativeTerminalPane does not surface an attach failure over the preview.
-    case 'cmd_native_terminal_attach': case 'cmd_native_terminal_set_focus': case 'cmd_native_terminal_set_bounds': return { cursorCol: 0, cursorRow: 0, cellWidthPx: 8, cellHeightPx: 17 };
+    case 'cmd_native_terminal_attach':
+      return {
+        sessionId: a.sessionId,
+        attachTuple: a.attachTuple ?? null,
+        presented: true,
+      };
+    case 'cmd_native_terminal_set_focus': case 'cmd_native_terminal_set_bounds': return { cursorCol: 0, cursorRow: 0, cellWidthPx: 8, cellHeightPx: 17 };
     case 'cmd_native_terminal_detach': case 'cmd_native_terminal_send_input': case 'cmd_native_terminal_scroll': case 'cmd_native_terminal_set_scrollbar_overlay': case 'cmd_native_terminal_set_attention_frame': return undefined;
     case 'cmd_native_terminal_scrollbar': return { total: 0, offset: 0, len: 0 };
     case 'cmd_native_terminal_copy_selection': return null;

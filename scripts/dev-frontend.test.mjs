@@ -1,4 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 
 import { startFrontend } from "./dev-frontend.mjs";
@@ -22,10 +25,38 @@ test("Tauri owns one long-lived frontend runner", () => {
 test(
   "the real runner serves Ferryx Tailwind utilities",
   async () => {
-    const originalCwd = process.cwd();
-    const vite = await startFrontend({ build: false });
+    const tempCacheDir = mkdtempSync(join(tmpdir(), "ferryx-vite-cache-"));
+    const scriptPath = fileURLToPath(scriptUrl);
+    const proc = Bun.spawn(["bun", scriptPath], {
+      env: {
+        ...process.env,
+        FERRYX_DEV_FRONTEND_NO_BUILD: "1",
+        FERRYX_DEV_CACHE_DIR: tempCacheDir,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
     try {
+      // Await FERRYX_FRONTEND_READY signal from the runner subprocess stdout
+      const reader = proc.stdout.getReader();
+      const stderrPromise = new Response(proc.stderr).text();
+      const decoder = new TextDecoder();
+      let output = "";
+      try {
+        while (!output.includes("FERRYX_FRONTEND_READY")) {
+          const { value, done } = await reader.read();
+          if (done) {
+            const exitCode = await proc.exited;
+            throw new Error(`frontend runner exited before readiness (exit ${exitCode}):\n${await stderrPromise}`);
+          }
+          output += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      expect(output).toContain("FERRYX_FRONTEND_READY");
+
       const response = await fetch("http://127.0.0.1:5173/src/index.css");
       expect(response.status).toBe(200);
       const css = await response.text();
@@ -33,8 +64,9 @@ test(
       expect(css).toContain(".w-screen");
       expect(css).toContain(".bg-background");
     } finally {
-      await vite.close();
-      process.chdir(originalCwd);
+      proc.kill();
+      await proc.exited;
+      rmSync(tempCacheDir, { recursive: true, force: true });
     }
   },
   30_000,

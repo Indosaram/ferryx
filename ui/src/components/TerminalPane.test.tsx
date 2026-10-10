@@ -641,11 +641,8 @@ describe("TerminalPane native routing contract", () => {
         onRefreshSessionIdentity={onRefreshSessionIdentity}
       />,
     );
-    expect(NativeTerminalPane).toHaveBeenCalledWith(
-      expect.objectContaining({
-        onRefreshSessionIdentity,
-      }),
-      expect.anything(),
+    expect(vi.mocked(NativeTerminalPane).mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ onRefreshSessionIdentity }),
     );
   });
 });

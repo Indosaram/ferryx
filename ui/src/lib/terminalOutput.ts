@@ -12,6 +12,8 @@ const TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH = 1 << 1;
 export const TERMINAL_OUTPUT_FRAME_HAS_GAP = 1 << 2;
 const TERMINAL_OUTPUT_FRAME_GAP_BYTES = 32;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: false });
+const bigUint64Buffer = new ArrayBuffer(8);
+const bigUint64View = new DataView(bigUint64Buffer);
 
 export type DecodedTerminalOutputGap = {
   requestedAfterSequence: string;
@@ -27,6 +29,13 @@ export type DecodedTerminalOutputFrame = {
   daemonEpoch?: string | null;
   gap?: DecodedTerminalOutputGap;
 };
+
+function readUint64LittleEndian(bytes: Uint8Array, offset: number): bigint {
+  for (let i = 0; i < 8; i++) {
+    bigUint64View.setUint8(i, bytes[offset + i]!);
+  }
+  return bigUint64View.getBigUint64(0, true);
+}
 
 export function decodeBase64(data: string): Uint8Array {
   if (typeof Uint8Array.fromBase64 === "function") {
@@ -48,14 +57,13 @@ export function decodeTerminalOutputFrame(frame: ArrayBuffer | Uint8Array): Deco
     throw new Error(`terminal output frame is too short: ${bytes.byteLength}`);
   }
 
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const version = view.getUint8(0);
+  const version = bytes[0]!;
   if (version !== TERMINAL_OUTPUT_FRAME_VERSION_V1 && version !== TERMINAL_OUTPUT_FRAME_VERSION_V2) {
     throw new Error(`unsupported terminal output frame version: ${version}`);
   }
 
-  const flags = view.getUint8(1);
-  const sessionIdLength = view.getUint16(2, true);
+  const flags = bytes[1]!;
+  const sessionIdLength = bytes[2]! | (bytes[3]! << 8);
   const sessionEnd = TERMINAL_OUTPUT_FRAME_FIXED_BYTES + sessionIdLength;
   if (sessionEnd > bytes.byteLength) {
     throw new Error(
@@ -74,17 +82,17 @@ export function decodeTerminalOutputFrame(frame: ArrayBuffer | Uint8Array): Deco
 
   const sessionId = utf8Decoder.decode(bytes.subarray(TERMINAL_OUTPUT_FRAME_FIXED_BYTES, sessionEnd));
   const sequence = (flags & TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE) !== 0
-    ? view.getBigUint64(4, true).toString()
+    ? readUint64LittleEndian(bytes, 4).toString()
     : null;
   const daemonEpoch = (flags & TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH) !== 0
-    ? view.getBigUint64(12, true).toString()
+    ? readUint64LittleEndian(bytes, 12).toString()
     : null;
   const gap = hasGap
     ? {
-        requestedAfterSequence: view.getBigUint64(sessionEnd, true).toString(),
-        availableFromSequence: view.getBigUint64(sessionEnd + 8, true).toString(),
-        startSequence: view.getBigUint64(sessionEnd + 16, true).toString(),
-        endSequence: view.getBigUint64(sessionEnd + 24, true).toString(),
+        requestedAfterSequence: readUint64LittleEndian(bytes, sessionEnd).toString(),
+        availableFromSequence: readUint64LittleEndian(bytes, sessionEnd + 8).toString(),
+        startSequence: readUint64LittleEndian(bytes, sessionEnd + 16).toString(),
+        endSequence: readUint64LittleEndian(bytes, sessionEnd + 24).toString(),
       }
     : undefined;
 
