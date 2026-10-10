@@ -34,6 +34,20 @@ const tauriCoreMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
 }));
 
+const tauriEventMocks = vi.hoisted(() => ({
+  listeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
+}));
+
+// b2e3ea0e registers stream-ended recovery through the Tauri event bridge before attaching.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+    const listeners = tauriEventMocks.listeners.get(name) ?? new Set();
+    listeners.add(handler);
+    tauriEventMocks.listeners.set(name, listeners);
+    return () => { listeners.delete(handler); };
+  }),
+}));
+
 const toastMocks = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
@@ -152,7 +166,9 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (command: string, args?: Record<string, unknown>) => {
-    const result = await tauriCoreMocks.invoke(command, args);
+    const result = await (args === undefined
+      ? tauriCoreMocks.invoke(command)
+      : tauriCoreMocks.invoke(command, args));
     if (command === "cmd_native_terminal_set_bounds" && result && typeof result === "object") {
       return { attachTuple: args?.attachTuple, ...result };
     }
@@ -173,6 +189,7 @@ vi.mock("../lib/localSplitLifecycle", async (importOriginal) => ({
 const persistedNativeSessions = new Map<string, TerminalSession>();
 
 beforeEach(() => {
+  tauriEventMocks.listeners.clear();
   persistedNativeSessions.clear();
   resetNativeTerminalLifecycleForTest();
 });
@@ -250,6 +267,19 @@ function stubPaneRect(): () => void {
   };
 }
 
+// 5464da0d makes native lifecycle requests carry the exact durable pane binding.
+async function renderNative(...args: Parameters<typeof render>) {
+  const view = render(...args);
+  await act(async () => undefined);
+  return view;
+}
+
+function expectedNativeBinding(backendSessionId: string | null) {
+  const owner = [...persistedNativeSessions.values()].find(session => session.backendSessionId === backendSessionId);
+  if (!owner?.attachTuple) throw new Error("Expected a persisted native binding");
+  return owner.attachTuple;
+}
+
 function createSession(
   sessionId = "term-session-1",
   backendSessionId: string | null = sessionId,
@@ -309,9 +339,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
         return undefined;
       });
 
-      const { queryByRole, rerender } = render(
-        <NativeTerminalPane sessionId="term-session-1" session={session} />,
-      );
+      const { queryByRole, rerender } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
       // Attempt 1 fails. The failure is reported to the IPC failure channel immediately, but the
       // banner stays hidden because a fast retry is already pending.
@@ -375,9 +403,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
       });
 
       const session = createSession("term-session-retry-click");
-      const { queryByRole } = render(
-        <NativeTerminalPane sessionId="term-session-retry-click" session={session} />,
-      );
+      const { queryByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-retry-click" session={session} />);
 
       // Advance through initial failure and retries to surface the error banner (750ms)
       await act(async () => {
@@ -422,9 +448,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
       return undefined;
     });
 
-    const { queryByRole } = render(
-      <NativeTerminalPane sessionId="term-session-exited" session={session} />,
-    );
+    const { queryByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-exited" session={session} />);
 
     await act(async () => {
       await Promise.resolve();
@@ -453,9 +477,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
         daemonEpoch: "1",
       };
 
-      const { rerender } = render(
-        <NativeTerminalPane sessionId="term-1" session={sessionEpoch1} />,
-      );
+      const { rerender } = await renderNative(<NativeTerminalPane sessionId="term-1" session={sessionEpoch1} />);
 
       await act(async () => {
         await Promise.resolve();
@@ -497,9 +519,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
       return undefined;
     });
 
-    const { findByRole, unmount } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { findByRole, unmount } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const alert = await findByRole("alert");
     expect(alert).toBeInTheDocument();
@@ -527,7 +547,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
       return undefined;
     });
 
-    const view = render(<NativeTerminalPane session={createSession("uncovered-bounds")} />);
+    const view = await renderNative(<NativeTerminalPane session={createSession("uncovered-bounds")} />);
     await act(async () => {});
 
     expect(view.getByRole("alert")).toBeInTheDocument();
@@ -558,9 +578,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
       return undefined;
     });
 
-    const { queryByRole } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { queryByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -617,11 +635,9 @@ describe("NativeTerminalPane bounded wheel normalization", () => {
       if (command === "cmd_native_terminal_scrollbar") return { total: 200, offset: 0, len: 24 };
       return undefined;
     });
-    const view = render(
-      <NativeTerminalVisibilityProvider visible>
+    const view = await renderNative(<NativeTerminalVisibilityProvider visible>
         <NativeTerminalPane session={session} />
-      </NativeTerminalVisibilityProvider>,
-    );
+      </NativeTerminalVisibilityProvider>);
     // Subscribe before mount; Vitest's bounded test timeout is the failure deadline.
     // The real bounds command and exact listener registration, not elapsed time, gate input.
     await act(async () => { await ready; });
@@ -726,7 +742,7 @@ describe("NativeTerminalPane bounded wheel normalization", () => {
 
   it("does not send wheel IPC outside Tauri", async () => {
     tauriCoreMocks.isTauri.mockReturnValue(false);
-    const view = render(<NativeTerminalPane session={createSession("web-wheel")} />);
+    const view = await renderNative(<NativeTerminalPane session={createSession("web-wheel")} />);
     await act(async () => { fireEvent.wheel(view.getByTestId("native-terminal-pane"), { deltaY: 60 }); });
     expect(scrollCalls()).toEqual([]);
     expect(nativeTerminalEventMocks.onNativeTerminalScrollbar).not.toHaveBeenCalled();
@@ -833,9 +849,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
   it("measures viewport DOM geometry and passes bounds and scaleFactor in cmd_native_terminal_attach on mount", async () => {
     const session = createSession("term-session-presize");
 
-    render(<NativeTerminalPane sessionId="term-session-presize" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-presize" session={session} />);
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+        attachTuple: expectedNativeBinding("term-session-presize"),
+        remainingMs: expect.any(Number),
       sessionId: "term-session-presize",
       bounds: {
         x: 10,
@@ -864,9 +882,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     };
 
     const session = createSession("term-session-fractional");
-    render(<NativeTerminalPane sessionId="term-session-fractional" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-fractional" session={session} />);
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+        attachTuple: expectedNativeBinding("term-session-fractional"),
+        remainingMs: expect.any(Number),
       sessionId: "term-session-fractional",
       bounds: { x: 1937, y: 45, width: 951, height: 900 },
       scaleFactor: 1,
@@ -889,9 +909,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     };
 
     const session = createSession("term-session-zero");
-    render(<NativeTerminalPane sessionId="term-session-zero" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-zero" session={session} />);
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+        attachTuple: expectedNativeBinding("term-session-zero"),
+        remainingMs: expect.any(Number),
       sessionId: "term-session-zero",
     });
   });
@@ -899,9 +921,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
   it("observes DOM rectangle, explicitly attaches session, and reports initial bounds on mount in Tauri mode", async () => {
     const session = createSession("term-session-1");
 
-    render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+        attachTuple: expectedNativeBinding("term-session-1"),
+        remainingMs: expect.any(Number),
       sessionId: "term-session-1",
       bounds: {
         x: 10,
@@ -917,6 +941,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
         "cmd_native_terminal_set_bounds",
         {
+        attachTuple: expectedNativeBinding("term-session-1"),
+        remainingMs: expect.any(Number),
           sessionId: "term-session-1",
           bounds: {
             x: 10,
@@ -944,7 +970,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
 
     // When: the terminal attaches and reports its viewport.
-    const { getByTestId } = render(<NativeTerminalPane session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane session={session} />);
     await act(async () => { await boundsReported; });
 
     // Then: neither CSS nor the native bounds subtract permanent chrome space.
@@ -953,6 +979,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     expect(pane.style.height).toBe("");
     expect(pane).toHaveClass("h-full");
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+        attachTuple: expectedNativeBinding("term-session-1"),
+        remainingMs: expect.any(Number),
       sessionId: "term-session-1",
       bounds: { x: 10, y: 20, width: 800, height: 600 },
       scaleFactor: 2,
@@ -962,7 +990,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
   it("reports changed bounds payload once when geometry changes", async () => {
     const session = createSession("term-session-1");
 
-    const { container } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { container } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     await waitFor(() => {
       expect(resizeRecords.length).toBeGreaterThan(0);
@@ -1005,6 +1033,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
         "cmd_native_terminal_set_bounds",
         {
+        attachTuple: expectedNativeBinding("term-session-1"),
+        remainingMs: expect.any(Number),
           sessionId: "term-session-1",
           bounds: {
             x: 15,
@@ -1028,7 +1058,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return undefined;
     });
     await act(async () => {
-      render(<NativeTerminalPane sessionId={session.id} session={session} />);
+      await renderNative(<NativeTerminalPane sessionId={session.id} session={session} />);
     });
     const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
     renderDeferred = true;
@@ -1041,6 +1071,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+        attachTuple: expectedNativeBinding(session.id),
+        remainingMs: expect.any(Number),
       sessionId: session.id,
       bounds: { x: 10, y: 20, width: 800, height: 700 },
       scaleFactor: 2,
@@ -1064,9 +1096,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return undefined;
     });
 
-    const { container } = render(
-      <NativeTerminalPane sessionId={session.id} session={session} />,
-    );
+    const { container } = await renderNative(<NativeTerminalPane sessionId={session.id} session={session} />);
     const boundsCalls = () =>
       tauriCoreMocks.invoke.mock.calls.filter(
         ([command]) => command === "cmd_native_terminal_set_bounds",
@@ -1129,6 +1159,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       expect(boundsCalls()[1]).toEqual([
         "cmd_native_terminal_set_bounds",
         {
+          attachTuple: expectedNativeBinding("term-session-resize-coalesce"),
+          remainingMs: expect.any(Number),
           sessionId: "term-session-resize-coalesce",
           bounds: { x: 10, y: 20, width: 800, height: 800 },
           scaleFactor: 2,
@@ -1145,9 +1177,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return undefined;
     });
 
-    const { container, getByTestId } = render(
-      <NativeTerminalPane sessionId={session.id} session={session} />,
-    );
+    const { container, getByTestId } = await renderNative(<NativeTerminalPane sessionId={session.id} session={session} />);
     const thumb = await waitFor(() => getByTestId("native-terminal-scrollbar-thumb"));
     expect(thumb).toHaveStyle({ height: "10%" });
 
@@ -1207,9 +1237,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return rect;
     };
 
-    const { container } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { container } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const boundsCalls = () =>
       tauriCoreMocks.invoke.mock.calls.filter(
@@ -1251,6 +1279,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+        attachTuple: expectedNativeBinding("term-session-1"),
+        remainingMs: expect.any(Number),
         sessionId: "term-session-1",
         bounds: { x: 236, y: 32, width: 522, height: 818 },
         scaleFactor: 2,
@@ -1273,9 +1303,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return undefined;
     });
 
-    const { container } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { container } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const boundsCalls = () =>
       tauriCoreMocks.invoke.mock.calls.filter(
@@ -1312,7 +1340,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
   it("disconnects ResizeObserver and invokes detach on unmount", async () => {
     const session = createSession("term-session-1");
 
-    const { unmount } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { unmount } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     await waitFor(() => {
       expect(resizeRecords.length).toBeGreaterThan(0);
@@ -1324,6 +1352,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     expect(primaryRecord.observer.disconnect).toHaveBeenCalled();
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding("term-session-1"),
         sessionId: "term-session-1",
       });
     });
@@ -1332,9 +1361,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
   it("presents the replacement terminal before detaching the outgoing terminal", async () => {
     const firstSession = createSession("term-session-1");
     const secondSession = createSession("term-session-2");
-    const { rerender } = render(
-      <NativeTerminalPane sessionId={firstSession.id} session={firstSession} />,
-    );
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId={firstSession.id} session={firstSession} />);
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -1352,6 +1379,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
         expect.objectContaining({ sessionId: secondSession.backendSessionId }),
       );
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(firstSession.backendSessionId),
         sessionId: firstSession.backendSessionId,
       });
     });
@@ -1380,9 +1408,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return undefined;
     });
 
-    const { rerender } = render(
-      <NativeTerminalPane sessionId={firstSession.id} session={firstSession} />,
-    );
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId={firstSession.id} session={firstSession} />);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
         "cmd_native_terminal_set_bounds",
@@ -1399,6 +1425,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       );
     });
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(firstSession.backendSessionId),
       sessionId: firstSession.backendSessionId,
     });
 
@@ -1409,9 +1436,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
         expect.objectContaining({ sessionId: thirdSession.backendSessionId }),
       );
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(firstSession.backendSessionId),
         sessionId: firstSession.backendSessionId,
       });
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(secondSession.backendSessionId),
         sessionId: secondSession.backendSessionId,
       });
     });
@@ -1427,7 +1456,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     tauriCoreMocks.isTauri.mockReturnValue(false);
     const session = createSession("term-session-1");
 
-    render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalled();
   });
@@ -1444,7 +1473,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       cellHeightPx: 20,
     });
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
 
     await waitFor(() => {
@@ -1519,9 +1548,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("focuses the hidden input sink and notifies native focus after successful attach", async () => {
     const session = createSession("term-session-1", "daemon-pty-123");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
 
     await waitFor(() => {
@@ -1545,7 +1572,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       cellHeightPx: 20,
     });
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
 
     await waitFor(() => {
@@ -1571,9 +1598,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       cellHeightPx: 20,
     });
     const session = createSession("term-session-1");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
 
     await waitFor(() => {
@@ -1660,7 +1685,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       cellHeightPx: 20,
     });
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     expect(textarea).toBeInTheDocument();
@@ -1721,7 +1746,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       cellHeightPx: 20,
     });
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     await waitFor(() => {
       expect(textarea.style.width).toBe("10px");
@@ -1845,7 +1870,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     const session = createSession("term-session-1");
     const error = new Error("native surface unavailable");
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockRejectedValue(error);
@@ -1869,7 +1894,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("self-heals detached session on send_input error by re-attaching and retrying input once", async () => {
     const session = createSession("term-session-self-heal");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-self-heal" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-self-heal" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     await act(async () => {});
 
@@ -1903,9 +1928,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   it("does not loop infinitely when input retry repeatedly fails", async () => {
     const session = createSession("term-session-retry-fail");
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { getByTestId, getByRole } = render(
-      <NativeTerminalPane sessionId="term-session-retry-fail" session={session} />,
-    );
+    const { getByTestId, getByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-retry-fail" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     await act(async () => {});
 
@@ -1942,9 +1965,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   it("tells the user when input was dropped by queue overflow instead of failing silently", async () => {
     // A dropped keystroke that says nothing is the worst outcome: the user believes they typed it.
     const session = createSession("term-session-overflow");
-    const { getByTestId, getByRole } = render(
-      <NativeTerminalPane sessionId="term-session-overflow" session={session} />,
-    );
+    const { getByTestId, getByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-overflow" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     await act(async () => {});
 
@@ -1965,7 +1986,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("encodes and forwards non-printable control keys on keydown without duplicating printable input", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const textarea = getByTestId("native-terminal-focus-sink");
 
@@ -2039,7 +2060,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("forwards macOS word-navigation and word-deletion chords instead of letting the focus sink edit itself", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
 
     const chords = [
@@ -2093,7 +2114,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("recovers the physical key when macOS translates an Option chord into a glyph", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
 
     const chords = [
@@ -2145,7 +2166,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("forwards modified character keys through the typed key IPC payload", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -2185,7 +2206,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("sends DOM text paste as one bracketed paste IPC payload", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -2208,7 +2229,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("sends multiline DOM text paste as a single payload to cmd_native_terminal_paste", async () => {
     const session = createSession("term-session-multiline");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-multiline" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-multiline" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -2249,9 +2270,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId={`term-session-native-paste-${key}`} session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={`term-session-native-paste-${key}`} session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
@@ -2297,9 +2316,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-native-image-paste" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-native-image-paste" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2352,9 +2369,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId={sessionId} session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
@@ -2409,9 +2424,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-local-image-paste" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-local-image-paste" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2454,9 +2467,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-korean-ctrl-v" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-korean-ctrl-v" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2498,9 +2509,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-latin-ctrl-v" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-latin-ctrl-v" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2542,9 +2551,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ctrl-shift-v" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ctrl-shift-v" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2582,9 +2589,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-shift-insert" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-shift-insert" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2624,9 +2629,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-native-image-paste-ctrl-v" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-native-image-paste-ctrl-v" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2668,12 +2671,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getAllByTestId } = render(
-      <div>
+    const { getAllByTestId } = await renderNative(<div>
         <NativeTerminalPane sessionId="term-session-native-menu-paste-left" session={leftSession} />
         <NativeTerminalPane sessionId="term-session-native-menu-paste-right" session={rightSession} />
-      </div>,
-    );
+      </div>);
     const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
     act(() => {
       leftSink.focus();
@@ -2748,9 +2749,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-native-empty-paste" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-native-empty-paste" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2797,9 +2796,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId={`term-session-korean-fallback-${key}`} session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={`term-session-korean-fallback-${key}`} session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
 
       tauriCoreMocks.invoke.mockClear();
@@ -2840,9 +2837,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-suppress-duplicate-paste" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-suppress-duplicate-paste" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2897,12 +2892,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-async-suppress-duplicate-paste"
         session={session}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -2978,12 +2971,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-blur-clears-paste-suppression"
         session={session}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3037,12 +3028,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getAllByTestId } = render(
-      <div>
+    const { getAllByTestId } = await renderNative(<div>
         <NativeTerminalPane sessionId="term-session-split-left" session={leftSession} />
         <NativeTerminalPane sessionId="term-session-split-right" session={rightSession} />
-      </div>,
-    );
+      </div>);
 
     const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
 
@@ -3147,9 +3136,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-linux-ctrl-v" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-linux-ctrl-v" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
@@ -3196,7 +3183,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-meta-sequence" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-korean-meta-sequence" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
 
     (document.activeElement as HTMLElement)?.blur?.();
@@ -3345,7 +3332,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3385,7 +3372,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3424,7 +3411,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3466,7 +3453,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3505,7 +3492,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3564,7 +3551,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(<NativeTerminalPane sessionId="pane-frontend-id" session={session} />);
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="pane-frontend-id" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
@@ -3594,7 +3581,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="pane-upload-fail" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="pane-upload-fail" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -3632,9 +3619,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId, rerender, unmount } = render(
-        <NativeTerminalPane sessionId="pane-late-upload" session={session} />,
-      );
+      const { getByTestId, rerender, unmount } = await renderNative(<NativeTerminalPane sessionId="pane-late-upload" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
@@ -3742,12 +3727,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   it("routes neutral BODY keyboard input only to the last-focused split terminal", async () => {
     const leftSession = createSession("split-key-left", "daemon-key-left");
     const rightSession = createSession("split-key-right", "daemon-key-right");
-    const { getAllByTestId } = render(
-      <>
+    const { getAllByTestId } = await renderNative(<>
         <NativeTerminalPane sessionId="split-key-left" session={leftSession} />
         <NativeTerminalPane sessionId="split-key-right" session={rightSession} />
-      </>,
-    );
+      </>);
     const [, rightSink] = getAllByTestId("native-terminal-focus-sink");
 
     act(() => {
@@ -3853,12 +3836,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   it("uses half-open native drop bounds so a split divider belongs to only the right pane", async () => {
     const leftSession = createSession("split-drop-left", "daemon-drop-left");
     const rightSession = createSession("split-drop-right", "daemon-drop-right");
-    const { getAllByTestId } = render(
-      <>
+    const { getAllByTestId } = await renderNative(<>
         <NativeTerminalPane sessionId="split-drop-left" session={leftSession} />
         <NativeTerminalPane sessionId="split-drop-right" session={rightSession} />
-      </>,
-    );
+      </>);
     const [leftPane, rightPane] = getAllByTestId("native-terminal-pane");
     leftPane.getBoundingClientRect = () => ({
       x: 0, y: 0, width: 400, height: 600,
@@ -3908,7 +3889,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       try {
         const session = createSession("term-session-tauri-dnd");
-        const { unmount } = render(<NativeTerminalPane sessionId="term-session-tauri-dnd" session={session} />);
+        const { unmount } = await renderNative(<NativeTerminalPane sessionId="term-session-tauri-dnd" session={session} />);
 
         await waitFor(() => {
           expect(tauriWindowMocks.onDragDropEvent).toHaveBeenCalled();
@@ -4028,9 +4009,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           return undefined;
         });
 
-        const { getByTestId } = render(
-          <NativeTerminalPane sessionId="term-session-cmd-click" session={session} />,
-        );
+        const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-cmd-click" session={session} />);
         const pane = getByTestId("native-terminal-pane");
         const viewport = getByTestId("native-terminal-viewport");
 
@@ -4103,9 +4082,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-file-click" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-file-click" session={session} />);
       const pane = getByTestId("native-terminal-pane");
       const viewport = getByTestId("native-terminal-viewport");
 
@@ -4187,9 +4164,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-preview-click" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-preview-click" session={session} />);
       const pane = getByTestId("native-terminal-pane");
       const viewport = getByTestId("native-terminal-viewport");
 
@@ -4251,7 +4226,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         if (command === "cmd_file_preview_resolve") return { resolvedPath: "/workspace/src/a.ts", exists: true, isDirectory: false };
         return undefined;
       });
-      const view = render(<NativeTerminalPane session={session} />);
+      const view = await renderNative(<NativeTerminalPane session={session} />);
       const pane = view.getByTestId("native-terminal-pane");
       vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
         .mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -4295,9 +4270,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-indented-click" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-indented-click" session={session} />);
       const pane = getByTestId("native-terminal-pane");
       const viewport = getByTestId("native-terminal-viewport");
 
@@ -4350,7 +4323,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("handles onWheel scrolling by issuing native scroll IPC command", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const pane = getByTestId("native-terminal-pane");
     tauriCoreMocks.invoke.mockClear();
 
@@ -4384,9 +4357,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       }
       return undefined;
     });
-    const { getByRole, getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-scrollbar" session={session} />,
-    );
+    const { getByRole, getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-scrollbar" session={session} />);
 
     const track = await waitFor(() => getByRole("scrollbar", { name: "Terminal scrollback" }));
     const thumb = getByTestId("native-terminal-scrollbar-thumb");
@@ -4434,9 +4405,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-wheel-reveal" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-wheel-reveal" session={session} />);
 
       const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
       const pane = getByTestId("native-terminal-pane");
@@ -4481,9 +4450,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-pointerdown-reveal" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-pointerdown-reveal" session={session} />);
 
       const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
       const pane = getByTestId("native-terminal-pane");
@@ -4519,9 +4486,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-drag-no-hide" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-drag-no-hide" session={session} />);
 
       const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
       const thumb = getByTestId("native-terminal-scrollbar-thumb");
@@ -4565,9 +4530,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-hover-track" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-hover-track" session={session} />);
 
       const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
 
@@ -4634,7 +4597,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
 
       const copyShortcut = new KeyboardEvent("keydown", {
@@ -4698,7 +4661,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-copy" session={session} />);
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-korean-copy" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
 
       const copyShortcut = new KeyboardEvent("keydown", {
@@ -4746,7 +4709,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       return undefined;
     });
 
-    render(<NativeTerminalPane sessionId="term-session-copy-interrupt-empty" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-copy-interrupt-empty" session={session} />);
     tauriCoreMocks.invoke.mockClear();
 
     act(() => {
@@ -4792,7 +4755,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      render(<NativeTerminalPane sessionId="term-session-copy-interrupt-with-text" session={session} />);
+      await renderNative(<NativeTerminalPane sessionId="term-session-copy-interrupt-with-text" session={session} />);
       tauriCoreMocks.invoke.mockClear();
 
       act(() => {
@@ -4855,7 +4818,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      render(<NativeTerminalPane sessionId="term-session-mac-copy-denied" session={session} />);
+      await renderNative(<NativeTerminalPane sessionId="term-session-mac-copy-denied" session={session} />);
       tauriCoreMocks.invoke.mockClear();
 
       act(() => {
@@ -4927,7 +4890,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         return undefined;
       });
 
-      render(<NativeTerminalPane sessionId="term-session-linux-copy-fail" session={session} />);
+      await renderNative(<NativeTerminalPane sessionId="term-session-linux-copy-fail" session={session} />);
       tauriCoreMocks.invoke.mockClear();
 
       act(() => {
@@ -5015,7 +4978,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("clears native preedit before committing composition text", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     tauriCoreMocks.invoke.mockClear();
 
@@ -5041,7 +5004,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("clears a cancelled composition when focus leaves the input sink", async () => {
     const session = createSession("term-session-1");
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     tauriCoreMocks.invoke.mockClear();
 
@@ -5137,9 +5100,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("leaves IME-owned keydowns on the focused sink to the IME and commits the composition text once", async () => {
     const session = createSession("term-session-ime-keydown-sink");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-keydown-sink" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-keydown-sink" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     textarea.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -5271,9 +5232,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("focuses the owning sink on a composition-starting IME keydown in the document fallback", async () => {
     const session = createSession("term-session-ime-fallback-focus");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-fallback-focus" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-fallback-focus" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     textarea.focus();
     (document.activeElement as HTMLElement)?.blur?.();
@@ -5390,9 +5349,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
   it("treats an AltGr chord in the document fallback as text input and focuses the sink", async () => {
     const session = createSession("term-session-altgraph-fallback");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-altgraph-fallback" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-altgraph-fallback" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     textarea.focus();
     (document.activeElement as HTMLElement)?.blur?.();
@@ -5624,9 +5581,7 @@ describe("active prop and pane focus event dispatch", () => {
 
   it("focuses the input sink and sends focus when active becomes true", async () => {
     const session = createSession("session-active-test", "backend-active-test");
-    const { getByTestId, rerender } = render(
-      <NativeTerminalPane sessionId="session-active-test" session={session} active={false} />,
-    );
+    const { getByTestId, rerender } = await renderNative(<NativeTerminalPane sessionId="session-active-test" session={session} active={false} />);
 
     const sink = getByTestId("native-terminal-focus-sink");
     expect(document.activeElement).not.toBe(sink);
@@ -5644,9 +5599,7 @@ describe("active prop and pane focus event dispatch", () => {
 
   it("sends focus false when active transitions to false", async () => {
     const session = createSession("session-active-false-test", "backend-active-false-test");
-    const { rerender } = render(
-      <NativeTerminalPane sessionId="session-active-false-test" session={session} active={true} />,
-    );
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId="session-active-false-test" session={session} active={true} />);
 
     tauriCoreMocks.invoke.mockClear();
 
@@ -5662,9 +5615,7 @@ describe("active prop and pane focus event dispatch", () => {
 
   it("claims window keydown and forwards input to the active pane when document.activeElement is document.body", async () => {
     const session = createSession("session-claim-test", "backend-claim-test");
-    render(
-      <NativeTerminalPane sessionId="session-claim-test" session={session} active={true} />,
-    );
+    await renderNative(<NativeTerminalPane sessionId="session-claim-test" session={session} active={true} />);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -5693,9 +5644,7 @@ describe("active prop and pane focus event dispatch", () => {
 
   it("does not claim fallback keydown when active is false even if hovered", async () => {
     const session = createSession("session-inactive-test", "backend-inactive-test");
-    render(
-      <NativeTerminalPane sessionId="session-inactive-test" session={session} active={false} />,
-    );
+    await renderNative(<NativeTerminalPane sessionId="session-inactive-test" session={session} active={false} />);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -5785,9 +5734,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     const daemonSessionId = "daemon-pty-xyz-999";
     const session = createSession(frontendId, daemonSessionId);
 
-    const { getByTestId, unmount } = render(
-      <NativeTerminalPane sessionId={frontendId} session={session} />,
-    );
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane sessionId={frontendId} session={session} />);
 
     // 1. Native attach must use backendSessionId
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -5854,32 +5801,37 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     unmount();
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(daemonSessionId),
         sessionId: daemonSessionId,
       });
     });
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(daemonSessionId),
       sessionId: frontendId,
     });
   });
 
-  it("preserves fallback behavior when callers only supply sessionId without session object", () => {
-    render(<NativeTerminalPane sessionId="legacy-caller-supplied-id" />);
-
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
-      "cmd_native_terminal_attach",
-      expect.objectContaining({
-        sessionId: "legacy-caller-supplied-id",
-      }),
-    );
+  // 29e60760 requires a persisted session identity before a native surface may attach.
+  it("refuses attachment when callers supply no durable session identity", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    try {
+      const view = await renderNative(<NativeTerminalPane sessionId="legacy-caller-supplied-id" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+      expect(view.getByRole("alert")).toHaveTextContent("Failed to attach native terminal");
+      expect(tauriCoreMocks.invoke.mock.calls.filter(([command]) => command === "cmd_native_terminal_attach")).toHaveLength(0);
+      expect(error).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      error.mockRestore();
+    }
   });
 
   it("makes no attach, focus, or input IPC calls when session has null backendSessionId, then attaches once upon receiving backendSessionId", async () => {
     const frontendId = "frontend-pane-1";
     const sessionWithoutBackend = createSession(frontendId, null);
 
-    const { getByTestId, rerender } = render(
-      <NativeTerminalPane sessionId={frontendId} session={sessionWithoutBackend} />,
-    );
+    const { getByTestId, rerender } = await renderNative(<NativeTerminalPane sessionId={frontendId} session={sessionWithoutBackend} />);
 
     // 1. Native attach and bounds must NOT be called when backendSessionId is null
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_attach", expect.anything());
@@ -5903,7 +5855,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     // 4. Rerender with rebound backendSessionId from daemon recovery
     const reboundSession = { ...sessionWithoutBackend, backendSessionId: "daemon-pty-fresh-123" };
-    rerender(<NativeTerminalPane sessionId={frontendId} session={reboundSession} />);
+    await act(async () => { rerender(<NativeTerminalPane sessionId={frontendId} session={reboundSession} />); });
 
     // Now it attaches exactly once with the rebound daemon ID, never with frontendId
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
@@ -5946,12 +5898,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
   it("focuses and routes input only to the pane receiving a reconnect binding", async () => {
     const leftCold = createSession("frontend-left", null);
     const rightLive = createSession("frontend-right", "backend-right");
-    const { getAllByTestId, rerender } = render(
-      <div>
+    const { getAllByTestId, rerender } = await renderNative(<div>
         <NativeTerminalPane sessionId={leftCold.id} session={leftCold} />
         <NativeTerminalPane sessionId={rightLive.id} session={rightLive} />
-      </div>,
-    );
+      </div>);
     const [leftInput, rightInput] = getAllByTestId("native-terminal-focus-sink") as HTMLTextAreaElement[];
     rightInput.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -5971,6 +5921,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       ([command, args]) => command === "cmd_native_terminal_attach" && args?.sessionId === "backend-resumed-left",
     )).toHaveLength(1);
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding("backend-right"),
       sessionId: "backend-right",
     });
 
@@ -6047,7 +5998,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("does not detach a replacement owner when the rebound pane reparents in the same turn", async () => {
     const rebound = createSession("frontend-reparent", "backend-resumed-reparent");
-    const first = render(<NativeTerminalPane sessionId={rebound.id} session={rebound} />);
+    const first = await renderNative(<NativeTerminalPane sessionId={rebound.id} session={rebound} />);
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
         "cmd_native_terminal_attach",
@@ -6065,6 +6016,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
 
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        attachTuple: expectedNativeBinding(rebound.backendSessionId),
       sessionId: rebound.backendSessionId,
     });
   });
@@ -6085,9 +6037,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         return undefined;
       });
 
-      const { queryByRole } = render(
-        <NativeTerminalPane sessionId="retry-mount-session" session={session} />,
-      );
+      const { queryByRole } = await renderNative(<NativeTerminalPane sessionId="retry-mount-session" session={session} />);
 
       // Initial attempt (attempt 1)
       await act(async () => {
@@ -6120,7 +6070,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("redirects printable keydown fallback when activeElement is document.body", async () => {
     const session = createSession("term-session-capture-fallback");
-    render(<NativeTerminalPane sessionId="term-session-capture-fallback" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-capture-fallback" session={session} />);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -6152,7 +6102,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     const sessionId = "term-session-last-focused";
     const backendSessionId = "backend-last-focused";
     const session = createSession(sessionId, backendSessionId);
-    render(<NativeTerminalPane sessionId={sessionId} session={session} active={false} />);
+    await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} active={false} />);
 
     await waitFor(() => {
       expect(nativeTerminalEventMocks.focusListeners.length).toBeGreaterThan(0);
@@ -6191,7 +6141,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("forwards Enter through the keydown fallback when activeElement is document.body", async () => {
     const session = createSession("term-session-fallback-enter");
-    render(<NativeTerminalPane sessionId="term-session-fallback-enter" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-fallback-enter" session={session} />);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -6217,7 +6167,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("forwards Ctrl+C through the keydown fallback when activeElement is document.body", async () => {
     const session = createSession("term-session-fallback-ctrlc");
-    render(<NativeTerminalPane sessionId="term-session-fallback-ctrlc" session={session} />);
+    await renderNative(<NativeTerminalPane sessionId="term-session-fallback-ctrlc" session={session} />);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -6253,12 +6203,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
   it("delivers a fallback Enter to exactly one pane when two split panes are mounted", async () => {
     const left = createSession("split-pane-left");
     const right = createSession("split-pane-right");
-    render(
-      <>
+    await renderNative(<>
         <NativeTerminalPane sessionId="split-pane-left" session={left} />
         <NativeTerminalPane sessionId="split-pane-right" session={right} />
-      </>,
-    );
+      </>);
 
     tauriCoreMocks.invoke.mockClear();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
@@ -6289,9 +6237,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("routes a keystroke to the swapped-in session after a workspace switch, never the outgoing one", async () => {
     const outgoing = createSession("switch-session-outgoing");
-    const { rerender } = render(
-      <NativeTerminalPane sessionId="switch-session-outgoing" session={outgoing} />,
-    );
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId="switch-session-outgoing" session={outgoing} />);
     await waitFor(() => {
       const attached = tauriCoreMocks.invoke.mock.calls.some(
         ([cmd, args]) =>
@@ -6346,12 +6292,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
     const leftSession = createSession("native-focus-left", "daemon-native-focus-left");
     const rightSession = createSession("native-focus-right", "daemon-native-focus-right");
-    const { getAllByTestId } = render(
-      <>
+    const { getAllByTestId } = await renderNative(<>
         <NativeTerminalPane sessionId="native-focus-left" session={leftSession} />
         <NativeTerminalPane sessionId="native-focus-right" session={rightSession} />
-      </>,
-    );
+      </>);
     const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
 
     await waitFor(() => {
@@ -6382,9 +6326,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("lets immediate Hangul input start composition after a native pane switch", async () => {
     const session = createSession("native-ime-switch", "daemon-native-ime-switch");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="native-ime-switch" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="native-ime-switch" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     await waitFor(() => {
       expect(nativeTerminalEventMocks.focusListeners).toHaveLength(1);
@@ -6432,9 +6374,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("forwards plain Ctrl+C with no activity prop as key 'c' with ctrl true", async () => {
     const session = createSession("term-session-plain-ctrlc");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-plain-ctrlc" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-plain-ctrlc" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -6480,13 +6420,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       state,
       title: "Agent Waiting",
     };
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-agent-waiting-ctrlc"
         session={session}
         activity={activity}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -6534,13 +6472,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         state: "waiting",
         title: "Agent Waiting",
       };
-      const { getByTestId } = render(
-        <NativeTerminalPane
+      const { getByTestId } = await renderNative(<NativeTerminalPane
           sessionId="term-session-agent-double-ctrlc"
           session={session}
           activity={activity}
-        />,
-      );
+        />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -6601,13 +6537,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         state: "waiting",
         title: "Agent Waiting",
       };
-      const { getByTestId } = render(
-        <NativeTerminalPane
+      const { getByTestId } = await renderNative(<NativeTerminalPane
           sessionId="term-session-agent-spaced-ctrlc"
           session={session}
           activity={activity}
-        />,
-      );
+        />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -6659,12 +6593,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     vi.useFakeTimers();
     try {
       const session = createSession("term-session-plain-shell-double-ctrlc");
-      const { getByTestId } = render(
-        <NativeTerminalPane
+      const { getByTestId } = await renderNative(<NativeTerminalPane
           sessionId="term-session-plain-shell-double-ctrlc"
           session={session}
-        />,
-      );
+        />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -6716,13 +6648,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         state: "working",
         title: "Agent Working",
       };
-      const { getByTestId } = render(
-        <NativeTerminalPane
+      const { getByTestId } = await renderNative(<NativeTerminalPane
           sessionId="term-session-agent-working-double-ctrlc"
           session={session}
           activity={activity}
-        />,
-      );
+        />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -6774,13 +6704,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         state: "waiting",
         title: "Agent Waiting",
       };
-      render(
-        <NativeTerminalPane
+      await renderNative(<NativeTerminalPane
           sessionId="term-session-agent-fallback-double-ctrlc"
           session={session}
           activity={activity}
-        />,
-      );
+        />);
 
       tauriCoreMocks.invoke.mockClear();
       (document.activeElement as HTMLElement)?.blur?.();
@@ -6832,13 +6760,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       state: "working",
       title: "Agent Working",
     };
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-agent-working-ctrlc"
         session={session}
         activity={activity}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -6879,9 +6805,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("normalizes Korean layout Ctrl+C (key ㅊ and code KeyC) to key 'c' instead of 'ㅊ'", async () => {
     const session = createSession("term-session-korean-ctrlc");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-korean-ctrlc" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-korean-ctrlc" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -6929,9 +6853,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("normalizes Korean layout Ctrl+L (key ㅣ and code KeyL) to key 'l' instead of 'ㅣ'", async () => {
     const session = createSession("term-session-korean-ctrll");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-korean-ctrll" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-korean-ctrll" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -6975,12 +6897,10 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       ...createSession("term-session-agent-no-activity-ctrlc"),
       agentType: "claude",
     };
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-agent-no-activity-ctrlc"
         session={session}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -7029,13 +6949,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       state: "working",
       title: "Agent Working",
     };
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-agent-working-override-ctrlc"
         session={session}
         activity={activity}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -7094,13 +7012,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane
+    const { getByTestId } = await renderNative(<NativeTerminalPane
         sessionId="term-session-cmdc-empty-waiting"
         session={session}
         activity={activity}
-      />,
-    );
+      />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -7156,13 +7072,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane
+      const { getByTestId } = await renderNative(<NativeTerminalPane
           sessionId="term-session-cmdc-selection-agent"
           session={session}
           activity={activity}
-        />,
-      );
+        />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -7231,9 +7145,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         return undefined;
       });
 
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="term-session-ctrl-shift-c-copy" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ctrl-shift-c-copy" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       tauriCoreMocks.invoke.mockClear();
 
@@ -7285,9 +7197,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
   it("syncs attention frame state to backend when needsAttention changes or component unmounts", async () => {
     const session = createSession("term-session-attention");
 
-    const { rerender, unmount } = render(
-      <NativeTerminalPane sessionId="term-session-attention" session={session} needsAttention={true} />,
-    );
+    const { rerender, unmount } = await renderNative(<NativeTerminalPane sessionId="term-session-attention" session={session} needsAttention={true} />);
 
     await waitFor(() => {
       expect(nativeTerminalEventMocks.setNativeTerminalAttentionFrame).toHaveBeenCalledWith(
@@ -7332,9 +7242,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("swallows the keydown that terminates an IME composition", async () => {
     const session = createSession("term-session-ime-swallow");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-swallow" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-swallow" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -7355,9 +7263,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("still sends standalone spaces after a committed composition", async () => {
     const session = createSession("term-session-ime-standalone-space");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-standalone-space" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-standalone-space" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -7379,9 +7285,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("disarms the tail suppression when a different key arrives", async () => {
     const session = createSession("term-session-ime-disarm");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-disarm" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-disarm" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -7403,9 +7307,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("sends plain space without any composition", async () => {
     const session = createSession("term-session-ime-plain-space");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-plain-space" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-plain-space" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -7425,9 +7327,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("does not swallow the first jamo of a new composition after a jamo-tailed commit", async () => {
     const session = createSession("term-session-ime-jamo-tail");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ime-jamo-tail" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-ime-jamo-tail" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
     tauriCoreMocks.invoke.mockClear();
@@ -7460,9 +7360,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
   it("does not trigger performAttach when send_input fails with Busy and inputWritten:false", async () => {
     const session = createSession("term-session-busy-no-attach");
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-busy-no-attach" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-busy-no-attach" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
     sink.focus();
 
@@ -7512,9 +7410,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-order" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-order" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
 
     act(() => {
@@ -7565,9 +7461,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       return undefined;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-coalesce" session={session} />,
-    );
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-coalesce" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
 
     act(() => {
@@ -7605,9 +7499,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     // Scenario 1: dropped (visible running pane whose session has no backend id yet)
     const unboundSession = createSession("term-session-drop-unbound", null);
-    const view1 = render(
-      <NativeTerminalPane sessionId="term-session-drop-unbound" session={unboundSession} />,
-    );
+    const view1 = await renderNative(<NativeTerminalPane sessionId="term-session-drop-unbound" session={unboundSession} />);
     act(() => {
       fireEvent.keyDown(view1.getByTestId("native-terminal-focus-sink"), { key: "a" });
     });
@@ -7620,9 +7512,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       workspaceId: "ssh:ws-outage",
       remoteConnectionState: "disconnected" as const,
     };
-    const view2 = render(
-      <NativeTerminalPane sessionId="term-session-drop-outage" session={outageSession} />,
-    );
+    const view2 = await renderNative(<NativeTerminalPane sessionId="term-session-drop-outage" session={outageSession} />);
     act(() => {
       fireEvent.keyDown(view2.getByTestId("native-terminal-focus-sink"), { key: "b" });
     });
@@ -7655,13 +7545,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       return undefined;
     });
     const onUnavailable = vi.fn();
-    const view3 = render(
-      <NativeTerminalPane
+    const view3 = await renderNative(<NativeTerminalPane
         sessionId="term-session-drop-quarantine"
         session={quarantineSession}
         onBackendSessionUnavailable={onUnavailable}
-      />,
-    );
+      />);
     const qSink = view3.getByTestId("native-terminal-focus-sink");
     await act(async () => {
       fireEvent.keyDown(qSink, { key: "c" });
@@ -7714,7 +7602,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const { getByTestId, unmount } = render(<NativeTerminalPane session={session} />);
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
     const pane = getByTestId("native-terminal-pane");
     const viewport = getByTestId("native-terminal-viewport");
     vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -7771,7 +7659,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const { getByTestId, unmount } = render(<NativeTerminalPane session={session} />);
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
     const pane = getByTestId("native-terminal-pane");
     const viewport = getByTestId("native-terminal-viewport");
     vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -7837,7 +7725,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const { getByTestId, unmount } = render(<NativeTerminalPane session={session} />);
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
     const pane = getByTestId("native-terminal-pane");
     const viewport = getByTestId("native-terminal-viewport");
     vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -7905,7 +7793,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const { getByTestId, unmount } = render(<NativeTerminalPane session={session} />);
+    const { getByTestId, unmount } = await renderNative(<NativeTerminalPane session={session} />);
     const pane = getByTestId("native-terminal-pane");
     const viewport = getByTestId("native-terminal-viewport");
     vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -8032,7 +7920,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const view1 = render(<NativeTerminalPane session={session1} />);
+    const view1 = await renderNative(<NativeTerminalPane session={session1} />);
     const pane1 = view1.getByTestId("native-terminal-pane");
     vi.spyOn(view1.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
       .mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -8069,7 +7957,7 @@ describe("terminal link UX (U1-U3)", () => {
       return undefined;
     });
 
-    const view2 = render(<NativeTerminalPane session={session2} />);
+    const view2 = await renderNative(<NativeTerminalPane session={session2} />);
     const pane2 = view2.getByTestId("native-terminal-pane");
     vi.spyOn(view2.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
       .mockReturnValue(new DOMRect(0, 0, 800, 480));
@@ -8115,9 +8003,7 @@ describe("terminal link UX (U1-U3)", () => {
 
     it("dispatches ferryx:session-interacted on user input", async () => {
       const session = createSession("session-interact-input");
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="session-interact-input" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="session-interact-input" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       act(() => {
         fireEvent.input(textarea, { target: { value: "a" } });
@@ -8127,9 +8013,7 @@ describe("terminal link UX (U1-U3)", () => {
 
     it("dispatches ferryx:session-interacted on paste", async () => {
       const session = createSession("session-interact-paste");
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="session-interact-paste" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="session-interact-paste" session={session} />);
       const textarea = getByTestId("native-terminal-focus-sink");
       act(() => {
         fireEvent.paste(textarea, { clipboardData: { getData: () => "text" } });
@@ -8139,9 +8023,7 @@ describe("terminal link UX (U1-U3)", () => {
 
     it("dispatches ferryx:session-interacted on pointer down", async () => {
       const session = createSession("session-interact-pointer");
-      const { getByTestId } = render(
-        <NativeTerminalPane sessionId="session-interact-pointer" session={session} />,
-      );
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="session-interact-pointer" session={session} />);
       const pane = getByTestId("native-terminal-pane");
       act(() => {
         fireEvent.pointerDown(pane);
@@ -8151,7 +8033,7 @@ describe("terminal link UX (U1-U3)", () => {
 
     it("dispatches ferryx:session-interacted on native terminal focus", async () => {
       const session = createSession("frontend-focus-session", "backend-focus-session");
-      render(<NativeTerminalPane sessionId="frontend-focus-session" session={session} />);
+      await renderNative(<NativeTerminalPane sessionId="frontend-focus-session" session={session} />);
       act(() => {
         nativeTerminalEventMocks.focusListeners.forEach((fn) => fn("backend-focus-session"));
       });
