@@ -1,6 +1,5 @@
 # Herdr reference-chat isolated acceptance runner (plan task 14).
 #
-# AUTHORED, NOT EXECUTED. The complete-code merge barrier owns every run of this script.
 #
 # This is the fixed CLI the plan's "Exact command contract" section names:
 #

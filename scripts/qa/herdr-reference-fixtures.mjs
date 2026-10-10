@@ -2,7 +2,7 @@
  * Frozen fixtures, schemas and shared helpers for the Herdr reference-chat acceptance
  * harness (plan task 14). Contract: docs/chat/herdr-port-contract.md (rev 2).
  *
- * AUTHORED, NOT EXECUTED. Every value here is read from an existing source in this
+ * Every value here is read from an existing source in this
  * repository or from the frozen contract document; nothing is guessed, and a value the
  * harness cannot obtain is reported as missing identity instead of being defaulted.
  *

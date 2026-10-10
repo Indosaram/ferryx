@@ -2,7 +2,6 @@
 /**
  * Herdr reference-chat fixture and candidate producer (plan task 14).
  *
- * AUTHORED, NOT EXECUTED. The complete-code merge barrier owns every run of this file.
  *
  * WHAT IT DOES
  *   Reads an authorized provisioning config, spawns and RECORDS the original PTYs it

@@ -1,7 +1,6 @@
 /**
  * Integration regression source for the reference chat lane (plan task 12).
  *
- * AUTHORED, NOT EXECUTED: the execution override defers every test run to the post-merge gate.
  *
  * The scenarios below are the task-12 acceptance contract (QA-01/04/05/06/07): chat is the default
  * at every width, the explicit terminal keeps the same session, submit/Stop/answer/files speak to

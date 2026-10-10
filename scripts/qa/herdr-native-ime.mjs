@@ -3,8 +3,7 @@
  * herdr-native-ime.mjs — real-device Android Korean-composition, layout, scroll and copy
  * producer for the Herdr reference-chat parity plan (task 15, QA-08).
  *
- * AUTHORED, NOT EXECUTED. Nothing in this file has been run: no device, no driver, no build,
- * no test. Every run belongs to the post-merge verification wave. The header is the contract;
+ * Device receipts, rather than this header, establish execution.
  * the receipt this file writes is validated by task 14's frozen
  * `validateDeviceReceipt()` in `scripts/qa/herdr-reference-fixtures.mjs`.
  *
