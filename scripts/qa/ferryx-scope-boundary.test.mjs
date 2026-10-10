@@ -1,4 +1,4 @@
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { prepare, cleanup, validateRoot, validateEvidence } from './ferryx-scope-fixtures.mjs';

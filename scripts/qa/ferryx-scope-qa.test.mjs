@@ -1,4 +1,4 @@
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { validateRoot, validateEvidence, prepare, cleanup } from './ferryx-scope-fixtures.mjs';
 import { symlinkSync, unlinkSync, rmdirSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -51,7 +51,7 @@ test('real self-test records HTTP results and cleanup without claiming product s
   expect(report.productVerified).toBe(false);
   const boundaryRun = report.commands.find(command => command.argv.includes('scripts/qa/ferryx-scope-boundary.test.mjs'));
   expect(boundaryRun.exitCode).toBe(0);
-  expect(boundaryRun.stdout).toMatch(/3 passed/);
+  expect(boundaryRun.stderr).toMatch(/3 pass/);
   expect(report.commands[0].exitCode).toBe(0);
   expect(report.http[0].headers).toContain('HTTP/1.1 200');
   expect(report.cleanup.map(item => item.loopbackServersClosed ?? item.removed)).toEqual([2, true]);

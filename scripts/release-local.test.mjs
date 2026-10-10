@@ -33,6 +33,38 @@ function digestDirectory(directory) {
   return hash.digest("hex");
 }
 
+function writeCheckoutHostConfig(tmp) {
+  const config = JSON.parse(readFileSync("scripts/release-hosts.example.json", "utf8"));
+  const repo = join(tmp, "source");
+  const ghostty = join(tmp, "ghostty");
+  const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
+  for (const dir of [repo, ghostty]) {
+    mkdirSync(dir);
+    git(dir, ["init", "-q"]);
+    git(dir, ["config", "user.name", "fixture"]);
+    git(dir, ["config", "user.email", "fixture@example.invalid"]);
+  }
+  writeFileSync(join(ghostty, "README"), "fixture");
+  git(ghostty, ["add", "."]);
+  git(ghostty, ["commit", "-qm", "fixture"]);
+  const pin = git(ghostty, ["rev-parse", "HEAD"]).trim();
+  mkdirSync(join(repo, "src-tauri", "native_terminal"), { recursive: true });
+  writeFileSync(join(repo, "src-tauri", "native_terminal", "build_ghostty.rs"), `const EXPECTED_GHOSTTY_SHA: &str = "${pin}";\n`);
+  writeFileSync(join(repo, "src-tauri", "tauri.conf.json"), readFileSync("src-tauri/tauri.conf.json"));
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-qm", "fixture"]);
+  config.repository = repo;
+  config.ghosttyRepository = ghostty;
+  const bin = join(tmp, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n");
+  chmodSync(join(bin, "gh"), 0o755);
+  config.hosts.macbook.root = join(tmp, "host-root");
+  const configPath = join(tmp, "hosts.json");
+  writeFileSync(configPath, JSON.stringify(config));
+  return configPath;
+}
+
 function writeIntegrityState(runDir, plan, publishDir) {
   const configPath = join(runDir, "hosts.json");
   writeFileSync(configPath, "{}\n");
@@ -135,6 +167,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-prepare-test-"));
   try {
     const outDir = join(tmp, "release-run-1");
+    const configPath = writeCheckoutHostConfig(tmp);
 
     const res = spawnSync(
       "node",
@@ -142,7 +175,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         SCRIPT_PATH,
         "prepare",
         "--config",
-        "scripts/release-hosts.example.json",
+        configPath,
         "--tag",
         "v2026.09.08.1",
         "--commit",
@@ -150,7 +183,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         "--out",
         outDir,
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } },
     );
 
     assert.equal(res.status, 0, `stderr: ${res.stderr}`);
@@ -183,7 +216,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         SCRIPT_PATH,
         "prepare",
         "--config",
-        "scripts/release-hosts.example.json",
+        configPath,
         "--tag",
         "v2026.09.08.1",
         "--commit",
@@ -205,15 +238,13 @@ test("build: accepts an untouched prepared plan digest", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-prepare-build-digest-"));
   try {
     const outDir = join(tmp, "run");
-    const config = JSON.parse(readFileSync("scripts/release-hosts.example.json", "utf8"));
-    config.hosts.macbook.root = join(tmp, "host-root");
-    const configPath = join(tmp, "hosts.json");
-    writeFileSync(configPath, JSON.stringify(config));
+    const configPath = writeCheckoutHostConfig(tmp);
     prepareRelease({
       configPath,
       tag: "v2026.09.08.1",
       commit: "HEAD",
       outDir,
+      changelog: () => "fixture release notes",
     });
     await assert.rejects(
       () => buildRelease({
@@ -238,8 +269,15 @@ test("preflight: exits non-zero and reports failure when disk budget is unmet", 
     const configPath = join(tmp, "hosts.json");
     writeFileSync(configPath, JSON.stringify(config, null, 2));
 
+    // Remote hosts are outside this local disk-budget contract.
+    const bin = join(tmp, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "ssh"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bin, "ssh"), 0o755);
+
     const res = spawnSync("node", [SCRIPT_PATH, "preflight", "--config", configPath], {
       encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
     });
 
     assert.notEqual(res.status, 0);

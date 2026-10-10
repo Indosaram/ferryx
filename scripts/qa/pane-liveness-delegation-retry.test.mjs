@@ -15,7 +15,7 @@
 // window, or a GUI action; the retry loop is driven through the module's own
 // injected attempt seam and the sink through real files in a temp fixture root.
 
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

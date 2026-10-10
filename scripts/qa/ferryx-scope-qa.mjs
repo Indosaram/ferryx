@@ -60,7 +60,7 @@ export async function main(argv) {
       if (exitCode !== 0 || !stdout.includes('data-testid="design-element"')) throw new Error('FIXTURE_HTTP_FAILED');
       report.browser = { default: 'Bun.WebView', available: typeof globalThis.Bun?.WebView === 'function', executed: false, reason: 'Private browser data-path isolation and product routes are not integrated', pushRequired: 'Playwright with real Chrome and physical phone', desktopRequired: 'computer-use bound to QA PID/window' };
       if (values['self-test']) {
-        const argv = [process.execPath, new URL('../../ui/node_modules/vitest/vitest.mjs', import.meta.url).pathname, 'run', '--config', new URL('./ferryx-scope-vitest.config.mjs', import.meta.url).pathname, 'scripts/qa/ferryx-scope-boundary.test.mjs'];
+        const argv = [process.execPath, 'test', 'scripts/qa/ferryx-scope-boundary.test.mjs'];
         const tests = spawnChild(argv);
         tests.stdin.end();
         const [stdout, stderr, exitCode] = await collectChild(tests);

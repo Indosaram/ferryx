@@ -358,6 +358,7 @@ export function runProcess(command, args = [], options = {}) {
       env,
       input,
       timeoutMs = 60000,
+      spawnProcess = spawn,
     } = options;
     const effectiveEnv = { ...(env ?? process.env) };
     const redact = (text) => redactProcessOutput(text, effectiveEnv);
@@ -371,7 +372,7 @@ export function runProcess(command, args = [], options = {}) {
     const isWin = process.platform === "win32";
     let child;
     try {
-      child = spawn(command, args, {
+      child = spawnProcess(command, args, {
         cwd,
         env: effectiveEnv,
         stdio: ["pipe", "pipe", "pipe"],

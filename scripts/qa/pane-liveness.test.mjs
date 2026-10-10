@@ -1,8 +1,6 @@
-// Task 3 runner unit tests (authored; execution delegated to the sole remote
-// verifier per plan - never run locally). Follows the scripts/qa/*.test.mjs
-// pattern that imports vitest from ui/node_modules.
+// Runner unit tests use the scripts suite's Bun test runner.
 
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, chmodSync, watch, realpathSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
@@ -418,14 +416,13 @@ test('pass-6 cleanup: a still-held root keeps cleanupGate.ok=false and names the
 test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the group', async () => {
   if (process.platform === 'win32') return; // taskkill /T /F covers the tree there
   const registry = new ResourceRegistry();
-  const grandchildSrc = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  const grandchildSrc = "process.on('SIGTERM', () => {}); process.stdout.write('READY:' + process.pid + '\\n'); setInterval(() => {}, 1000);";
   const leaderSrc = [
     "process.on('SIGTERM', () => {});",
     `const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSrc)}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
-    "process.stdout.write('READY:' + c.pid + '\\n');",
     'setInterval(() => {}, 1000);',
   ].join(' ');
-  const child = spawnOwned(registry, process.execPath, ['-e', leaderSrc]);
+  const child = spawnOwned(registry, 'node', ['-e', leaderSrc]);
   const grandchildPid = await new Promise((resolvePromise, rejectPromise) => {
     let buffer = '';
     const onData = chunk => {
@@ -444,6 +441,8 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     child.once('error', rejectPromise);
   });
   expect(Number.isInteger(grandchildPid)).toBe(true);
+  // Both descendants inherit stdout; leader exit alone does not settle their handles.
+  const stdoutClosed = new Promise(resolvePromise => { child.stdout.once('close', () => resolvePromise(true)); });
   let reaped = false;
   try {
     const receipts = await registry.cleanup();
@@ -451,6 +450,8 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     expect(receipt.escalated).toBe(true); // SIGTERM was ignored: the force step ran
     expect(receipt.exited).toBe(true);
     expect(receipt.descendants.map(d => d.pid)).toContain(grandchildPid);
+    const closed = await withDeadline(stdoutClosed, 5000, 'force-reaped-stdout-close');
+    expect(closed.timedOut).toBe(false);
     reaped = true;
   } finally {
     // Fixture-owned fallback so a broken escalation cannot leak an orphan.

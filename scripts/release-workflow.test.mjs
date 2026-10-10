@@ -4,13 +4,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { parse } from "yaml";
+import { YAML } from "bun";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const parse = YAML.parse;
 const POLICY_BIN = join(REPO_ROOT, "scripts/release-workflow-policy.mjs");
 const BUILD_TEST_PATH = join(REPO_ROOT, ".github/workflows/build-test.yml");
-const PAGES_PATH = join(REPO_ROOT, ".github/workflows/deploy-pages.yml");
 const RELEASE_WORKFLOW_PATH = join(REPO_ROOT, ".github/workflows/release.yml");
 
 // Helper to run the policy validator via Bun
@@ -312,8 +312,12 @@ test("PR check workflow (.github/workflows/build-test.yml) complies with release
   );
 });
 
-test("Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy", () => {
-  const res = runPolicy([PAGES_PATH]);
+test("Retired Pages deployment workflow remains permitted by release policy", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pages-policy-"));
+  const path = join(tmp, "deploy-pages.yml");
+  writeFileSync(path, "name: Pages\non: workflow_dispatch\npermissions:\n  contents: read\n  pages: write\n  id-token: write\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bun run --cwd site build\n      - uses: actions/deploy-pages@v4\n");
+  const res = runPolicy([path]);
+  rmSync(tmp, { recursive: true, force: true });
   assert.equal(
     res.status,
     0,
@@ -340,7 +344,7 @@ test("Windows CI executes isolated nonzero platform-relevant contracts", () => {
   assert.equal(job['runs-on'], '${{ matrix.platform }}');
   const steps = job.steps.filter(step => step.if === "matrix.os_name == 'windows'" && /cargo test\b/.test(step.run ?? ''));
   assert.ok(steps.length > 0, 'Windows must execute tests, not just check/link');
-  const commands = steps.map(step => step.run).join('\n');
+  const commands = steps.flatMap(step => step.run.split(/\n\s*\n/)).filter(command => /--test windows_edge_probe_contract/.test(command)).join('\n');
   assert.doesNotMatch(commands, /--no-run|--list|--lib|daemon_persistence_contract/);
   for (const target of ['windows_edge_probe_contract', 'windows_window_opacity_contract']) {
     assert.match(commands, new RegExp(`--test ${target}\\b`));

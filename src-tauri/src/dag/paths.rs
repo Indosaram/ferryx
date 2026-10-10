@@ -20,7 +20,7 @@ fn resolve_dag_runs_dir_with_env(
     } else if has_records(&project_path.join(".omo/senpi-task")) {
         nested.join("runs")
     } else {
-        match agent_project_state_dir(project_path, get_env) {
+        match agent_project_state_dir(&real_project_path(project_path), get_env) {
             Some(state_dir) => state_dir.join("dag/runs"),
             None => nested.join("runs"),
         }
@@ -48,8 +48,7 @@ fn agent_project_state_dir(
                 .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
                 .map(|home| PathBuf::from(home).join(".omo").join("agent"))
         })?;
-    let real = real_project_path(project_path);
-    let real_text = real.to_string_lossy();
+    let real_text = project_path.to_string_lossy();
     let digest = {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(real_text.as_bytes());
@@ -58,7 +57,7 @@ fn agent_project_state_dir(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     };
-    let name: String = real
+    let name: String = project_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -186,10 +185,13 @@ mod tests {
 
     #[test]
     fn known_omo_hash_matches_node_for_an_absent_path() {
-        let resolved = resolve_dag_runs_dir_with_env(
+        // Exercise hashing directly: this fixed vector may be a real project on the host.
+        let resolved = agent_project_state_dir(
             Path::new("/home/projects/mhc"),
             |key| (key == "HOME").then(|| std::ffi::OsString::from("/home/indo")),
-        );
+        )
+        .expect("injected home")
+        .join("dag/runs");
         assert_eq!(
             resolved,
             PathBuf::from("/home/indo/.omo/agent/projects/mhc-e1e16759b81f/senpi-task/dag/runs")

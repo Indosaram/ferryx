@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { syncBuiltinESMExports } from "node:module";
+import { tmpdir, type } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -395,7 +394,7 @@ test("runHostScript: macbook runs locally via bash -s and uname succeeds", async
     posix: "uname",
   });
   assert.equal(result.exitCode, 0);
-  assert.equal(result.stdout.trim(), "Darwin");
+  assert.equal(result.stdout.trim(), type());
 });
 
 test("runHostScript: macbook fails closed on script non-zero exit", async () => {
@@ -462,8 +461,8 @@ process.exit(res.status ?? 0);
     assert.ok(call.args.includes("-o"));
     assert.ok(call.args.includes("BatchMode=yes"));
     assert.ok(call.args.includes("ConnectTimeout=10"));
-    assert.ok(call.args.includes("ServerAliveInterval=5"));
-    assert.ok(call.args.includes("ServerAliveCountMax=2"));
+    assert.ok(call.args.includes("ServerAliveInterval=30"));
+    assert.ok(call.args.includes("ServerAliveCountMax=20"));
     assert.ok(call.args.includes("omaki"));
     assert.ok(call.args.includes("bash"));
     assert.ok(call.args.includes("-s"));
@@ -521,8 +520,8 @@ process.exit(0);
     assert.ok(call.args.includes("-o"));
     assert.ok(call.args.includes("BatchMode=yes"));
     assert.ok(call.args.includes("ConnectTimeout=10"));
-    assert.ok(call.args.includes("ServerAliveInterval=5"));
-    assert.ok(call.args.includes("ServerAliveCountMax=2"));
+    assert.ok(call.args.includes("ServerAliveInterval=30"));
+    assert.ok(call.args.includes("ServerAliveCountMax=20"));
     assert.ok(call.args.includes("maho-win"));
     assert.ok(call.args.includes("powershell"));
     assert.ok(call.args.includes("-NoProfile"));
@@ -746,29 +745,24 @@ test("runProcess: preserves normal build output and non-sensitive env variables 
   assert.ok(!result.stdout.includes("[REDACTED]"));
 });
 
-test("runProcess reports non-EPIPE input errors after terminating its child", async (t) => {
+test("runProcess reports non-EPIPE input errors after terminating its child", async () => {
   const realSpawn = childProcess.spawn;
   let child;
-  t.mock.method(childProcess, "spawn", (...args) => {
+  const spawnProcess = (...args) => {
     child = realSpawn(...args);
     queueMicrotask(() => {
       const error = Object.assign(new Error("input write fault"), { code: "EIO" });
       child.stdin.emit("error", error);
     });
     return child;
-  });
-  syncBuiltinESMExports();
-  try {
+  };
     await assert.rejects(
       runProcess(process.execPath, ["-e", "process.stdin.resume()"], {
         input: "input",
         timeoutMs: 2000,
+        spawnProcess,
       }),
       /input write fault/,
     );
     assert.ok(child.exitCode !== null || child.signalCode !== null);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-  }
 });

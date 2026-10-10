@@ -12,7 +12,6 @@ import fs, {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { syncBuiltinESMExports } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -141,6 +140,8 @@ function createSyntheticReleaseFixture({
 
   const macDmgBuf = Buffer.from("mac-dmg-installer-content-67890");
   writeFileSync(join(macDir, "Ferryx_2026.908.1_universal.dmg"), macDmgBuf);
+  const macCliBuf = Buffer.from("mac-cli-universal-content");
+  writeFileSync(join(macDir, "ferryx-cli-darwin-universal"), macCliBuf);
 
   const macReceipt = {
     schemaVersion: 1,
@@ -168,6 +169,15 @@ function createSyntheticReleaseFixture({
         targets: ["darwin-aarch64", "darwin-x86_64"],
       },
       {
+        kind: "cli-darwin-universal",
+        name: "ferryx-cli-darwin-universal",
+        relPath: "darwin/ferryx-cli-darwin-universal",
+        bytes: macCliBuf.length,
+        sha256: sha256(macCliBuf),
+        signatureRelPath: null,
+        targets: [],
+      },
+      {
         kind: "dmg",
         name: "Ferryx_2026.908.1_universal.dmg",
         relPath: "darwin/Ferryx_2026.908.1_universal.dmg",
@@ -190,6 +200,8 @@ function createSyntheticReleaseFixture({
 
   const debBuf = Buffer.from("linux-deb-installer-content-fedcba");
   writeFileSync(join(linuxDir, "Ferryx_2026.908.1_amd64.deb"), debBuf);
+  const linuxCliBuf = Buffer.from("linux-cli-amd64-content");
+  writeFileSync(join(linuxDir, "ferryx-cli-linux-amd64"), linuxCliBuf);
 
   const linuxReceipt = {
     schemaVersion: 1,
@@ -215,6 +227,15 @@ function createSyntheticReleaseFixture({
         sha256: sha256(appimageBuf),
         signatureRelPath: "linux/Ferryx_2026.908.1_amd64.AppImage.sig",
         targets: ["linux-x86_64"],
+      },
+      {
+        kind: "cli-linux-amd64",
+        name: "ferryx-cli-linux-amd64",
+        relPath: "linux/ferryx-cli-linux-amd64",
+        bytes: linuxCliBuf.length,
+        sha256: sha256(linuxCliBuf),
+        signatureRelPath: null,
+        targets: [],
       },
       {
         kind: "deb",
@@ -354,6 +375,8 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.AppImage.sig")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.deb")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
+    assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
+    assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
 
     // Original artifacts present
     assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_universal.dmg")), true);
@@ -742,7 +765,7 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
     receipt.artifacts[0].bytes = invalidArchive.length;
     receipt.artifacts[0].sha256 = sha256(invalidArchive);
     writeFileSync(receiptPath, JSON.stringify(receipt));
-    childProcess.spawnSync = (command, args, options) => {
+    const spawnProcess = (command, args, options) => {
       if (args?.[0]?.endsWith("assert-updater-archive-layout.mjs")) {
         layoutChecked = true;
         // A concurrent source replacement can fool a source-path-only check.
@@ -757,7 +780,6 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
       }
       return realSpawn(command, args, options);
     };
-    syncBuiltinESMExports();
     assert.throws(
       () => assembleRelease({
         planPath: fixture.planPath,
@@ -765,14 +787,13 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
         artifactsDir: fixture.artifactsDir,
         outDir,
         publicKey: fixture.keys.publicKeyWrapped,
+        spawnProcess,
       }),
       /archive layout/i,
     );
     assert.equal(layoutChecked, true);
     assert.equal(existsSync(outDir), false);
   } finally {
-    childProcess.spawnSync = realSpawn;
-    syncBuiltinESMExports();
     fixture.cleanup();
   }
 });
