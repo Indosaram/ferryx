@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,21 +14,40 @@ const FIXTURE_ARCHIVE_PATH = join(REPO_ROOT, "scripts", "fixtures", "updater", "
 const FIXTURE_SIG_PATH = join(REPO_ROOT, "scripts", "fixtures", "updater", "Ferryx.app.tar.gz.sig");
 const TAURI_CONF_PATH = join(REPO_ROOT, "src-tauri", "tauri.conf.json");
 
-/**
- * Invokes the minisign CLI oracle directly.
- * Fails with a clear prerequisite error if minisign is not installed on the coordinator host.
- */
-function invokeMinisign(args, options = {}) {
-  try {
-    return execFileSync("minisign", args, options);
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      throw new Error(
-        "minisign CLI oracle is required on coordinator workstation but minisign executable was not found in PATH",
-      );
-    }
-    throw error;
+async function obtainMinisign(tmpDir) {
+  const command = process.env.MINISIGN_BIN || "minisign";
+  const probe = spawnSync(command, ["-v"], { encoding: "utf8" });
+  if (!probe.error) {
+    assert.equal(probe.status, 0, probe.stderr);
+    return command;
   }
+  assert.equal(probe.error.code, "ENOENT");
+  const distributions = {
+    linux: {
+      file: "minisign-0.12-linux.tar.gz",
+      sha256: "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73",
+    },
+    darwin: {
+      file: "minisign-0.12-macos.zip",
+      sha256: "89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63",
+    },
+  };
+  const distribution = distributions[process.platform];
+  assert.ok(distribution, "Set MINISIGN_BIN to the oracle executable on this platform");
+  const response = await fetch(`https://github.com/jedisct1/minisign/releases/download/0.12/${distribution.file}`);
+  assert.equal(response.status, 200);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), distribution.sha256);
+  const archive = join(tmpDir, distribution.file);
+  writeFileSync(archive, bytes);
+  if (process.platform === "linux") {
+    const arch = { x64: "x86_64", arm64: "aarch64" }[process.arch];
+    assert.ok(arch, "Set MINISIGN_BIN for this Linux architecture");
+    execFileSync("tar", ["-xzf", archive, "-C", tmpDir]);
+    return join(tmpDir, "minisign-linux", arch, "minisign");
+  }
+  execFileSync("unzip", ["-q", archive, "-d", tmpDir]);
+  return join(tmpDir, "minisign");
 }
 
 /**
@@ -268,9 +287,11 @@ test("verifies independent Ed (raw legacy Ed25519) signatures across wrapped, te
 // 3. Minisign CLI Oracle Two-Way Cross Validation (Direct Required Oracle)
 // ---------------------------------------------------------------------------
 
-test("minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures", () => {
+test("minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures", { timeout: 60000 }, async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "minisign-oracle-"));
   try {
+    const oracle = await obtainMinisign(tmpDir);
+    const invokeMinisign = (args, options = {}) => execFileSync(oracle, args, options);
     // A. Verify Node-generated fixture with minisign CLI oracle
     const nodeFixture = generateIndependentMinisignFixture({
       algorithm: "ED",
