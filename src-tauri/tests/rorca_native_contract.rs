@@ -115,12 +115,21 @@ fn ghostty_parser_handles_quotes_and_macos_option_keywords() {
 
 #[test]
 fn loads_real_ghostty_config_from_system() {
-    let prefs = ferryx_lib::terminal::load_terminal_preferences();
-    println!("SYSTEM LOADED: {:?}", prefs);
-    if prefs.source == ferryx_lib::terminal::TerminalPreferencesSource::Ghostty {
-        assert!(prefs.font_family.contains("MesloLGS NF"));
-        assert!(prefs.macos_option_as_alt);
-    }
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join(".config").join("ghostty");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let config_path = config_dir.join("config");
+    std::fs::write(
+        &config_path,
+        "font-family = MesloLGS NF\nfont-size = 14\nmacos-option-as-alt = true\n",
+    )
+    .expect("write ghostty config");
+    let prefs = load_terminal_preferences_from_path(&config_path);
+    assert_eq!(prefs.source, TerminalPreferencesSource::Ghostty);
+    assert_eq!(prefs.status, TerminalPreferencesStatus::Imported);
+    assert!(prefs.font_family.contains("MesloLGS NF"));
+    assert_eq!(prefs.font_size, 14.0);
+    assert!(prefs.macos_option_as_alt);
 }
 
 #[test]

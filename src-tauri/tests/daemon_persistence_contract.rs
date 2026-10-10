@@ -1076,7 +1076,7 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
 
     let mut output = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !output.contains("SEQ_DONE\r\n") {
+    while !output.contains("SEQ_DONE") {
         let msg = tokio::time::timeout_at(deadline, attach.next_message())
             .await
             .expect("burst deadline")
@@ -1095,15 +1095,21 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
             output.push_str(&String::from_utf8_lossy(&data));
         }
     }
-    for index in 1..=5 {
-        assert_eq!(
-            output
-                .lines()
-                .filter(|line| *line == format!("SEQ_BURST_{index}"))
-                .count(),
-            1
-        );
-    }
+    let observed_markers: Vec<&str> = output
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("SEQ_BURST_"))
+        .collect();
+    assert_eq!(
+        observed_markers,
+        vec![
+            "SEQ_BURST_1",
+            "SEQ_BURST_2",
+            "SEQ_BURST_3",
+            "SEQ_BURST_4",
+            "SEQ_BURST_5"
+        ]
+    );
 
     // Shell is blocked in read with echo disabled, so no prompt/output can race
     // DescribeSession -> Attach. The stream sentinel is split-chunk safe.
@@ -1216,8 +1222,8 @@ fn test_launchd_plist_generation_and_identity_contract() {
         std::path::Path::new("/tmp/ferryx-test-logs"),
     );
     assert!(
-        plist.contains("<string>com.rorca.daemon</string>"),
-        "Must preserve com.rorca.daemon compatibility identifier in launchd plist"
+        plist.contains("<string>com.ferryx.daemon</string>"),
+        "Must use the canonical com.ferryx.daemon identifier in launchd plist"
     );
     assert!(
         plist.contains("<string>/Applications/Ferryx.app/Contents/MacOS/ferryx</string>"),
@@ -1233,8 +1239,8 @@ fn test_launchd_plist_generation_and_identity_contract() {
 fn test_get_launchd_plist_path_location() {
     if let Some(path) = get_launchd_plist_path() {
         assert!(
-            path.ends_with("Library/LaunchAgents/com.rorca.daemon.plist"),
-            "LaunchAgent plist must target Library/LaunchAgents/com.rorca.daemon.plist"
+            path.ends_with("Library/LaunchAgents/com.ferryx.daemon.plist"),
+            "LaunchAgent plist must target Library/LaunchAgents/com.ferryx.daemon.plist"
         );
     }
 }

@@ -116,7 +116,10 @@ impl Fixture {
         socket
     }
     pub async fn cleanup(mut self) {
-        self.state.auth_manager.revoke_device(&self.device);
+        self.state
+            .auth_manager
+            .revoke_device(&self.device)
+            .expect("cleanup device revocation must succeed");
         let backend = self.owner.terminal_service();
         for id in backend.list_sessions() {
             // A child may exit naturally when its control socket drops on a
@@ -185,16 +188,22 @@ impl Held {
         let fd = pty.raw_master_fd().unwrap();
         let bytes = [b'x'; 65536];
         let mut accepted = 0u64;
+        let mut chunk_size = bytes.len();
         loop {
             // SAFETY: FFI buffer bounds: bytes is live for the call, fd is owned
-            // by pty retained above, and write only reads bytes.len() bytes.
-            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            // by pty retained above, and write only reads chunk_size bytes.
+            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), chunk_size) };
             if n < 0 {
-                assert_eq!(
-                    std::io::Error::last_os_error().kind(),
-                    std::io::ErrorKind::WouldBlock
-                );
-                break;
+                let err = std::io::Error::last_os_error();
+                assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+                if chunk_size > 1 {
+                    // Binary step down so the buffer is full down to a single byte:
+                    // EAGAIN on a 64k write does not prove 4-byte LATE cannot fit.
+                    chunk_size = (chunk_size / 2).max(1);
+                    continue;
+                } else {
+                    break;
+                }
             }
             accepted += u64::try_from(n).unwrap();
             assert!(accepted < 4 * 1024 * 1024);

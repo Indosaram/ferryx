@@ -2,6 +2,8 @@
 
 #[path = "support/a10_observed_listener.rs"]
 mod observed;
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 use ferryx_lib::{daemon::server::DaemonServer, remote::{server::create_remote_router, terminal_wire::decode_frame}};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -24,9 +26,12 @@ async fn attach(base: &str, target: &Value) -> Socket {
     let mut request = url.into_client_request().unwrap();
     request.headers_mut().insert("authorization", "Bearer owner-token".parse().unwrap());
     let dial = tokio::net::TcpSocket::new_v4().unwrap();
-    dial.set_recv_buffer_size(1024).unwrap();
+    dial.set_recv_buffer_size(4096).unwrap();
+    dial.set_send_buffer_size(4096).unwrap();
     let address = base.strip_prefix("http://").unwrap().parse().unwrap();
     let stream = dial.connect(address).await.unwrap();
+    stream.set_nodelay(true).expect("set client TCP_NODELAY");
+    observed::set_small_buffers(&stream);
     let (mut socket, _) = client_async(request, stream).await.unwrap();
     let Message::Text(text) = timeout_message(&mut socket).await.unwrap() else { panic!("attached first") };
     assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["type"], "attached");
@@ -39,6 +44,7 @@ async fn timeout_message(socket: &mut Socket) -> Option<Message> {
 
 #[tokio::test]
 async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects() {
+    if supervisor::run("continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects").await { return; }
     // Given an actual authenticated gateway, owned PTYs and attached sockets.
     let (root, owner) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
@@ -80,30 +86,69 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         }).await.expect("held socket accepted within deadline");
         assert!(!progress.borrow().pending && !progress.borrow().dropped);
         let (_, mut raw) = backend.attach(id).unwrap();
-        // When the actual shell produces continuously while its WS peer never reads.
-        // Signals are installed before triggering input; the IO observer never gates IO.
-        held.send(Message::Binary(b"dd if=/dev/zero bs=65536 count=1024 2>/dev/null; printf '\\nA10_%s:END\\n' DRAINED\r".to_vec().into())).await.unwrap();
+        let pre_published = backend.output_hub().session_published_bytes(id).expect("registered session");
+        // Two-phase actual shell writer: fill transport kernel buffer to establish
+        // actual Poll::Pending backpressure, then release the continuous 64 MiB overflow.
+        held.send(Message::Binary(b"stty -opost || exit 1; dd if=/dev/zero bs=65536 count=4 2>/dev/null & read _release; printf '\nA10_%s:END\n' RELEASED; dd if=/dev/zero bs=65536 count=1024 2>/dev/null; printf '\nA10_%s:END\n' DRAINED\r".to_vec().into())).await.unwrap();
         let start = tokio::time::Instant::now();
-        let (transport, produced) = tokio::join!(
-            tokio::time::timeout(Duration::from_secs(5), async {
-                progress.wait_for(|state| state.pending).await.unwrap();
-                progress.wait_for(|state| state.dropped).await.unwrap();
-            }),
-            tokio::time::timeout(DEADLINE, async {
-                let mut total = 0usize;
-                let mut tail = Vec::new();
-                loop {
-                    let bytes = raw.recv().await.expect("continuously drained real PTY broadcast");
-                    total += bytes.len();
-                    tail.extend_from_slice(&bytes);
-                    if tail.windows(b"A10_DRAINED:END".len()).any(|w| w == b"A10_DRAINED:END") { break total; }
-                    if tail.len() > 128 { tail.drain(..tail.len() - 128); }
+        tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.pending))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!progress.borrow().dropped, "connection must stay alive under backpressure before overflow release");
+        let release_backend = backend.clone();
+        let release_id = id.to_owned();
+        tokio::task::spawn_blocking(move || release_backend.write_input(&release_id, b"RELEASE\n"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut marker_tail = Vec::new();
+        let mut raw_bytes = 0usize;
+        let mut lagged = 0u64;
+        let mut saw_release_marker = false;
+        let (transport, _marker) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.dropped)),
+            async {
+                let marker = tokio::time::timeout(DEADLINE, async {
+                    loop {
+                        match raw.recv().await {
+                            Ok(bytes) => {
+                                raw_bytes += bytes.len();
+                                marker_tail.extend_from_slice(&bytes);
+                                let mut offset = 0;
+                                let mut drained = false;
+                                while let Some(pos) = marker_tail[offset..].iter().position(|&b| b == b'A') {
+                                    let candidate = offset + pos;
+                                    let slice = &marker_tail[candidate..];
+                                    if !saw_release_marker && slice.starts_with(b"A10_RELEASED:END") {
+                                        saw_release_marker = true;
+                                    }
+                                    if slice.starts_with(b"A10_DRAINED:END") {
+                                        drained = true;
+                                        break;
+                                    }
+                                    offset = candidate + 1;
+                                }
+                                if drained { break; }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => { lagged += skipped; continue; }
+                            Err(e) => panic!("PTY marker broadcast receive failed after {raw_bytes} bytes: {e:?}; tail={:?}", String::from_utf8_lossy(&marker_tail)),
+                        }
+                        if marker_tail.len() > 128 { marker_tail.drain(..marker_tail.len() - 128); }
+                    }
+                }).await;
+                if marker.is_err() {
+                    let published = backend.output_hub().session_published_bytes(id).unwrap_or_default();
+                    let delta = published.saturating_sub(pre_published);
+                    panic!("PTY marker timeout: release_input=ok saw_release_marker={saw_release_marker} lagged={lagged} raw_bytes={raw_bytes} published_delta={delta} tail={:?}", String::from_utf8_lossy(&marker_tail));
                 }
-            }),
+                assert!(saw_release_marker, "PTY release marker missing before overflow completion; lagged={lagged} raw_bytes={raw_bytes}");
+            },
         );
-        transport.unwrap();
-        let produced = produced.unwrap();
-        assert!(produced >= 64 * 1024 * 1024);
+        transport.unwrap().unwrap();
+        let post_published = backend.output_hub().session_published_bytes(id).expect("registered session");
+        let delta = post_published.checked_sub(pre_published).expect("published byte counter must not regress");
+        assert!(delta >= 64 * 1024 * 1024, "published byte delta ({delta}) must be at least 64 MiB");
         assert!(start.elapsed() < Duration::from_secs(10), "not the read/write deadline");
         // Classify only expected abrupt termination; other protocol errors fail.
         tokio::time::timeout(DEADLINE, async {
@@ -138,9 +183,9 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         let replay = decode_frame(&frame).unwrap();
         assert!(matches!(replay.metadata, ferryx_lib::remote::terminal_wire::Metadata::Replay { gap: Some(_), .. }));
         assert_eq!(backend.get_session(id).unwrap().pid(), Some(original_pid));
-        eprintln!("A10_OUTPUT_LIVE_SOCKET original_pid={original_pid} sibling_pid={proof} pty_bytes={produced} actual_tcp_pending=true server_transport_dropped=true before_deadline=true reconnect_cursor=0 reconnect_gap=true");
+        eprintln!("A10_OUTPUT_LIVE_SOCKET original_pid={original_pid} sibling_pid={proof} pty_bytes={delta} actual_tcp_pending=true server_transport_dropped=true before_deadline=true reconnect_cursor=0 reconnect_gap=true");
     }).catch_unwind().await;
-    state.auth_manager.revoke_device("owner");
+    state.auth_manager.revoke_device("owner").unwrap();
     let mut cleanup = Vec::new();
     for id in backend.list_sessions() {
         let pty = backend.get_session(&id).unwrap();
@@ -150,12 +195,13 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
     }
     stop.send(()).unwrap();
     tokio::time::timeout(DEADLINE, task).await.unwrap().unwrap();
-    drop(owner); drop(state);
-    tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+    drop(backend); drop(owner); drop(state);
+    let root_close_res = tokio::task::spawn_blocking(move || root.close()).await;
     for (pid, closed, reaped, reader_finished) in cleanup {
         closed.unwrap();
         assert!(reaped && reader_finished);
         eprintln!("A10_OUTPUT_SOCKET_CLEANUP pid={pid:?} reaped={reaped} reader_finished={reader_finished} listener_joined=true root_removed=true");
     }
     if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Ok(Err(e)) = root_close_res { panic!("failed removing test root directory: {e}"); }
 }

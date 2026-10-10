@@ -1148,3 +1148,45 @@ async fn r12_router_auth_admission() {
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn project_inventory_aliases_share_projection_with_distinct_ids() {
+    let root = tempfile::tempdir().unwrap();
+    let plain = root.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let canonical = std::fs::canonicalize(&plain).unwrap();
+    let server = DaemonServer::new_with_paths(
+        Some(root.path().join("data/config")),
+        Some(root.path().join("data/auth")),
+    );
+    let state = server.remote_state().clone();
+    let service = state.machine_services.as_ref().unwrap().workspaces.clone();
+    service.register("alias-a", plain.to_str().unwrap()).unwrap();
+    service.register("alias-b", plain.to_str().unwrap()).unwrap();
+    let catalog = super::workspace_api::event_projects(service).await.unwrap();
+    assert_eq!(catalog.projects.len(), 2);
+    let a = catalog
+        .projects
+        .iter()
+        .find(|p| p.workspace_id == "alias-a")
+        .expect("alias-a project");
+    let b = catalog
+        .projects
+        .iter()
+        .find(|p| p.workspace_id == "alias-b")
+        .expect("alias-b project");
+    assert_ne!(a.workspace_id, b.workspace_id);
+    assert_eq!(a.repo_root, canonical.to_str().unwrap());
+    assert_eq!(b.repo_root, canonical.to_str().unwrap());
+    assert_eq!(a.git_root, b.git_root);
+    assert_eq!(a.git_common_dir, b.git_common_dir);
+    assert_eq!(a.git_remote, b.git_remote);
+    assert_eq!(a.git_branch, b.git_branch);
+    assert_eq!(a.git_head, b.git_head);
+    assert_eq!(a.availability, b.availability);
+    assert_eq!(a.revision, b.revision);
+    assert_eq!(catalog.completeness, super::machine_protocol::Completeness::Complete);
+    drop(state);
+    drop(server);
+    root.close().unwrap();
+}

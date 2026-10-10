@@ -102,22 +102,29 @@ async fn machine_socket_disconnects_when_held_output_exceeds_byte_budget() {
         assert_eq!(backend.get_session(id).unwrap().pid(), Some(original_pid));
         eprintln!("A10_OUTPUT_SOCKET original_pid={original_pid} sibling_pid={proof} unequal_pending=1100000 overflow_closed=true reconnect_gap=true");
     }).catch_unwind().await;
-    state.auth_manager.revoke_device("owner");
+    state
+        .auth_manager
+        .revoke_device("owner")
+        .expect("cleanup device revocation must succeed");
     let mut cleanup = Vec::new();
     for id in backend.list_sessions() {
         let pty = backend.get_session(&id).unwrap();
         let pid = pty.pid();
         let closed = backend.close_session(&id).await;
+        owner.session_service().wait_machine_lifecycle(&id).await.unwrap();
         cleanup.push((pid, closed, pty.is_reaped(), pty.is_reader_finished()));
     }
-    stop.send(()).unwrap();
+    stop.send(()).expect("A10 listener shutdown signal receiver must still be open");
     tokio::time::timeout(DEADLINE, task).await.unwrap().unwrap();
-    drop(owner); drop(state);
-    tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
     for (pid, closed, reaped, reader_finished) in cleanup {
         closed.unwrap();
         assert!(reaped && reader_finished);
-        eprintln!("A10_OUTPUT_SOCKET_CLEANUP pid={pid:?} reaped={reaped} reader_finished={reader_finished} listener_joined=true root_removed=true");
+        eprintln!("A10_OUTPUT_SOCKET_CLEANUP pid={pid:?} reaped={reaped} reader_finished={reader_finished} listener_joined=true root_removed=false");
     }
+    drop(backend);
+    drop(state);
+    drop(owner);
+    tokio::task::spawn_blocking(move || root.close().expect("A10 temporary root removal must succeed")).await.unwrap();
+    eprintln!("A10_OUTPUT_SOCKET_ROOT_REMOVED root_removed=true");
     if let Err(panic) = result { std::panic::resume_unwind(panic); }
 }

@@ -2,29 +2,55 @@ use ferryx_lib::{daemon::server::DaemonServer, remote::server::create_remote_rou
 use futures_util::{FutureExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 async fn next_kind(socket: &mut Socket, kind: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let message = socket.next().await.unwrap().unwrap();
+            if !message.is_text() { continue; }
             let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
             if value["type"] == "inventoryInvalidated" && value["payload"]["error"].is_string() { eprintln!("A12 snapshot failure while awaiting {kind}: {value}"); }
             if value["type"] == kind { return value; }
         }
     }).await.expect("expected event before deadline")
 }
+async fn next_complete_inventory(socket: &mut Socket) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            if !message.is_text() { continue; }
+            let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if value["type"] == "inventoryInvalidated"
+                && value["payload"]["completeness"] == "complete"
+            {
+                return value;
+            }
+        }
+    }).await.expect("expected complete inventory before deadline")
+}
 
 #[tokio::test]
 async fn machine_events_begin_with_authoritative_snapshot() {
+    if supervisor::run("machine_events_begin_with_authoritative_snapshot").await { return; }
     let _trace = tracing::subscriber::set_default(tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_test_writer().finish());
-    let (root, owner) = tokio::task::spawn_blocking(|| {
+    let (root, owner, project_root, initial_branch) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("project")).unwrap();
+        let project_root = root.path().join("project");
+        std::fs::create_dir(&project_root).unwrap();
+        let project_root = std::fs::canonicalize(project_root).unwrap();
+        for args in [vec!["init", "--quiet"], vec!["-c", "user.name=A12", "-c", "user.email=a12@example.invalid", "commit", "--allow-empty", "-m", "base"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&project_root).args(args).status().unwrap().success());
+        }
+        let output = std::process::Command::new("git").arg("-C").arg(&project_root).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap();
+        assert!(output.status.success());
+        let initial_branch = String::from_utf8(output.stdout).unwrap().trim().to_owned();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         std::fs::write(root.path().join("auth"), json!({"devices":{"owner":{"id":"owner","name":"owner","permission":"control","accessScope":"machine","createdAt":now,"lastSeenAt":now},"mirror":{"id":"mirror","name":"mirror","permission":"control","accessScope":"mirror","createdAt":now,"lastSeenAt":now}},"tokens":{"fixture-token":"owner","mirror-token":"mirror"}}).to_string()).unwrap();
         let owner = DaemonServer::new_with_paths(Some(root.path().join("config")), Some(root.path().join("auth")));
-        (root, owner)
+        (root, owner, project_root, initial_branch)
     }).await.unwrap();
     let state = owner.remote_state().clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -55,6 +81,8 @@ async fn machine_events_begin_with_authoritative_snapshot() {
             .body(json!({"requestId":uuid::Uuid::new_v4().to_string(),"repoPath":root.path().join("project")}).to_string()).send().await.unwrap();
         assert_eq!(response.status(), 201);
         let project: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(project["gitRoot"], project_root.to_string_lossy().as_ref());
+        assert_eq!(project["gitBranch"], initial_branch);
         let message = tokio::time::timeout(Duration::from_secs(10), socket.next()).await.unwrap().unwrap().unwrap();
         let event: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
         assert_eq!(event["type"], "projectRegistered");
@@ -74,21 +102,19 @@ async fn machine_events_begin_with_authoritative_snapshot() {
         assert_eq!(boundary["payload"]["projects"]["projects"][0], project);
         // Native notify invalidates an externally removed root without an HTTP read.
         let removed_root = root.path().join("project");
-        tokio::task::spawn_blocking(move || std::fs::remove_dir(removed_root).unwrap()).await.unwrap();
+        let unavailable_root = root.path().join("project-unavailable");
+        tokio::task::spawn_blocking(move || std::fs::rename(removed_root, unavailable_root).unwrap()).await.unwrap();
         let availability = next_kind(&mut socket, "projectAvailabilityChanged").await;
         assert_eq!(availability["payload"]["availability"], "missing");
         assert_eq!(availability["workspaceId"], project["workspaceId"]);
+        let unavailable_root = root.path().join("project-unavailable");
         let restored_root = root.path().join("project");
-        tokio::task::spawn_blocking(move || std::fs::create_dir(restored_root).unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || std::fs::rename(unavailable_root, restored_root).unwrap()).await.unwrap();
         let availability = next_kind(&mut socket, "projectAvailabilityChanged").await;
         assert_eq!(availability["payload"]["availability"], "ready");
+        assert_eq!(availability["payload"]["gitRoot"], project_root.to_string_lossy().as_ref());
+        assert_eq!(availability["payload"]["gitBranch"], project["gitBranch"]);
         eprintln!("A12 native watcher missing/ready availability events preserve registered identity");
-        let git_root = root.path().join("project");
-        tokio::task::spawn_blocking(move || {
-            for args in [vec!["init", "--quiet"], vec!["-c", "user.name=A12", "-c", "user.email=a12@example.invalid", "commit", "--allow-empty", "-m", "base"]] {
-                assert!(std::process::Command::new("git").arg("-C").arg(&git_root).args(args).status().unwrap().success());
-            }
-        }).await.unwrap();
         let workspace = project["workspaceId"].as_str().unwrap();
         let created = client.post(format!("http://{addr}/api/v1/workspace/worktrees")).bearer_auth("fixture-token")
             .body(json!({"requestId":uuid::Uuid::new_v4().to_string(),"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"event"}}).to_string()).send().await.unwrap();
@@ -133,17 +159,29 @@ async fn machine_events_begin_with_authoritative_snapshot() {
         tokio::time::timeout(Duration::from_secs(5), subscriptions.wait_for(|n| *n == 1)).await.unwrap().unwrap();
         let service = state.machine_services.as_ref().unwrap().workspaces.clone();
         let path = root.path().join("plain");
+        tokio::time::pause();
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir(&path).unwrap();
             for index in 0..70 { service.register(&format!("local-{index}"), path.to_str().unwrap()).unwrap(); }
         }).await.unwrap();
+        tokio::time::resume();
         drop(slots);
-        let overlap_boundary = next_kind(&mut overlap, "inventoryInvalidated").await;
-        assert_eq!(overlap_boundary["payload"]["projects"]["projects"].as_array().unwrap().len(), 71);
+        let overlap_boundary = next_complete_inventory(&mut overlap).await;
+        let overlap_projects = overlap_boundary["payload"]["projects"]["projects"].as_array().unwrap();
+        assert_eq!(overlap_projects.len(), 71);
+        let overlap_ids: std::collections::HashSet<_> = overlap_projects.iter().map(|p| p["workspaceId"].as_str().unwrap()).collect();
+        assert_eq!(overlap_ids.len(), 71);
+        assert!(overlap_ids.contains(workspace));
+        for index in 0..70 { assert!(overlap_ids.contains(&format!("local-{index}") as &str)); }
         let lag = tokio::time::timeout(Duration::from_secs(15), async {
-            loop { let event = next_kind(&mut overlap, "inventoryInvalidated").await; if event["reason"] == "lag" { break event; } }
+            loop { let event = next_complete_inventory(&mut overlap).await; if event["reason"] == "lag" { break event; } }
         }).await.unwrap();
-        assert_eq!(lag["payload"]["projects"]["projects"].as_array().unwrap().len(), 71);
+        let lag_projects = lag["payload"]["projects"]["projects"].as_array().unwrap();
+        assert_eq!(lag_projects.len(), 71);
+        let lag_ids: std::collections::HashSet<_> = lag_projects.iter().map(|p| p["workspaceId"].as_str().unwrap()).collect();
+        assert_eq!(lag_ids.len(), 71);
+        assert!(lag_ids.contains(workspace));
+        for index in 0..70 { assert!(lag_ids.contains(&format!("local-{index}") as &str)); }
         assert_eq!(owner.terminal_service().list_sessions().len(), 1);
         assert!(std::sync::Arc::ptr_eq(&original, &owner.terminal_service().get_session(session["target"]["sessionId"].as_str().unwrap()).unwrap()));
         assert_eq!(lag["payload"]["sessions"]["sessions"][0]["target"], session["target"]);

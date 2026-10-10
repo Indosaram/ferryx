@@ -1,7 +1,12 @@
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
+const FRONTEND_BRIDGE: &str = include_str!("../../ui/src/lib/tauri.ts");
+const APP_SOURCE: &str = include_str!("../../ui/src/App.tsx");
 
 const DEAD_MENU_ITEM_IDS: [&str; 2] = ["sidebar.left.toggle", "commandPalette.open"];
-const DEAD_MENU_EVENTS: [&str; 2] = ["menu_toggle_sidebar", "menu_command_palette"];
+const NATIVE_SHORTCUT_EVENTS: [(&str, &str); 2] = [
+    ("menu_toggle_sidebar", "onToggleSidebarMenu"),
+    ("menu_command_palette", "onCommandPaletteMenu"),
+];
 const LIVE_MENU_EVENTS: [&str; 2] = ["menu_new_terminal_tab", "menu_close_tab"];
 
 #[test]
@@ -32,11 +37,12 @@ fn app_menu_never_claims_an_accelerator_without_a_frontend_listener() {
              ever receiving the keydown that ui/src/lib/shortcuts.ts binds"
         );
     }
-    for event in DEAD_MENU_EVENTS {
+    for (event, handler) in NATIVE_SHORTCUT_EVENTS {
         assert!(
-            !LIB_SOURCE.contains(event),
-            "{event} has no listener in ui/src, so emitting it silently drops the shortcut"
+            LIB_SOURCE.contains(event) && FRONTEND_BRIDGE.contains(event),
+            "{event} must be forwarded to its frontend listener"
         );
+        assert!(APP_SOURCE.contains(&format!("void {handler}(")), "{event} must have an active App handler");
     }
     for event in LIVE_MENU_EVENTS {
         assert!(
