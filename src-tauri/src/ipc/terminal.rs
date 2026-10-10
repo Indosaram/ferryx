@@ -454,7 +454,8 @@ pub fn start_managed_pump_token<R: Runtime>(
             drop(bindings);
         }
 
-        let bindings = PUMP_BINDINGS.lock();
+        let mut guard = ACTIVE_PUMPS.lock();
+        let mut bindings = PUMP_BINDINGS.lock();
         if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
             return;
         }
@@ -468,14 +469,18 @@ pub fn start_managed_pump_token<R: Runtime>(
             );
         }
         crate::terminal::metrics::clear_pending_batch_read(&session_id_clone);
+        if let Some(map) = bindings.as_mut() {
+            map.remove(&session_id_clone);
+        }
         drop(bindings);
 
-        let mut guard = ACTIVE_PUMPS.lock();
         if let Some(map) = guard.as_mut() {
             if map.get(&session_id_clone).is_some_and(|pump| pump.token == token) {
                 map.remove(&session_id_clone);
             }
         }
+        drop(guard);
+        drop(messages);
     });
 
     map.insert(session_id, PumpHandle { token, task, stream_task });
@@ -5042,7 +5047,6 @@ pub async fn cmd_terminal_attach<R: Runtime>(
                 }
             }
         }
-        let token = reserve_managed_pump(&session_id);
         let description = if let Some(attempt) = &split_attempt {
             if attempt.frontend_session_id != binding.frontend_session_id
                 || attempt.generation != binding.attempt_generation
@@ -5074,6 +5078,7 @@ pub async fn cmd_terminal_attach<R: Runtime>(
                 available_from_sequence: gap.available_from_sequence.to_string(),
             }),
         };
+        let token = reserve_managed_pump(&session_id);
         start_managed_pump_token(session_id, app, attachment, token);
         return Ok(response);
     }
@@ -5100,7 +5105,6 @@ async fn terminal_attach<R: Runtime>(
     session_id: String,
     after_sequence: Option<String>,
 ) -> Result<AttachTerminalResponse, IpcError> {
-    let pump_token = reserve_managed_pump(&session_id);
     let after_seq = after_sequence
         .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
@@ -5211,11 +5215,8 @@ async fn terminal_attach<R: Runtime>(
     if session_id != target_session_id {
         stop_managed_pump(&session_id);
     }
-    if target_session_id == session_id {
-        start_managed_pump_token(target_session_id, app, attachment, pump_token);
-    } else {
-        start_managed_pump(target_session_id, app, attachment);
-    }
+    let pump_token = reserve_managed_pump(&target_session_id);
+    start_managed_pump_token(target_session_id, app, attachment, pump_token);
 
     Ok(resp)
 }
@@ -5725,6 +5726,217 @@ mod tests {
         assert_eq!(PUMP_BINDINGS.lock().as_ref().unwrap().get(&session), Some(&current));
         assert!(!ACTIVE_PUMPS.lock().as_ref().is_some_and(|map| map.contains_key(&session)));
         stop_managed_pump_token(&session, current);
+    }
+
+    #[tokio::test]
+    async fn cmd_terminal_attach_preserves_active_pump_on_attach_failure() {
+        use tauri::Manager;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let session = format!("attach-preserve-{}", uuid::Uuid::new_v4());
+        let initial_token = reserve_managed_pump(&session);
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mock-daemon.sock");
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(not(unix))]
+        let listener = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            listener
+        };
+
+        let session_for_peer = session.clone();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            for step in 0..2 {
+                let line = match lines.next_line().await {
+                    Ok(Some(l)) => l,
+                    _ => break,
+                };
+                let request: crate::daemon::protocol::DaemonRequest =
+                    serde_json::from_str(&line).unwrap();
+                let response = match (step, request) {
+                    (0, crate::daemon::protocol::DaemonRequest::Handshake { .. }) => {
+                        crate::daemon::protocol::DaemonResponse::HandshakeOk {
+                            version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 41,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                            capabilities: Vec::new(),
+                            admission_time_unix_ms: None,
+                        }
+                    }
+                    (1, crate::daemon::protocol::DaemonRequest::DescribeSession { session_id })
+                        if session_id == session_for_peer =>
+                    {
+                        let mut details = crate::daemon::protocol::DaemonSessionDetails::new(
+                            session_for_peer.clone(),
+                            None,
+                            None,
+                            None,
+                            80,
+                            24,
+                            true,
+                            None,
+                            None,
+                            None,
+                            false,
+                        );
+                        details.incarnation = Some("daemon-incarnation-mismatch".into());
+                        crate::daemon::protocol::DaemonResponse::DescribeSessionOk {
+                            session: details,
+                            daemon_epoch: Some("41".into()),
+                        }
+                    }
+                    other => panic!("unexpected exchange: {other:?}"),
+                };
+                write
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = Arc::new(DaemonClient::new_with_socket(path));
+        let app = tauri::test::mock_builder()
+            .manage(client.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        let (sender, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending::<()>());
+        let closed = sender.closed();
+        tokio::pin!(closed);
+
+        start_managed_pump_token(
+            session.clone(),
+            app.handle().clone(),
+            DaemonAttachment {
+                session_id: session.clone(),
+                epoch: 1,
+                start_sequence: None,
+                end_sequence: None,
+                gap: None,
+                history: bytes::Bytes::new(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
+                remote_generation: None,
+                messages,
+                stream_task,
+            },
+            initial_token,
+        );
+
+        let tuple = crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: session.clone(),
+            frontend_session_id: "frontend-1".into(),
+            pane_identity: "pane-1".into(),
+            binding_key: "binding-1".into(),
+            attempt_generation: 1,
+            daemon_epoch: "1".into(),
+            incarnation: Some("caller-expected-incarnation".into()),
+        };
+
+        let result = cmd_terminal_attach(
+            app.handle().clone(),
+            app.state::<Arc<DaemonClient>>(),
+            session.clone(),
+            None,
+            None,
+            Some(tuple),
+        )
+        .await;
+
+        let err = result.expect_err("attach must fail on incarnation conflict");
+        assert_eq!(err.code, IpcErrorCode::SpawnRequestConflict);
+
+        assert_eq!(
+            PUMP_BINDINGS.lock().as_ref().and_then(|m| m.get(&session)).copied(),
+            Some(initial_token),
+            "existing pump binding must remain active on attach failure"
+        );
+        assert_eq!(
+            ACTIVE_PUMPS.lock().as_ref().and_then(|m| m.get(&session)).map(|p| p.token),
+            Some(initial_token),
+            "existing pump in ACTIVE_PUMPS must not be aborted on attach failure"
+        );
+
+        stop_managed_pump_token(&session, initial_token);
+        tokio::time::timeout(Duration::from_secs(1), closed).await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_pump_normal_exit_cleans_up_pump_bindings() {
+        let session = format!("pump-exit-{}", uuid::Uuid::new_v4());
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (sender, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending::<()>());
+        let token = reserve_managed_pump(&session);
+        let closed = sender.closed();
+        tokio::pin!(closed);
+
+        start_managed_pump_token(
+            session.clone(),
+            app.handle().clone(),
+            DaemonAttachment {
+                session_id: session.clone(),
+                epoch: 1,
+                start_sequence: None,
+                end_sequence: None,
+                gap: None,
+                history: bytes::Bytes::new(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
+                remote_generation: None,
+                messages,
+                stream_task,
+            },
+            token,
+        );
+
+        assert_eq!(
+            PUMP_BINDINGS.lock().as_ref().and_then(|m| m.get(&session)).copied(),
+            Some(token)
+        );
+        assert!(ACTIVE_PUMPS.lock().as_ref().is_some_and(|m| m.contains_key(&session)));
+
+        sender
+            .send(DaemonStreamMessage::Exit {
+                session_id: std::borrow::Cow::Owned(session.clone()),
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), closed).await.unwrap();
+
+        assert!(
+            !PUMP_BINDINGS
+                .lock()
+                .as_ref()
+                .is_some_and(|map| map.contains_key(&session)),
+            "PUMP_BINDINGS must not leak session ID on normal pump task exit"
+        );
+        assert!(
+            !ACTIVE_PUMPS
+                .lock()
+                .as_ref()
+                .is_some_and(|map| map.contains_key(&session)),
+            "ACTIVE_PUMPS must not retain session on exit"
+        );
     }
 
     #[tokio::test(start_paused = true)]

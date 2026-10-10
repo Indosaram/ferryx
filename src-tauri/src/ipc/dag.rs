@@ -712,7 +712,7 @@ pub(crate) fn classify_bridge_error(err: &crate::ssh::bridge::BridgeError) -> Ss
                 SshWatchFailureKind::HelperMissing(format!(
                     "Helper process not executable (exit 126): {stderr}"
                 ))
-            } else if *code == Some(255)
+            } else if (*code == Some(255) || code.is_none())
                 && (lower_stderr.contains("permission denied")
                     || lower_stderr.contains("host key verification failed")
                     || lower_stderr.contains("authentication failed"))
@@ -2063,6 +2063,18 @@ mod tests {
         };
         assert!(matches!(
             classify_bridge_error(&bridge_auth),
+            SshWatchFailureKind::Authentication(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_bridge_error_treats_code_none_with_auth_stderr_as_authentication() {
+        let bridge_auth_no_code = crate::ssh::bridge::BridgeError::ProcessExited {
+            code: None,
+            stderr: "Permission denied (publickey).".into(),
+        };
+        assert!(matches!(
+            classify_bridge_error(&bridge_auth_no_code),
             SshWatchFailureKind::Authentication(_)
         ));
     }

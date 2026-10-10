@@ -934,7 +934,8 @@ async fn native_terminal_attach<R: Runtime>(
     if attach_tuple.as_ref().is_some_and(|tuple| tuple.backend_session_id != session_id) {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
-    if attach_tuple.is_some() && state.session_attempt_generation(&session_id).is_none() {
+    let is_new_reservation = attach_tuple.is_some() && state.session_attempt_generation(&session_id).is_none();
+    if is_new_reservation {
         // Reserve a resident VT before awaiting the daemon, so even the first two concurrent
         // attaches have a generation and binding against which their completions are checked.
         let bounds = logical_bounds.unwrap_or(LogicalBounds {
@@ -944,50 +945,64 @@ async fn native_terminal_attach<R: Runtime>(
             session_id: session_id.clone(), bounds,
         }, font_metrics_for_bounds(bounds)).map_err(IpcError::from)?;
     }
-    let token = state.begin_replay_request_with_tuple(&session_id, attach_tuple.clone());
-    if token.is_none() && (attach_tuple.is_some() || state.session_attach_tuple(&session_id).is_some()) {
-        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
-    }
-    let after_seq = replay_request_cursor(token.as_ref().map(|token| token.last_sequence), after_sequence);
-    let mut attachment = match daemon_client.attach(&session_id, after_seq).await {
-        Ok(attachment) => attachment,
-        // The fence already aborted the old stream, so a failed request must not leave the pane
-        // stranded: fall back to a full replay, which needs no cursor to be correct.
-        Err(err) if after_seq.is_some() => {
-            tracing::warn!(
-                session_id,
-                %err,
-                "tail attach failed after fencing the resident stream; retrying with full history"
-            );
-            daemon_client.attach(&session_id, None).await?
+
+    let initial_attach_tuple = attach_tuple.clone();
+
+    let attach_body = async {
+        let token = state.begin_replay_request_with_tuple(&session_id, attach_tuple.clone());
+        if token.is_none() && (attach_tuple.is_some() || state.session_attach_tuple(&session_id).is_some()) {
+            return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())));
         }
-        Err(err) => return Err(err),
-    };
-    // A restarted daemon numbers sequences from scratch, so a cursor minted under the previous
-    // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
-    // empty while carrying no gap, which would leave the pane blank. Re-request the full history
-    // once the response reveals the epoch actually served.
-    if let Some(token) = token.as_ref() {
-        if after_seq.is_some() && attachment.epoch != token.epoch {
+        let after_seq = replay_request_cursor(token.as_ref().map(|token| token.last_sequence), after_sequence);
+        let mut attachment = match daemon_client.attach(&session_id, after_seq).await {
+            Ok(attachment) => attachment,
+            // The fence already aborted the old stream, so a failed request must not leave the pane
+            // stranded: fall back to a full replay, which needs no cursor to be correct.
+            Err(err) if after_seq.is_some() => {
+                tracing::warn!(
+                    session_id,
+                    %err,
+                    "tail attach failed after fencing the resident stream; retrying with full history"
+                );
+                daemon_client.attach(&session_id, None).await?
+            }
+            Err(err) => return Err(err),
+        };
+        // A restarted daemon numbers sequences from scratch, so a cursor minted under the previous
+        // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
+        // empty while carrying no gap, which would leave the pane blank. Re-request the full history
+        // once the response reveals the epoch actually served.
+        if let Some(token) = token.as_ref() {
+            if after_seq.is_some() && attachment.epoch != token.epoch {
+                attachment.stream_task.abort();
+                attachment = daemon_client.attach(&session_id, None).await?;
+            }
+        }
+        if attach_tuple.as_ref().is_some_and(|tuple| tuple.daemon_epoch != attachment.epoch.to_string()) {
             attachment.stream_task.abort();
-            attachment = daemon_client.attach(&session_id, None).await?;
+            return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())));
+        }
+        if let Err(err) = state.attach_daemon_attachment_with_bounds_client_and_token(
+            &session_id,
+            attachment,
+            Some(app),
+            logical_bounds,
+            Some(daemon_client.inner().clone()),
+            token,
+        ) {
+            return Err(IpcError::internal(err.to_string()));
+        }
+        Ok(())
+    };
+
+    let result = attach_body.await;
+    if result.is_err() && is_new_reservation {
+        let active = state.session_attach_tuple(&session_id);
+        if active == initial_attach_tuple || active.is_none() {
+            state.close_session_fenced(&session_id, active.as_ref());
         }
     }
-    if attach_tuple.as_ref().is_some_and(|tuple| tuple.daemon_epoch != attachment.epoch.to_string()) {
-        attachment.stream_task.abort();
-        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
-    }
-    if let Err(err) = state.attach_daemon_attachment_with_bounds_client_and_token(
-        &session_id,
-        attachment,
-        Some(app),
-        logical_bounds,
-        Some(daemon_client.inner().clone()),
-        token,
-    ) {
-        return Err(IpcError::internal(err.to_string()));
-    }
-    Ok(())
+    result
 }
 
 fn replay_request_cursor(resident: Option<Option<u64>>, explicit: Option<String>) -> Option<u64> {
@@ -2613,6 +2628,92 @@ mod tests {
             tokio::time::advance(std::time::Duration::from_secs(60)).await;
         };
         tokio::join!(peer, action, clock);
+    }
+
+    #[tokio::test]
+    async fn native_attach_failure_rolls_back_new_session_reservation() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("attach-fail-rollback");
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(not(unix))]
+        let listener = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::fs::write(&path, listener.local_addr().unwrap().port().to_string()).unwrap();
+            listener
+        };
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(path)))
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        let session_id = "test-fail-rollback-session";
+        let tuple = crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: session_id.into(),
+            incarnation: Some("inc-1".into()),
+            daemon_epoch: "7".into(),
+            frontend_session_id: "front-1".into(),
+            pane_identity: "pane-1".into(),
+            binding_key: "bind-1".into(),
+            attempt_generation: 1,
+        };
+
+        let peer = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+
+            // 1. Handshake
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let hs_resp = serde_json::to_string(&crate::daemon::DaemonResponse::HandshakeOk {
+                version: crate::daemon::DAEMON_PROTOCOL_VERSION,
+                pid: 12345,
+                epoch: 7,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+                capabilities: Vec::new(),
+                admission_time_unix_ms: None,
+            }).unwrap() + "\n";
+            write_half.write_all(hs_resp.as_bytes()).await.unwrap();
+            write_half.flush().await.unwrap();
+            line.clear();
+
+            // 2. Attach -> return SessionNotFound error
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let err_resp = serde_json::to_string(&crate::daemon::DaemonResponse::Error {
+                code: Some("SESSION_NOT_FOUND".into()),
+                message: "Session not found".into(),
+                details: None,
+            }).unwrap() + "\n";
+            write_half.write_all(err_resp.as_bytes()).await.unwrap();
+            write_half.flush().await.unwrap();
+        };
+
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+        let action = async {
+            let res = cmd_native_terminal_attach(
+                app.handle().clone(),
+                app.state::<Arc<DaemonClient>>(),
+                state.clone(),
+                session_id.into(),
+                None,
+                None,
+                None,
+                Some(tuple),
+                Some(1000),
+            ).await;
+            assert!(res.is_err(), "attach must fail when daemon returns error");
+            assert!(state.session_attempt_generation(session_id).is_none(), "session reservation must be rolled back on attach failure");
+            assert!(!state.has_session(session_id), "session must not be leaked in sessions map");
+        };
+
+        tokio::join!(peer, action);
+        state.teardown();
     }
 
     #[test]

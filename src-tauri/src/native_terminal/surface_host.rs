@@ -2382,12 +2382,18 @@ fn pane_liveness_registration_matches(
     active: &crate::daemon::protocol::PaneAttachTuple,
     incoming: &crate::daemon::protocol::PaneAttachTuple,
 ) -> bool {
-    active.backend_session_id == incoming.backend_session_id
-        && active.incarnation == incoming.incarnation
-        && active.frontend_session_id == incoming.frontend_session_id
+    if active.backend_session_id != incoming.backend_session_id
+        || active.incarnation != incoming.incarnation
+    {
+        return false;
+    }
+    if incoming.attempt_generation > active.attempt_generation {
+        return true;
+    }
+    active.frontend_session_id == incoming.frontend_session_id
         && active.pane_identity == incoming.pane_identity
         && active.binding_key == incoming.binding_key
-        && active.attempt_generation <= incoming.attempt_generation
+        && active.attempt_generation == incoming.attempt_generation
 }
 
 #[cfg(test)]
@@ -2586,6 +2592,111 @@ mod pane_liveness_native_binding_tests {
         assert_eq!(state.bound_presentation_observation(&active.backend_session_id, &receipt), (Some(active.clone()), true));
         assert!(state.detach_session_fenced(&active.backend_session_id, Some(&active)));
         assert_eq!(state.bound_presentation_observation(&active.backend_session_id, &receipt), (Some(active), false));
+        state.teardown();
+    }
+
+    #[test]
+    fn pane_liveness_registration_matches_accepts_newer_generation_with_evolved_binding() {
+        let active: PaneAttachTuple = serde_json::from_value(serde_json::json!({
+            "backendSessionId": "backend-1", "incarnation": "incarnation-1", "daemonEpoch": "7",
+            "frontendSessionId": "front-1", "paneIdentity": "pane-1", "bindingKey": "bk-1", "attemptGeneration": 1
+        })).unwrap();
+        let incoming: PaneAttachTuple = serde_json::from_value(serde_json::json!({
+            "backendSessionId": "backend-1", "incarnation": "incarnation-1", "daemonEpoch": "7",
+            "frontendSessionId": "front-1", "paneIdentity": "pane-1", "bindingKey": "bk-2", "attemptGeneration": 2
+        })).unwrap();
+        assert!(super::pane_liveness_registration_matches(&active, &incoming));
+    }
+
+    #[test]
+    fn pane_liveness_registration_matches_rejects_older_generation() {
+        let active: PaneAttachTuple = serde_json::from_value(serde_json::json!({
+            "backendSessionId": "backend-1", "incarnation": "incarnation-1", "daemonEpoch": "7",
+            "frontendSessionId": "front-1", "paneIdentity": "pane-1", "bindingKey": "bk-1", "attemptGeneration": 2
+        })).unwrap();
+        let incoming: PaneAttachTuple = serde_json::from_value(serde_json::json!({
+            "backendSessionId": "backend-1", "incarnation": "incarnation-1", "daemonEpoch": "7",
+            "frontendSessionId": "front-1", "paneIdentity": "pane-1", "bindingKey": "bk-1", "attemptGeneration": 1
+        })).unwrap();
+        assert!(!super::pane_liveness_registration_matches(&active, &incoming));
+    }
+
+    #[tokio::test]
+    async fn daemon_stream_exit_sets_output_stream_ended_and_finishes_output() {
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let session_id = "test-exit-session";
+        state.attach_test_session_for_liveness(session_id, 7, None).unwrap();
+        let token = state.begin_replay_request_with_tuple(session_id, None).unwrap();
+        let (output, messages) = tokio::sync::mpsc::channel(10);
+        let attachment = crate::daemon::DaemonAttachment {
+            session_id: session_id.into(),
+            epoch: 7,
+            start_sequence: None,
+            end_sequence: None,
+            gap: None,
+            history: bytes::Bytes::new(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            session_id, attachment, None, None, Some(token),
+        ).unwrap();
+
+        assert!(!state.sessions.lock()[session_id].output_stream_ended);
+
+        output.send(crate::daemon::DaemonStreamMessage::Exit {
+            session_id: session_id.into(),
+            exit_code: Some(0),
+        }).await.unwrap();
+
+        let mut pump_task = state.sessions.lock().get_mut(session_id)
+            .and_then(|s| s.pump_task.take()).expect("attached output pump");
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), &mut pump_task).await;
+        if completed.is_err() {
+            pump_task.abort();
+            let _ = pump_task.await;
+        }
+        let ended = state.sessions.lock()[session_id].output_stream_ended;
+        state.teardown();
+        completed.expect("Exit must complete the subscribed output pump").expect("output pump task");
+        assert!(ended);
+    }
+
+    #[tokio::test]
+    async fn fresh_session_attach_restores_initial_geometry_after_history_segments() {
+        use super::TerminalEngine as _;
+
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let session_id = "fresh-session-geometry";
+        let (_, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = crate::daemon::DaemonAttachment {
+            session_id: session_id.into(),
+            epoch: 7,
+            start_sequence: None,
+            end_sequence: None,
+            gap: None,
+            history: bytes::Bytes::new(),
+            history_segments: vec![crate::terminal::output_hub::HistorySegment {
+                cols: Some(80),
+                rows: Some(24),
+                bytes: b"hello world\n".to_vec(),
+            }],
+            pty_cols: Some(140),
+            pty_rows: Some(50),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            session_id, attachment, None, None, None,
+        ).unwrap();
+
+        let dims = state.sessions.lock()[session_id].terminal.dimensions().unwrap();
+        assert_eq!(dims, (140, 50));
         state.teardown();
     }
 }
@@ -3579,6 +3690,17 @@ impl NativeTerminalSurfaceHostState {
                         &attachment.history_segments,
                     )?;
                 }
+                if let (Some(cols), Some(rows)) = (attachment.pty_cols, attachment.pty_rows) {
+                    if terminal.dimensions()? != (cols, rows) {
+                        let metrics = font_manager::derived_cell_metrics();
+                        terminal.resize(
+                            cols,
+                            rows,
+                            metrics.width_px,
+                            metrics.height_px,
+                        )?;
+                    }
+                }
                 let _ = terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 let bracketed_paste_seen = terminal.bracketed_paste_enabled().unwrap_or(false);
                 // A fresh session created by an attach owns a surface by definition.
@@ -4167,7 +4289,31 @@ impl NativeTerminalSurfaceHostState {
                     DaemonStreamMessage::DagRunUpdated { .. }
                     | DaemonStreamMessage::DagInventory { .. } => {}
                     DaemonStreamMessage::Exit { .. } => {
+                        let mut sessions_guard = sessions.lock();
+                        let mut owned_stream_ended = false;
+                        if let Some(session) = sessions_guard
+                            .get_mut(&session_id_owned)
+                            .filter(|session| session.pump_generation == pump_generation)
+                        {
+                            if let Err(error) = session.terminal.finish_synchronized_output() {
+                                tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
+                            }
+                            session.output_stream_ended = true;
+                            session.publish_frame();
+                            owned_stream_ended = true;
+                        }
+                        drop(sessions_guard);
+                        if owned_stream_ended {
+                            if let Some(app) = app_handle.as_ref() {
+                                if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
+                                    session_id: session_id_owned.clone(),
+                                }) {
+                                    tracing::warn!(session_id = %session_id_owned, %error, "Failed to notify terminal stream disconnect");
+                                }
+                            }
+                        }
                         update_sender.send_replace(());
+                        schedule_render();
                         break;
                     }
                 }
@@ -4699,6 +4845,12 @@ impl NativeTerminalSurfaceHostState {
                     })
             });
         (tuple, presented)
+    }
+
+    /// Check whether a session is present in resident state (test utility).
+    #[cfg(test)]
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.sessions.lock().contains_key(session_id)
     }
 
     /// Attempt generation currently bound to the native session.
