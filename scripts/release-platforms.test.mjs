@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, readdirSync, statSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { join, resolve } from "node:path";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 
 import {
@@ -144,6 +144,301 @@ test("createGitBundles: produces valid standalone git bundles and sha256 digests
     execFileSync("git", ["clone", bundleResult.sourceBundlePath, testClone]);
     const clonedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: testClone, encoding: "utf8" }).trim();
     assert.equal(clonedSha, shaA);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createGitBundles: concurrent invocations with platform-scoped outDirs do not collide on temp refs or locks", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-bundle-concurrency-test-"));
+  try {
+    const repoA = join(tmp, "repo-a");
+    mkdirSync(repoA);
+    execFileSync("git", ["init"], { cwd: repoA });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoA });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoA });
+    writeFileSync(join(repoA, "README.md"), "Hello");
+    execFileSync("git", ["add", "README.md"], { cwd: repoA });
+    execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: repoA });
+    const shaA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoA, encoding: "utf8" }).trim();
+
+    const repoB = join(tmp, "repo-b");
+    mkdirSync(repoB);
+    execFileSync("git", ["init"], { cwd: repoB });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoB });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoB });
+    writeFileSync(join(repoB, "ghostty.txt"), "GhosttyVT");
+    execFileSync("git", ["add", "ghostty.txt"], { cwd: repoB });
+    execFileSync("git", ["commit", "-m", "Ghostty pin"], { cwd: repoB });
+    const shaB = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoB, encoding: "utf8" }).trim();
+
+    const platforms = ["macbook", "omaki", "maho-win"];
+    const libPath = resolve("scripts/lib/release-platforms.mjs");
+    const workerScript = `
+      import { createGitBundles } from ${JSON.stringify(libPath)};
+      const [repoDir, ghosttyRepoDir, commitSha, ghosttyPin, outDir] = process.argv.slice(1);
+      createGitBundles({ repoDir, ghosttyRepoDir, commitSha, ghosttyPin, outDir });
+    `;
+
+    const activeChildren = [];
+    const workerPromises = platforms.map((platform) => {
+      const outDir = join(tmp, "bundles", platform);
+      return new Promise((resolveWorker, rejectWorker) => {
+        const child = spawn(process.execPath, [
+          "--input-type=module",
+          "-e", workerScript,
+          repoA, repoB, shaA, shaB, outDir,
+        ], { stdio: ["ignore", "pipe", "pipe"] });
+
+        activeChildren.push(child);
+
+        let stderr = "";
+        child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, 30000);
+
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          rejectWorker(err);
+        });
+
+        child.on("exit", (code, signal) => {
+          clearTimeout(timer);
+          if (timedOut) {
+            rejectWorker(new Error(`Worker for ${platform} timed out after 30000ms: ${stderr}`));
+          } else if (code === 0) {
+            resolveWorker({ platform, outDir });
+          } else {
+            rejectWorker(new Error(`Worker for ${platform} exited with code ${code} (${signal}): ${stderr}`));
+          }
+        });
+      });
+    });
+
+    const results = await Promise.allSettled(workerPromises);
+    const failures = results.filter((r) => r.status === "rejected");
+    if (failures.length > 0) {
+      for (const child of activeChildren) {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+      throw new Error(`Concurrent bundle creation failed: ${failures.map((f) => f.reason.message).join("; ")}`);
+    }
+    const finishedWorkers = results.map((r) => r.value);
+
+    // Assert each platform bundle was created and independently clones matching commit and pin
+    for (const { platform, outDir } of finishedWorkers) {
+      const sourceBundle = join(outDir, "source.bundle");
+      const ghosttyBundle = join(outDir, "ghostty.bundle");
+      assert.ok(existsSync(sourceBundle));
+      assert.ok(existsSync(ghosttyBundle));
+
+      const cloneSource = join(tmp, `clone-source-${platform}`);
+      execFileSync("git", ["clone", sourceBundle, cloneSource], { stdio: "pipe" });
+      const clonedSourceSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: cloneSource, encoding: "utf8" }).trim();
+      assert.equal(clonedSourceSha, shaA);
+
+      const cloneGhostty = join(tmp, `clone-ghostty-${platform}`);
+      execFileSync("git", ["clone", ghosttyBundle, cloneGhostty], { stdio: "pipe" });
+      const clonedGhosttySha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: cloneGhostty, encoding: "utf8" }).trim();
+      assert.equal(clonedGhosttySha, shaB);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("buildHost: reuses existing host-scoped bundles when present", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-buildhost-scoped-bundles-"));
+  try {
+    const runDir = join(tmp, "run");
+    mkdirSync(runDir);
+    mkdirSync(join(runDir, "artifacts"));
+    mkdirSync(join(runDir, "artifacts", "linux"));
+    mkdirSync(join(runDir, "receipts"));
+    mkdirSync(join(runDir, "bundles"));
+    const hostRoot = join(tmp, "host-root");
+    mkdirSync(hostRoot);
+
+    // Pre-create host-scoped bundles for macbook, leave shared bundles absent
+    const macbookBundlesDir = join(runDir, "bundles", "macbook");
+    mkdirSync(macbookBundlesDir, { recursive: true });
+    writeFileSync(join(macbookBundlesDir, "source.bundle"), "HOST_SCOPED_SOURCE_BUNDLE");
+    writeFileSync(join(macbookBundlesDir, "ghostty.bundle"), "HOST_SCOPED_GHOSTTY_BUNDLE");
+
+    const plan = {
+      schemaVersion: 1,
+      runId: "rel-run-fixture-host-scoped",
+      repo: "Indosaram/ferryx",
+      commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
+      tag: "v2026.09.08.1",
+      appVersion: "2026.908.1",
+      msixVersion: "2026.908.1.0",
+      channels: { store: true, nsisMigration: false },
+      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      sourceDateEpoch: 1788868800,
+      createdAt: "2026-09-08T12:00:00.000Z",
+    };
+    writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
+
+    const config = {
+      schemaVersion: 1,
+      repository: "/Users/indo/code/project/orca-lite",
+      ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+      repo: "Indosaram/ferryx",
+      hosts: {
+        macbook: {
+          platform: "darwin",
+          ssh: null,
+          root: hostRoot,
+          minFreeBytes: 1024,
+        },
+      },
+    };
+
+    let observedHost = null;
+    const mockRunner = async ({ hostName, workspaceDir, artifactsOutDir }) => {
+      observedHost = hostName;
+      const dummyApp = join(artifactsOutDir, "Ferryx.app.tar.gz");
+      const dummySig = join(artifactsOutDir, "Ferryx.app.tar.gz.sig");
+      const dummyDmg = join(artifactsOutDir, "Ferryx_universal.dmg");
+      writeFileSync(dummyApp, "MOCK_APP_CONTENT");
+      writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
+      writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      return {
+        exitCode: 0,
+        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+      };
+    };
+
+    const receipt = await buildHost({
+      hostName: "macbook",
+      config,
+      runDir,
+      runner: mockRunner,
+    });
+
+    assert.equal(receipt.host, "macbook");
+    assert.equal(observedHost, "macbook");
+    // Verify shared bundles were never created, existing host-scoped bundles were reused
+    assert.ok(!existsSync(join(runDir, "bundles", "source.bundle")));
+    assert.ok(existsSync(join(macbookBundlesDir, "source.bundle")));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("buildHost: creates host-scoped bundles into platform subdirectory when shared bundles are absent", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-buildhost-create-scoped-"));
+  try {
+    const repoA = join(tmp, "source-repo");
+    mkdirSync(repoA);
+    execFileSync("git", ["init"], { cwd: repoA });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoA });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoA });
+    mkdirSync(join(repoA, "src-tauri", "native_terminal"), { recursive: true });
+
+    const repoB = join(tmp, "ghostty-repo");
+    mkdirSync(repoB);
+    execFileSync("git", ["init"], { cwd: repoB });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repoB });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoB });
+    writeFileSync(join(repoB, "ghostty.txt"), "GhosttyVT");
+    execFileSync("git", ["add", "ghostty.txt"], { cwd: repoB });
+    execFileSync("git", ["commit", "-m", "ghostty"], { cwd: repoB });
+    const ghosttySha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoB, encoding: "utf8" }).trim();
+
+    writeFileSync(
+      join(repoA, "src-tauri", "native_terminal", "build_ghostty.rs"),
+      `pub const EXPECTED_GHOSTTY_SHA: &str = "${ghosttySha}";\n`,
+    );
+    execFileSync("git", ["add", "."], { cwd: repoA });
+    execFileSync("git", ["commit", "-m", "init source"], { cwd: repoA });
+    const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoA, encoding: "utf8" }).trim();
+
+    const runDir = join(tmp, "run");
+    mkdirSync(runDir);
+    mkdirSync(join(runDir, "artifacts"));
+    mkdirSync(join(runDir, "artifacts", "darwin"));
+    mkdirSync(join(runDir, "receipts"));
+    mkdirSync(join(runDir, "bundles"));
+    const hostRoot = join(tmp, "host-root");
+    mkdirSync(hostRoot);
+
+    const plan = {
+      schemaVersion: 1,
+      runId: "rel-run-create-scoped-1",
+      repo: "Indosaram/ferryx",
+      commitSha: sourceSha,
+      tag: "v2026.09.08.1",
+      appVersion: "2026.908.1",
+      msixVersion: "2026.908.1.0",
+      channels: { store: true, nsisMigration: false },
+      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      sourceDateEpoch: 1788868800,
+      createdAt: "2026-09-08T12:00:00.000Z",
+    };
+    writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
+
+    const config = {
+      schemaVersion: 1,
+      repository: repoA,
+      ghosttyRepository: repoB,
+      repo: "Indosaram/ferryx",
+      hosts: {
+        macbook: {
+          platform: "darwin",
+          ssh: null,
+          root: hostRoot,
+          minFreeBytes: 1024,
+        },
+      },
+    };
+
+    let observedHost = null;
+    const mockRunner = async ({ hostName, workspaceDir, artifactsOutDir }) => {
+      observedHost = hostName;
+      const dummyApp = join(artifactsOutDir, "Ferryx.app.tar.gz");
+      const dummySig = join(artifactsOutDir, "Ferryx.app.tar.gz.sig");
+      const dummyDmg = join(artifactsOutDir, "Ferryx_universal.dmg");
+      writeFileSync(dummyApp, "MOCK_APP_CONTENT");
+      writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
+      writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      return {
+        exitCode: 0,
+        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+      };
+    };
+
+    const receipt = await buildHost({
+      hostName: "macbook",
+      config,
+      runDir,
+      runner: mockRunner,
+    });
+
+    assert.equal(receipt.host, "macbook");
+    assert.equal(observedHost, "macbook");
+
+    // Verify host-scoped bundle was created and shared bundle was NOT written
+    const hostSourceBundle = join(runDir, "bundles", "macbook", "source.bundle");
+    const hostGhosttyBundle = join(runDir, "bundles", "macbook", "ghostty.bundle");
+    assert.ok(existsSync(hostSourceBundle), "host-scoped source.bundle should be created");
+    assert.ok(existsSync(hostGhosttyBundle), "host-scoped ghostty.bundle should be created");
+    assert.ok(!existsSync(join(runDir, "bundles", "source.bundle")), "shared source.bundle should not be created");
+
+    // Verify created bundle is valid and matches commitSha
+    const testClone = join(tmp, "verify-clone");
+    execFileSync("git", ["clone", hostSourceBundle, testClone], { stdio: "pipe" });
+    const clonedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: testClone, encoding: "utf8" }).trim();
+    assert.equal(clonedSha, sourceSha);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
