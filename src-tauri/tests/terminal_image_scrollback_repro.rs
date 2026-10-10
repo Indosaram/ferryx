@@ -121,19 +121,24 @@ fn tui_body_region_image_keeps_body_and_scrollback_consistent() {
     let mut terminal = new_terminal(40, 24);
     let mut renderer = new_renderer();
 
+    // An inset scrolling region (top > 1) isolates the body so lines scrolling
+    // off the top of the region are discarded rather than pushed to scrollback.
     terminal
-        .feed(b"\x1b[1;20r")
-        .expect("scroll region rows 1-20");
+        .feed(b"\x1b[2;20r")
+        .expect("inset scroll region rows 2-20");
+    terminal
+        .feed(b"\x1b[1;3HHEADER STATUS")
+        .expect("header row");
     for index in 0..8 {
         terminal
-            .feed(format!("\x1b[{};3HBODY {:02}", index + 1, index).as_bytes())
+            .feed(format!("\x1b[{};3HBODY {:02}", index + 2, index).as_bytes())
             .expect("body line");
     }
-    terminal.feed(b"\x1b[3;6H").expect("image origin");
+    terminal.feed(b"\x1b[4;6H").expect("image origin");
     terminal
         .feed(&red_image_transmission(91, (6, 3)))
         .expect("kitty image");
-    for row in 21..24 {
+    for row in 21..=24 {
         terminal
             .feed(format!("\x1b[{row};3Hstatus {row}").as_bytes())
             .expect("status bar");
@@ -143,18 +148,13 @@ fn tui_body_region_image_keeps_body_and_scrollback_consistent() {
     println!("initial {}", describe_scrollbar(&terminal));
     assert_image_present(&terminal, "initial placement inside the body region");
     let frame = render(&mut renderer, &terminal);
-    assert_eq!(pixel(&frame, 44, 40), [255, 0, 0, 255], "image pixels");
+    assert_eq!(pixel(&frame, 44, 56), [255, 0, 0, 255], "image pixels");
     save_frame(&frame, "tui-00-initial");
 
     for step in 1..=6 {
         terminal
             .feed(format!("\x1b[20;3H\nNEW BODY LINE {step:02}").as_bytes())
             .expect("body scroll");
-        for row in 21..24 {
-            terminal
-                .feed(format!("\x1b[{row};3Hstatus {row}").as_bytes())
-                .expect("status bar");
-        }
         println!(
             "scroll {step} placements {:?}",
             describe_placements(&terminal)
@@ -170,11 +170,72 @@ fn tui_body_region_image_keeps_body_and_scrollback_consistent() {
     for row in 0..20 {
         println!("row {row:2}: {:?}", snapshot.row_text(row));
     }
+    assert!(
+        snapshot.row_text(0).contains("HEADER STATUS"),
+        "header row 1 above the inset region must remain intact"
+    );
+    for row in 20..24 {
+        assert!(
+            snapshot.row_text(row).contains(&format!("status {}", row + 1)),
+            "footer row {} below the inset region must remain intact",
+            row + 1
+        );
+    }
 
     assert_eq!(
         terminal.scrollback_rows().expect("scrollback rows"),
         0,
-        "a partial DECSTBM region must not push rows into scrollback"
+        "an inset DECSTBM region (top > 1) must not push rows into scrollback"
+    );
+}
+
+#[test]
+fn top_anchored_body_region_image_pushes_rows_to_scrollback() {
+    let mut terminal = new_terminal(40, 24);
+    let mut renderer = new_renderer();
+
+    // Ghostty VT definitive semantics: a top-anchored region (top == 1, 0-based 0)
+    // pushes scrolled lines into scrollback via cursorScrollAbove().
+    terminal
+        .feed(b"\x1b[1;20r")
+        .expect("top-anchored scroll region rows 1-20");
+    for index in 0..8 {
+        terminal
+            .feed(format!("\x1b[{};3HBODY {:02}", index + 1, index).as_bytes())
+            .expect("body line");
+    }
+    terminal.feed(b"\x1b[3;6H").expect("image origin");
+    terminal
+        .feed(&red_image_transmission(91, (6, 3)))
+        .expect("kitty image");
+    for row in 21..=24 {
+        terminal
+            .feed(format!("\x1b[{row};3Hstatus {row}").as_bytes())
+            .expect("status bar");
+    }
+
+    let frame = render(&mut renderer, &terminal);
+    assert_eq!(pixel(&frame, 44, 40), [255, 0, 0, 255], "image pixels");
+
+    for step in 1..=6 {
+        terminal
+            .feed(format!("\x1b[20;3H\nNEW BODY LINE {step:02}").as_bytes())
+            .expect("body scroll");
+    }
+
+    let snapshot = terminal.render_snapshot().expect("snapshot");
+    for row in 20..24 {
+        assert!(
+            snapshot.row_text(row).contains(&format!("status {}", row + 1)),
+            "footer row {} below the region must remain intact",
+            row + 1
+        );
+    }
+
+    assert_eq!(
+        terminal.scrollback_rows().expect("scrollback rows"),
+        6,
+        "a top-anchored DECSTBM region (top == 1) pushes scrolled lines into scrollback"
     );
 }
 

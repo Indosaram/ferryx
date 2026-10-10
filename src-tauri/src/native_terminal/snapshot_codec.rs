@@ -152,7 +152,10 @@ pub fn validate_snapshot_bounds(
             bytes[115], bytes[116], bytes[117], bytes[118],
             bytes[119], bytes[120], bytes[121], bytes[122],
         ]);
-        if max_sb_bytes > options.max_scrollback_bytes || max_sb_rows > options.max_scrollback_rows {
+        // The wire uses u64::MAX for an absent scrollback policy, not a history size.
+        if (max_sb_bytes != u64::MAX && max_sb_bytes > options.max_scrollback_bytes)
+            || (max_sb_rows != u64::MAX && max_sb_rows > options.max_scrollback_rows)
+        {
             return Err(NativeTerminalError::LimitExceeded);
         }
     }
@@ -614,7 +617,7 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
         Ok(rows)
     }
 
-    pub fn history_rows_alternate(&self) -> Result<u64, NativeTerminalError> {
+    pub fn history_rows_alternate(&self) -> Result<Option<u64>, NativeTerminalError> {
         let dec_ptr = self.decoder.expect("decoder present").as_ptr();
         let mut rows: u64 = 0;
         let res = unsafe {
@@ -624,8 +627,11 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
                 (&mut rows as *mut u64).cast(),
             )
         };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
         NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_HISTORY_ROWS_ALTERNATE)")?;
-        Ok(rows)
+        Ok(Some(rows))
     }
 
     pub fn progress_rows(&self) -> Result<usize, NativeTerminalError> {

@@ -239,10 +239,21 @@ async fn lagged_recovery_with_genuine_gap_rebuilds_from_supplied_history() {
         1,
         "a genuine gap must apply the recovery history"
     );
+    // Under ea77e131, rebuilds return VT to ground and preserve scrollback history
     assert_eq!(
         occurrences(&state, session_id, "unreachable-stale-line"),
-        0,
-        "a genuine gap must not keep state the daemon can no longer vouch for"
+        1,
+        "a genuine gap rebuild must preserve resident scrollback history"
+    );
+    assert_eq!(
+        occurrences(&state, session_id, "output stream resynced"),
+        1,
+        "a rebuild must print the visible resync notice line exactly once"
+    );
+    assert_eq!(
+        state.session_last_sequence(session_id),
+        Some(120),
+        "the cursor must advance to the recovery's end sequence"
     );
 }
 
@@ -325,10 +336,21 @@ async fn legacy_lagged_without_delta_marker_rebuilds_conservatively() {
         1,
         "a legacy replay must still apply its history"
     );
+    // Under ea77e131, an unproven replay rebuilds conservatively, printing the resync notice and preserving scrollback
     assert_eq!(
         occurrences(&state, session_id, "legacy-resident-line"),
-        0,
-        "an unproven replay must rebuild rather than assume contiguity"
+        1,
+        "an unproven replay rebuild must preserve resident scrollback history"
+    );
+    assert_eq!(
+        occurrences(&state, session_id, "output stream resynced"),
+        1,
+        "an unproven replay rebuild must print the visible resync notice line exactly once"
+    );
+    assert_eq!(
+        state.session_last_sequence(session_id),
+        Some(5),
+        "the cursor must advance to the legacy replay's end sequence"
     );
 }
 
@@ -547,15 +569,21 @@ async fn an_overlapping_replay_preserves_the_older_marker_semantics() {
             .expect("overlap recovery signal arrives")
             .expect("pump publishes the overlap recovery");
 
+        // Under ea77e131, ReplayVerdict::Rebuild keeps resident scrollback and prints the resync notice
         assert_eq!(
             occurrences(&state, session_id, "resident-only-marker"),
-            0,
-            "marker {marker:?}: a straddling replay must rebuild, discarding resident-only content"
+            1,
+            "marker {marker:?}: a straddling replay rebuild must preserve resident-only content in scrollback"
+        );
+        assert_eq!(
+            occurrences(&state, session_id, "output stream resynced"),
+            1,
+            "marker {marker:?}: a straddling replay rebuild must print the visible resync notice exactly once"
         );
         assert_eq!(
             occurrences(&state, session_id, "shared-overlap-line"),
-            1,
-            "marker {marker:?}: an overlapping replay must not double-apply shared sequences"
+            2,
+            "marker {marker:?}: shared overlap line appears in resident history and replayed after resync notice"
         );
         assert_eq!(
             occurrences(&state, session_id, "overlap-tail-line"),

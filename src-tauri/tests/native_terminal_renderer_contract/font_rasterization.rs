@@ -27,23 +27,25 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
     );
 
     // Rasterize ASCII char 'A'
-    let ascii_mask = global_mgr
-        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false)
-        .into_buffer();
+    let ascii_glyph = global_mgr
+        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false);
+    let ascii_bpp = if ascii_glyph.is_subpixel() || ascii_glyph.is_color() { 4 } else { 1 };
+    let ascii_mask = ascii_glyph.into_buffer();
     assert_eq!(
         ascii_mask.len(),
-        (metrics.width_px * metrics.height_px * 4) as usize,
-        "ASCII mask length must equal width * height * 4"
+        (metrics.width_px * metrics.height_px * ascii_bpp as u32) as usize,
+        "ASCII mask length must equal width * height * bytes_per_pixel"
     );
 
     // Rasterize CJK char '가' (wide cell: 2 * width)
-    let cjk_mask = global_mgr
-        .rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false)
-        .into_buffer();
+    let cjk_glyph = global_mgr
+        .rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false);
+    let cjk_bpp = if cjk_glyph.is_subpixel() || cjk_glyph.is_color() { 4 } else { 1 };
+    let cjk_mask = cjk_glyph.into_buffer();
     assert_eq!(
         cjk_mask.len(),
-        (metrics.width_px * 2 * metrics.height_px * 4) as usize,
-        "CJK mask length must equal 2 * width * height * 4"
+        (metrics.width_px * 2 * metrics.height_px * cjk_bpp as u32) as usize,
+        "CJK mask length must equal 2 * width * height * bytes_per_pixel"
     );
 
     let ascii_non_empty = ascii_mask.iter().any(|&b| b > 0);
@@ -149,25 +151,27 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
     let m2 = global_mgr.cell_metrics_for_scale(2.0);
 
     let mask_1x = global_mgr
-        .rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0)
-        .into_buffer();
+        .rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0);
+    let bpp_1x = if mask_1x.is_subpixel() || mask_1x.is_color() { 4 } else { 1 };
+    let mask_1x_buf = mask_1x.into_buffer();
     let mask_2x = global_mgr
-        .rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0)
-        .into_buffer();
+        .rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0);
+    let bpp_2x = if mask_2x.is_subpixel() || mask_2x.is_color() { 4 } else { 1 };
+    let mask_2x_buf = mask_2x.into_buffer();
 
     assert_eq!(
-        mask_1x.len(),
-        (m1.width_px * m1.height_px * 4) as usize,
+        mask_1x_buf.len(),
+        (m1.width_px * m1.height_px * bpp_1x as u32) as usize,
         "1x mask length matches 1x cell dimensions"
     );
     assert_eq!(
-        mask_2x.len(),
-        (m2.width_px * m2.height_px * 4) as usize,
+        mask_2x_buf.len(),
+        (m2.width_px * m2.height_px * bpp_2x as u32) as usize,
         "2x mask length matches 2x cell dimensions"
     );
 
-    let count_1x = mask_1x.iter().filter(|&&b| b > 0).count();
-    let count_2x = mask_2x.iter().filter(|&&b| b > 0).count();
+    let count_1x = mask_1x_buf.iter().filter(|&&b| b > 0).count();
+    let count_2x = mask_2x_buf.iter().filter(|&&b| b > 0).count();
 
     if count_1x > 0 {
         assert!(
@@ -179,22 +183,23 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
 
 #[test]
 fn test_glyph_orientation_regression_contract() {
-    let global_mgr = FontManager::global();
+    let global_mgr = FontManager::new_with_family_and_size("monospace", 13.0);
     let metrics = global_mgr.cell_metrics();
     let w = metrics.width_px;
     let h = metrics.height_px;
     let mid_y = (h / 2) as usize;
 
     // 'L': bottom-half ink > top-half ink
-    let l_mask = global_mgr
-        .rasterize_glyph("L", w, h, false, false)
-        .into_buffer();
+    let l_glyph = global_mgr
+        .rasterize_glyph("L", w, h, false, false);
+    let l_bpp = if l_glyph.is_subpixel() || l_glyph.is_color() { 4 } else { 1 };
+    let l_mask = l_glyph.into_buffer();
     let mut top_ink_l = 0u64;
     let mut bottom_ink_l = 0u64;
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let idx = (y * (w as usize) + x) * 4;
-            let val = l_mask[idx + 3] as u64;
+            let idx = (y * (w as usize) + x) * l_bpp;
+            let val = if l_bpp == 1 { l_mask[idx] as u64 } else { l_mask[idx + 3] as u64 };
             if y < mid_y {
                 top_ink_l += val;
             } else {
@@ -208,15 +213,16 @@ fn test_glyph_orientation_regression_contract() {
     );
 
     // 'P': top-half ink > bottom-half ink
-    let p_mask = global_mgr
-        .rasterize_glyph("P", w, h, false, false)
-        .into_buffer();
+    let p_glyph = global_mgr
+        .rasterize_glyph("P", w, h, false, false);
+    let p_bpp = if p_glyph.is_subpixel() || p_glyph.is_color() { 4 } else { 1 };
+    let p_mask = p_glyph.into_buffer();
     let mut top_ink_p = 0u64;
     let mut bottom_ink_p = 0u64;
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let idx = (y * (w as usize) + x) * 4;
-            let val = p_mask[idx + 3] as u64;
+            let idx = (y * (w as usize) + x) * p_bpp;
+            let val = if p_bpp == 1 { p_mask[idx] as u64 } else { p_mask[idx + 3] as u64 };
             if y < mid_y {
                 top_ink_p += val;
             } else {
@@ -230,15 +236,16 @@ fn test_glyph_orientation_regression_contract() {
     );
 
     // '─': horizontal bar must be centered within ±2px of buffer middle
-    let line_mask = global_mgr
-        .rasterize_glyph("─", w, h, false, false)
-        .into_buffer();
+    let line_glyph = global_mgr
+        .rasterize_glyph("─", w, h, false, false);
+    let line_bpp = if line_glyph.is_subpixel() || line_glyph.is_color() { 4 } else { 1 };
+    let line_mask = line_glyph.into_buffer();
     let mut row_sums: Vec<(usize, u64)> = (0..h as usize)
         .map(|y| {
             let sum: u64 = (0..w as usize)
                 .map(|x| {
-                    let idx = (y * (w as usize) + x) * 4;
-                    line_mask[idx + 3] as u64
+                    let idx = (y * (w as usize) + x) * line_bpp;
+                    if line_bpp == 1 { line_mask[idx] as u64 } else { line_mask[idx + 3] as u64 }
                 })
                 .sum();
             (y, sum)

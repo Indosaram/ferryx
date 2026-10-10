@@ -69,6 +69,20 @@ fn test_pre_ffi_dimension_and_count_bounding() {
 }
 
 #[test]
+fn absent_scrollback_policies_do_not_exceed_decode_limits() {
+    let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
+    term.vt_write(b"snapshot policy\r\n");
+    let snapshot = term.encode(DEFAULT_MAX_SNAPSHOT_WIRE_BYTES).expect("snapshot");
+    let mut options = SnapshotCodecOptions::default();
+    options.max_scrollback_rows = 0;
+    assert!(validate_snapshot_bounds(&snapshot, &options).is_ok());
+
+    let mut explicit = snapshot.clone();
+    explicit[115..123].copy_from_slice(&1_u64.to_le_bytes());
+    assert!(matches!(validate_snapshot_bounds(&explicit, &options), Err(NativeTerminalError::LimitExceeded)));
+}
+
+#[test]
 fn test_continuation_tracking_configuration() {
     let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
     assert_eq!(term.cols().unwrap(), 80);
@@ -167,6 +181,13 @@ fn test_primary_alternate_screen_and_saved_state() {
         .encode(DEFAULT_MAX_SNAPSHOT_WIRE_BYTES)
         .expect("encode alt screen snapshot");
 
+    let alt_incremental = IncrementalSnapshotDecoder::start(&snapshot, SnapshotCodecOptions::default())
+        .expect("start incremental decoder with alt screen");
+    assert!(
+        alt_incremental.history_rows_alternate().expect("history alternate query").is_some(),
+        "declared alternate screen must provide alternate history rows"
+    );
+
     let mut decoded =
         decode_terminal_snapshot(&snapshot, SnapshotCodecOptions::default())
             .expect("decode alt screen snapshot");
@@ -260,7 +281,11 @@ fn test_incremental_decoder_and_next_page() {
     assert!(offset > 0);
 
     let _ = incremental.history_rows_primary().expect("history primary");
-    let _ = incremental.history_rows_alternate().expect("history alternate");
+    assert_eq!(
+        incremental.history_rows_alternate().expect("history alternate"),
+        None,
+        "snapshot without alternate screen returns None for alternate history rows"
+    );
 
     while incremental.next_page().expect("next page") {}
 

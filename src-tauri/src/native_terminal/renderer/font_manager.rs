@@ -386,6 +386,7 @@ pub fn derived_cell_metrics_for_scale(scale_factor: f64) -> CellMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::preferences::DEFAULT_TERMINAL_FONT_FAMILY;
 
     fn bytes_per_pixel(glyph: &RasterizedGlyph) -> usize {
         match glyph {
@@ -441,7 +442,10 @@ mod tests {
 
     #[test]
     fn test_font_manager_derives_nonzero_metrics_and_rasterizes() {
-        let mgr = FontManager::global();
+        let mgr = FontManager::new_with_family_and_size(
+            DEFAULT_TERMINAL_FONT_FAMILY,
+            DEFAULT_TERMINAL_FONT_SIZE,
+        );
         let metrics = mgr.cell_metrics();
         assert!(metrics.width_px > 0, "cell width must be strictly positive");
         assert!(
@@ -607,7 +611,10 @@ mod tests {
 
     #[test]
     fn test_glyph_orientation_regression() {
-        let mgr = FontManager::global();
+        let mgr = FontManager::new_with_family_and_size(
+            DEFAULT_TERMINAL_FONT_FAMILY,
+            DEFAULT_TERMINAL_FONT_SIZE,
+        );
         let metrics = mgr.cell_metrics();
         let w = metrics.width_px;
         let h = metrics.height_px;
