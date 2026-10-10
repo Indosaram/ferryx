@@ -2408,7 +2408,6 @@ impl DaemonServer {
         &self.remote_state
     }
 
-    #[cfg(test)]
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
     }

@@ -552,6 +552,8 @@ mod spawn_owner_tests {
     #[cfg(unix)]
     #[test]
     fn a_blocked_handover_reports_busy_and_succeeds_on_retry_after_the_spawn_completes() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _runtime_guard = runtime.enter();
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
         let terminals = Arc::new(TerminalService::default());
@@ -584,6 +586,32 @@ mod spawn_owner_tests {
         assert_eq!(manager.status(), HandoverStatus::Prepared);
         manager.abort_handover().unwrap();
         drop(listener);
+    }
+
+    #[test]
+    fn generated_legacy_socket_paths_are_unique_and_parseable_for_predecessor_pid() {
+        let pid = std::process::id();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let path = HandoverManager::generate_legacy_socket_path();
+            assert!(
+                seen.insert(path.clone()),
+                "legacy path {} generated more than once",
+                path.display()
+            );
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("valid legacy socket file name");
+            assert!(file_name.starts_with(&format!("legacy-{pid}-")));
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            {
+                assert_eq!(
+                    crate::daemon::qa_producers::predecessor_pid_from_legacy_path(&path),
+                    Some(pid)
+                );
+            }
+        }
     }
 }
 
@@ -729,17 +757,24 @@ impl HandoverManager {
     pub fn generate_legacy_socket_path() -> PathBuf {
         let runtime_dir = get_runtime_dir();
         let pid = std::process::id();
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
+        let disambiguator = if seq == 0 {
+            format!("{timestamp}")
+        } else {
+            format!("{timestamp}-{seq}")
+        };
         #[cfg(unix)]
         {
-            runtime_dir.join(format!("legacy-{pid}-{timestamp}.sock"))
+            runtime_dir.join(format!("legacy-{pid}-{disambiguator}.sock"))
         }
         #[cfg(not(unix))]
         {
-            runtime_dir.join(format!("legacy-{pid}-{timestamp}.port"))
+            runtime_dir.join(format!("legacy-{pid}-{disambiguator}.port"))
         }
     }
 
