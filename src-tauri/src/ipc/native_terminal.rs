@@ -878,19 +878,10 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
 ) -> Result<NativeTerminalAttachReceipt, IpcError> {
     let receipt_state = state.inner().clone();
     let expected_tuple = attach_tuple.clone();
-    tokio::time::timeout(
-        std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000)),
-        native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
-            scale_factor, after_sequence, attach_tuple),
-    )
-    .await
-    .map_err(|_| {
-        IpcError::new(
-            IpcErrorCode::Timeout,
-            "Terminal attachment timed out. Retry reconnecting this pane.",
-        )
-        .with_details(serde_json::json!({ "sessionId": session_id, "phase": "attach" }))
-    })??;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000));
+    native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
+        scale_factor, after_sequence, attach_tuple, deadline).await?;
     let active = receipt_state.session_attach_tuple(&session_id);
     if active != expected_tuple {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
@@ -907,6 +898,7 @@ async fn native_terminal_attach<R: Runtime>(
     scale_factor: Option<f64>,
     after_sequence: Option<String>,
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+    deadline: tokio::time::Instant,
 ) -> Result<(), IpcError> {
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
@@ -995,7 +987,13 @@ async fn native_terminal_attach<R: Runtime>(
         Ok(())
     };
 
-    let result = attach_body.await;
+    // Keep timeout cancellation inside the reservation owner so rollback still runs.
+    let result = tokio::time::timeout_at(deadline, attach_body).await.unwrap_or_else(|_| {
+        Err(IpcError::new(
+            IpcErrorCode::Timeout,
+            "Terminal attachment timed out. Retry reconnecting this pane.",
+        ).with_details(serde_json::json!({ "sessionId": session_id, "phase": "attach" })))
+    });
     if result.is_err() && is_new_reservation {
         let active = state.session_attach_tuple(&session_id);
         if active == initial_attach_tuple || active.is_none() {
@@ -2610,18 +2608,31 @@ mod tests {
         };
         let action = async {
             // When the native IPC entry point attempts attachment.
+            let tuple = crate::daemon::protocol::PaneAttachTuple {
+                backend_session_id: "qa-existing-session".into(),
+                incarnation: Some("qa-incarnation".into()),
+                daemon_epoch: "7".into(),
+                frontend_session_id: "qa-frontend".into(),
+                pane_identity: "qa-pane".into(),
+                binding_key: "qa-binding".into(),
+                attempt_generation: 1,
+            };
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(120),
                 cmd_native_terminal_attach(
                     app.handle().clone(), app.state::<Arc<DaemonClient>>(),
                     app.state::<NativeTerminalSurfaceHostState>(),
-                    "qa-existing-session".into(), None, None, None, None, None,
+                    "qa-existing-session".into(), None, None, None, Some(tuple), None,
                 ),
             ).await;
             // Then the command settles before the test's safety deadline.
             assert!(result.is_ok(), "native reconnect attach exceeded its bounded-error contract");
             let error = result.unwrap().err().expect("attachment must fail");
             assert_eq!(error.code, IpcErrorCode::Timeout);
+            let state = app.state::<NativeTerminalSurfaceHostState>();
+            assert!(!state.has_session("qa-existing-session"), "timeout must roll back the new native reservation");
+            assert!(state.session_attempt_generation("qa-existing-session").is_none());
+            state.teardown();
         };
         let clock = async {
             handshake.await.unwrap();
