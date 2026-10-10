@@ -87,7 +87,7 @@ export function assembleRelease(options) {
     throw new Error("assembleRelease options must be an object");
   }
 
-  const { planPath, receiptsDir, artifactsDir, outDir, publicKey } = options;
+  const { planPath, receiptsDir, artifactsDir, outDir, publicKey, spawnProcess = spawnSync } = options;
 
   if (!planPath || typeof planPath !== "string") {
     throw new Error("Missing required option: planPath");
@@ -367,7 +367,7 @@ export function assembleRelease(options) {
 
       if (artifact.kind === "macos-updater") {
         const checkerPath = resolve(dirname(fileURLToPath(import.meta.url)), "assert-updater-archive-layout.mjs");
-        const checkRes = spawnSync(process.execPath, [checkerPath, join(stagingDir, artifact.name)], { encoding: "utf8" });
+        const checkRes = spawnProcess(process.execPath, [checkerPath, join(stagingDir, artifact.name)], { encoding: "utf8" });
         if (checkRes.status !== 0) {
           throw new Error(
             `macOS updater archive layout validation failed for '${artifact.name}': ${checkRes.stderr.trim() || checkRes.stdout.trim() || "exit code " + checkRes.status}`,

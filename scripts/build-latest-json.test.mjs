@@ -12,7 +12,6 @@ import fs, {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { syncBuiltinESMExports } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -766,7 +765,7 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
     receipt.artifacts[0].bytes = invalidArchive.length;
     receipt.artifacts[0].sha256 = sha256(invalidArchive);
     writeFileSync(receiptPath, JSON.stringify(receipt));
-    childProcess.spawnSync = (command, args, options) => {
+    const spawnProcess = (command, args, options) => {
       if (args?.[0]?.endsWith("assert-updater-archive-layout.mjs")) {
         layoutChecked = true;
         // A concurrent source replacement can fool a source-path-only check.
@@ -781,7 +780,6 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
       }
       return realSpawn(command, args, options);
     };
-    syncBuiltinESMExports();
     assert.throws(
       () => assembleRelease({
         planPath: fixture.planPath,
@@ -789,14 +787,13 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
         artifactsDir: fixture.artifactsDir,
         outDir,
         publicKey: fixture.keys.publicKeyWrapped,
+        spawnProcess,
       }),
       /archive layout/i,
     );
     assert.equal(layoutChecked, true);
     assert.equal(existsSync(outDir), false);
   } finally {
-    childProcess.spawnSync = realSpawn;
-    syncBuiltinESMExports();
     fixture.cleanup();
   }
 });
