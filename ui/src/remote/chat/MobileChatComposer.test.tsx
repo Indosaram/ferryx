@@ -1,7 +1,6 @@
 /**
  * Composer regressions (plan task 12).
  *
- * AUTHORED, NOT EXECUTED: the run is deferred to the post-merge gate.
  *
  * The composer no longer keeps browser-side attachment blobs and no longer blocks sending while
  * one is attached: a file is staged on the OWNING host and its mention is plain text in the
@@ -26,6 +25,38 @@ function stagedFile(overrides: Partial<ReferenceFileReceipt> = {}): ReferenceFil
 describe("MobileChatComposer", () => {
   beforeEach(cleanup);
   afterEach(cleanup);
+
+  it("host-staged attachments allocate no blob URLs on selection, send, removal or unmount", () => {
+    const create = vi.fn(() => "blob:attachment");
+    const revoke = vi.fn();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = create;
+    URL.revokeObjectURL = revoke;
+    try {
+      const attach = vi.fn();
+      const remove = vi.fn();
+      const send = vi.fn();
+      const { unmount } = render(<MobileChatComposer
+        onSend={send} value="@notes.txt" attachments={[stagedFile()]}
+        onAttachFiles={attach} onRemoveAttachment={remove}
+      />);
+      const image = new File(["image"], "image.png", { type: "image/png" });
+      fireEvent.change(screen.getByTestId("file-upload-input"), { target: { files: [image] } });
+      expect(attach).toHaveBeenCalledWith([image], expect.any(Number));
+      fireEvent.click(screen.getByTestId("send-button"));
+      expect(send).toHaveBeenCalledWith("@notes.txt");
+      fireEvent.click(screen.getByTestId("remove-attachment-att-1"));
+      expect(remove).toHaveBeenCalledWith("att-1");
+      unmount();
+      // No browser-owned resource exists to revoke: host receipts replace blob previews.
+      expect(create).not.toHaveBeenCalled();
+      expect(revoke).not.toHaveBeenCalled();
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+    }
+  });
 
   it("renders the T3 composer row with attach, mic, and circular send controls", () => {
     const onSend = vi.fn();
