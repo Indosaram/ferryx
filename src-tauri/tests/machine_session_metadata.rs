@@ -3,6 +3,8 @@ use ferryx_lib::{daemon::server::DaemonServer, remote::server::create_remote_rou
 use futures_util::{FutureExt, StreamExt};
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+#[path = "support/private_supervisor.rs"]
+mod supervisor;
 #[cfg(unix)]
 #[path = "support/session_metadata_handover.rs"]
 mod handover;
@@ -24,6 +26,10 @@ async fn next_kind(socket: &mut Socket, kind: &str) -> Value {
             if frame.is_text() {
                 let event: Value =
                     serde_json::from_str(frame.to_text().expect("text frame")).expect("JSON event");
+                eprintln!(
+                    "[next_kind awaiting={kind}] type={:?} sequence={:?}",
+                    event["type"], event["sequence"]
+                );
                 if event["type"] == kind {
                     return event;
                 }
@@ -59,10 +65,18 @@ async fn connect_events(client: &reqwest::Client, base: &str, token: &str) -> So
 
 #[tokio::test]
 async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
+    if supervisor::run("publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd").await { return; }
     // Given: runner isolates HOME/data/runtime/temp before any process initialization.
     let data = std::env::var_os("FERRYX_DATA_DIR").expect("run with isolated FERRYX_DATA_DIR");
     let home = std::env::var_os("HOME").expect("isolated HOME");
     assert!(std::path::Path::new(&data).parent() == std::path::Path::new(&home).parent());
+    let runtime = std::path::PathBuf::from(std::env::var_os("FERRYX_RUNTIME_DIR").expect("private runtime"));
+    assert!(runtime.starts_with(std::path::Path::new(&home).parent().expect("private supervisor root")), "runtime must use the private supervisor directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&runtime).expect("private runtime metadata").permissions().mode() & 0o777, 0o700, "handover runtime must be private");
+    }
     let (root, owner) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().expect("private fixture");
         std::fs::create_dir_all(root.path().join("project/child")).expect("project fixture");
@@ -82,10 +96,14 @@ async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
     let base = format!("http://{address}");
     let router = create_remote_router(state.clone());
     let mut tasks = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     #[cfg(unix)]
     let agent_listener = owner.spawn_agent_state_listener().expect("canonical report listener");
     tasks.spawn(async move {
-        axum::serve(listener, router).await.expect("HTTP server");
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+            .await
+            .expect("HTTP server");
     });
     let result = std::panic::AssertUnwindSafe(async {
         let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
@@ -177,6 +195,7 @@ async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
         mirror.close(None).await.expect("mirror close");
     }).catch_unwind().await;
     // Cleanup also runs for the expected RED assertion, with bounded task joins.
+    let _ = shutdown_tx.send(());
     for id in owner.terminal_service().list_sessions() {
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -186,8 +205,8 @@ async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
         .expect("bounded owned PTY cleanup")
         .expect("PTY close");
     }
-    state.auth_manager.revoke_device("owner");
-    state.auth_manager.revoke_device("mirror");
+    state.auth_manager.revoke_device("owner").unwrap();
+    state.auth_manager.revoke_device("mirror").unwrap();
     #[cfg(unix)]
     {
         agent_listener.abort();
@@ -215,11 +234,15 @@ async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
     .expect("subscription state");
     drop(owner);
     drop(state);
-    tokio::task::spawn_blocking(move || root.close().expect("remove fixture root"))
-        .await
-        .expect("fixture cleanup");
+    let cleanup = tokio::task::spawn_blocking(move || root.close()).await;
     eprintln!("A12 cleanup: owned PTYs closed, grants revoked, listener task joined, machine subscriptions zero, fixture removed");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
+    match result {
+        Err(panic) => {
+            if let Err(cleanup_error) = cleanup {
+                eprintln!("A12 secondary fixture cleanup failure (original test panic preserved): {cleanup_error}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+        Ok(()) => cleanup.expect("fixture cleanup task").expect("remove fixture root"),
     }
 }

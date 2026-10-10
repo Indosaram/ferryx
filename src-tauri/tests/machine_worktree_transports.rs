@@ -129,7 +129,7 @@ async fn scenario(root: &Path) {
     assert_eq!(project["repoRoot"], canonical.to_str().unwrap());
     let endpoint = format!("{origin}/workspace/worktrees");
     let local = DaemonClient::new_with_socket(socket.clone());
-    let handshake = local.send_request(DaemonRequest::Handshake { version: 3, token: None }).await.unwrap();
+    let handshake = local.send_request(DaemonRequest::Handshake { version: ferryx_lib::daemon::protocol::DAEMON_PROTOCOL_VERSION, token: None }).await.unwrap();
     assert!(matches!(handshake, DaemonResponse::HandshakeOk {pid, ..} if pid == std::process::id()));
     for (slug, delete_branch) in [("relay-keep", false), ("relay-delete", true)] {
         let request = json!({"requestId":uuid::Uuid::new_v4(),"workspaceId":ws,"worktree":{"wsId":ws,"slug":slug},"baseRef":"HEAD"});

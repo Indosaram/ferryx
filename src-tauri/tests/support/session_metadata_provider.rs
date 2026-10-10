@@ -13,7 +13,7 @@ pub async fn publish_discovered(owner: &DaemonServer, root: &Path, session: &Val
     let transcript = home
         .join(".omo/sessions/project")
         .join(format!("fixture_{provider_id}.jsonl"));
-    let script = root.join("omo.js");
+    let script = home.join("omo.js");
     let cwd = std::fs::canonicalize(root.join("project/child")).expect("provider CWD");
     std::fs::create_dir_all(transcript.parent().expect("transcript parent"))
         .expect("provider directory");
@@ -86,11 +86,14 @@ pub async fn publish_discovered(owner: &DaemonServer, root: &Path, session: &Val
         .write_all(&frame)
         .await
         .expect("canonical report write");
+    eprintln!("[A12 provider report] write ok: session={id} provider_id={provider_id}");
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.expect("owner metadata event");
+            eprintln!("[A12 provider event] received on machine_events: type={:?} payload={}", event["type"], event["payload"]);
             if event["payload"]["providerSession"]["id"] == provider_id {
                 assert_eq!(event["payload"]["target"], session["target"]);
+                eprintln!("[A12 provider proven] providerSession.id={provider_id} matched target");
                 break;
             }
         }
