@@ -272,6 +272,8 @@ pub struct PtyManager {
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
     #[cfg(unix)]
     transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
+    #[cfg(test)]
+    removal_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Default for PtyManager {
@@ -289,6 +291,8 @@ impl PtyManager {
             output_hub: Arc::new(RwLock::new(None)),
             #[cfg(unix)]
             transfer_owners: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            removal_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1026,7 +1030,17 @@ impl PtyManager {
     fn remove_from_registry(&self, session_id: &str) -> Option<Arc<PtySession>> {
         let mut sessions = self.sessions.write();
         self.cwd_probe_permits.lock().remove(session_id);
-        sessions.remove(session_id)
+        let removed = sessions.remove(session_id);
+        #[cfg(test)]
+        if removed.is_some() {
+            self.removal_notify.notify_waiters();
+        }
+        removed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn removal_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.removal_notify.clone()
     }
 
     pub fn list_sessions(&self) -> Vec<String> {

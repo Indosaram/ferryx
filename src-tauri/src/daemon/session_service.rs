@@ -364,9 +364,16 @@ pub struct DaemonSessionService {
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
     pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
+    #[cfg(test)]
+    pub(super) test_shell_command: parking_lot::Mutex<Option<portable_pty::CommandBuilder>>,
 }
 
 impl DaemonSessionService {
+    #[cfg(test)]
+    pub(crate) fn set_test_shell_command(&self, cmd: portable_pty::CommandBuilder) {
+        *self.test_shell_command.lock() = Some(cmd);
+    }
+
     pub(crate) fn admission_time_unix_ms(&self) -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
     }
@@ -2191,6 +2198,8 @@ impl DaemonSessionService {
         let client_request_id = client_request_id.to_string();
         let max_machine_sessions = self.max_machine_sessions();
         let split_deadline = LOCAL_SPLIT_SPAWN.try_with(|deadline| (*deadline).into_std()).ok();
+        #[cfg(test)]
+        let test_shell_command = self.test_shell_command.lock().clone();
         crate::ipc::run_blocking(move || {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
@@ -2384,6 +2393,12 @@ impl DaemonSessionService {
                     Ok(cmd) => cmd,
                     Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
                 };
+                #[cfg(test)]
+                if spawn_startup.is_none() {
+                    if let Some(test_cmd) = test_shell_command {
+                        cmd = test_cmd;
+                    }
+                }
                 if let Some(claim) = spawn_claim.as_ref() {
                     if let Some(existing_session_id) = claims.lock().get(claim) {
                         return Err(SpawnError::AgentSessionConflict {

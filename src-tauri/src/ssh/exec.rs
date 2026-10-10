@@ -167,10 +167,11 @@ mod tests {
 
     #[test]
     fn red_probe_argv_shape() {
+        let program = resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
         assert_eq!(
             probe_argv(&host(None, None, None, None)),
             vec![
-                "ssh",
+                program.as_str(),
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -188,8 +189,9 @@ mod tests {
 
     #[test]
     fn red_interactive_argv_flags() {
+        let program = resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
         let bare = interactive_argv(&host(None, None, None, None));
-        assert_eq!(bare, vec!["ssh", "-tt", "maho-win"]);
+        assert_eq!(bare, vec![program.as_str(), "-tt", "maho-win"]);
 
         let full = interactive_argv(&host(
             Some(2200),
@@ -200,7 +202,7 @@ mod tests {
         assert_eq!(
             full,
             vec![
-                "ssh",
+                program.as_str(),
                 "-tt",
                 "-p",
                 "2200",

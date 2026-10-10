@@ -992,19 +992,24 @@ mod tests {
 
     #[test]
     fn test_agents_detect_existing_and_nonexistent_binaries() {
+        let (existing_a, existing_b) = if cfg!(windows) {
+            ("cmd", "powershell")
+        } else {
+            ("sh", "ls")
+        };
         let results = detect_agents(&[
-            "sh".into(),
-            "ls".into(),
+            existing_a.into(),
+            existing_b.into(),
             "definitely-not-a-real-binary-xyz".into(),
             "".into(),
             "   ".into(),
         ]);
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].name, "sh");
+        assert_eq!(results[0].name, existing_a);
         assert!(results[0].available);
         assert!(results[0].path.is_some());
-        assert_eq!(results[1].name, "ls");
+        assert_eq!(results[1].name, existing_b);
         assert!(results[1].available);
         assert_eq!(results[2].name, "definitely-not-a-real-binary-xyz");
         assert!(!results[2].available);

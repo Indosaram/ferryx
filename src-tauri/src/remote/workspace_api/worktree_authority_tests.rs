@@ -397,9 +397,14 @@ async fn followthrough_delete_publication_blocks_spawn() {
 
 async fn ipc(owner: Arc<DaemonServer>, request: DaemonRequest) -> DaemonResponse {
     let (mut client, stream) = tokio::io::duplex(65536);
-    let worker = tokio::spawn(owner.handle_client(stream));
+    let mut payload = serde_json::to_value(&request).unwrap();
+    if let Some(token) = owner.transport_token() {
+        payload["token"] = serde_json::Value::String(token.to_string());
+    }
+    let server = Arc::clone(&owner);
+    let worker = tokio::spawn(server.handle_client(stream));
     client
-        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .write_all(format!("{payload}\n").as_bytes())
         .await
         .unwrap();
     let mut reader = tokio::io::BufReader::new(client);

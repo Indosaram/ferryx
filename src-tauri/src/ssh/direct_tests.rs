@@ -28,13 +28,18 @@ async fn failed_windows_probe_keeps_raw_stderr_but_displays_plain_text() {
 }
 
 fn host() -> SshHost {
+    let identity_file = if cfg!(windows) {
+        r"C:\keys\key with 'quote'"
+    } else {
+        "/keys/key with 'quote'"
+    };
     SshHost {
         id: "host-one".into(),
         label: "Test host".into(),
         hostname: "example.test".into(),
         username: Some("user".into()),
         port: Some(2200),
-        identity_file: Some("/keys/key with 'quote'".into()),
+        identity_file: Some(identity_file.into()),
         jump_host: Some("jump-user@bastion:2222".into()),
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Key,
@@ -62,12 +67,16 @@ fn automated_commands_disable_tty_even_when_ssh_config_requests_one() {
 
 #[test]
 fn startup_plan_honors_saved_options_and_quotes_remote_root() {
-    let plan = shell_plan(&host(), "/srv/project's space").expect("plan");
-    assert_eq!(plan.program, "ssh");
+    let h = host();
+    let id_file = h.identity_file.clone().unwrap();
+    let plan = shell_plan(&h, "/srv/project's space").expect("plan");
+    let expected_program =
+        crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
+    assert_eq!(plan.program, expected_program);
     assert!(plan.args.iter().any(|v| v == "-tt"));
     for pair in [
         ["-p", "2200"],
-        ["-i", "/keys/key with 'quote'"],
+        ["-i", id_file.as_str()],
         ["-J", "jump-user@bastion:2222"],
     ] {
         assert!(plan.args.windows(2).any(|args| args == pair));
@@ -322,7 +331,9 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
     )
     .expect("plan");
 
-    assert_eq!(plan.program, "ssh");
+    let expected_program =
+        crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
+    assert_eq!(plan.program, expected_program);
     assert!(plan
         .args
         .windows(2)
@@ -381,7 +392,9 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
         root: "/home/user/.ferryx/helper/host-one".into(),
     };
     let plan = bridge_plan(&host(), &env, &location).expect("bridge_plan");
-    assert_eq!(plan.program, "ssh");
+    let expected_program =
+        crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
+    assert_eq!(plan.program, expected_program);
     assert!(plan.args.iter().any(|v| v == "-T"));
     assert!(!plan.args.iter().any(|v| v == "-tt"));
     assert!(plan
@@ -474,6 +487,95 @@ public class Recorder {
 }
 
 #[test]
+fn windows_bridge_command_pwsh_leaves_root_standard() {
+    let env_pwsh = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Pwsh,
+        version: "fixture".into(),
+        home: r"C:\Users\QA Person".into(),
+        temp: r"C:\Temp".into(),
+        git: false,
+    };
+    let root = r"C:\Users\QA Person\项目\";
+    let location = crate::ssh::helper_setup::HelperLocation {
+        executable: r"C:\bin\helper.exe".into(),
+        root: root.into(),
+    };
+    let cmd_pwsh = bridge_command(&env_pwsh, &location);
+    let expected_data = crate::ssh::runtime::powershell_data(root);
+    assert!(
+        cmd_pwsh.ends_with(&expected_data),
+        "pwsh must use standard unescaped root via powershell_data"
+    );
+
+    let env_ps = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Powershell,
+        version: "fixture".into(),
+        home: r"C:\Users\QA Person".into(),
+        temp: r"C:\Temp".into(),
+        git: false,
+    };
+    let cmd_ps = bridge_command(&env_ps, &location);
+    assert_ne!(
+        cmd_ps, cmd_pwsh,
+        "legacy powershell 5.1 must escape trailing backslash while pwsh does not"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn p10_windows_bridge_pwsh_preserves_native_argv() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("argv recorder pwsh.exe");
+    let source = r#"using System;
+public class Recorder {
+    public static void Main(string[] args) {
+        foreach (string arg in args)
+            Console.WriteLine(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(arg)));
+    }
+}"#;
+    let compile = format!(
+        "Add-Type -TypeDefinition {} -Language CSharp -OutputAssembly {} -OutputType ConsoleApplication",
+        crate::ssh::runtime::powershell_data(source),
+        crate::ssh::runtime::powershell_data(exe.to_str().unwrap()),
+    );
+    // Compile via WindowsPowerShell 5.1 (.NET Framework supports Add-Type -OutputType ConsoleApplication)
+    let powershell = |script: String| ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script],
+    };
+    bounded_output(&powershell(compile), Duration::from_secs(30)).await.unwrap();
+    assert!(exe.is_file());
+    let pwsh = |script: String| ShellCommandPlan {
+        program: "pwsh.exe".into(),
+        args: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script],
+    };
+    let env = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Pwsh,
+        version: "fixture".into(),
+        home: dir.path().display().to_string(),
+        temp: dir.path().display().to_string(),
+        git: false,
+    };
+    for root in [r"C:\Users\QA Person\项目\.ferryx\helper\h", r"C:\Users\QA Person\项目\"] {
+        let location = crate::ssh::helper_setup::HelperLocation {
+            executable: exe.to_str().unwrap().into(),
+            root: root.into(),
+        };
+        let output = bounded_output(&pwsh(bridge_command(&env, &location)), Duration::from_secs(10))
+            .await
+            .expect("pwsh.exe execution must succeed on Windows host");
+        let actual: Vec<String> = std::str::from_utf8(&output).unwrap().lines().map(|line| {
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(line).unwrap()).unwrap()
+        }).collect();
+        assert_eq!(actual, vec!["bridge", "--stdio", "--root", root]);
+    }
+}
+
+#[test]
 fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
     let env = crate::ssh::runtime::RemoteEnvironment {
         platform: crate::ssh::runtime::RemotePlatform::Windows,
@@ -488,7 +590,9 @@ fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
         root: "C:\\Users\\user\\.ferryx\\helper\\host-win".into(),
     };
     let plan = bridge_plan(&host(), &env, &location).expect("bridge_plan");
-    assert_eq!(plan.program, "ssh");
+    let expected_program =
+        crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
+    assert_eq!(plan.program, expected_program);
     assert!(plan.args.iter().any(|v| v == "-T"));
     assert!(plan
         .args

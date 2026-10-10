@@ -818,6 +818,8 @@ pub struct BridgeConnection {
     stderr_fd: Option<RawFd>,
     stderr_capture: Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(test)]
+    pub(crate) stderr_capture_notify: Arc<tokio::sync::Notify>,
     prefetched_bytes: Vec<u8>,
     captured_stderr_prefix: Vec<u8>,
     closed: bool,
@@ -1016,6 +1018,10 @@ impl BridgeConnection {
 
         let stderr_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr_sink = Arc::clone(&stderr_capture);
+        #[cfg(test)]
+        let stderr_capture_notify = Arc::new(tokio::sync::Notify::new());
+        #[cfg(test)]
+        let stderr_notify_clone = Arc::clone(&stderr_capture_notify);
 
         let stderr_task = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -1029,6 +1035,9 @@ impl BridgeConnection {
                     let to_copy = n.min(remaining);
                     lock.extend_from_slice(&buf[..to_copy]);
                 }
+                drop(lock);
+                #[cfg(test)]
+                stderr_notify_clone.notify_waiters();
             }
         });
 
@@ -1039,6 +1048,8 @@ impl BridgeConnection {
             stderr_fd,
             stderr_capture,
             stderr_task: Some(stderr_task),
+            #[cfg(test)]
+            stderr_capture_notify,
             prefetched_bytes: Vec::new(),
             captured_stderr_prefix: Vec::new(),
             closed: false,
@@ -1591,6 +1602,10 @@ impl BridgeConnection {
 
             let stderr_capture = Arc::new(std::sync::Mutex::new(state.captured_stderr));
             let stderr_sink = Arc::clone(&stderr_capture);
+            #[cfg(test)]
+            let stderr_capture_notify = Arc::new(tokio::sync::Notify::new());
+            #[cfg(test)]
+            let stderr_notify_clone = Arc::clone(&stderr_capture_notify);
             let stderr_task = tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let mut stderr = tokio_stderr;
@@ -1604,6 +1619,9 @@ impl BridgeConnection {
                         let to_copy = n.min(remaining);
                         lock.extend_from_slice(&buf[..to_copy]);
                     }
+                    drop(lock);
+                    #[cfg(test)]
+                    stderr_notify_clone.notify_waiters();
                 }
             });
 
@@ -1616,6 +1634,8 @@ impl BridgeConnection {
                 stderr_fd: Some(stored_stderr_fd),
                 stderr_capture,
                 stderr_task: Some(stderr_task),
+                #[cfg(test)]
+                stderr_capture_notify,
                 prefetched_bytes: Vec::new(),
                 captured_stderr_prefix: Vec::new(),
                 closed: false,
@@ -2400,33 +2420,244 @@ impl DagSubscription {
 mod transfer_tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn canonical_powershell_path() -> String {
+        let sys_root = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("SYSTEMROOT"))
+            .unwrap_or_else(|_| "C:\\Windows".to_string());
+        format!("{sys_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+    }
+
     fn spawn_cat_child() -> tokio::process::Child {
-        tokio::process::Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn cat child")
+        #[cfg(unix)]
+        {
+            tokio::process::Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn cat child")
+        }
+        #[cfg(windows)]
+        {
+            let exe = canonical_powershell_path();
+            tokio::process::Command::new(exe)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "$in = [Console]::OpenStandardInput(); $out = [Console]::OpenStandardOutput(); $buf = New-Object byte[] 4096; while(($n = $in.Read($buf, 0, 4096)) -gt 0) { $out.Write($buf, 0, $n); $out.Flush() }; (New-Object System.Threading.ManualResetEvent($false)).WaitOne()",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn cat child")
+        }
     }
 
     fn spawn_echo_stderr_and_cat_child() -> tokio::process::Child {
-        tokio::process::Command::new("/bin/sh")
-            .args(["-c", "echo 'prefix-stderr-content' >&2; exec cat"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn echo stderr and cat child")
+        #[cfg(unix)]
+        {
+            tokio::process::Command::new("/bin/sh")
+                .args(["-c", "echo 'prefix-stderr-content' >&2; exec cat"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn echo stderr and cat child")
+        }
+        #[cfg(windows)]
+        {
+            let exe = canonical_powershell_path();
+            tokio::process::Command::new(exe)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "[Console]::Error.WriteLine('prefix-stderr-content'); [Console]::Error.Flush(); $in = [Console]::OpenStandardInput(); $out = [Console]::OpenStandardOutput(); $buf = New-Object byte[] 4096; while(($n = $in.Read($buf, 0, 4096)) -gt 0) { $out.Write($buf, 0, $n); $out.Flush() }; (New-Object System.Threading.ManualResetEvent($false)).WaitOne()",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn echo stderr and cat child")
+        }
     }
 
+    #[cfg(windows)]
+    struct OwnedProcessGuard {
+        pid: u32,
+        handle: *mut std::ffi::c_void,
+        expected_exe_path: String,
+        verified: bool,
+    }
+
+    #[cfg(windows)]
+    impl OwnedProcessGuard {
+        fn from_child(child: &tokio::process::Child, expected_exe_path: String) -> Self {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+                fn QueryFullProcessImageNameW(
+                    process: *mut std::ffi::c_void,
+                    flags: u32,
+                    exe_name: *mut u16,
+                    size: *mut u32,
+                ) -> i32;
+            }
+            const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+            const PROCESS_TERMINATE: u32 = 0x0001;
+            const SYNCHRONIZE: u32 = 0x00100000;
+
+            let pid = child.id().expect("child pid");
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                    0,
+                    pid,
+                )
+            };
+            assert!(!handle.is_null(), "OpenProcess failed for PID {pid}");
+
+            let mut guard = Self {
+                pid,
+                handle,
+                expected_exe_path,
+                verified: false,
+            };
+
+            let mut buf = [0u16; 1024];
+            let mut size = buf.len() as u32;
+            let ok = unsafe { QueryFullProcessImageNameW(guard.handle, 0, buf.as_mut_ptr(), &mut size) };
+            assert_ne!(ok, 0, "QueryFullProcessImageNameW failed for PID {pid}");
+            let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+            assert!(
+                image_name.eq_ignore_ascii_case(&guard.expected_exe_path),
+                "Process image path mismatch: expected '{}', got '{image_name}'",
+                guard.expected_exe_path
+            );
+
+            guard.verified = true;
+            guard
+        }
+
+        fn assert_still_alive(&self) {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetExitCodeProcess(process: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+            }
+            const STILL_ACTIVE: u32 = 259;
+            let mut exit_code = 0u32;
+            let ok = unsafe { GetExitCodeProcess(self.handle, &mut exit_code) };
+            assert_ne!(ok, 0, "GetExitCodeProcess failed for PID {}", self.pid);
+            assert_eq!(
+                exit_code, STILL_ACTIVE,
+                "Process {} exited prematurely with code {exit_code}",
+                self.pid
+            );
+        }
+
+        fn terminate_and_wait(mut self) {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+                fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+                fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+                fn QueryFullProcessImageNameW(
+                    process: *mut std::ffi::c_void,
+                    flags: u32,
+                    exe_name: *mut u16,
+                    size: *mut u32,
+                ) -> i32;
+            }
+            const WAIT_OBJECT_0: u32 = 0;
+
+            if self.handle.is_null() {
+                return;
+            }
+
+            let mut buf = [0u16; 1024];
+            let mut size = buf.len() as u32;
+            let ok = unsafe { QueryFullProcessImageNameW(self.handle, 0, buf.as_mut_ptr(), &mut size) };
+            assert_ne!(ok, 0, "QueryFullProcessImageNameW failed before terminate for PID {}", self.pid);
+            let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+            assert!(
+                image_name.eq_ignore_ascii_case(&self.expected_exe_path),
+                "Process image mismatch before terminate: expected '{}', got '{image_name}'",
+                self.expected_exe_path
+            );
+
+            let term_ok = unsafe { TerminateProcess(self.handle, 1) };
+            assert_ne!(term_ok, 0, "TerminateProcess failed for PID {}", self.pid);
+            let wait_res = unsafe { WaitForSingleObject(self.handle, 5000) };
+            assert_eq!(wait_res, WAIT_OBJECT_0, "WaitForSingleObject timed out (result: {wait_res}) for PID {}", self.pid);
+            let close_ok = unsafe { CloseHandle(self.handle) };
+            assert_ne!(close_ok, 0, "CloseHandle failed for PID {}", self.pid);
+            self.handle = std::ptr::null_mut();
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for OwnedProcessGuard {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+                    fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+                    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+                    fn QueryFullProcessImageNameW(
+                        process: *mut std::ffi::c_void,
+                        flags: u32,
+                        exe_name: *mut u16,
+                        size: *mut u32,
+                    ) -> i32;
+                }
+                const WAIT_OBJECT_0: u32 = 0;
+
+                if self.verified {
+                    let mut buf = [0u16; 1024];
+                    let mut size = buf.len() as u32;
+                    let ok = unsafe { QueryFullProcessImageNameW(self.handle, 0, buf.as_mut_ptr(), &mut size) };
+                    if ok == 0 {
+                        eprintln!("[OwnedProcessGuard::drop] QueryFullProcessImageNameW failed for PID {}", self.pid);
+                    } else {
+                        let image_name = String::from_utf16_lossy(&buf[..size as usize]);
+                        if !image_name.eq_ignore_ascii_case(&self.expected_exe_path) {
+                            eprintln!(
+                                "[OwnedProcessGuard::drop] Image mismatch for PID {}: expected '{}', got '{}'",
+                                self.pid, self.expected_exe_path, image_name
+                            );
+                        } else {
+                            let term_ok = unsafe { TerminateProcess(self.handle, 1) };
+                            if term_ok == 0 {
+                                eprintln!("[OwnedProcessGuard::drop] TerminateProcess failed for PID {}", self.pid);
+                            } else {
+                                let wait_res = unsafe { WaitForSingleObject(self.handle, 5000) };
+                                if wait_res != WAIT_OBJECT_0 {
+                                    eprintln!(
+                                        "[OwnedProcessGuard::drop] WaitForSingleObject wait timeout/failure (result {wait_res}) for PID {}",
+                                        self.pid
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                let close_ok = unsafe { CloseHandle(self.handle) };
+                if close_ok == 0 {
+                    eprintln!("[OwnedProcessGuard::drop] CloseHandle failed for PID {}", self.pid);
+                }
+                self.handle = std::ptr::null_mut();
+            }
+        }
+    }
     #[tokio::test]
     async fn test_bridge_freeze_export_import_roundtrip() {
         let child = spawn_echo_stderr_and_cat_child();
+        #[cfg(windows)]
+        let guard = OwnedProcessGuard::from_child(&child, canonical_powershell_path());
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
         let pid = conn.child_id().expect("child pid");
-
-        // Wait a few ms for stderr to be pumped
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Write a test frame through the connection
         let msg1 = json!({"ok": true, "stage": "pre-freeze", "seq": 1});
@@ -2438,65 +2669,126 @@ mod transfer_tests {
             .expect("read frame 1");
         assert_eq!(resp1, Some(msg1));
 
+        // Wait for stderr pump to capture the prefix using exact event notification loop
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = conn.stderr_capture_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if conn.check_stderr().contains("prefix-stderr-content") {
+                break;
+            }
+
+            let now = tokio::time::Instant::now();
+            let remaining = deadline
+                .checked_duration_since(now)
+                .expect("timed out waiting for stderr prefix in test");
+
+            tokio::time::timeout(remaining, notified)
+                .await
+                .expect("timed out waiting for stderr capture notification");
+        }
+
         // Freeze / pause for transfer
         conn.pause_for_transfer().await.expect("pause_for_transfer");
         assert!(conn.paused);
 
-        // Export state
-        let state = conn.export_transfer_state().expect("export_transfer_state");
-        assert_eq!(state.child_pid, Some(pid));
-        assert!(state.stdin_fd >= 0);
-        assert!(state.stdout_fd >= 0);
-        assert!(state.stderr_fd >= 0);
-        let captured = String::from_utf8_lossy(&state.captured_stderr);
-        assert!(
-            captured.contains("prefix-stderr-content"),
-            "stderr capture should contain prefix: {captured}"
-        );
-
-        // Detach without kill
-        conn.detach_without_kill();
-        drop(conn);
-
-        // Child process should still be alive
         #[cfg(unix)]
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        {
+            // Export state
+            let state = conn.export_transfer_state().expect("export_transfer_state");
+            assert_eq!(state.child_pid, Some(pid));
+            assert!(state.stdin_fd >= 0);
+            assert!(state.stdout_fd >= 0);
+            assert!(state.stderr_fd >= 0);
+            let captured = String::from_utf8_lossy(&state.captured_stderr);
+            assert!(
+                captured.contains("prefix-stderr-content"),
+                "stderr capture should contain prefix: {captured}"
+            );
 
-        // Import into new BridgeConnection
-        let mut imported =
-            BridgeConnection::from_transfer_state(state).expect("from_transfer_state");
-        assert_eq!(imported.child_id(), Some(pid));
-        let imported_stderr = imported.check_stderr();
-        assert!(
-            imported_stderr.contains("prefix-stderr-content"),
-            "imported stderr should match: {imported_stderr}"
-        );
+            // Detach without kill
+            conn.detach_without_kill();
+            drop(conn);
 
-        // Write another frame through imported connection
-        let msg2 = json!({"ok": true, "stage": "post-import", "seq": 2});
-        write_frame_async(
-            imported.writer.as_mut().unwrap(),
-            &msg2,
-            Duration::from_secs(2),
-        )
-        .await
-        .expect("write frame 2");
-        let resp2 = read_frame_async(imported.reader.as_mut().unwrap(), Duration::from_secs(2))
+            // Child process should still be alive
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+
+            // Import into new BridgeConnection
+            let mut imported =
+                BridgeConnection::from_transfer_state(state).expect("from_transfer_state");
+            assert_eq!(imported.child_id(), Some(pid));
+            let imported_stderr = imported.check_stderr();
+            assert!(
+                imported_stderr.contains("prefix-stderr-content"),
+                "imported stderr should match: {imported_stderr}"
+            );
+
+            // Write another frame through imported connection
+            let msg2 = json!({"ok": true, "stage": "post-import", "seq": 2});
+            write_frame_async(
+                imported.writer.as_mut().unwrap(),
+                &msg2,
+                Duration::from_secs(2),
+            )
             .await
-            .expect("read frame 2");
-        assert_eq!(resp2, Some(msg2));
+            .expect("write frame 2");
+            let resp2 = read_frame_async(imported.reader.as_mut().unwrap(), Duration::from_secs(2))
+                .await
+                .expect("read frame 2");
+            assert_eq!(resp2, Some(msg2));
 
-        // Cleanup
-        imported.close().await.expect("close imported");
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+            // Cleanup
+            imported.close().await.expect("close imported");
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let captured = conn.check_stderr();
+            assert!(
+                captured.contains("prefix-stderr-content"),
+                "stderr capture should contain prefix: {captured}"
+            );
+
+            match conn.export_transfer_state() {
+                Err(BridgeError::NotTransferable(_)) => {}
+                Err(other) => panic!("Expected NotTransferable error on Windows, got: {other:?}"),
+                Ok(_) => panic!("Expected export_transfer_state to fail on Windows, but it succeeded"),
+            }
+
+            let dummy_state = BridgeConnectionTransferState {
+                stdin_fd: -1,
+                stdout_fd: -1,
+                stderr_fd: -1,
+                child_pid: Some(pid),
+                captured_stderr: Vec::new(),
+                prefetch: Vec::new(),
+            };
+            match BridgeConnection::from_transfer_state(dummy_state) {
+                Err(BridgeError::NotTransferable(_)) => {}
+                Err(other) => panic!("Expected NotTransferable error on Windows, got: {other:?}"),
+                Ok(_) => panic!("Expected from_transfer_state to fail on Windows, but it succeeded"),
+            }
+
+            // Detach without kill
+            conn.detach_without_kill();
+            drop(conn);
+
+            // Child process should still be alive
+            guard.assert_still_alive();
+            guard.terminate_and_wait();
         }
     }
 
     #[tokio::test]
     async fn test_bridge_poisoned_connection_export_rejected() {
         let child = spawn_cat_child();
+        #[cfg(windows)]
+        let guard = OwnedProcessGuard::from_child(&child, canonical_powershell_path());
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
         let pid = conn.child_id().expect("child pid");
 
@@ -2504,39 +2796,56 @@ mod transfer_tests {
         conn.poison_for_test();
 
         // Pause must fail
-        let pause_err = conn.pause_for_transfer().await.unwrap_err();
-        assert!(
-            matches!(pause_err, BridgeError::NotTransferable(_)),
-            "Expected NotTransferable error, got: {pause_err:?}"
-        );
+        match conn.pause_for_transfer().await {
+            Err(BridgeError::NotTransferable(_)) => {}
+            Err(other) => panic!("Expected NotTransferable error, got: {other:?}"),
+            Ok(_) => panic!("Expected pause_for_transfer to fail on poisoned connection, but it succeeded"),
+        }
 
         // Export must fail
-        let export_err = conn.export_transfer_state().unwrap_err();
-        assert!(
-            matches!(export_err, BridgeError::NotTransferable(_)),
-            "Expected NotTransferable error, got: {export_err:?}"
-        );
+        match conn.export_transfer_state() {
+            Err(BridgeError::NotTransferable(_)) => {}
+            Err(other) => panic!("Expected NotTransferable error, got: {other:?}"),
+            Ok(_) => panic!("Expected export_transfer_state to fail on poisoned connection, but it succeeded"),
+        }
 
         conn.detach_without_kill();
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
         }
+        #[cfg(windows)]
+        {
+            guard.terminate_and_wait();
+        }
     }
 
     #[tokio::test]
     async fn test_bridge_drop_after_detach_does_not_kill_child() {
         let child = spawn_cat_child();
+        #[cfg(windows)]
+        let guard = OwnedProcessGuard::from_child(&child, canonical_powershell_path());
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
         let pid = conn.child_id().expect("child pid");
 
         // Process is alive
         #[cfg(unix)]
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        #[cfg(windows)]
+        guard.assert_still_alive();
 
         // Pause and export
         conn.pause_for_transfer().await.expect("pause_for_transfer");
+        #[cfg(unix)]
         let mut state = conn.export_transfer_state().expect("export_transfer_state");
+        #[cfg(windows)]
+        {
+            match conn.export_transfer_state() {
+                Err(BridgeError::NotTransferable(_)) => {}
+                Err(other) => panic!("Expected NotTransferable error on Windows, got: {other:?}"),
+                Ok(_) => panic!("Expected export_transfer_state to fail on Windows, but it succeeded"),
+            }
+        }
 
         // Detach without kill
         conn.detach_without_kill();
@@ -2544,21 +2853,20 @@ mod transfer_tests {
         // Drop original connection
         drop(conn);
 
-        // Wait a short duration to ensure any async kill would have fired
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         // Process MUST still be alive!
         #[cfg(unix)]
         {
             let res = unsafe { libc::kill(pid as i32, 0) };
             assert_eq!(res, 0, "Child process was killed by drop after detach!");
+            state.close_fds();
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
         }
-
-        // Clean up exported FDs and kill the test child
-        state.close_fds();
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+        #[cfg(windows)]
+        {
+            guard.assert_still_alive();
+            guard.terminate_and_wait();
         }
     }
 
@@ -2566,6 +2874,10 @@ mod transfer_tests {
     async fn test_ssh_bridge_client_transfer_roundtrip() {
         let c_child = spawn_cat_child();
         let r_child = spawn_cat_child();
+        #[cfg(windows)]
+        let c_guard = OwnedProcessGuard::from_child(&c_child, canonical_powershell_path());
+        #[cfg(windows)]
+        let r_guard = OwnedProcessGuard::from_child(&r_child, canonical_powershell_path());
         let c_pid = c_child.id().unwrap();
         let r_pid = r_child.id().unwrap();
 
@@ -2594,39 +2906,85 @@ mod transfer_tests {
         // Pause for transfer
         client.pause_for_transfer().await.expect("pause_for_transfer");
 
-        // Export state
-        let state = client
-            .export_transfer_state()
-            .await
-            .expect("export_transfer_state");
-        assert_eq!(state.raw_fds().len(), 6);
-        assert_eq!(state.host_id, "test-host-id");
-        assert_eq!(state.epoch, Epoch(12345));
-        assert_eq!(state.handshake, handshake);
-
-        // Detach without kill
-        client.detach_without_kill().await;
-        drop(client);
-
-        // Children must still be alive
         #[cfg(unix)]
         {
+            // Export state
+            let state = client
+                .export_transfer_state()
+                .await
+                .expect("export_transfer_state");
+            assert_eq!(state.raw_fds().len(), 6);
+            assert_eq!(state.host_id, "test-host-id");
+            assert_eq!(state.epoch, Epoch(12345));
+            assert_eq!(state.handshake, handshake);
+
+            // Detach without kill
+            client.detach_without_kill().await;
+            drop(client);
+
+            // Children must still be alive
             assert_eq!(unsafe { libc::kill(c_pid as i32, 0) }, 0);
             assert_eq!(unsafe { libc::kill(r_pid as i32, 0) }, 0);
+
+            // Reconstruct client from state
+            let imported = SshBridgeClient::from_transfer_state(state).expect("from_transfer_state");
+            assert_eq!(imported.host_id(), "test-host-id");
+            assert_eq!(imported.owner_id(), "test-owner-id");
+            assert_eq!(imported.epoch(), Epoch(12345));
+
+            // Clean up
+            imported.close().await.expect("close imported");
+            unsafe {
+                libc::kill(c_pid as i32, libc::SIGKILL);
+                libc::kill(r_pid as i32, libc::SIGKILL);
+            }
         }
 
-        // Reconstruct client from state
-        let imported = SshBridgeClient::from_transfer_state(state).expect("from_transfer_state");
-        assert_eq!(imported.host_id(), "test-host-id");
-        assert_eq!(imported.owner_id(), "test-owner-id");
-        assert_eq!(imported.epoch(), Epoch(12345));
+        #[cfg(windows)]
+        {
+            match client.export_transfer_state().await {
+                Err(BridgeError::NotTransferable(_)) => {}
+                Err(other) => panic!("Expected NotTransferable error on Windows, got: {other:?}"),
+                Ok(_) => panic!("Expected export_transfer_state to fail on Windows, but it succeeded"),
+            }
 
-        // Clean up
-        imported.close().await.expect("close imported");
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(c_pid as i32, libc::SIGKILL);
-            libc::kill(r_pid as i32, libc::SIGKILL);
+            let dummy_state = SshBridgeTransferState {
+                control: BridgeConnectionTransferState {
+                    stdin_fd: -1,
+                    stdout_fd: -1,
+                    stderr_fd: -1,
+                    child_pid: Some(c_pid),
+                    captured_stderr: Vec::new(),
+                    prefetch: Vec::new(),
+                },
+                reader: BridgeConnectionTransferState {
+                    stdin_fd: -1,
+                    stdout_fd: -1,
+                    stderr_fd: -1,
+                    child_pid: Some(r_pid),
+                    captured_stderr: Vec::new(),
+                    prefetch: Vec::new(),
+                },
+                host_id: "test-host-id".into(),
+                owner_id: "test-owner-id".into(),
+                epoch: Epoch(12345),
+                handshake: handshake.clone(),
+            };
+            match SshBridgeClient::from_transfer_state(dummy_state) {
+                Err(BridgeError::NotTransferable(_)) => {}
+                Err(other) => panic!("Expected NotTransferable error on Windows, got: {other:?}"),
+                Ok(_) => panic!("Expected from_transfer_state to fail on Windows, but it succeeded"),
+            }
+
+            // Detach without kill
+            client.detach_without_kill().await;
+            drop(client);
+
+            // Children must still be alive
+            c_guard.assert_still_alive();
+            r_guard.assert_still_alive();
+            c_guard.terminate_and_wait();
+            r_guard.terminate_and_wait();
         }
     }
 }

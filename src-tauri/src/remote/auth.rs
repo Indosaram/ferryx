@@ -2458,6 +2458,18 @@ mod persistence_tests {
             std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         }
         let auth_path = ro_dir.join("remote-auth.json");
+        #[cfg(windows)]
+        let lock_path = auth_path.with_extension("tx.lock");
+        #[cfg(windows)]
+        let original_perms = {
+            std::fs::File::create(&lock_path).unwrap();
+            let mut perms = std::fs::metadata(&lock_path).unwrap().permissions();
+            let original = perms.clone();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&lock_path, perms).unwrap();
+            original
+        };
+
         let manager = AuthManager::with_persistence(Some(auth_path));
 
         let result = manager.validate_token("any-token");
@@ -2466,6 +2478,10 @@ mod persistence_tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::fs::set_permissions(&lock_path, original_perms);
         }
 
         assert!(

@@ -1157,8 +1157,13 @@ mod tests {
         let old_file = dir.join("old.png");
         std::fs::write(&old_file, b"old-content").expect("write old file");
         let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
-        let f = std::fs::File::open(&old_file).expect("open old file");
-        let _ = f.set_modified(two_days_ago);
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&old_file)
+                .expect("open old file");
+            f.set_modified(two_days_ago).expect("set_modified old file");
+        }
 
         // Pre-populate a fresh file
         let fresh_file = dir.join("fresh.png");

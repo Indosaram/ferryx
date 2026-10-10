@@ -326,6 +326,9 @@ fn verify_overlay_with_interface(iface_name: Option<&str>, addr: &std::net::Ipv4
     #[cfg(target_os = "windows")]
     {
         let _ = iface_name;
+        if let Some(cli_result) = probe_tailscale_cli(addr) {
+            return cli_result;
+        }
         let target_str = addr.to_string();
         if let Ok(output) = std::process::Command::new("ipconfig")
             .args(["/all"])
@@ -1399,8 +1402,21 @@ mod tests {
         assert!(verify_overlay_with_interface(Some("utun5"), &addr));
 
         // Non-tunnel interfaces are never exempt regardless of CLI.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+        #[cfg(not(windows))]
         assert!(!verify_overlay_with_interface(Some("en0"), &addr));
+
+        #[cfg(windows)]
+        {
+            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+            assert!(verify_overlay_with_interface(Some("Ethernet"), &addr));
+
+            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+            assert!(!verify_overlay_with_interface(Some("Ethernet"), &addr));
+        }
+
+        // Missing interface with explicit CLI denial fails immediately closed.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+        assert!(!verify_overlay_with_interface(None, &addr));
 
         // Missing interface: fail closed.
         *TEST_CLI_PROBE_OVERRIDE.lock() = None;
@@ -1998,7 +2014,8 @@ mod tests {
         let external_path = manager
             .worktree_path_for(&identity.ws_id, &identity.slug)
             .expect("external path");
-        let external_path_text = external_path.to_string_lossy().into_owned();
+        let external_path_normalized = crate::worktree::normalize_path_for_git(&external_path);
+        let external_path_text = external_path_normalized.to_string_lossy().into_owned();
         crate::worktree::run_git(
             &repo_root,
             &[

@@ -1428,7 +1428,15 @@ pub async fn dag_read_node_artifact(
         }
 
         let rel = Path::new(trimmed);
-        if rel.is_absolute() {
+        let bytes = trimmed.as_bytes();
+        let is_windows_drive =
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if rel.is_absolute()
+            || rel.has_root()
+            || trimmed.starts_with('/')
+            || trimmed.starts_with('\\')
+            || is_windows_drive
+        {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidArgument,
                 "artifact path must be relative, not absolute",
@@ -1436,11 +1444,20 @@ pub async fn dag_read_node_artifact(
         }
 
         for comp in rel.components() {
-            if matches!(comp, std::path::Component::ParentDir) {
-                return Err(IpcError::new(
-                    IpcErrorCode::PermissionDenied,
-                    "parent directory traversal ('..') is strictly forbidden",
-                ));
+            match comp {
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "artifact path must be relative, not absolute",
+                    ));
+                }
+                std::path::Component::ParentDir => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::PermissionDenied,
+                        "parent directory traversal ('..') is strictly forbidden",
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -1643,6 +1660,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err_abs.code, IpcErrorCode::InvalidArgument);
+
+        let err_win_abs = dag_read_node_artifact(project_str.clone(), "C:\\secret.txt".into())
+            .await
+            .unwrap_err();
+        assert_eq!(err_win_abs.code, IpcErrorCode::InvalidArgument);
 
         // 6. NotFound for nonexistent file
         let err_missing =

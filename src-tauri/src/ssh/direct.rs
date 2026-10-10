@@ -257,6 +257,19 @@ pub async fn probe(
     Ok((probed.repo_root, probed.git_root, probed.git_remote))
 }
 
+fn windows_powershell_root_arg(root: &str) -> String {
+    if (root.contains(' ') || root.contains('\t')) && root.ends_with('\\') {
+        let mut escaped = root.to_string();
+        let trailing = root.chars().rev().take_while(|&c| c == '\\').count();
+        for _ in 0..trailing {
+            escaped.push('\\');
+        }
+        super::runtime::powershell_data(&escaped)
+    } else {
+        super::runtime::powershell_data(root)
+    }
+}
+
 pub fn bridge_command(
     env: &super::runtime::RemoteEnvironment,
     location: &super::helper_setup::HelperLocation,
@@ -267,11 +280,19 @@ pub fn bridge_command(
             quote_posix(&location.executable),
             quote_posix(&location.root),
         ),
-        super::runtime::RemotePlatform::Windows => format!(
-            "& {} bridge --stdio --root {}",
-            super::runtime::powershell_data(&location.executable),
-            super::runtime::powershell_data(&location.root),
-        ),
+        super::runtime::RemotePlatform::Windows => {
+            let root_arg = match env.executor {
+                super::runtime::RemoteExecutor::Powershell => {
+                    windows_powershell_root_arg(&location.root)
+                }
+                _ => super::runtime::powershell_data(&location.root),
+            };
+            format!(
+                "& {} bridge --stdio --root {}",
+                super::runtime::powershell_data(&location.executable),
+                root_arg,
+            )
+        }
     }
 }
 

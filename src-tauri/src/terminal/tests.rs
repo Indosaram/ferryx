@@ -5,9 +5,16 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 async fn wait_for_session_removal(manager: &PtyManager, session_id: &str) {
+    let removal = manager.removal_notify();
     timeout(Duration::from_secs(5), async {
         while manager.has_session(session_id) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            let notified = removal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !manager.has_session(session_id) {
+                break;
+            }
+            notified.await;
         }
     })
     .await
@@ -39,28 +46,38 @@ async fn test_spawn_write_echo_and_read() {
     assert!(manager.has_session(&session_id));
     assert!(manager.is_alive(&session_id).unwrap_or(false));
 
+    #[cfg(unix)]
     manager
         .write_input(&session_id, b"echo hello\n")
         .expect("failed to write input");
 
     let mut accumulated = Vec::new();
     let mut found = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    #[cfg(not(unix))]
+    let mut dsr_answered = false;
 
-    while tokio::time::Instant::now() < deadline {
-        match timeout(Duration::from_millis(500), rx.recv()).await {
-            Ok(Some(chunk)) => {
-                accumulated.extend_from_slice(&chunk);
-                let text = String::from_utf8_lossy(&accumulated);
-                if text.contains("hello") {
-                    found = true;
-                    break;
-                }
+    timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = rx.recv().await {
+            accumulated.extend_from_slice(&chunk);
+            #[cfg(not(unix))]
+            if !dsr_answered && accumulated.windows(4).any(|w| w == b"\x1b[6n") {
+                dsr_answered = true;
+                manager
+                    .write_input(&session_id, b"\x1b[1;1R")
+                    .expect("write DSR response");
+                manager
+                    .write_input(&session_id, b"echo hello\r")
+                    .expect("write command input");
             }
-            Ok(None) => break,
-            Err(_) => continue,
+            let text = String::from_utf8_lossy(&accumulated);
+            if text.contains("hello") {
+                found = true;
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("output arrived before timeout");
 
     assert!(
         found,
@@ -204,37 +221,66 @@ async fn test_multiple_concurrent_sessions() {
     assert_ne!(id1, id2);
     assert_eq!(manager.session_count(), 2);
 
-    manager
-        .write_input(&id1, b"echo session_one\n")
-        .expect("write 1");
-    manager
-        .write_input(&id2, b"echo session_two\n")
-        .expect("write 2");
+    #[cfg(unix)]
+    {
+        manager
+            .write_input(&id1, b"echo session_one\n")
+            .expect("write 1");
+        manager
+            .write_input(&id2, b"echo session_two\n")
+            .expect("write 2");
+    }
 
     let mut text1 = Vec::new();
     let mut text2 = Vec::new();
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut found1 = false;
     let mut found2 = false;
+    #[cfg(not(unix))]
+    let mut dsr1_answered = false;
+    #[cfg(not(unix))]
+    let mut dsr2_answered = false;
 
-    while tokio::time::Instant::now() < deadline && (!found1 || !found2) {
-        tokio::select! {
-            Some(chunk) = rx1.recv(), if !found1 => {
-                text1.extend_from_slice(&chunk);
-                if String::from_utf8_lossy(&text1).contains("session_one") {
-                    found1 = true;
+    timeout(Duration::from_secs(5), async {
+        while !found1 || !found2 {
+            tokio::select! {
+                Some(chunk) = rx1.recv(), if !found1 => {
+                    text1.extend_from_slice(&chunk);
+                    #[cfg(not(unix))]
+                    if !dsr1_answered && text1.windows(4).any(|w| w == b"\x1b[6n") {
+                        dsr1_answered = true;
+                        manager
+                            .write_input(&id1, b"\x1b[1;1R")
+                            .expect("write DSR response 1");
+                        manager
+                            .write_input(&id1, b"echo session_one\r")
+                            .expect("write command 1");
+                    }
+                    if String::from_utf8_lossy(&text1).contains("session_one") {
+                        found1 = true;
+                    }
                 }
-            }
-            Some(chunk) = rx2.recv(), if !found2 => {
-                text2.extend_from_slice(&chunk);
-                if String::from_utf8_lossy(&text2).contains("session_two") {
-                    found2 = true;
+                Some(chunk) = rx2.recv(), if !found2 => {
+                    text2.extend_from_slice(&chunk);
+                    #[cfg(not(unix))]
+                    if !dsr2_answered && text2.windows(4).any(|w| w == b"\x1b[6n") {
+                        dsr2_answered = true;
+                        manager
+                            .write_input(&id2, b"\x1b[1;1R")
+                            .expect("write DSR response 2");
+                        manager
+                            .write_input(&id2, b"echo session_two\r")
+                            .expect("write command 2");
+                    }
+                    if String::from_utf8_lossy(&text2).contains("session_two") {
+                        found2 = true;
+                    }
                 }
+                else => break,
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
-    }
+    })
+    .await
+    .expect("concurrent output arrived before timeout");
 
     assert!(
         found1,
@@ -303,13 +349,71 @@ async fn test_lifecycle_poll_interval_is_relaxed_and_event_driven() {
 
     let manager = PtyManager::new();
     let mut cmd = test_shell();
-    cmd.arg("-c");
-    cmd.arg("exit 42");
+    #[cfg(unix)]
+    {
+        cmd.arg("-c");
+        cmd.arg("exit 42");
+    }
+    #[cfg(not(unix))]
+    {
+        cmd.arg("/c");
+        cmd.arg("exit 42");
+    }
 
-    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn");
     let session = manager.get_session(&session_id).expect("session");
 
-    wait_for_session_removal(&manager, &session_id).await;
+    // Windows ConPTY emits ESC[6n (DSR query) and waits for ESC[1;1R before starting the child.
+    // Respond to DSR in the fixture using accumulated bytes so fragmented DSR queries are handled,
+    // and wait for session exit and registry removal via the removal_notify event.
+    let removal = manager.removal_notify();
+    #[cfg(not(unix))]
+    let mut accumulated = Vec::new();
+    #[cfg(not(unix))]
+    let mut dsr_answered = false;
+    let mut rx_closed = false;
+    timeout(Duration::from_secs(5), async {
+        while manager.has_session(&session_id) {
+            let notified = removal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !manager.has_session(&session_id) {
+                break;
+            }
+            tokio::select! {
+                chunk = rx.recv(), if !rx_closed => {
+                    match chunk {
+                        Some(chunk) => {
+                            #[cfg(not(unix))]
+                            {
+                                accumulated.extend_from_slice(&chunk);
+                                if !dsr_answered && accumulated.windows(4).any(|w| w == b"\x1b[6n") {
+                                    dsr_answered = true;
+                                    manager
+                                        .write_input(&session_id, b"\x1b[1;1R")
+                                        .expect("write DSR response");
+                                }
+                            }
+                            #[cfg(unix)]
+                            {
+                                let _ = chunk;
+                            }
+                        }
+                        None => {
+                            rx_closed = true;
+                        }
+                    }
+                }
+                _ = &mut notified => {
+                    if !manager.has_session(&session_id) {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("session should exit and be removed from registry");
     assert_eq!(
         session.state(),
         PtySessionState::Exited { code: Some(42) },
