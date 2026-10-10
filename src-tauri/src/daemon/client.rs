@@ -381,6 +381,9 @@ fn transport_pair_is_stale(error: &IpcError) -> bool {
 fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError {
     if code == Some(TRANSPORT_UNAUTHORIZED_CODE) {
         transport_pair_stale_error(message)
+    } else if code == Some("DAEMON_RETIRED") {
+        IpcError::new(IpcErrorCode::HostUnavailable, message)
+            .with_details(serde_json::json!({ "type": "daemonRetired" }))
     } else {
         IpcError::new(IpcErrorCode::InternalError, message)
     }
@@ -2345,11 +2348,29 @@ impl DaemonClient {
     /// connected to, or presents one that boot rejects. The rejected attempt is never reported as
     /// a request failure, because re-reading both halves is what makes the pair coherent again.
     async fn connect_and_handshake(&self) -> Result<ActiveConnection, IpcError> {
-        match self.connect_and_handshake_once().await {
-            Err(error) if transport_pair_is_stale(&error) => {
+        let mut retirement_deadline = None;
+        let mut refreshed_pair = false;
+        loop {
+            let outcome = if let Some(deadline) = retirement_deadline {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(IpcError::new(IpcErrorCode::HostUnavailable, "Daemon handover handshake timed out"));
+                }
+                tokio::time::timeout_at(deadline, self.connect_and_handshake_once())
+                    .await
+                    .map_err(|_| IpcError::new(IpcErrorCode::HostUnavailable, "Daemon handover handshake timed out"))?
+            } else {
                 self.connect_and_handshake_once().await
+            };
+            match outcome {
+                Err(error) if transport_pair_is_stale(&error) && !refreshed_pair => {
+                    refreshed_pair = true;
+                }
+                Err(error) if error.details.as_ref().is_some_and(|details| details["type"] == "daemonRetired") => {
+                    let deadline = *retirement_deadline.get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(5));
+                    tokio::time::sleep_until((tokio::time::Instant::now() + Duration::from_millis(50)).min(deadline)).await;
+                }
+                outcome => return outcome,
             }
-            outcome => outcome,
         }
     }
 
@@ -7926,6 +7947,34 @@ mod local_split_transport_tests {
         .await
         .unwrap();
 
+        drop(fixture.listener);
+        fixture.root.close().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retiring_predecessor_handshake_reconnects_to_successor() {
+        let fixture = Fixture::new().await;
+        let predecessor = Arc::new(crate::daemon::server::DaemonServer::new());
+        let (retired_tx, retired_rx) = tokio::sync::oneshot::channel();
+        let retired_tx = std::sync::Mutex::new(Some(retired_tx));
+        predecessor.handover_manager.set_retirement_action(move || {
+            retired_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+        });
+        predecessor.handover_manager.commit_handover_v5(&Arc::new(crate::terminal::TerminalService::default())).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), retired_rx).await.unwrap().unwrap();
+        let peer = async {
+            let (stream, _) = fixture.listener.accept().await.unwrap();
+            predecessor.handle_client(stream).await;
+            let mut successor = fixture.accept(false).await;
+            assert!(matches!(read_request(&mut successor).await, DaemonRequest::Ping));
+            reply(&mut successor, json!({ "type": "pong" })).await;
+        };
+        let action = async {
+            let mut connection = fixture.client.connect_and_handshake().await.unwrap();
+            assert!(matches!(connection.request(&DaemonRequest::Ping).await.unwrap(), DaemonResponse::Pong));
+        };
+        tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(peer, action); }).await.unwrap();
         drop(fixture.listener);
         fixture.root.close().unwrap();
     }

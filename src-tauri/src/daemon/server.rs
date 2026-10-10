@@ -3573,7 +3573,13 @@ impl DaemonServer {
 
                     let resp = match req {
                 Ok(DaemonRequest::Handshake { version, .. }) => {
-                    if version != DAEMON_PROTOCOL_VERSION {
+                    if self.handover_manager.status() == super::handover::HandoverStatus::Retired {
+                        DaemonResponse::Error {
+                            code: Some("DAEMON_RETIRED".into()),
+                            message: "Daemon ownership transferred to successor".into(),
+                            details: None,
+                        }
+                    } else if version != DAEMON_PROTOCOL_VERSION {
                         DaemonResponse::ProtocolMismatch {
                             expected_version: DAEMON_PROTOCOL_VERSION,
                             received_version: version,
