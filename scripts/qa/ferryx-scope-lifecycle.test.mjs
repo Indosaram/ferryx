@@ -1,4 +1,4 @@
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { pageCurl, identityHeader, releaseAll, listen, bounded } from './ferryx-scope-lifecycle.mjs';
 

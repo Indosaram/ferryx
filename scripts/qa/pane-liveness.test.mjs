@@ -1,8 +1,6 @@
-// Task 3 runner unit tests (authored; execution delegated to the sole remote
-// verifier per plan - never run locally). Follows the scripts/qa/*.test.mjs
-// pattern that imports vitest from ui/node_modules.
+// Runner unit tests use the scripts suite's Bun test runner.
 
-import { test, expect } from '../../ui/node_modules/vitest/dist/index.js';
+import { test, expect } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, chmodSync, watch, realpathSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
