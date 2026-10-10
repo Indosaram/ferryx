@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { syncBuiltinESMExports } from "node:module";
+import { tmpdir, type } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -746,29 +745,24 @@ test("runProcess: preserves normal build output and non-sensitive env variables 
   assert.ok(!result.stdout.includes("[REDACTED]"));
 });
 
-test("runProcess reports non-EPIPE input errors after terminating its child", async (t) => {
+test("runProcess reports non-EPIPE input errors after terminating its child", async () => {
   const realSpawn = childProcess.spawn;
   let child;
-  t.mock.method(childProcess, "spawn", (...args) => {
+  const spawnProcess = (...args) => {
     child = realSpawn(...args);
     queueMicrotask(() => {
       const error = Object.assign(new Error("input write fault"), { code: "EIO" });
       child.stdin.emit("error", error);
     });
     return child;
-  });
-  syncBuiltinESMExports();
-  try {
+  };
     await assert.rejects(
       runProcess(process.execPath, ["-e", "process.stdin.resume()"], {
         input: "input",
         timeoutMs: 2000,
+        spawnProcess,
       }),
       /input write fault/,
     );
     assert.ok(child.exitCode !== null || child.signalCode !== null);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-  }
 });
