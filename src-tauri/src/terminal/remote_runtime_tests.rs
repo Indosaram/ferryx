@@ -20,6 +20,10 @@ struct Fake {
     write_failure: parking_lot::Mutex<Option<BridgeError>>,
     write_entered: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
     write_pause: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// When set, `stop` signals `.0` on entry and waits for `.1` before completing.
+    stop_pause: parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    /// When true, `describe` reports the target as exited.
+    describe_exited: std::sync::atomic::AtomicBool,
     write_history: parking_lot::Mutex<Vec<Vec<u8>>>,
     resizes: AtomicUsize,
     last_resize: parking_lot::Mutex<Option<(u16, u16)>>,
@@ -41,7 +45,7 @@ impl Transport for Fake {
                 cols: 80,
                 rows: 24,
                 cursor: RemoteCursor(900),
-                exited: false,
+                exited: self.describe_exited.load(Ordering::SeqCst),
             })
         })
     }
@@ -90,7 +94,12 @@ impl Transport for Fake {
         })
     }
     fn stop<'a>(&'a self, _: &'a TargetRef) -> Rpc<'a, ()> {
+        let pause = self.stop_pause.lock().take();
         Box::pin(async move {
+            if let Some((entered, release)) = pause {
+                entered.notify_one();
+                release.notified().await;
+            }
             self.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -144,6 +153,8 @@ fn fixture() -> (
         write_failure: parking_lot::Mutex::new(None),
         write_entered: parking_lot::Mutex::new(None),
         write_pause: parking_lot::Mutex::new(None),
+        stop_pause: parking_lot::Mutex::new(None),
+        describe_exited: std::sync::atomic::AtomicBool::new(false),
         write_history: parking_lot::Mutex::new(Vec::new()),
         resizes: AtomicUsize::new(0),
         last_resize: parking_lot::Mutex::new(None),
@@ -529,33 +540,42 @@ async fn ssh_daemon_restart_descriptor_only_and_drop_does_not_stop() {
     );
 }
 #[tokio::test]
-async fn ssh_reconnect_safety_retry_cap_and_terminal_failure() {
+async fn ssh_reconnect_safety_outage_never_parks_and_terminal_failure() {
     let (runtime, _, dialer, tx) = fixture();
     runtime.restore(descriptor()).unwrap();
     let mut rx = runtime.subscribe("local-stable").unwrap();
-    for attempt in 0..=5 {
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    // A long outage: every redial fails well past the old five-attempt budget.
+    for attempt in 1..=12u32 {
         state(&mut rx, |d| {
-            d.state == RemoteConnectionState::Connected && d.attempts == attempt
+            d.state == RemoteConnectionState::Reconnecting && d.attempts == attempt
         })
         .await;
-        tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
-        if attempt < 5 {
-            state(&mut rx, |d| {
-                d.state == RemoteConnectionState::Reconnecting && d.attempts == attempt + 1
-            })
-            .await;
-            dialer.clock.add_permits(1);
-        } else {
-            state(&mut rx, |d| d.state == RemoteConnectionState::Disconnected).await;
-        }
+        *dialer.failure.lock() = Some(BridgeError::ConnectionClosed);
+        dialer.clock.add_permits(1);
     }
-    assert_eq!(dialer.calls.load(Ordering::SeqCst), 6);
-    runtime.retry("local-stable").unwrap();
+    // The host comes back: the loop must still be dialing and reconnect on its own.
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.attempts == 13
+    })
+    .await;
+    dialer.clock.add_permits(1);
     state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), 14);
     tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
     let expired = state(&mut rx, |d| d.state == RemoteConnectionState::Expired).await;
     assert_eq!(expired.failure.unwrap().kind, RemoteFailureKind::Expired);
-    assert_eq!(dialer.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), 14);
+}
+
+#[test]
+fn ssh_reconnect_backoff_is_bounded() {
+    use crate::terminal::remote::reconnect_backoff;
+    assert_eq!(reconnect_backoff(0), Duration::from_millis(250));
+    assert_eq!(reconnect_backoff(1), Duration::from_millis(500));
+    assert_eq!(reconnect_backoff(7), Duration::from_secs(32));
+    assert_eq!(reconnect_backoff(u32::MAX), Duration::from_secs(32));
 }
 
 #[tokio::test]
@@ -1003,6 +1023,8 @@ fn agent_fixture(supports_agent_state: bool) -> (
         write_failure: parking_lot::Mutex::new(None),
         write_entered: parking_lot::Mutex::new(None),
         write_pause: parking_lot::Mutex::new(None),
+        stop_pause: parking_lot::Mutex::new(None),
+        describe_exited: std::sync::atomic::AtomicBool::new(false),
         write_history: parking_lot::Mutex::new(Vec::new()),
         resizes: AtomicUsize::new(0),
         last_resize: parking_lot::Mutex::new(None),
@@ -1388,6 +1410,8 @@ async fn ssh_agent_state_imported_live_pump_publishes_and_acks() {
         write_failure: parking_lot::Mutex::new(None),
         write_entered: parking_lot::Mutex::new(None),
         write_pause: parking_lot::Mutex::new(None),
+        stop_pause: parking_lot::Mutex::new(None),
+        describe_exited: std::sync::atomic::AtomicBool::new(false),
         write_history: parking_lot::Mutex::new(Vec::new()),
         resizes: AtomicUsize::new(0),
         last_resize: parking_lot::Mutex::new(None),
@@ -1535,9 +1559,104 @@ async fn ssh_close_preserves_expired_target_classification() {
     *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
     let failure = runtime.close("local-stable").await.unwrap_err();
     assert_eq!(failure.kind, RemoteFailureKind::Expired);
+    // Closing forgets the session even though its gone target could not be stopped.
+    assert!(runtime.details("local-stable").is_none());
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn ssh_close_with_unreachable_host_forgets_the_session() {
+    let (runtime, hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Reconnecting).await;
+    // The host stays unreachable for the close attempt too.
+    *dialer.failure.lock() = Some(BridgeError::ConnectionClosed);
+    let failure = runtime.close("local-stable").await.unwrap_err();
+    assert_eq!(failure.kind, RemoteFailureKind::Transport);
+    assert!(!runtime.contains("local-stable"));
+    assert!(!hub.has_session("local-stable"));
+    let dials = dialer.calls.load(Ordering::SeqCst);
+    dialer.clock.add_permits(4);
+    tokio::task::yield_now().await;
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), dials, "a closed session must not be redialed");
+}
+
+#[tokio::test]
+async fn ssh_reconnect_to_exited_target_publishes_its_final_output() {
+    let (runtime, hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    let (_history, mut hub_output) = hub.subscribe("local-stable").expect("hub session");
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Reconnecting).await;
+    // While disconnected the remote program printed its last words and exited.
+    dialer.fake.describe_exited.store(true, Ordering::SeqCst);
+    tx.send(Ok(output(7, false))).unwrap();
+    dialer.clock.add_permits(1);
+    let gone = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    assert_eq!(gone.failure.unwrap().kind, RemoteFailureKind::Missing);
+    let published = tokio::time::timeout(Duration::from_secs(3), hub_output.recv())
+        .await
+        .expect("final output published before expiry")
+        .unwrap();
+    assert_eq!(published, b"record-7;".to_vec());
+}
+
+#[tokio::test]
+async fn ssh_retry_on_expired_session_is_refused_without_redial() {
+    let (runtime, _hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    let dials = dialer.calls.load(Ordering::SeqCst);
+    let failure = runtime.retry("local-stable").unwrap_err();
+    assert_eq!(failure.kind, RemoteFailureKind::Expired);
     let details = runtime.details("local-stable").unwrap();
     assert_eq!(details.state, RemoteConnectionState::Expired);
-    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+    tokio::task::yield_now().await;
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), dials);
+}
+
+#[tokio::test]
+async fn ssh_retry_while_close_stops_target_does_not_orphan_a_reconnect_loop() {
+    let (runtime, hub, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    let dials_before = dialer.calls.load(Ordering::SeqCst);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.stop_pause.lock() = Some((entered.clone(), release.clone()));
+    let closing = {
+        let runtime = &runtime;
+        async move { runtime.close("local-stable").await }
+    };
+    tokio::pin!(closing);
+    // Drive close until it is parked inside the stop RPC, after it published Disconnected.
+    tokio::select! {
+        _ = &mut closing => panic!("close finished before stop was released"),
+        _ = entered.notified() => {}
+    }
+    assert_eq!(
+        runtime.details("local-stable").unwrap().state,
+        RemoteConnectionState::Disconnected
+    );
+    // The recovery watcher re-arms on `disconnected`; that retry must not launch a loop.
+    assert!(runtime.retry("local-stable").is_err());
+    release.notify_one();
+    closing.await.unwrap();
+    assert!(!runtime.contains("local-stable"));
+    assert!(!hub.has_session("local-stable"));
+    // Any orphaned loop would dial again immediately (attempts reset to 0, no delay permit needed).
+    tokio::task::yield_now().await;
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), dials_before);
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

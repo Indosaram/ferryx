@@ -263,10 +263,12 @@ impl Connector for SshConnector {
         })
     }
     fn delay(&self, attempt: u32) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(tokio::time::sleep(Duration::from_millis(
-            250 * (1u64 << attempt.min(5)),
-        )))
+        Box::pin(tokio::time::sleep(reconnect_backoff(attempt)))
     }
+}
+/// Delay before redial number `attempt + 1`: 250 ms doubling, capped at 32 s.
+pub(crate) fn reconnect_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250 * (1u64 << attempt.min(MAX_BACKOFF_SHIFT)))
 }
 pub(crate) struct Session {
     pub(crate) details: RemoteSessionDetails,
@@ -279,6 +281,8 @@ pub(crate) struct Session {
     /// leaving the remote PTY at its spawn defaults.
     pending_size: Option<(u16, u16, u64)>,
     pub(crate) agent_ack: RemoteCursor,
+    /// Set by `close` while it stops the remote target; `retry` refuses to re-arm meanwhile.
+    closing: bool,
 }
 const MAX_PENDING_OPERATIONS: usize = 17;
 const MAX_PENDING_BYTES: usize = 256 * 1024;
@@ -319,7 +323,11 @@ pub struct RemoteRuntime {
     connector: Arc<dyn Connector>,
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
 }
-const MAX_ATTEMPTS: u32 = 5;
+/// Transport outages are retried for as long as the session lives: a parked session never
+/// recovers on its own, so the reconnect loop instead backs off to a bounded interval
+/// (250 ms doubling up to 2^MAX_BACKOFF_SHIFT, i.e. 32 s) and keeps dialing until the
+/// host answers, the user closes the session, or a non-transport failure ends it.
+const MAX_BACKOFF_SHIFT: u32 = 7;
 impl RemoteRuntime {
     pub fn new(hub: Arc<TerminalOutputHub>) -> Self {
         Self::with_connector(hub, Arc::new(SshConnector))
@@ -470,6 +478,7 @@ impl RemoteRuntime {
                 task: None,
                 pending_size: None,
                 agent_ack: RemoteCursor(0),
+                closing: false,
             }),
             control: Arc::new(AsyncMutex::new(())),
             queue_tx,
@@ -580,10 +589,30 @@ impl RemoteRuntime {
         }));
     }
     /// Explicit retry is deduplicated while reconnecting and only describes the stored target.
+    /// A retry that arrives while `close` is stopping the target is refused: re-arming then would
+    /// launch a reconnect loop for an entry that `close` is about to remove from the runtime,
+    /// leaving an orphaned task dialing the host forever.
     pub fn retry(&self, id: &str) -> Result<(), RemoteFailure> {
         let e = self.entry(id)?;
         {
             let mut s = e.state.lock();
+            if s.closing {
+                return Err(RemoteFailure::new(
+                    RemoteFailureKind::Disconnected,
+                    "Remote terminal is closing",
+                ));
+            }
+            // An expired target cannot be revived (reconnect only describes the stored target),
+            // and the daemon's status watcher has already ended for it, so re-arming would leave
+            // the pane parked in `reconnecting` with no further status events.
+            if s.details.state == RemoteConnectionState::Expired {
+                return Err(s.details.failure.clone().unwrap_or_else(|| {
+                    RemoteFailure::new(
+                        RemoteFailureKind::Expired,
+                        "Remote session has expired; open a new terminal",
+                    )
+                }));
+            }
             if matches!(
                 s.details.state,
                 RemoteConnectionState::Connected | RemoteConnectionState::Reconnecting
@@ -708,6 +737,7 @@ impl RemoteRuntime {
             }
             s.details.generation += 1;
             s.details.state = RemoteConnectionState::Disconnected;
+            s.closing = true;
             let c = s.transport.take();
             Entry::notify(&s);
             (s.details.descriptor.clone(), c)
@@ -722,12 +752,19 @@ impl RemoteRuntime {
         .await;
         if let Err(error) = result {
             let f = RemoteFailure::from_bridge(&error);
-            let mut s = e.state.lock();
-            fail(&mut s, f.clone());
-            if f.kind == RemoteFailureKind::Transport {
-                s.details.state = RemoteConnectionState::Disconnected;
+            {
+                let mut s = e.state.lock();
+                fail(&mut s, f.clone());
+                if f.kind == RemoteFailureKind::Transport {
+                    s.details.state = RemoteConnectionState::Disconnected;
+                }
+                Entry::notify(&s);
             }
-            Entry::notify(&s);
+            // The terminal was closed: whether its target is already gone or only unreachable,
+            // forget it locally so it is neither listed nor restored (and redialed) after a
+            // daemon restart. The failure is still reported to the caller.
+            self.sessions.lock().remove(id);
+            self.hub.remove_session(id);
             return Err(f);
         }
         self.sessions.lock().remove(id);
@@ -901,6 +938,7 @@ impl RemoteRuntime {
                 task: None,
                 pending_size: state.pending_size,
                 agent_ack: RemoteCursor(0),
+                closing: false,
             }),
             control: Arc::new(AsyncMutex::new(())),
             queue_tx,
@@ -1062,6 +1100,26 @@ async fn run(
                 });
             }
             if info.exited {
+                // The target exited while we were disconnected. Its helper still holds the
+                // output produced before the exit (often the reason it exited), so publish that
+                // tail once before reporting the target as gone.
+                let cursor = e.state.lock().details.descriptor.remote_cursor;
+                if let Ok(read) = client.read(&d.target, cursor, RemoteCursor(0)).await {
+                    let mut s = e.state.lock();
+                    if s.details.generation == generation && read.target == d.target {
+                        if read.gap {
+                            hub.publish_gap(&d.backend_session_id);
+                        }
+                        for chunk in read.chunks {
+                            if chunk.cursor > cursor {
+                                hub.publish(&d.backend_session_id, chunk.bytes);
+                            }
+                        }
+                        if read.cursor > cursor {
+                            s.details.descriptor.remote_cursor = read.cursor;
+                        }
+                    }
+                }
                 return Err(BridgeError::TargetNotFound);
             }
             if !client.supports_agent_state() {
@@ -1219,12 +1277,7 @@ async fn run(
             if failure.kind != RemoteFailureKind::Transport {
                 return;
             }
-            if attempts >= MAX_ATTEMPTS {
-                s.details.state = RemoteConnectionState::Disconnected;
-                Entry::notify(&s);
-                return;
-            }
-            attempts += 1;
+            attempts = attempts.saturating_add(1);
             s.details.attempts = attempts;
             s.details.generation += 1;
             generation = s.details.generation;
