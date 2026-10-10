@@ -1,0 +1,4396 @@
+--- a/src-tauri/src/remote/mod.rs	2026-10-02 00:20:00
++++ b/src-tauri/src/remote/mod.rs	2026-10-02 01:05:32
+@@ -20,6 +20,7 @@
+ pub mod machine_operation_journal;
+ pub mod machine_protocol;
+ pub mod mirror;
++pub mod presence;
+ pub mod protocol;
+ pub mod push;
+ pub mod relay_client;
+@@ -28,6 +29,7 @@
+ pub mod relay_server;
+ pub mod server;
+ pub(crate) mod session_api;
++pub mod share_token;
+ mod ssh;
+ pub mod state;
+ pub mod terminal_wire;
+@@ -52,6 +54,7 @@
+ };
+ pub use browser_security::{require_permission, sanitize_url, RequestDeduplicator, SecurityError};
+ pub use browser_ws::{BrowserWsSession, WsConnectionState};
++pub use share_token::*;
+ pub use mirror::*;
+ pub use protocol::*;
+ pub use server::*;
+--- /dev/null	2026-10-02 06:47:28
++++ b/src-tauri/src/remote/presence.rs	2026-10-02 03:40:43
+@@ -0,0 +1,896 @@
++//! Collaborator presence for shared terminal sessions.
++//!
++//! The registry tracks every client holding a live `/api/v1/terminal/{id}` socket and
++//! fans out one `session_presence_changed` push on each connect and disconnect, so
++//! header badges are derived from real socket lifecycle events instead of polling or
++//! constants. Serialized participants never carry device names, repository paths,
++//! tokens, or raw client ids: the public alias is an opaque role-prefixed FNV-1a hash
++//! and the raw client id stays internal to the registry for cleanup bookkeeping.
++
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use axum::extract::{Path as AxumPath, State};
++use axum::http::{header, HeaderMap, StatusCode};
++use axum::response::{IntoResponse, Response};
++use axum::Json;
++use parking_lot::Mutex;
++use serde::{Deserialize, Serialize};
++use std::sync::atomic::{AtomicU64, Ordering};
++
++use super::protocol::RemoteEventMessage;
++use super::server::extract_token;
++use super::share_token::standard_security_headers;
++use super::state::RemoteGatewayState;
++
++/// Event name pushed on every presence change over `/api/v1/events`.
++pub const SESSION_PRESENCE_EVENT: &str = "session_presence_changed";
++
++/// Bound on concurrently tracked sessions. Admission beyond it is rejected for a new
++/// session; a live entry is never evicted, so no other socket silently loses presence.
++const MAX_TRACKED_SESSIONS: usize = 64;
++
++/// Bound on distinct participants projected for one session. Admission of a further
++/// client is rejected rather than truncating or evicting anyone already live.
++const MAX_PARTICIPANTS_PER_SESSION: usize = 32;
++
++/// Public participant shape. Deliberately carries no client id, device name, host
++/// name, path, or token: only the opaque alias, the coarse role, and connect time.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct PresenceParticipant {
++    pub alias: String,
++    pub role: String,
++    pub connected_at: u64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ClientPresence {
++    participant: PresenceParticipant,
++    /// Per-connection tokens held by this client right now. The projection shows the
++    /// client once (refcounted) and only the guard holding a given token may remove it.
++    connections: Vec<u64>,
++}
++
++/// Result of registering one socket. `Rejected` means capacity would require evicting
++/// another live entry; `Attached` carries the per-connection token plus the projected
++/// snapshot only when the public projection actually changed, so pushes stay event-true.
++enum JoinOutcome {
++    Rejected,
++    Attached {
++        token: u64,
++        changed: Option<Vec<PresenceParticipant>>,
++    },
++}
++
++fn unix_now_secs() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs())
++        .unwrap_or(0)
++}
++
++/// Deterministic display alias (FNV-1a over the client id, 24 bits of output).
++/// Two different clients can only collide by hash chance, and the alias never
++/// encodes anything derived from a device name, hostname, path, or credential.
++pub fn alias_for(client_id: &str, role: &str) -> String {
++    let mut hash: u32 = 0x811c_9dc5;
++    for byte in client_id.as_bytes() {
++        hash ^= u32::from(*byte);
++        hash = hash.wrapping_mul(0x0100_0193);
++    }
++    let label = if role == "view" { "Viewer" } else { "Control" };
++    format!("{label}-{:06x}", hash & 0x00ff_ffff)
++}
++
++/// Session-keyed collaborator registry. Each socket join is stored under a unique
++/// per-connection token; the public projection collapses a client's overlapping
++/// connections by refcount, so an old guard's drop can never remove a newer live
++/// connection. Only the projection is ever serialized or broadcast.
++pub struct PresenceRegistry {
++    sessions: Mutex<HashMap<String, HashMap<String, ClientPresence>>>,
++    next_token: AtomicU64,
++}
++
++impl Default for PresenceRegistry {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl PresenceRegistry {
++    pub fn new() -> Self {
++        Self {
++            sessions: Mutex::new(HashMap::new()),
++            next_token: AtomicU64::new(1),
++        }
++    }
++
++    fn project(clients: &HashMap<String, ClientPresence>) -> Vec<PresenceParticipant> {
++        let mut participants: Vec<PresenceParticipant> = clients
++            .values()
++            .map(|client| client.participant.clone())
++            .collect();
++        participants.sort_by(|a, b| {
++            a.alias
++                .cmp(&b.alias)
++                .then(a.connected_at.cmp(&b.connected_at))
++        });
++        participants.truncate(MAX_PARTICIPANTS_PER_SESSION);
++        participants
++    }
++
++    /// Register one socket under a fresh connection token. A further connection from
++    /// the same client joins its refcount and leaves the projection untouched (no
++    /// push); the projection changes only when a client first appears. Capacity never
++    /// evicts a live entry — the new admission is rejected instead.
++    fn join(&self, session_id: &str, client_id: &str, role: &str) -> JoinOutcome {
++        let participant = PresenceParticipant {
++            alias: alias_for(client_id, role),
++            role: role.to_string(),
++            connected_at: unix_now_secs(),
++        };
++        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
++        let mut sessions = self.sessions.lock();
++        if let Some(clients) = sessions.get_mut(session_id) {
++            if let Some(existing) = clients.get_mut(client_id) {
++                existing.connections.push(token);
++                return JoinOutcome::Attached {
++                    token,
++                    changed: None,
++                };
++            }
++            if clients.len() >= MAX_PARTICIPANTS_PER_SESSION {
++                return JoinOutcome::Rejected;
++            }
++            clients.insert(
++                client_id.to_string(),
++                ClientPresence {
++                    participant,
++                    connections: vec![token],
++                },
++            );
++            let changed = Self::project(clients);
++            return JoinOutcome::Attached {
++                token,
++                changed: Some(changed),
++            };
++        }
++        if sessions.len() >= MAX_TRACKED_SESSIONS {
++            return JoinOutcome::Rejected;
++        }
++        let mut clients = HashMap::new();
++        clients.insert(
++            client_id.to_string(),
++            ClientPresence {
++                participant,
++                connections: vec![token],
++            },
++        );
++        let changed = Self::project(&clients);
++        sessions.insert(session_id.to_string(), clients);
++        JoinOutcome::Attached {
++            token,
++            changed: Some(changed),
++        }
++    }
++
++    /// Remove exactly the connection identified by its guard token. Returns the new
++    /// snapshot only when a client actually left the projection; while a sibling
++    /// connection from the same client is still live the projection is unchanged, so
++    /// an old socket's drop can never remove a newer live connection (and pushes no-op).
++    /// Returns `None` when the token is already gone. Empty sessions are dropped.
++    fn leave(&self, session_id: &str, token: u64) -> Option<Vec<PresenceParticipant>> {
++        let mut sessions = self.sessions.lock();
++        let clients = sessions.get_mut(session_id)?;
++        let client_id = clients.iter().find_map(|(client_id, client)| {
++            client
++                .connections
++                .iter()
++                .any(|held| *held == token)
++                .then(|| client_id.clone())
++        })?;
++        let client = clients.get_mut(&client_id).expect("client just found");
++        let Some(position) = client.connections.iter().position(|held| *held == token) else {
++            return None;
++        };
++        client.connections.remove(position);
++        if !client.connections.is_empty() {
++            return None;
++        }
++        clients.remove(&client_id);
++        let snapshot = Self::project(clients);
++        if clients.is_empty() {
++            sessions.remove(session_id);
++        }
++        Some(snapshot)
++    }
++
++    /// Public snapshot for the REST route (no raw ids, bounded).
++    pub fn snapshot(&self, session_id: &str) -> Vec<PresenceParticipant> {
++        let sessions = self.sessions.lock();
++        sessions
++            .get(session_id)
++            .map(|entries| Self::project(entries))
++            .unwrap_or_default()
++    }
++
++    /// Explicit removal for share revocation: drops every connection held by the
++    /// `share-{client_id}` client, so a revoke clears all of its overlapping sockets
++    /// in one projection change.
++    pub fn remove_share_client(&self, session_id: &str, client_id: &str) -> Option<Vec<PresenceParticipant>> {
++        let mut sessions = self.sessions.lock();
++        let clients = sessions.get_mut(session_id)?;
++        clients.remove(&format!("share-{client_id}"))?;
++        let snapshot = Self::project(clients);
++        if clients.is_empty() {
++            sessions.remove(session_id);
++        }
++        Some(snapshot)
++    }
++}
++
++#[derive(Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct PresenceEventPayload {
++    session_id: String,
++    participants: Vec<PresenceParticipant>,
++    count: usize,
++}
++
++/// Fan out a full participant snapshot so any late or reconnecting subscriber
++/// converges from the next push without polling.
++pub fn broadcast_presence(
++    state: &RemoteGatewayState,
++    session_id: &str,
++    participants: Vec<PresenceParticipant>,
++) {
++    let payload = PresenceEventPayload {
++        session_id: session_id.to_string(),
++        count: participants.len(),
++        participants,
++    };
++    let payload = match serde_json::to_value(payload) {
++        Ok(value) => value,
++        Err(_) => return,
++    };
++    let frame = serde_json::to_string(&RemoteEventMessage {
++        event: SESSION_PRESENCE_EVENT.to_string(),
++        payload,
++    });
++    if let Ok(frame) = frame {
++        state.emit_event(frame);
++    }
++}
++
++/// RAII attach for one terminal socket: joins on creation and leaves on drop, so
++/// every exit path (socket close, revocation watch, upgrade teardown) cleans up and
++/// pushes exactly one disconnect for the connection it registered — never for a
++/// sibling connection sharing the same client id. Returns `None` when presence
++/// admission is rejected at capacity (the socket still runs, simply untracked).
++pub struct PresenceGuard {
++    state: Arc<RemoteGatewayState>,
++    session_id: String,
++    token: u64,
++}
++
++impl PresenceGuard {
++    pub fn attach(
++        state: Arc<RemoteGatewayState>,
++        session_id: &str,
++        client_id: &str,
++        role: &'static str,
++    ) -> Option<Self> {
++        match state.presence.join(session_id, client_id, role) {
++            JoinOutcome::Rejected => None,
++            JoinOutcome::Attached { token, changed } => {
++                if let Some(participants) = changed {
++                    broadcast_presence(&state, session_id, participants);
++                }
++                Some(Self {
++                    state,
++                    session_id: session_id.to_string(),
++                    token,
++                })
++            }
++        }
++    }
++}
++
++impl Drop for PresenceGuard {
++    fn drop(&mut self) {
++        if let Some(participants) = self.state.presence.leave(&self.session_id, self.token) {
++            broadcast_presence(&self.state, &self.session_id, participants);
++        }
++    }
++}
++
++#[derive(Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SessionPresenceResponse {
++    session_id: String,
++    participants: Vec<PresenceParticipant>,
++    count: usize,
++}
++
++/// `GET /api/v1/sessions/{sessionId}/presence` — one authoritative snapshot for the
++/// initial badge render; live updates arrive as `session_presence_changed` pushes.
++/// Authorized for gateway device tokens and for a share token scoped to this session
++/// under the SAME canonical target policy as the socket-ticket and terminal checks
++/// (`share_target_matches` on the requested path with its host scope preserved);
++/// unauthorized or foreign-scope credentials are refused before any data is read.
++/// The snapshot is keyed by the CANONICAL requested id — the same host-scoped key
++/// the terminal socket attached under — never a stripped raw id.
++pub async fn get_session_presence_handler(
++    State(state): State<Arc<RemoteGatewayState>>,
++    AxumPath(session_id): AxumPath<String>,
++    headers: HeaderMap,
++) -> Result<Response, (StatusCode, String)> {
++    let token = extract_token(&headers)
++        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
++
++    // Canonical grant policy, identical to the socket-ticket and terminal checks:
++    // the requested id keeps its host scope for the match, so `host-a::s1` and
++    // `host-b::s1` can never alias into an unauthorized snapshot. No unwrap
++    // happens anywhere on this path — the canonical requested id is both the
++    // authorized target and the registry key.
++    let canonical_target = format!("/api/v1/terminal/{}", session_id);
++    let authorized = if state.auth_manager.validate_token(&token).is_ok() {
++        true
++    } else if let Ok(grant) = state.share_manager.validate_share_token(&token) {
++        super::share_token::share_target_matches(&grant.session_id, &canonical_target)
++    } else {
++        false
++    };
++    if !authorized {
++        return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()));
++    }
++
++    // Canonical requested id end-to-end: presence is keyed the way the socket
++    // attached (host scope kept), so this snapshot can never read an identically
++    // named raw session of another host's registry bucket.
++    let participants = state.presence.snapshot(&session_id);
++    let count = participants.len();
++    Ok((
++        standard_security_headers(),
++        Json(SessionPresenceResponse {
++            session_id,
++            participants,
++            count,
++        }),
++    )
++        .into_response())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::remote::state::RemoteGatewayState;
++    use crate::worktree::WorkspaceRegistry;
++
++    fn test_state() -> Arc<RemoteGatewayState> {
++        Arc::new(RemoteGatewayState::new_with_backend(
++            Arc::new(TestSessions),
++            WorkspaceRegistry::new(),
++        ))
++    }
++
++    struct TestSessions;
++
++    impl crate::remote::backend::RemoteSessionBackend for TestSessions {
++        fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
++            Box::pin(async { vec!["session-a".into()] })
++        }
++        fn describe_session<'a>(
++            &'a self,
++            session_id: &'a str,
++        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::backend::RemoteSessionDetails, String>> {
++            let id = session_id.to_string();
++            Box::pin(async move {
++                Ok(crate::remote::backend::RemoteSessionDetails {
++                    session_id: id,
++                    workspace_id: Some("ws".into()),
++                    worktree_label: Some("main".into()),
++                    worktree_path: None,
++                    running: true,
++                    cols: 80,
++                    rows: 24,
++                })
++            })
++        }
++        fn attach_with_sequence<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _after_sequence: Option<u64>,
++        ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>> {
++            Box::pin(async { Err("attach unsupported".into()) })
++        }
++        fn write_input<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _data: &'a [u8],
++        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
++            Box::pin(async { Ok(()) })
++        }
++        fn resize<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _cols: u16,
++            _rows: u16,
++        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    fn auth_headers(token: &str) -> HeaderMap {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            header::AUTHORIZATION,
++            format!("Bearer {token}").parse().unwrap(),
++        );
++        headers
++    }
++
++    #[test]
++    fn test_alias_is_opaque_and_deterministic() {
++        let client = "share-0f0f1e2d-aaaa-bbbb-cccc-0123456789ab";
++        let first = alias_for(client, "view");
++        let second = alias_for(client, "view");
++        assert_eq!(first, second);
++        assert!(first.starts_with("Viewer-"));
++        assert!(!first.contains(client));
++        assert!(!first.contains("share-"));
++        assert_ne!(first, alias_for(client, "control"));
++        assert_ne!(first, alias_for("share-0f0f1e2d-aaaa-bbbb-cccc-0123456789ac", "view"));
++        assert!(alias_for("other", "control").starts_with("Control-"));
++    }
++
++    #[test]
++    fn test_join_leave_snapshot_and_idempotent_cleanup() {
++        let registry = PresenceRegistry::new();
++        let first = match registry.join("session-a", "device-1", "control") {
++            JoinOutcome::Attached { token, changed } => {
++                assert_eq!(changed.expect("first join changes projection").len(), 1);
++                token
++            }
++            JoinOutcome::Rejected => panic!("first join must attach"),
++        };
++        assert_eq!(registry.snapshot("session-a").len(), 1);
++
++        let second = match registry.join("session-a", "device-1", "control") {
++            JoinOutcome::Attached { token, changed } => {
++                assert!(changed.is_none(), "sibling join leaves projection unchanged");
++                token
++            }
++            JoinOutcome::Rejected => panic!("sibling join must attach"),
++        };
++        assert_eq!(registry.snapshot("session-a").len(), 1);
++
++        assert!(registry.leave("session-a", first).is_none());
++        assert_eq!(registry.snapshot("session-a").len(), 1);
++        assert!(registry.leave("session-a", first).is_none());
++        assert!(registry.leave("session-a", second).is_some());
++        assert!(registry.snapshot("session-a").is_empty());
++        assert!(registry.leave("session-a", second).is_none());
++        assert!(registry.sessions.lock().get("session-a").is_none());
++    }
++
++    #[test]
++    fn test_share_client_removal_targets_revoked_holder() {
++        let registry = PresenceRegistry::new();
++        assert!(matches!(
++            registry.join("session-a", "share-abc", "view"),
++            JoinOutcome::Attached { .. }
++        ));
++        assert!(matches!(
++            registry.join("session-a", "device-1", "control"),
++            JoinOutcome::Attached { .. }
++        ));
++        let after = registry.remove_share_client("session-a", "abc").expect("removed");
++        assert_eq!(after.len(), 1);
++        assert_eq!(after[0].role, "control");
++        assert!(registry.remove_share_client("session-a", "abc").is_none());
++    }
++
++    #[test]
++    fn test_registry_bounds_reject_admission_without_evicting_lives() {
++        let registry = PresenceRegistry::new();
++        for i in 0..MAX_PARTICIPANTS_PER_SESSION {
++            assert!(matches!(
++                registry.join("session-bounded", &format!("client-{i}"), "view"),
++                JoinOutcome::Attached { .. }
++            ));
++        }
++        assert!(matches!(
++            registry.join("session-bounded", "client-late", "view"),
++            JoinOutcome::Rejected
++        ));
++        assert_eq!(
++            registry.snapshot("session-bounded").len(),
++            MAX_PARTICIPANTS_PER_SESSION
++        );
++
++        let registry = PresenceRegistry::new();
++        for i in 0..MAX_TRACKED_SESSIONS {
++            assert!(matches!(
++                registry.join(&format!("session-{i}"), "device-1", "control"),
++                JoinOutcome::Attached { .. }
++            ));
++        }
++        assert!(matches!(
++            registry.join("session-new", "device-1", "control"),
++            JoinOutcome::Rejected
++        ));
++        let sessions = registry.sessions.lock();
++        assert_eq!(sessions.len(), MAX_TRACKED_SESSIONS);
++        assert!(
++            sessions.contains_key("session-0"),
++            "a live session must never be evicted to make room"
++        );
++        assert!(!sessions.contains_key("session-new"));
++        drop(sessions);
++
++        let state = test_state();
++        for i in 0..MAX_PARTICIPANTS_PER_SESSION {
++            assert!(PresenceGuard::attach(
++                Arc::clone(&state),
++                "session-ful",
++                &format!("client-{i}"),
++                "view",
++            )
++            .is_some());
++        }
++        assert!(
++            PresenceGuard::attach(Arc::clone(&state), "session-ful", "client-late", "view")
++                .is_none(),
++            "capacity rejects the new admission instead of evicting a live socket"
++        );
++    }
++
++    #[test]
++    fn test_guard_drop_cleans_up_and_payload_leaks_nothing() {
++        let state = test_state();
++        let json;
++        {
++            let guard = PresenceGuard::attach(
++                Arc::clone(&state),
++                "session-a",
++                "share-2f2f-device-secret",
++                "view",
++            );
++            assert!(guard.is_some());
++            let _guard = guard;
++            let snapshot = state.presence.snapshot("session-a");
++            assert_eq!(snapshot.len(), 1);
++            json = serde_json::to_string(&snapshot).expect("serialize");
++            assert!(!json.contains("share-2f2f-device-secret"));
++            assert!(!json.contains("client_id"));
++            assert!(!json.contains("token"));
++        }
++        assert!(state.presence.snapshot("session-a").is_empty());
++    }
++
++    #[test]
++    fn test_broadcast_frame_shape_is_camel_case_and_named() {
++        let state = test_state();
++        let participants = match state.presence.join("session-a", "device-9", "view") {
++            JoinOutcome::Attached { changed, .. } => {
++                changed.expect("first join changes projection")
++            }
++            JoinOutcome::Rejected => panic!("join must attach below capacity"),
++        };
++        broadcast_presence(&state, "session-a", participants);
++        let frame = {
++            let mut rx = state.event_tx.subscribe();
++            let participants = state.presence.snapshot("session-a");
++            broadcast_presence(&state, "session-a", participants);
++            futures_util::FutureExt::now_or_never(rx.recv())
++                .expect("frame available")
++                .expect("broadcast open")
++        };
++        let value: serde_json::Value = serde_json::from_str(&frame).expect("json frame");
++        assert_eq!(value["event"], SESSION_PRESENCE_EVENT);
++        assert_eq!(value["payload"]["sessionId"], "session-a");
++        assert_eq!(value["payload"]["count"], 1);
++        let participant = &value["payload"]["participants"][0];
++        assert!(participant["alias"].as_str().unwrap().starts_with("Viewer-"));
++        assert_eq!(participant["role"], "view");
++        assert!(participant["connectedAt"].as_u64().is_some());
++        assert!(participant.get("clientId").is_none());
++        assert!(participant.get("client_id").is_none());
++        assert!(participant.get("token").is_none());
++        assert!(participant.get("path").is_none());
++    }
++
++    #[tokio::test]
++    async fn test_presence_route_requires_authorized_credential() {
++        let state = test_state();
++        let code = state
++            .auth_manager
++            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
++        let (control_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&code, "control-device")
++            .unwrap();
++
++        assert!(matches!(
++            state.presence.join("session-a", "device-1", "control"),
++            JoinOutcome::Attached { .. }
++        ));
++
++        let ok = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            auth_headers(&control_token),
++        )
++        .await
++        .expect("control device reads presence");
++        assert_eq!(ok.status(), StatusCode::OK);
++        assert_eq!(ok.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
++
++        let missing = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            HeaderMap::new(),
++        )
++        .await;
++        assert!(matches!(missing, Err((StatusCode::UNAUTHORIZED, _))));
++
++        let garbage = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            auth_headers("not-a-real-token"),
++        )
++        .await;
++        assert!(matches!(garbage, Err((StatusCode::UNAUTHORIZED, _))));
++    }
++
++    #[tokio::test]
++    async fn test_presence_route_binds_share_token_to_session() {
++        let state = test_state();
++        let (share_id, code, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "session-a",
++                crate::remote::share_token::SharePermission::View,
++                Some(600),
++            )
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&code, None).unwrap();
++        assert_eq!(share_id, grant.share_id);
++
++        assert!(matches!(
++            state.presence.join("session-a", "device-1", "control"),
++            JoinOutcome::Attached { .. }
++        ));
++
++        let scoped = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await
++        .expect("scoped share reads its own session presence");
++        assert_eq!(scoped.status(), StatusCode::OK);
++
++        let foreign = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-other".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(foreign, Err((StatusCode::UNAUTHORIZED, _))));
++    }
++
++    /// The share route matches the GRANT against the canonical (host-scoped)
++    /// request path — the same policy as the socket-ticket and terminal checks —
++    /// and unwraps the host scope only for the registry lookup.
++    #[tokio::test]
++    async fn test_presence_route_preserves_canonical_target_for_scoped_grant() {
++        let state = test_state();
++        let (_, code, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "host-a::session-a",
++                crate::remote::share_token::SharePermission::View,
++                Some(600),
++            )
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&code, None).unwrap();
++
++        // Terminal sockets attach under the CANONICAL requested id (server passes
++        // the host-scoped path id straight into PresenceGuard::attach).
++        assert!(matches!(
++            state.presence.join("host-a::session-a", "device-1", "control"),
++            JoinOutcome::Attached { .. }
++        ));
++
++        // Own canonical (host-scoped) path: authorized. RED under the old
++        // strip-before-match compare, which returned 401 for scoped grants.
++        let own = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("host-a::session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await
++        .expect("scoped grant reads its own canonical presence path");
++        assert_eq!(own.status(), StatusCode::OK);
++        let bytes = axum::body::to_bytes(own.into_body(), 4096).await.unwrap();
++        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
++        assert_eq!(json["sessionId"].as_str(), Some("host-a::session-a"));
++        assert_eq!(json["count"].as_u64(), Some(1));
++
++        // The same session id under ANOTHER host's scope: refused by the triad.
++        let alias = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("host-b::session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(alias, Err((StatusCode::UNAUTHORIZED, _))));
++
++        // The bare (unscoped) spelling of a scoped grant's session: also refused,
++        // and the raw bucket must stay empty — no cross-host alias via stripping.
++        let bare = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(bare, Err((StatusCode::UNAUTHORIZED, _))));
++        assert!(state.presence.snapshot("session-a").is_empty());
++    }
++
++    /// A raw (host-agnostic) grant must not authenticate a host-scoped path:
++    /// RED under the old strip-before-match, which stripped `host-b::session-a`
++    /// to `session-a`, matched the raw grant, and returned the snapshot — the
++    /// cross-host alias the canonical policy exists to refuse. The registry key
++    /// stays the canonical requested id for raw-form sessions (no scope to keep).
++    #[tokio::test]
++    async fn test_presence_route_refuses_scoped_path_for_unscoped_grant() {
++        let state = test_state();
++        let (_, code, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "session-a",
++                crate::remote::share_token::SharePermission::View,
++                Some(600),
++            )
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&code, None).unwrap();
++        assert!(matches!(
++            state.presence.join("session-a", "device-1", "control"),
++            JoinOutcome::Attached { .. }
++        ));
++
++        let alias = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("host-b::session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(alias, Err((StatusCode::UNAUTHORIZED, _))));
++
++        // The same raw grant still reads its own raw path.
++        let own = get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-a".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await
++        .expect("raw grant reads its own raw path");
++        assert_eq!(own.status(), StatusCode::OK);
++    }
++
++    /// One non-blocking read of the next presence frame. The channel send is
++    /// synchronous, so `None` proves the action pushed nothing without any sleeping.
++    fn take_event(rx: &mut tokio::sync::broadcast::Receiver<String>) -> Option<String> {
++        futures_util::FutureExt::now_or_never(rx.recv())
++            .map(|result| result.expect("broadcast channel open"))
++    }
++
++    #[test]
++    fn test_two_overlapping_connections_project_one_client_with_one_event() {
++        let state = test_state();
++        let mut rx = state.event_tx.subscribe();
++        let first = PresenceGuard::attach(Arc::clone(&state), "session-a", "device-1", "view");
++        let second = PresenceGuard::attach(Arc::clone(&state), "session-a", "device-1", "view");
++        assert!(first.is_some());
++        assert!(second.is_some());
++
++        let join_frame = take_event(&mut rx).expect("first join pushes one event");
++        let value: serde_json::Value = serde_json::from_str(&join_frame).expect("json frame");
++        assert_eq!(value["event"], SESSION_PRESENCE_EVENT);
++        assert_eq!(value["payload"]["sessionId"], "session-a");
++        assert_eq!(value["payload"]["count"], 1);
++        assert_eq!(
++            value["payload"]["participants"]
++                .as_array()
++                .expect("participants array")
++                .len(),
++            1
++        );
++        assert!(
++            take_event(&mut rx).is_none(),
++            "a sibling connection of the same client must not push"
++        );
++
++        let snapshot = state.presence.snapshot("session-a");
++        assert_eq!(snapshot.len(), 1);
++        assert_eq!(snapshot[0].alias, alias_for("device-1", "view"));
++    }
++
++    #[test]
++    fn test_old_connection_close_keeps_newer_connection_live() {
++        let state = test_state();
++        let old = PresenceGuard::attach(Arc::clone(&state), "session-a", "device-1", "view");
++        let new = PresenceGuard::attach(Arc::clone(&state), "session-a", "device-1", "view");
++        assert!(old.is_some());
++        assert!(new.is_some());
++        let mut rx = state.event_tx.subscribe();
++        let before = state.presence.snapshot("session-a");
++        assert_eq!(before.len(), 1);
++
++        drop(old);
++        assert!(
++            take_event(&mut rx).is_none(),
++            "closing the old connection must not push while the new one lives"
++        );
++        assert_eq!(
++            state.presence.snapshot("session-a"),
++            before,
++            "the replacement connection's projected state must be untouched"
++        );
++
++        drop(new);
++        let leave_frame = take_event(&mut rx).expect("last close pushes one event");
++        let value: serde_json::Value = serde_json::from_str(&leave_frame).expect("json frame");
++        assert_eq!(value["event"], SESSION_PRESENCE_EVENT);
++        assert_eq!(value["payload"]["count"], 0);
++        assert!(
++            value["payload"]["participants"]
++                .as_array()
++                .expect("participants array")
++                .is_empty()
++        );
++        assert!(state.presence.snapshot("session-a").is_empty());
++        assert!(take_event(&mut rx).is_none());
++    }
++
++    #[test]
++    fn test_revoke_clears_every_connection_then_drops_are_noops() {
++        let state = test_state();
++        let share_a = PresenceGuard::attach(Arc::clone(&state), "session-a", "share-abc", "view");
++        let share_b = PresenceGuard::attach(Arc::clone(&state), "session-a", "share-abc", "view");
++        let other = PresenceGuard::attach(Arc::clone(&state), "session-a", "device-9", "control");
++        assert!(share_a.is_some());
++        assert!(share_b.is_some());
++        assert!(other.is_some());
++        let mut rx = state.event_tx.subscribe();
++
++        let after = state
++            .presence
++            .remove_share_client("session-a", "abc")
++            .expect("revoked client removed");
++        assert_eq!(after.len(), 1);
++        assert_eq!(after[0].alias, alias_for("device-9", "control"));
++        let revoke_frame = take_event(&mut rx).expect("revoke pushes one event");
++        let value: serde_json::Value = serde_json::from_str(&revoke_frame).expect("json frame");
++        assert_eq!(value["payload"]["count"], 1);
++        assert_eq!(value["payload"]["participants"][0]["role"], "control");
++
++        drop(share_a);
++        drop(share_b);
++        assert!(
++            take_event(&mut rx).is_none(),
++            "guards of an already-revoked client must not push again"
++        );
++        assert_eq!(state.presence.snapshot("session-a"), after);
++
++        drop(other);
++        let last_frame = take_event(&mut rx).expect("final close pushes one event");
++        let value: serde_json::Value = serde_json::from_str(&last_frame).expect("json frame");
++        assert_eq!(value["payload"]["count"], 0);
++        assert!(state.presence.snapshot("session-a").is_empty());
++    }
++}
+--- a/src-tauri/src/remote/server.rs	2026-10-02 00:20:00
++++ b/src-tauri/src/remote/server.rs	2026-10-02 06:46:50
+@@ -232,8 +232,8 @@
+ 
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+-struct SocketTicketRequest {
+-    target: String,
++pub(super) struct SocketTicketRequest {
++    pub(super) target: String,
+ }
+ 
+ #[derive(Serialize)]
+@@ -273,25 +273,63 @@
+ /// The bearer is presented in the `Authorization` header and never appears in a URL.
+ /// The returned ticket is what the browser puts in the socket query string, so a
+ /// leaked URL exposes only a one-shot credential that expires in seconds.
+-async fn issue_socket_ticket(
++pub(crate) async fn issue_socket_ticket(
+     State(state): State<Arc<RemoteGatewayState>>,
+     headers: HeaderMap,
+     Json(request): Json<SocketTicketRequest>,
+-) -> Result<Json<SocketTicketResponse>, (StatusCode, String)> {
++) -> Result<Response, (StatusCode, String)> {
+     let token = extract_token(&headers)
+         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".to_string()))?;
+-    // Authorize with the real device store, so a revoked or unknown bearer cannot
+-    // trade an unusable token for a working ticket.
+-    state.auth_manager.validate_token(&token).map_err(|_| {
+-        (
+-            StatusCode::UNAUTHORIZED,
+-            "Invalid or revoked token".to_string(),
+-        )
+-    })?;
++
++    let is_device_valid = state.auth_manager.validate_token(&token).is_ok();
++    let maybe_share = if !is_device_valid {
++        match state.share_manager.validate_share_token(&token) {
++            Ok(grant) => {
++                let rx = state
++                    .share_manager
++                    .revocation_receiver(&grant.share_id)
++                    .map_err(|_| (
++                        StatusCode::UNAUTHORIZED,
++                        "Invalid or revoked token".to_string(),
++                    ))?;
++                if *rx.borrow() {
++                    return Err((
++                        StatusCode::UNAUTHORIZED,
++                        "Invalid or revoked token".to_string(),
++                    ));
++                }
++                Some(grant)
++            }
++            Err(_) => {
++                return Err((
++                    StatusCode::UNAUTHORIZED,
++                    "Invalid or revoked token".to_string(),
++                ));
++            }
++        }
++    } else {
++        None
++    };
++
+     if !valid_socket_target(&request.target) {
+         return Err((StatusCode::BAD_REQUEST, "Unsupported socket target".into()));
+     }
+ 
++    if let Some(grant) = &maybe_share {
++        // The events stream mints for any live grant: its handler forwards only
++        // frames canonically targeted at that grant's own session, so the ticket
++        // grants no reach the grant did not already have.
++        let scoped_events = request.target == "/api/v1/events";
++        if !scoped_events
++            && !super::share_token::share_target_matches(&grant.session_id, &request.target)
++        {
++            return Err((
++                StatusCode::FORBIDDEN,
++                "Forbidden: share token is not authorized for this target".into(),
++            ));
++        }
++    }
++
+     let ticket = uuid::Uuid::new_v4().to_string();
+     let expires_at = unix_now_secs() + SOCKET_TICKET_TTL_SECS;
+     {
+@@ -306,7 +344,14 @@
+         }
+         tickets.insert(ticket.clone(), (token, request.target, expires_at));
+     }
+-    Ok(Json(SocketTicketResponse { ticket, expires_at }))
++    Ok((
++        [
++            (header::REFERRER_POLICY, "no-referrer"),
++            (header::CACHE_CONTROL, "no-store"),
++        ],
++        Json(SocketTicketResponse { ticket, expires_at }),
++    )
++        .into_response())
+ }
+ 
+ /// Redeems a ticket for the device token it was minted from, removing it so the
+@@ -1562,61 +1607,107 @@
+ ) -> Result<Response, (StatusCode, String)> {
+     let token = socket_credential(&state, &headers, &query, "/api/v1/events")
+         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+-    let device = state
+-        .auth_manager
+-        .validate_token(&token)
+-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+-    let mut revocation = state
+-        .auth_manager
+-        .device_revocation(&device.id)
+-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++    if let Ok(device) = state.auth_manager.validate_token(&token) {
++        let mut revocation = state
++            .auth_manager
++            .device_revocation(&device.id)
++            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+ 
+-    // Subscribe before reading the snapshot: a desktop focus change in between
+-    if device.access_scope == DeviceAccessScope::Machine {
+-        if device.permission != DevicePermission::Control {
+-            return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
++        // Subscribe before reading the snapshot: a desktop focus change in between
++        if device.access_scope == DeviceAccessScope::Machine {
++            if device.permission != DevicePermission::Control {
++                return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
++            }
++            let services = state.machine_services.as_ref().ok_or((
++                StatusCode::SERVICE_UNAVAILABLE,
++                "MACHINE_SERVICE_UNAVAILABLE".into(),
++            ))?;
++            let receiver = services.workspaces.machine_events.subscribe();
++            return Ok(ws.on_upgrade(move |socket| async move {
++                let _ = while_device_authorized(
++                    &mut revocation,
++                    super::machine_events::serve(socket, state, receiver),
++                )
++                .await;
++            }));
+         }
+-        let services = state.machine_services.as_ref().ok_or((
+-            StatusCode::SERVICE_UNAVAILABLE,
+-            "MACHINE_SERVICE_UNAVAILABLE".into(),
+-        ))?;
+-        let receiver = services.workspaces.machine_events.subscribe();
+-        return Ok(ws.on_upgrade(move |socket| async move {
++
++        // Subscribe before reading the snapshot: a desktop focus change in between
++        // is then queued as a follow-up event, never missed by this client.
++        let rx = state.event_tx.subscribe();
++        let active_selection = state.active_selection();
++        Ok(ws.on_upgrade(move |socket| async move {
+             let _ = while_device_authorized(
+                 &mut revocation,
+-                super::machine_events::serve(socket, state, receiver),
++                handle_events_socket(socket, rx, active_selection),
+             )
+             .await;
+-        }));
++        }))
++    } else if let Ok(grant) = state.share_manager.validate_share_token(&token) {
++        let mut revocation = state
++            .share_manager
++            .revocation_receiver(&grant.share_id)
++            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++        if *revocation.borrow() {
++            return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()));
++        }
++        // Subscribe before the upgrade so nothing between authorize and connect is
++        // missed. A share socket never reads the desktop selection snapshot: only
++        // `handle_share_events_socket`'s canonical-target filter may deliver a frame,
++        // so the global focus stream stays device-only.
++        let rx = state.event_tx.subscribe();
++        let grant_session_id = grant.session_id;
++        let deadline = Some(share_grant_deadline(grant.expires_at));
++        Ok(ws.on_upgrade(move |socket| async move {
++            let _ = while_authorized(
++                &mut revocation,
++                deadline,
++                handle_share_events_socket(socket, rx, grant_session_id),
++            )
++            .await;
++        }))
++    } else {
++        Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))
+     }
++}
+ 
+-    // Subscribe before reading the snapshot: a desktop focus change in between
+-    // is then queued as a follow-up event, never missed by this client.
+-    let rx = state.event_tx.subscribe();
+-    let active_selection = state.active_selection();
+-    Ok(ws.on_upgrade(move |socket| async move {
+-        let _ = while_device_authorized(
+-            &mut revocation,
+-            handle_events_socket(socket, rx, active_selection),
+-        )
+-        .await;
+-    }))
++pub(crate) fn share_grant_deadline(expires_at: u64) -> tokio::time::Instant {
++    let now = unix_now_secs();
++    let remaining = expires_at.saturating_sub(now);
++    tokio::time::Instant::now() + std::time::Duration::from_secs(remaining)
+ }
+ 
+-/// Biased cancellation also checks the retained watch value before the first
+-/// poll of work. The work future owns all socket pumps, so dropping it cancels
+-/// pending sends/input/attachments, rather than detaching spawned tasks.
+-async fn while_device_authorized<T>(
++/// Biased cancellation checks the retained watch value before the first poll of work
++/// and races an optional deadline (for expiring share grants). The work future owns all
++/// socket pumps, so dropping it cancels pending sends/input/attachments.
++pub(crate) async fn while_authorized<T>(
+     revocation: &mut tokio::sync::watch::Receiver<bool>,
++    deadline: Option<tokio::time::Instant>,
+     work: impl std::future::Future<Output = T>,
+ ) -> Option<T> {
+-    tokio::select! {
+-        biased;
+-        _ = revocation.wait_for(|revoked| *revoked) => None,
+-        result = work => Some(result),
++    if let Some(deadline) = deadline {
++        tokio::select! {
++            biased;
++            _ = revocation.wait_for(|revoked| *revoked) => None,
++            _ = tokio::time::sleep_until(deadline) => None,
++            result = work => Some(result),
++        }
++    } else {
++        tokio::select! {
++            biased;
++            _ = revocation.wait_for(|revoked| *revoked) => None,
++            result = work => Some(result),
++        }
+     }
+ }
+ 
++pub(crate) async fn while_device_authorized<T>(
++    revocation: &mut tokio::sync::watch::Receiver<bool>,
++    work: impl std::future::Future<Output = T>,
++) -> Option<T> {
++    while_authorized(revocation, None, work).await
++}
++
+ async fn handle_events_socket(
+     mut socket: WebSocket,
+     mut rx: broadcast::Receiver<String>,
+@@ -1639,6 +1730,58 @@
+     }
+ }
+ 
++/// Share sockets receive only events canonically targeted at their own session:
++/// the frame's `payload.sessionId` must pass the same canonical triad comparison
++/// that authorizes the terminal route, so a host-scoped grant can never read an
++/// identically named raw session of another host. Frames without a session target
++/// (the desktop selection/focus stream, workspace inventory) and unparseable
++/// frames are dropped by default, and the event TYPE must be on the explicit
++/// allowlist — presence only — regardless of target.
++fn share_event_forwardable(frame: &str, grant_session_id: &str) -> bool {
++    let Ok(value) = serde_json::from_str::<serde_json::Value>(frame) else {
++        return false;
++    };
++    // Explicit allowlist: no plan authorizes arbitrary sessionId-bearing event
++    // types for share sockets (superlogical-parity-plan names presence only),
++    // so every other type — selection, inventory, agent/transcript frames,
++    // unknown future events — is denied even when its payload names the
++    // grant's own canonical session.
++    if value.get("event").and_then(|event| event.as_str())
++        != Some(super::presence::SESSION_PRESENCE_EVENT)
++    {
++        return false;
++    }
++    let Some(target_session) = value
++        .get("payload")
++        .and_then(|payload| payload.get("sessionId"))
++        .and_then(|value| value.as_str())
++    else {
++        return false;
++    };
++    super::share_token::share_target_matches(
++        grant_session_id,
++        &format!("/api/v1/terminal/{target_session}"),
++    )
++}
++
++/// Events pump for a share grant: no initial snapshot, per-event canonical-target
++/// filtering, and the same biased revocation cancellation the device path uses —
++/// revocation wins over an in-flight event send and closes the socket.
++async fn handle_share_events_socket(
++    mut socket: WebSocket,
++    mut rx: broadcast::Receiver<String>,
++    grant_session_id: String,
++) {
++    while let Ok(msg) = rx.recv().await {
++        if !share_event_forwardable(&msg, &grant_session_id) {
++            continue;
++        }
++        if socket.send(Message::Text(msg.into())).await.is_err() {
++            break;
++        }
++    }
++}
++
+ async fn ws_terminal_handler(
+     ws: WebSocketUpgrade,
+     AxumPath(requested_session_id): AxumPath<String>,
+@@ -1649,7 +1792,9 @@
+     // Callers may address a session by its raw ID or by a host-scoped ID of the form
+     // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
+     // session backend itself only knows about raw session IDs, so unwrap the scope
+-    // (if present) before doing any lookups or routing.
++    // (if present) before backend lookups and routing; the share-grant comparison
++    // below instead checks the full canonical target so two hosts' identical raw
++    // session IDs cannot alias through stripping.
+     let token = socket_credential(
+         &state,
+         &headers,
+@@ -1662,14 +1807,48 @@
+         &format!("/api/v1/terminal/{requested_session_id}"),
+     )
+     .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+-    let device = state
+-        .auth_manager
+-        .validate_token(&token)
+-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+-    let mut revocation = state
+-        .auth_manager
+-        .device_revocation(&device.id)
+-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++    let (device, mut revocation, share_deadline, is_share) = if let Ok(dev) = state.auth_manager.validate_token(&token) {
++        let rev = state
++            .auth_manager
++            .device_revocation(&dev.id)
++            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++        (dev, rev, None, false)
++    } else if let Ok(grant) = state.share_manager.validate_share_token(&token) {
++        if !super::share_token::share_target_matches(
++            &grant.session_id,
++            &format!("/api/v1/terminal/{requested_session_id}"),
++        ) {
++            return Err((
++                StatusCode::FORBIDDEN,
++                "Forbidden: share token is scoped to a different session".into(),
++            ));
++        }
++        let rev = state
++            .share_manager
++            .revocation_receiver(&grant.share_id)
++            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked share token".into()))?;
++        if *rev.borrow() {
++            return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked share token".into()));
++        }
++        let deadline = Some(share_grant_deadline(grant.expires_at));
++        let dev = DeviceInfo {
++            id: format!("share-{}", grant.client_id),
++            name: format!("Share ({})", grant.permission.as_str()),
++            permission: match grant.permission {
++                crate::remote::share_token::SharePermission::Control => DevicePermission::Control,
++                crate::remote::share_token::SharePermission::View => DevicePermission::View,
++            },
++            access_scope: DeviceAccessScope::Mirror,
++            created_at: grant.created_at,
++            last_seen_at: unix_now_secs(),
++            revoked: false,
++            installation_id: None,
++            attach_public_key: None,
++        };
++        (dev, rev, deadline, true)
++    } else {
++        return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()));
++    };
+     if device.access_scope == DeviceAccessScope::Machine {
+         if let Some(peer) = state.machine_services.as_ref().and_then(|services| {
+             services
+@@ -1697,6 +1876,10 @@
+         )
+         .await;
+     }
++    // Presence and events key on the CANONICAL requested id (host scope kept):
++    // raw-keying here collapses `host-a::s1` and `host-b::s1` into one registry
++    // bucket — the cross-host alias. The unwrap below stays backend-only.
++    let presence_session_id = requested_session_id.clone();
+     let session_id = parse_host_scoped_session_id(&requested_session_id)
+         .map(|(_, id)| id.to_string())
+         .unwrap_or(requested_session_id);
+@@ -1751,19 +1934,20 @@
+             ));
+         }
+         if let Some(declared_active_id) = active.session_id.as_deref() {
+-            if declared_active_id != session_id.as_str() {
++            if declared_active_id != session_id.as_str() && !is_share {
+                 return Err((
+                     StatusCode::FORBIDDEN,
+                     "Forbidden: session is not the active desktop session".into(),
+                 ));
+             }
+         }
+-    } else if !is_session_valid
+-        || state
+-            .terminal_service
+-            .remote()
+-            .details(&session_id)
+-            .is_some()
++    } else if (!is_share && !is_session_valid)
++        || (!is_share
++            && state
++                .terminal_service
++                .remote()
++                .details(&session_id)
++                .is_some())
+     {
+         // Local headless sessions remain attachable, but an SSH terminal must
+         // first be exposed through the desktop selection before mirror access.
+@@ -1773,8 +1957,15 @@
+         ));
+     }
+ 
++    if is_share && !is_session_valid {
++        return Err((
++            StatusCode::NOT_FOUND,
++            "Session not found".into(),
++        ));
++    }
++
+     let mut initial_resized = false;
+-    let attachment = while_device_authorized(&mut revocation, async {
++    let attachment = while_authorized(&mut revocation, share_deadline, async {
+         if let Some((cols, rows)) =
+             requested_geometry.filter(|_| device.permission == DevicePermission::Control)
+         {
+@@ -1798,10 +1989,24 @@
+     .ok_or((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?
+     .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
+ 
++    let presence_client_id = device.id.clone();
++    let presence_role: &'static str = if device.permission == DevicePermission::Control {
++        "control"
++    } else {
++        "view"
++    };
++
+     Ok(ws.on_upgrade(move |socket| async move {
++        let _presence = super::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            &presence_session_id,
++            &presence_client_id,
++            presence_role,
++        );
+         let resized = Arc::new(std::sync::atomic::AtomicBool::new(initial_resized));
+-        let _ = while_device_authorized(
++        let _ = while_authorized(
+             &mut revocation,
++            share_deadline,
+             handle_terminal_socket(
+                 socket,
+                 session_id.clone(),
+@@ -4496,6 +4701,19 @@
+     {
+         writer_task.abort();
+     }
++}
++
++async fn serve_join_page(uri: axum::http::Uri) -> Response {
++    let mut response = serve_static_or_index(uri).await;
++    response.headers_mut().insert(
++        header::REFERRER_POLICY,
++        header::HeaderValue::from_static("no-referrer"),
++    );
++    response.headers_mut().insert(
++        header::CACHE_CONTROL,
++        header::HeaderValue::from_static("no-store"),
++    );
++    response
+ }
+ 
+ async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+@@ -4505,7 +4723,19 @@
+     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+         return StatusCode::METHOD_NOT_ALLOWED.into_response();
+     }
+-    serve_static_or_index(uri).await
++    let is_join = uri.path() == "/join" || uri.path().starts_with("/join/");
++    let mut response = serve_static_or_index(uri).await;
++    if is_join {
++        response.headers_mut().insert(
++            header::REFERRER_POLICY,
++            header::HeaderValue::from_static("no-referrer"),
++        );
++        response.headers_mut().insert(
++            header::CACHE_CONTROL,
++            header::HeaderValue::from_static("no-store"),
++        );
++    }
++    response
+ }
+ 
+ async fn remote_method_not_allowed() -> Response {
+@@ -4546,6 +4776,10 @@
+                 )),
+         )
+         .route(
++            "/api/v1/sessions/{sessionId}/presence",
++            get(super::presence::get_session_presence_handler),
++        )
++        .route(
+             "/api/v1/workspace/state",
+             get(get_workspace_state),
+         )
+@@ -4601,6 +4835,31 @@
+         .route("/api/v1/devices", get(list_devices))
+         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
+         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
++        .route(
++            "/api/v1/shares",
++            post(super::share_token::create_share_handler)
++                .get(super::share_token::list_shares_handler)
++                .layer(axum::extract::DefaultBodyLimit::max(
++                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
++                )),
++        )
++        .route(
++            "/api/v1/shares/exchange",
++            post(super::share_token::exchange_share_handler).layer(
++                axum::extract::DefaultBodyLimit::max(
++                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
++                ),
++            ),
++        )
++        .route(
++            "/api/v1/shares/{shareId}",
++            get(super::share_token::get_share_handler),
++        )
++        .route(
++            "/api/v1/shares/{shareId}/revoke",
++            post(super::share_token::revoke_share_handler),
++        )
++        .route("/join", get(serve_join_page))
+         .route("/api/v1/events", get(ws_events_handler))
+         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
+         .route("/api/v1/browser/sessions", get(list_browser_sessions))
+@@ -5684,8 +5943,411 @@
+             .unwrap();
+         let json: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+         json["ticket"].as_str().expect("ticket").to_string()
++    }
++
++    /// A share grant subscribes to `/api/v1/events` through the real ticket route
++    /// but receives only frames canonically targeted at its own session: the
++    /// desktop selection stream and another grant's presence never cross the
++    /// grant boundary, no initial snapshot is sent, and revocation closes the
++    /// socket through the biased cancellation branch.
++    /// Presence payloads carry the CANONICAL requested id (host scope kept — the
++    /// same string the grant was minted with), so a scoped grant receives its OWN
++    /// session's frames instead of having them canonical-rejected as a raw/scoped
++    /// mismatch, while other-host, bare and non-session frames stay denied.
++    #[test]
++    fn test_share_event_forward_accepts_canonical_own_session_payload() {
++        let grant = "host-a::session-a";
++        let own = r#"{"event":"session_presence_changed","payload":{"sessionId":"host-a::session-a","participants":[{"clientId":"c1","alias":"me","role":"view","joinedAtMs":1}],"count":1}}"#;
++        assert!(share_event_forwardable(own, grant));
++
++        let other_host = r#"{"event":"session_presence_changed","payload":{"sessionId":"host-b::session-a","participants":[],"count":0}}"#;
++        assert!(
++            !share_event_forwardable(other_host, grant),
++            "another host's identically named session must never forward"
++        );
++
++        let bare = r#"{"event":"session_presence_changed","payload":{"sessionId":"session-a","participants":[],"count":0}}"#;
++        assert!(
++            !share_event_forwardable(bare, grant),
++            "bare spelling of a scoped session is a scope mismatch"
++        );
++
++        let selection = r#"{"event":"workspace_selection_changed","payload":{"workspaceId":"ws-1"}}"#;
++        assert!(
++            !share_event_forwardable(selection, grant),
++            "frames without a session target are denied by default"
++        );
++
++        // A raw-form grant keeps receiving its own raw payload.
++        let raw_own = r#"{"event":"session_presence_changed","payload":{"sessionId":"session-b","participants":[],"count":0}}"#;
++        assert!(share_event_forwardable(raw_own, "session-b"));
++
++        // Event-type allowlist: no plan authorizes arbitrary sessionId event
++        // types, so a foreign type naming the grant's own canonical session is
++        // denied before any target comparison.
++        let foreign_type =
++            r#"{"event":"session_agent_notice","payload":{"sessionId":"host-a::session-a","note":"x"}}"#;
++        assert!(!share_event_forwardable(foreign_type, "host-a::session-a"));
+     }
+ 
++    #[tokio::test]
++    async fn test_share_events_stream_scoped_and_closes_on_revocation() {
++        use futures_util::StreamExt;
++
++        let state = Arc::new(RemoteGatewayState::new(
++            Arc::new(TerminalService::default()),
++            WorkspaceRegistry::new(),
++        ));
++        let (_, code_a, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "session-a",
++                crate::remote::share_token::SharePermission::View,
++                None,
++            )
++            .unwrap();
++        let grant_a = state.share_manager.exchange_code(&code_a, None).unwrap();
++        let (_, code_b, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "session-b",
++                crate::remote::share_token::SharePermission::View,
++                None,
++            )
++            .unwrap();
++        let _grant_b = state.share_manager.exchange_code(&code_b, None).unwrap();
++
++        // Desktop focus exists before the share socket connects: a device socket
++        // would receive this selection as its initial snapshot frame.
++        state.set_active_selection(RemoteActiveDesktopSelection {
++            workspace_id: Some("ws-desktop".into()),
++            worktree_slug: Some("main".into()),
++            ..Default::default()
++        });
++
++        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
++        let client = reqwest::Client::builder().no_proxy().build().unwrap();
++        let ticket_resp = client
++            .post(format!("http://{addr}/api/v1/socket-ticket"))
++            .header("Authorization", format!("Bearer {}", grant_a.share_token))
++            .header("Content-Type", "application/json")
++            .body(serde_json::json!({ "target": "/api/v1/events" }).to_string())
++            .send()
++            .await
++            .unwrap()
++            .error_for_status()
++            .unwrap();
++        let ticket_json: serde_json::Value =
++            serde_json::from_str(&ticket_resp.text().await.unwrap()).unwrap();
++        let ticket = ticket_json["ticket"].as_str().expect("ticket").to_string();
++
++        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
++            "ws://{addr}/api/v1/events?ticket={ticket}"
++        ))
++        .await
++        .unwrap();
++
++        // FIFO probe: global desktop event first, then grant B's presence, then
++        // grant A's presence. Anything leaked would arrive before A's own frame.
++        state.emit_desktop_event(
++            REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
++            serde_json::json!({ "workspaceId": "ws-desktop" }),
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "session-b",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "dead01".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_000,
++            }],
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "session-a",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "beef01".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_001,
++            }],
++        );
++
++        let first = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
++            .await
++            .expect("first frame in time")
++            .expect("socket still open")
++            .expect("valid frame");
++        let first_text = match first {
++            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
++            other => panic!("expected the grant's own presence frame, got {other:?}"),
++        };
++        let first_json: serde_json::Value = serde_json::from_str(&first_text).expect("json frame");
++        assert_eq!(
++            first_json["event"],
++            crate::remote::presence::SESSION_PRESENCE_EVENT
++        );
++        assert_eq!(first_json["payload"]["sessionId"], "session-a");
++        assert_eq!(first_json["payload"]["count"].as_u64(), Some(1));
++
++        // The stream stays live for the grant's own session.
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "session-a",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "beef01".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_002,
++            }],
++        );
++        let second = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
++            .await
++            .expect("second frame in time")
++            .expect("socket still open")
++            .expect("valid frame");
++        let second_text = match second {
++            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
++            other => panic!("expected a second presence frame, got {other:?}"),
++        };
++        let second_json: serde_json::Value =
++            serde_json::from_str(&second_text).expect("json frame");
++        assert_eq!(
++            second_json["event"],
++            crate::remote::presence::SESSION_PRESENCE_EVENT
++        );
++        assert_eq!(second_json["payload"]["sessionId"], "session-a");
++
++        // Revocation closes the share socket through the biased cancellation branch.
++        state
++            .share_manager
++            .revoke_share(&grant_a.share_id)
++            .expect("revoke");
++        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
++            loop {
++                match ws.next().await {
++                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
++                    | Some(Err(_))
++                    | None => break,
++                    Some(Ok(_)) => continue,
++                }
++            }
++        })
++        .await;
++        assert!(
++            closed.is_ok(),
++            "revocation must close the share events socket"
++        );
++
++        let _ = stop_tx.send(());
++        let _ = task.await;
++    }
++
++    /// Scoped producer-path proof: a `host-a::s1` share socket receives its own
++    /// joins produced by the REAL `PresenceGuard::attach` (canonical key), while
++    /// host-b::s1, bare s1 and desktop-focus frames are never delivered; the
++    /// production revoke route then closes the socket and clears only the
++    /// canonical host-a bucket, leaving the host-b bucket (same raw name) intact.
++    #[tokio::test]
++    async fn test_share_events_stream_scoped_producer_path_and_revocation() {
++        let state = Arc::new(RemoteGatewayState::new(
++            Arc::new(TerminalService::default()),
++            WorkspaceRegistry::new(),
++        ));
++
++        // Owner (Machine + Control) device for the production revoke route.
++        let owner_code = state
++            .auth_manager
++            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
++            .unwrap();
++        let (owner_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&owner_code, "owner-device")
++            .unwrap();
++
++        let (share_id, code, _, _) = state
++            .share_manager
++            .create_exchange_code(
++                "host-a::s1",
++                crate::remote::share_token::SharePermission::View,
++                Some(600),
++            )
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&code, None).unwrap();
++
++        // Host-b sibling with the same raw session name: must never be touched.
++        let _host_b_sibling = crate::remote::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            "host-b::s1",
++            "host-b-device",
++            "control",
++        )
++        .expect("host-b admission");
++
++        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
++        let client = reqwest::Client::builder().no_proxy().build().unwrap();
++        let ticket_resp = client
++            .post(format!("http://{addr}/api/v1/socket-ticket"))
++            .header("Authorization", format!("Bearer {}", grant.share_token))
++            .header("Content-Type", "application/json")
++            .body(serde_json::json!({ "target": "/api/v1/events" }).to_string())
++            .send()
++            .await
++            .unwrap()
++            .error_for_status()
++            .unwrap();
++        let ticket_json: serde_json::Value =
++            serde_json::from_str(&ticket_resp.text().await.unwrap()).unwrap();
++        let ticket = ticket_json["ticket"].as_str().expect("ticket").to_string();
++
++        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
++            "ws://{addr}/api/v1/events?ticket={ticket}"
++        ))
++        .await
++        .unwrap();
++
++        // Noise after subscribe: focus, host-b presence, bare s1 presence — none
++        // of these may precede the grant's own frame.
++        state.emit_desktop_event(
++            REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
++            serde_json::json!({ "workspaceId": "ws-desktop" }),
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "host-b::s1",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "dead01".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_000,
++            }],
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "s1",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "dead02".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_001,
++            }],
++        );
++
++        // The REAL producer: the grant's own share client attaches under the
++        // canonical `host-a::s1` key exactly as the terminal ws upgrade does.
++        let holder = crate::remote::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            "host-a::s1",
++            &format!("share-{}", grant.client_id),
++            "view",
++        )
++        .expect("host-a share admission");
++
++        let first = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
++            .await
++            .expect("first frame in time")
++            .expect("socket still open")
++            .expect("valid frame");
++        let first_text = match first {
++            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
++            other => panic!("expected the scoped grant's own join frame, got {other:?}"),
++        };
++        let first_json: serde_json::Value = serde_json::from_str(&first_text).expect("json frame");
++        assert_eq!(
++            first_json["event"],
++            crate::remote::presence::SESSION_PRESENCE_EVENT
++        );
++        assert_eq!(first_json["payload"]["sessionId"], "host-a::s1");
++        assert_eq!(first_json["payload"]["count"].as_u64(), Some(1));
++
++        // The stream stays live through more noise: the next frame is still own.
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "host-b::s1",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "dead03".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_002,
++            }],
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "s1",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "dead04".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_003,
++            }],
++        );
++        crate::remote::presence::broadcast_presence(
++            &state,
++            "host-a::s1",
++            vec![crate::remote::presence::PresenceParticipant {
++                alias: "beef02".into(),
++                role: "view".into(),
++                connected_at: 1_700_000_004,
++            }],
++        );
++        let second = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
++            .await
++            .expect("second frame in time")
++            .expect("socket still open")
++            .expect("valid frame");
++        let second_text = match second {
++            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
++            other => panic!("expected the grant's own live frame, got {other:?}"),
++        };
++        let second_json: serde_json::Value =
++            serde_json::from_str(&second_text).expect("json frame");
++        assert_eq!(second_json["payload"]["sessionId"], "host-a::s1");
++
++        // Production revoke route: closes the socket and performs canonical
++        // registry cleanup (removal of `share-{client_id}` from `host-a::s1`).
++        let mut owner_headers = HeaderMap::new();
++        owner_headers.insert(
++            header::AUTHORIZATION,
++            format!("Bearer {owner_token}").parse().unwrap(),
++        );
++        let revoke = crate::remote::share_token::revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_id.clone()),
++            owner_headers,
++        )
++        .await
++        .unwrap();
++        assert_eq!(revoke.status(), StatusCode::OK);
++
++        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
++            loop {
++                match ws.next().await {
++                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
++                    | Some(Err(_))
++                    | None => break,
++                    Some(Ok(_)) => continue,
++                }
++            }
++        })
++        .await;
++        assert!(
++            closed.is_ok(),
++            "revocation must close the scoped share events socket"
++        );
++
++        // Registry cleanup: the canonical host-a bucket lost only the grant's
++        // share client; the host-b bucket with the identical raw name is intact
++        // (no cross-host collateral). `holder` drops after these assertions and
++        // its leave is a no-op on the already-cleared bucket.
++        assert!(
++            state.presence.snapshot("host-a::s1").is_empty(),
++            "revoke cleared the canonical host-a bucket"
++        );
++        assert_eq!(
++            state.presence.snapshot("host-b::s1").len(),
++            1,
++            "host-b sibling intact — no cross-host collateral"
++        );
++        drop(holder);
++
++        let _ = stop_tx.send(());
++        let _ = task.await;
++    }
++
+     /// R4-3: the desktop scope is derived server-side from the authenticated
+     /// connection's authoritative selection. A blank or forged query scope may never
+     /// widen the visible inventory, identify may not return a hidden session, and
+@@ -8170,5 +8832,220 @@
+         let _ = stop_tx.send(());
+         let _ = server_task.await;
+         let _ = std::fs::remove_dir_all(&home);
++    }
++
++    #[tokio::test]
++    async fn test_sharing_auth_route_matrix() {
++        let root = tempfile::tempdir().unwrap();
++        let server = crate::daemon::server::DaemonServer::new_with_paths(
++            Some(root.path().join("data/config")),
++            Some(root.path().join("data/auth")),
++        );
++        let state = server.remote_state().clone();
++        // Owner-authority surface: share issue/revoke/list/read now require
++        // Machine scope, so the control fixture pairs as owner-scoped.
++        let control_pin = state
++            .auth_manager
++            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
++            .unwrap();
++        let (control_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&control_pin, "test-control-device")
++            .unwrap();
++
++        let view_pin = state
++            .auth_manager
++            .create_scoped_pairing_code(DevicePermission::View, DeviceAccessScope::Mirror)
++            .unwrap();
++        let (view_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&view_pin, "test-view-device")
++            .unwrap();
++
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        let router = create_remote_router(Arc::clone(&state));
++        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
++        let server_task = tokio::spawn(async move {
++            axum::serve(listener, router)
++                .with_graceful_shutdown(async {
++                    let _ = stop_rx.await;
++                })
++                .await
++                .unwrap();
++        });
++
++        let client = reqwest::Client::builder().no_proxy().build().unwrap();
++
++        let view_issue_resp = client
++            .post(format!("http://{addr}/api/v1/shares"))
++            .header("Authorization", format!("Bearer {view_token}"))
++            .json(&serde_json::json!({
++                "sessionId": "test-session-1",
++                "permission": "view"
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(view_issue_resp.status(), StatusCode::FORBIDDEN);
++
++        let (session_id, _shell_rx) = state
++            .terminal_service
++            .spawn_shell(80, 24)
++            .expect("spawn_shell registers an authoritative PTY session for the share grant");
++        let issue_resp = client
++            .post(format!("http://{addr}/api/v1/shares"))
++            .header("Authorization", format!("Bearer {control_token}"))
++            .json(&serde_json::json!({
++                "sessionId": session_id.as_str(),
++                "permission": "view",
++                "ttlSeconds": 3600
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(issue_resp.status(), StatusCode::OK);
++        assert_eq!(
++            issue_resp.headers().get("referrer-policy").unwrap(),
++            "no-referrer"
++        );
++        assert_eq!(
++            issue_resp.headers().get("cache-control").unwrap(),
++            "no-store"
++        );
++
++        let issue_json: serde_json::Value = issue_resp.json().await.unwrap();
++        let share_id = issue_json["shareId"].as_str().unwrap().to_string();
++        let exchange_code = issue_json["exchangeCode"].as_str().unwrap().to_string();
++        assert_eq!(issue_json["sessionId"].as_str(), Some(session_id.as_str()));
++        assert_eq!(issue_json["permission"], "view");
++
++        let get_resp = client
++            .get(format!("http://{addr}/api/v1/shares/{share_id}"))
++            .header("Authorization", format!("Bearer {control_token}"))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(get_resp.status(), StatusCode::OK);
++        assert_eq!(
++            get_resp.headers().get("referrer-policy").unwrap(),
++            "no-referrer"
++        );
++
++        let exchange_resp = client
++            .post(format!("http://{addr}/api/v1/shares/exchange"))
++            .json(&serde_json::json!({
++                "code": exchange_code,
++                "clientName": "viewer-bob"
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(exchange_resp.status(), StatusCode::OK);
++        assert_eq!(
++            exchange_resp.headers().get("referrer-policy").unwrap(),
++            "no-referrer"
++        );
++        let exchange_json: serde_json::Value = exchange_resp.json().await.unwrap();
++        let share_token = exchange_json["shareToken"].as_str().unwrap().to_string();
++        let client_id = exchange_json["clientId"].as_str().unwrap().to_string();
++        assert!(!share_token.is_empty());
++        assert!(!client_id.is_empty());
++
++        let reuse_resp = client
++            .post(format!("http://{addr}/api/v1/shares/exchange"))
++            .json(&serde_json::json!({
++                "code": exchange_code
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(reuse_resp.status(), StatusCode::GONE);
++
++        let forged_ticket_resp = client
++            .post(format!("http://{addr}/api/v1/socket-ticket"))
++            .header("Authorization", format!("Bearer {share_token}"))
++            .json(&serde_json::json!({
++                "target": "/api/v1/terminal/forged-session-2"
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(forged_ticket_resp.status(), StatusCode::FORBIDDEN);
++
++        let valid_ticket_resp = client
++            .post(format!("http://{addr}/api/v1/socket-ticket"))
++            .header("Authorization", format!("Bearer {share_token}"))
++            .json(&serde_json::json!({
++                "target": format!("/api/v1/terminal/{session_id}")
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(valid_ticket_resp.status(), StatusCode::OK);
++        assert_eq!(
++            valid_ticket_resp.headers().get("referrer-policy").unwrap(),
++            "no-referrer"
++        );
++
++        let revoke_resp = client
++            .post(format!("http://{addr}/api/v1/shares/{share_id}/revoke"))
++            .header("Authorization", format!("Bearer {control_token}"))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(revoke_resp.status(), StatusCode::OK);
++
++        let after_revoke_resp = client
++            .post(format!("http://{addr}/api/v1/socket-ticket"))
++            .header("Authorization", format!("Bearer {share_token}"))
++            .json(&serde_json::json!({
++                "target": format!("/api/v1/terminal/{session_id}")
++            }))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(after_revoke_resp.status(), StatusCode::UNAUTHORIZED);
++
++        let (_, code_for_concurrency, _, _) = state
++            .share_manager
++            .create_exchange_code(session_id.as_str(), crate::remote::share_token::SharePermission::View, None)
++            .unwrap();
++
++        let mut handles = Vec::new();
++        for i in 0..10 {
++            let client_c = client.clone();
++            let url = format!("http://{addr}/api/v1/shares/exchange");
++            let c = code_for_concurrency.clone();
++            handles.push(tokio::spawn(async move {
++                client_c
++                    .post(url)
++                    .json(&serde_json::json!({
++                        "code": c,
++                        "clientName": format!("client-{i}")
++                    }))
++                    .send()
++                    .await
++                    .unwrap()
++                    .status()
++            }));
++        }
++
++        let mut ok_count = 0;
++        let mut gone_count = 0;
++        for h in handles {
++            let status = h.await.unwrap();
++            if status == StatusCode::OK {
++                ok_count += 1;
++            } else if status == StatusCode::GONE {
++                gone_count += 1;
++            }
++        }
++        assert_eq!(ok_count, 1);
++        assert_eq!(gone_count, 9);
++
++        let _ = state.terminal_service.close_session(&session_id).await;
++        let _ = stop_tx.send(());
++        let _ = server_task.await;
+     }
+ }
+--- /dev/null	2026-10-02 06:47:28
++++ b/src-tauri/src/remote/share_token.rs	2026-10-02 06:47:21
+@@ -0,0 +1,2270 @@
++use axum::{
++    extract::{Path as AxumPath, Query, State},
++    http::{header, HeaderMap, StatusCode},
++    response::{IntoResponse, Response},
++    Json,
++};
++use parking_lot::Mutex;
++use rand::RngCore;
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use std::collections::{HashMap, HashSet};
++use std::sync::Arc;
++use tokio::sync::watch;
++
++pub const DEFAULT_EXCHANGE_CODE_TTL_SECS: u64 = 60;
++pub const DEFAULT_SHARE_GRANT_TTL_SECS: u64 = 3600;
++pub const MIN_SHARE_GRANT_TTL_SECS: u64 = 1;
++pub const MAX_SHARE_GRANT_TTL_SECS: u64 = 86400 * 30; // 30 days
++pub const MAX_PENDING_EXCHANGE_CODES: usize = 512;
++pub const MAX_ACTIVE_SHARE_GRANTS: usize = 1024;
++pub const MAX_REVOCATION_REGISTRY_ENTRIES: usize = 2048;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub enum SharePermission {
++    View,
++    Control,
++}
++
++impl SharePermission {
++    pub fn as_str(&self) -> &'static str {
++        match self {
++            Self::View => "view",
++            Self::Control => "control",
++        }
++    }
++
++    pub fn can_write(&self) -> bool {
++        matches!(self, Self::Control)
++    }
++
++    pub fn can_resize(&self) -> bool {
++        matches!(self, Self::Control)
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ShareError {
++    InvalidOrExpiredCode,
++    ShareNotFound,
++    RevokedToken,
++    ExpiredToken,
++    Unauthorized,
++    ForbiddenPermission,
++    SessionMismatch,
++    RateLimited,
++}
++
++impl std::fmt::Display for ShareError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::InvalidOrExpiredCode => write!(f, "Invalid or expired exchange code"),
++            Self::ShareNotFound => write!(f, "Share grant not found"),
++            Self::RevokedToken => write!(f, "Share token has been revoked"),
++            Self::ExpiredToken => write!(f, "Share token has expired"),
++            Self::Unauthorized => write!(f, "Unauthorized access"),
++            Self::ForbiddenPermission => write!(f, "Insufficient permission for share operation"),
++            Self::SessionMismatch => write!(f, "Target session mismatch"),
++            Self::RateLimited => write!(f, "Rate limit exceeded for share operations"),
++        }
++    }
++}
++
++impl std::error::Error for ShareError {}
++
++pub fn generate_csprng_token_128() -> String {
++    let mut bytes = [0u8; 16];
++    rand::rngs::OsRng.fill_bytes(&mut bytes);
++    let mut hex = String::with_capacity(32);
++    for b in bytes {
++        use std::fmt::Write;
++        let _ = write!(hex, "{:02x}", b);
++    }
++    hex
++}
++
++pub fn hash_token_sha256(token: &str) -> [u8; 32] {
++    let mut hasher = Sha256::new();
++    hasher.update(token.as_bytes());
++    hasher.finalize().into()
++}
++
++pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
++    let mut diff = 0u8;
++    for (x, y) in a.iter().zip(b.iter()) {
++        diff |= x ^ y;
++    }
++    diff == 0
++}
++
++fn unix_now_secs() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs())
++        .unwrap_or(0)
++}
++
++#[derive(Clone)]
++struct PendingExchange {
++    _code_hash: [u8; 32],
++    share_id: String,
++    session_id: String,
++    permission: SharePermission,
++    created_at: u64,
++    expires_at: u64,
++    grant_expires_at: u64,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ActiveShareGrant {
++    #[serde(skip)]
++    pub token_hash: [u8; 32],
++    pub share_id: String,
++    pub session_id: String,
++    pub permission: SharePermission,
++    pub created_at: u64,
++    pub expires_at: u64,
++    pub client_id: String,
++    pub client_name: Option<String>,
++    pub revoked: bool,
++}
++
++#[derive(Debug, Clone)]
++pub struct ExchangedShareGrant {
++    pub share_token: String,
++    pub share_id: String,
++    pub session_id: String,
++    pub permission: SharePermission,
++    pub expires_at: u64,
++    pub client_id: String,
++}
++
++struct ShareAuthorityState {
++    pending_codes: HashMap<[u8; 32], PendingExchange>,
++    active_grants: HashMap<[u8; 32], ActiveShareGrant>,
++    revoked_share_ids: HashSet<String>,
++    revocation_channels: HashMap<String, watch::Sender<bool>>,
++}
++
++impl ShareAuthorityState {
++    fn new() -> Self {
++        Self {
++            pending_codes: HashMap::new(),
++            active_grants: HashMap::new(),
++            revoked_share_ids: HashSet::new(),
++            revocation_channels: HashMap::new(),
++        }
++    }
++
++    fn prune_expired(&mut self, now: u64) {
++        self.pending_codes.retain(|_, p| p.expires_at > now);
++
++        for grant in self.active_grants.values() {
++            if grant.revoked || now >= grant.expires_at {
++                self.revoked_share_ids.insert(grant.share_id.clone());
++                if let Some(tx) = self.revocation_channels.get_mut(&grant.share_id) {
++                    let _ = tx.send_replace(true);
++                }
++            }
++        }
++        self.active_grants.retain(|_, g| !g.revoked && g.expires_at > now);
++
++        let mut live_shares: HashSet<&str> = HashSet::new();
++        for p in self.pending_codes.values() {
++            live_shares.insert(&p.share_id);
++        }
++        for g in self.active_grants.values() {
++            live_shares.insert(&g.share_id);
++        }
++
++        // Bounded revocation registry: keep channels and tombstones only for live shares or bounded window
++        if self.revocation_channels.len() > MAX_REVOCATION_REGISTRY_ENTRIES {
++            self.revocation_channels.retain(|id, _| live_shares.contains(id.as_str()));
++        }
++        if self.revoked_share_ids.len() > MAX_REVOCATION_REGISTRY_ENTRIES {
++            self.revoked_share_ids.retain(|id| live_shares.contains(id.as_str()));
++        }
++    }
++}
++
++pub struct ShareManager {
++    state: Mutex<ShareAuthorityState>,
++}
++
++impl Default for ShareManager {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl ShareManager {
++    pub fn new() -> Self {
++        Self {
++            state: Mutex::new(ShareAuthorityState::new()),
++        }
++    }
++
++    pub fn create_exchange_code(
++        &self,
++        session_id: &str,
++        permission: SharePermission,
++        ttl_seconds: Option<u64>,
++    ) -> Result<(String, String, u64, u64), ShareError> {
++        let code = generate_csprng_token_128();
++        let share_id = uuid::Uuid::new_v4().to_string();
++        let now = unix_now_secs();
++        let code_expires_at = now.saturating_add(DEFAULT_EXCHANGE_CODE_TTL_SECS);
++
++        // Checked, clamped TTL preventing arithmetic overflow
++        let grant_ttl = ttl_seconds
++            .unwrap_or(DEFAULT_SHARE_GRANT_TTL_SECS)
++            .clamp(MIN_SHARE_GRANT_TTL_SECS, MAX_SHARE_GRANT_TTL_SECS);
++        let grant_expires_at = now.saturating_add(grant_ttl);
++
++        let code_hash = hash_token_sha256(&code);
++        let pending = PendingExchange {
++            _code_hash: code_hash,
++            share_id: share_id.clone(),
++            session_id: session_id.to_string(),
++            permission,
++            created_at: now,
++            expires_at: code_expires_at,
++            grant_expires_at,
++        };
++
++        {
++            let mut state = self.state.lock();
++            state.prune_expired(now);
++            if state.pending_codes.len() >= MAX_PENDING_EXCHANGE_CODES {
++                return Err(ShareError::RateLimited);
++            }
++            state.pending_codes.insert(code_hash, pending);
++            state.revocation_channels.entry(share_id.clone()).or_insert_with(|| {
++                let (tx, _) = watch::channel(false);
++                tx
++            });
++        }
++
++        Ok((share_id, code, code_expires_at, grant_expires_at))
++    }
++
++    pub fn exchange_code(
++        &self,
++        code: &str,
++        client_name: Option<String>,
++    ) -> Result<ExchangedShareGrant, ShareError> {
++        let code_hash = hash_token_sha256(code);
++        let share_token = generate_csprng_token_128();
++        let token_hash = hash_token_sha256(&share_token);
++        let client_id = uuid::Uuid::new_v4().to_string();
++        let now = unix_now_secs();
++
++        // Single authority transaction: atomicity and tombstone check prevents resurrection races
++        let mut state = self.state.lock();
++        state.prune_expired(now);
++
++        let pending = state
++            .pending_codes
++            .remove(&code_hash)
++            .ok_or(ShareError::InvalidOrExpiredCode)?;
++
++        // Expiry >= boundary consistent enforcement
++        if now >= pending.expires_at {
++            return Err(ShareError::InvalidOrExpiredCode);
++        }
++
++        // Tombstone check: if share was revoked while pending, reject immediately
++        if state.revoked_share_ids.contains(&pending.share_id) {
++            return Err(ShareError::RevokedToken);
++        }
++
++        if state.active_grants.len() >= MAX_ACTIVE_SHARE_GRANTS {
++            return Err(ShareError::RateLimited);
++        }
++
++        let expires_at = pending.grant_expires_at;
++        if now >= expires_at {
++            return Err(ShareError::ExpiredToken);
++        }
++
++        let grant = ActiveShareGrant {
++            token_hash,
++            share_id: pending.share_id.clone(),
++            session_id: pending.session_id.clone(),
++            permission: pending.permission,
++            created_at: pending.created_at,
++            expires_at,
++            client_id: client_id.clone(),
++            client_name,
++            revoked: false,
++        };
++
++        state.active_grants.insert(token_hash, grant);
++
++        Ok(ExchangedShareGrant {
++            share_token,
++            share_id: pending.share_id,
++            session_id: pending.session_id,
++            permission: pending.permission,
++            expires_at,
++            client_id,
++        })
++    }
++
++    pub fn validate_share_token(&self, token: &str) -> Result<ActiveShareGrant, ShareError> {
++        let candidate_hash = hash_token_sha256(token);
++        let now = unix_now_secs();
++
++        let state = self.state.lock();
++        for (stored_hash, grant) in state.active_grants.iter() {
++            if constant_time_eq_32(stored_hash, &candidate_hash) {
++                if grant.revoked || state.revoked_share_ids.contains(&grant.share_id) {
++                    return Err(ShareError::RevokedToken);
++                }
++                // Expiry >= boundary consistent enforcement
++                if now >= grant.expires_at {
++                    return Err(ShareError::ExpiredToken);
++                }
++                return Ok(grant.clone());
++            }
++        }
++
++        Err(ShareError::Unauthorized)
++    }
++
++    pub fn revoke_share(&self, share_id: &str) -> Result<(), ShareError> {
++        let mut state = self.state.lock();
++        let mut found = false;
++
++        // 1. Remove pending exchange code if present
++        let before_pending = state.pending_codes.len();
++        state.pending_codes.retain(|_, p| p.share_id != share_id);
++        if state.pending_codes.len() < before_pending {
++            found = true;
++        }
++
++        // 2. Mark active grants revoked
++        for grant in state.active_grants.values_mut() {
++            if grant.share_id == share_id {
++                grant.revoked = true;
++                found = true;
++            }
++        }
++
++        // 3. Atomically record tombstone under same lock to prevent concurrent resurrection
++        state.revoked_share_ids.insert(share_id.to_string());
++
++        // 4. Retain revoked state via send_replace so watch channel never loses state even if 0 receivers
++        if let Some(tx) = state.revocation_channels.get_mut(share_id) {
++            let _ = tx.send_replace(true);
++            found = true;
++        } else {
++            let (tx, _) = watch::channel(true);
++            state.revocation_channels.insert(share_id.to_string(), tx);
++            found = true;
++        }
++
++        if found {
++            Ok(())
++        } else {
++            Err(ShareError::ShareNotFound)
++        }
++    }
++
++    pub fn revocation_receiver(&self, share_id: &str) -> Result<watch::Receiver<bool>, ShareError> {
++        let mut state = self.state.lock();
++        let is_tombstone = state.revoked_share_ids.contains(share_id);
++
++        let tx = state
++            .revocation_channels
++            .entry(share_id.to_string())
++            .or_insert_with(|| {
++                let (tx, _) = watch::channel(is_tombstone);
++                tx
++            });
++
++        if is_tombstone {
++            let _ = tx.send_replace(true);
++        }
++
++        Ok(tx.subscribe())
++    }
++
++    pub fn list_active_shares(&self, session_id: Option<&str>) -> Vec<ActiveShareGrant> {
++        let now = unix_now_secs();
++        let state = self.state.lock();
++        state
++            .active_grants
++            .values()
++            .filter(|g| !g.revoked && !state.revoked_share_ids.contains(&g.share_id) && g.expires_at > now)
++            .filter(|g| session_id.map_or(true, |sid| g.session_id == sid))
++            .cloned()
++            .collect()
++    }
++
++    pub fn get_share(&self, share_id: &str) -> Option<ActiveShareGrant> {
++        let now = unix_now_secs();
++        let state = self.state.lock();
++        state
++            .active_grants
++            .values()
++            .filter(|g| g.share_id == share_id && !g.revoked && !state.revoked_share_ids.contains(&g.share_id) && g.expires_at > now)
++            .max_by_key(|g| g.expires_at)
++            .or_else(|| {
++                state
++                    .active_grants
++                    .values()
++                    .filter(|g| g.share_id == share_id)
++                    .max_by_key(|g| g.expires_at)
++            })
++            .cloned()
++    }
++
++    #[cfg(test)]
++    pub fn expire_code_for_test(&self, code: &str) {
++        let code_hash = hash_token_sha256(code);
++        let mut state = self.state.lock();
++        if let Some(entry) = state.pending_codes.get_mut(&code_hash) {
++            entry.expires_at = 0;
++        }
++    }
++
++    #[cfg(test)]
++    pub fn expire_grant_for_test(&self, share_id: &str) {
++        let mut state = self.state.lock();
++        for grant in state.active_grants.values_mut() {
++            if grant.share_id == share_id {
++                grant.expires_at = 0;
++            }
++        }
++    }
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct CreateShareRequest {
++    pub session_id: String,
++    #[serde(default = "default_share_permission")]
++    pub permission: SharePermission,
++    pub ttl_seconds: Option<u64>,
++}
++
++fn default_share_permission() -> SharePermission {
++    SharePermission::View
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct CreateShareResponse {
++    pub share_id: String,
++    pub exchange_code: String,
++    pub session_id: String,
++    pub permission: SharePermission,
++    pub expires_at: u64,
++    pub code_expires_at: u64,
++    pub join_url: String,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ExchangeShareRequest {
++    pub code: String,
++    pub client_name: Option<String>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ExchangeShareResponse {
++    pub share_token: String,
++    pub share_id: String,
++    pub session_id: String,
++    pub permission: SharePermission,
++    pub expires_at: u64,
++    pub client_id: String,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ShareInfoResponse {
++    pub share_id: String,
++    pub session_id: String,
++    pub permission: SharePermission,
++    pub expires_at: u64,
++    pub revoked: bool,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RevokeShareResponse {
++    pub revoked: bool,
++    pub share_id: String,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ListSharesQuery {
++    pub session_id: Option<String>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ListSharesResponse {
++    pub shares: Vec<ShareInfoResponse>,
++}
++
++pub fn standard_security_headers() -> [(header::HeaderName, &'static str); 2] {
++    [
++        (header::REFERRER_POLICY, "no-referrer"),
++        (header::CACHE_CONTROL, "no-store"),
++    ]
++}
++
++/// Canonical share-grant target check: route prefix, host scope, and session id
++/// must all agree, because the host scope is part of the routed target's
++/// identity. A raw grant never authorizes `host-a::s1` (the scope would alias
++/// two hosts' same raw session id), and a grant for `host-a::s1` never
++/// authorizes `host-b::s1` or the bare `s1`.
++pub fn share_target_matches(grant_session_id: &str, requested_target: &str) -> bool {
++    let Some(requested_id) = requested_target.strip_prefix("/api/v1/terminal/") else {
++        return false;
++    };
++    match (
++        crate::worktree::parse_host_scoped_session_id(grant_session_id),
++        crate::worktree::parse_host_scoped_session_id(requested_id),
++    ) {
++        (None, None) => grant_session_id == requested_id,
++        (Some((grant_host, grant_sid)), Some((target_host, target_sid))) => {
++            grant_host == target_host && grant_sid == target_sid
++        }
++        (Some(_), None) | (None, Some(_)) => false,
++    }
++}
++
++#[cfg(test)]
++mod share_target_tests {
++    use super::share_target_matches;
++
++    #[test]
++    fn raw_grant_matches_only_the_bare_target() {
++        assert!(share_target_matches("s1", "/api/v1/terminal/s1"));
++        assert!(!share_target_matches("s1", "/api/v1/terminal/host-a::s1"));
++        assert!(!share_target_matches("s1", "/api/v1/terminal/host-b::s1"));
++        assert!(!share_target_matches("s1", "/api/v1/terminal/s2"));
++    }
++
++    #[test]
++    fn scoped_grant_matches_only_its_own_canonical_target() {
++        assert!(share_target_matches(
++            "host-a::s1",
++            "/api/v1/terminal/host-a::s1"
++        ));
++        assert!(!share_target_matches(
++            "host-a::s1",
++            "/api/v1/terminal/host-b::s1"
++        ));
++        assert!(!share_target_matches("host-a::s1", "/api/v1/terminal/s1"));
++    }
++
++    #[test]
++    fn rejects_targets_outside_the_terminal_route() {
++        assert!(!share_target_matches("s1", "/api/v1/events"));
++        assert!(!share_target_matches("s1", "/api/v1/browser/s1"));
++    }
++}
++
++pub async fn create_share_handler(
++    State(state): State<Arc<super::state::RemoteGatewayState>>,
++    headers: HeaderMap,
++    Json(payload): Json<CreateShareRequest>,
++) -> Result<Response, (StatusCode, String)> {
++    let token = super::server::extract_token(&headers)
++        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
++
++    let device = state
++        .auth_manager
++        .validate_token(&token)
++        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++
++    if device.permission != super::auth::DevicePermission::Control {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: read-only clients cannot issue shares".into(),
++        ));
++    }
++
++    // Owner scope: issuing a share is owner authority — not a capability any
++    // paired mirror-scoped control device may exercise.
++    if device.access_scope != super::auth::DeviceAccessScope::Machine {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: owner device scope required to issue shares".into(),
++        ));
++    }
++
++    let session_exists = state
++        .session_backend
++        .list_sessions()
++        .await
++        .contains(&payload.session_id)
++        || state.terminal_service.list_sessions().contains(&payload.session_id);
++
++    if !session_exists {
++        return Err((StatusCode::NOT_FOUND, "Target session not found".into()));
++    }
++
++    let (share_id, code, code_expires_at, expires_at) = state
++        .share_manager
++        .create_exchange_code(
++            &payload.session_id,
++            payload.permission,
++            payload.ttl_seconds,
++        )
++        .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
++
++    let join_url = format!("/join?code={}", code);
++
++    let response = CreateShareResponse {
++        share_id,
++        exchange_code: code,
++        session_id: payload.session_id,
++        permission: payload.permission,
++        expires_at,
++        code_expires_at,
++        join_url,
++    };
++
++    Ok((standard_security_headers(), Json(response)).into_response())
++}
++
++pub async fn exchange_share_handler(
++    State(state): State<Arc<super::state::RemoteGatewayState>>,
++    Json(payload): Json<ExchangeShareRequest>,
++) -> Result<Response, (StatusCode, String)> {
++    let grant = state
++        .share_manager
++        .exchange_code(&payload.code, payload.client_name)
++        .map_err(|e| match e {
++            ShareError::InvalidOrExpiredCode => (
++                StatusCode::GONE,
++                "Invalid or expired one-time exchange code".into(),
++            ),
++            ShareError::RevokedToken => (
++                StatusCode::FORBIDDEN,
++                "Share has already been revoked".into(),
++            ),
++            ShareError::RateLimited => (
++                StatusCode::TOO_MANY_REQUESTS,
++                "Too many pending exchange requests".into(),
++            ),
++            _ => (StatusCode::BAD_REQUEST, "Exchange failed".into()),
++        })?;
++
++    let response = ExchangeShareResponse {
++        share_token: grant.share_token,
++        share_id: grant.share_id,
++        session_id: grant.session_id,
++        permission: grant.permission,
++        expires_at: grant.expires_at,
++        client_id: grant.client_id,
++    };
++
++    Ok((standard_security_headers(), Json(response)).into_response())
++}
++
++pub async fn get_share_handler(
++    State(state): State<Arc<super::state::RemoteGatewayState>>,
++    AxumPath(share_id): AxumPath<String>,
++    headers: HeaderMap,
++) -> Result<Response, (StatusCode, String)> {
++    let token = super::server::extract_token(&headers)
++        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
++
++    // Owner devices only: Machine access scope with Control — never any device.
++    // A share token instead takes the binding path below.
++    let presented_grant = if let Ok(device) = state.auth_manager.validate_token(&token) {
++        if device.access_scope != super::auth::DeviceAccessScope::Machine
++            || device.permission != super::auth::DevicePermission::Control
++        {
++            return Err((
++                StatusCode::FORBIDDEN,
++                "Forbidden: owner scope with control permission required to read share grants"
++                    .into(),
++            ));
++        }
++        None
++    } else {
++        // Bind BEFORE any lookup: a share token may read exactly its own grant.
++        // A foreign or unknown share id must never reach get_share — no metadata
++        // disclosure, no existence oracle.
++        let grant = state
++            .share_manager
++            .validate_share_token(&token)
++            .map_err(|_| (StatusCode::UNAUTHORIZED, "Unauthorized".into()))?;
++        if grant.share_id != share_id {
++            return Err((
++                StatusCode::FORBIDDEN,
++                "Forbidden: share token can only read its own grant".into(),
++            ));
++        }
++        Some(grant)
++    };
++
++    let grant = if let Some(presented) = presented_grant {
++        presented
++    } else {
++        state
++            .share_manager
++            .get_share(&share_id)
++            .ok_or((StatusCode::NOT_FOUND, "Share grant not found".into()))?
++    };
++
++    // Canonical session-target bind (the second half of the binding): the record
++    // served for this share must match the presented grant's session under the
++    // same canonical policy as the ticket, terminal and presence checks.
++    if let Some(presented) = &presented_grant {
++        if !share_target_matches(
++            &presented.session_id,
++            &format!("/api/v1/terminal/{}", grant.session_id),
++        ) {
++            return Err((
++                StatusCode::FORBIDDEN,
++                "Forbidden: share token is not bound to this grant's session target".into(),
++            ));
++        }
++    }
++
++    let response = ShareInfoResponse {
++        share_id: grant.share_id,
++        session_id: grant.session_id,
++        permission: grant.permission,
++        expires_at: grant.expires_at,
++        revoked: grant.revoked,
++    };
++
++    Ok((standard_security_headers(), Json(response)).into_response())
++}
++
++pub async fn revoke_share_handler(
++    State(state): State<Arc<super::state::RemoteGatewayState>>,
++    AxumPath(share_id): AxumPath<String>,
++    headers: HeaderMap,
++) -> Result<Response, (StatusCode, String)> {
++    let token = super::server::extract_token(&headers)
++        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
++
++    let device = state
++        .auth_manager
++        .validate_token(&token)
++        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++
++    if device.permission != super::auth::DevicePermission::Control {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: control permission required to revoke shares".into(),
++        ));
++    }
++
++    // Owner scope: revocation is owner authority — not any device's.
++    if device.access_scope != super::auth::DeviceAccessScope::Machine {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: owner device scope required to revoke shares".into(),
++        ));
++    }
++
++    state.share_manager.revoke_share(&share_id).map_err(|e| match e {
++        ShareError::ShareNotFound => (StatusCode::NOT_FOUND, "Share grant not found".into()),
++        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Revocation failed".into()),
++    })?;
++
++    // Revocation also drops the grant holder from collaborator presence so the
++    // header badge converges even if the viewer's socket lingers past revocation.
++    if let Some(grant) = state.share_manager.get_share(&share_id) {
++        // Presence is keyed by the CANONICAL requested id (host scope kept — the
++        // same form this grant was minted with). Never strip the scope here:
++        // unwrapping `host-a::s1` to `s1` would aim the removal at the raw bucket
++        // and could hit another host's identically named session — cross-host
++        // alias with collateral removal.
++        if let Some(participants) =
++            state.presence.remove_share_client(&grant.session_id, &grant.client_id)
++        {
++            super::presence::broadcast_presence(&state, &grant.session_id, participants);
++        }
++    }
++
++    let response = RevokeShareResponse {
++        revoked: true,
++        share_id,
++    };
++
++    Ok((standard_security_headers(), Json(response)).into_response())
++}
++
++pub async fn list_shares_handler(
++    State(state): State<Arc<super::state::RemoteGatewayState>>,
++    Query(query): Query<ListSharesQuery>,
++    headers: HeaderMap,
++) -> Result<Response, (StatusCode, String)> {
++    let token = super::server::extract_token(&headers)
++        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
++
++    let device = state
++        .auth_manager
++        .validate_token(&token)
++        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
++
++    if device.permission != super::auth::DevicePermission::Control {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: control permission required to list shares".into(),
++        ));
++    }
++
++    // Owner scope: share metadata stays inside the owner's device scope.
++    if device.access_scope != super::auth::DeviceAccessScope::Machine {
++        return Err((
++            StatusCode::FORBIDDEN,
++            "Forbidden: owner device scope required to list shares".into(),
++        ));
++    }
++
++    let shares = state
++        .share_manager
++        .list_active_shares(query.session_id.as_deref())
++        .into_iter()
++        .map(|grant| ShareInfoResponse {
++            share_id: grant.share_id,
++            session_id: grant.session_id,
++            permission: grant.permission,
++            expires_at: grant.expires_at,
++            revoked: grant.revoked,
++        })
++        .collect();
++
++    Ok((standard_security_headers(), Json(ListSharesResponse { shares })).into_response())
++}
++
++#[cfg(test)]
++pub mod tests {
++    use super::*;
++    use crate::remote::state::RemoteGatewayState;
++    use crate::worktree::WorkspaceRegistry;
++
++    struct TestShareSessionBackend {
++        sessions: Vec<String>,
++    }
++
++    impl crate::remote::backend::RemoteSessionBackend for TestShareSessionBackend {
++        fn list_sessions(&self) -> futures_util::future::BoxFuture<'_, Vec<String>> {
++            let sessions = self.sessions.clone();
++            Box::pin(async move { sessions })
++        }
++        fn describe_session<'a>(
++            &'a self,
++            session_id: &'a str,
++        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::backend::RemoteSessionDetails, String>> {
++            let id = session_id.to_string();
++            Box::pin(async move {
++                Ok(crate::remote::backend::RemoteSessionDetails {
++                    session_id: id,
++                    workspace_id: Some("ws".into()),
++                    worktree_label: Some("main".into()),
++                    worktree_path: None,
++                    running: true,
++                    cols: 80,
++                    rows: 24,
++                })
++            })
++        }
++        fn attach_with_sequence<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _after_sequence: Option<u64>,
++        ) -> futures_util::future::BoxFuture<'a, Result<crate::terminal::SessionAttachment, String>> {
++            Box::pin(async { Err("attach unsupported".into()) })
++        }
++        fn write_input<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _data: &'a [u8],
++        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
++            Box::pin(async { Ok(()) })
++        }
++        fn resize<'a>(
++            &'a self,
++            _session_id: &'a str,
++            _cols: u16,
++            _rows: u16,
++        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    fn create_test_state(sessions: Vec<String>) -> (Arc<RemoteGatewayState>, String, String) {
++        let backend = Arc::new(TestShareSessionBackend { sessions });
++        let state = Arc::new(RemoteGatewayState::new_with_backend(
++            backend,
++            WorkspaceRegistry::new(),
++        ));
++
++        let control_code = state
++            .auth_manager
++            .create_scoped_pairing_code(
++                crate::remote::auth::DevicePermission::Control,
++                crate::remote::auth::DeviceAccessScope::Machine,
++            )
++            .unwrap();
++        let (control_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&control_code, "control-device")
++            .unwrap();
++
++        let view_code = state
++            .auth_manager
++            .create_pairing_code(crate::remote::auth::DevicePermission::View);
++        let (view_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&view_code, "view-device")
++            .unwrap();
++
++        (state, control_token, view_token)
++    }
++
++    fn auth_headers(token: &str) -> HeaderMap {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            header::AUTHORIZATION,
++            format!("Bearer {token}").parse().unwrap(),
++        );
++        headers
++    }
++
++    #[test]
++    fn test_csprng_token_length_and_uniqueness() {
++        let token1 = generate_csprng_token_128();
++        let token2 = generate_csprng_token_128();
++        assert_eq!(token1.len(), 32);
++        assert_eq!(token2.len(), 32);
++        assert_ne!(token1, token2);
++    }
++
++    #[test]
++    fn test_constant_time_comparison() {
++        let h1 = hash_token_sha256("token-secret-alpha");
++        let h2 = hash_token_sha256("token-secret-alpha");
++        let h3 = hash_token_sha256("token-secret-beta");
++        assert!(constant_time_eq_32(&h1, &h2));
++        assert!(!constant_time_eq_32(&h1, &h3));
++    }
++
++    #[tokio::test]
++    async fn test_route_issue() {
++        let (state, control_token, view_token) = create_test_state(vec!["session-alpha".into()]);
++
++        // 1. Success case: Control permission issues share for existing session
++        let req = CreateShareRequest {
++            session_id: "session-alpha".into(),
++            permission: SharePermission::View,
++            ttl_seconds: Some(1800),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .expect("issue should succeed");
++
++        assert_eq!(res.status(), StatusCode::OK);
++        assert_eq!(
++            res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++        assert_eq!(
++            res.headers().get(header::CACHE_CONTROL).unwrap(),
++            "no-store"
++        );
++
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
++            .await
++            .expect("read response body");
++        let body: CreateShareResponse =
++            serde_json::from_slice(&body_bytes).expect("parse create response");
++        assert_eq!(body.session_id, "session-alpha");
++        assert_eq!(body.exchange_code.len(), 32);
++        assert_eq!(body.permission, SharePermission::View);
++        assert!(body.join_url.starts_with("/join?code="));
++        assert!(body.code_expires_at > unix_now_secs());
++        assert!(body.expires_at > unix_now_secs());
++
++        // 2. Failure: View-only device cannot issue share
++        let req_view = CreateShareRequest {
++            session_id: "session-alpha".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res_view = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&view_token),
++            Json(req_view),
++        )
++        .await;
++        assert!(matches!(res_view, Err((StatusCode::FORBIDDEN, _))));
++
++        // 3. Failure: Target session not found
++        let req_missing = CreateShareRequest {
++            session_id: "session-nonexistent".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res_missing = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req_missing),
++        )
++        .await;
++        assert!(matches!(res_missing, Err((StatusCode::NOT_FOUND, _))));
++
++        // 4. Failure: Missing auth token
++        let res_unauth = create_share_handler(
++            State(Arc::clone(&state)),
++            HeaderMap::new(),
++            Json(CreateShareRequest {
++                session_id: "session-alpha".into(),
++                permission: SharePermission::View,
++                ttl_seconds: None,
++            }),
++        )
++        .await;
++        assert!(matches!(res_unauth, Err((StatusCode::UNAUTHORIZED, _))));
++    }
++
++    #[tokio::test]
++    async fn test_route_join() {
++        let (state, control_token, _) = create_test_state(vec!["session-join".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-join".into(),
++            permission: SharePermission::Control,
++            ttl_seconds: Some(3600),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        // Join / Exchange
++        let exchange_req = ExchangeShareRequest {
++            code: issue.exchange_code.clone(),
++            client_name: Some("collaborator-alice".into()),
++        };
++        let join_res = exchange_share_handler(State(Arc::clone(&state)), Json(exchange_req))
++            .await
++            .expect("exchange should succeed");
++
++        assert_eq!(join_res.status(), StatusCode::OK);
++        assert_eq!(
++            join_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++        assert_eq!(
++            join_res.headers().get(header::CACHE_CONTROL).unwrap(),
++            "no-store"
++        );
++
++        let join_bytes = axum::body::to_bytes(join_res.into_body(), 64 * 1024).await.unwrap();
++        let join_body: ExchangeShareResponse = serde_json::from_slice(&join_bytes).unwrap();
++
++        assert_eq!(join_body.share_id, issue.share_id);
++        assert_eq!(join_body.session_id, "session-join");
++        assert_eq!(join_body.permission, SharePermission::Control);
++        assert_eq!(join_body.share_token.len(), 32);
++        assert!(!join_body.client_id.is_empty());
++
++        // Validate that issued share token is authenticated
++        let grant = state
++            .share_manager
++            .validate_share_token(&join_body.share_token)
++            .expect("share token must validate");
++        assert_eq!(grant.client_id, join_body.client_id);
++        assert_eq!(grant.session_id, "session-join");
++        assert_eq!(grant.permission, SharePermission::Control);
++    }
++
++    #[tokio::test]
++    async fn test_route_reuse() {
++        let (state, control_token, _) = create_test_state(vec!["session-reuse".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-reuse".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        // First exchange: Success (code atomically consumed)
++        let first_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code.clone(),
++                client_name: None,
++            }),
++        )
++        .await;
++        assert!(first_res.is_ok());
++
++        // Second exchange: Reused code must be rejected with 410 GONE
++        let second_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code.clone(),
++                client_name: None,
++            }),
++        )
++        .await;
++        assert!(matches!(second_res, Err((StatusCode::GONE, _))));
++    }
++
++    #[tokio::test]
++    async fn test_route_expiry() {
++        let (state, control_token, _) = create_test_state(vec!["session-expiry".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-expiry".into(),
++            permission: SharePermission::View,
++            ttl_seconds: Some(10),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        // 1. Code expiry
++        state.share_manager.expire_code_for_test(&issue.exchange_code);
++        let expired_code_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code.clone(),
++                client_name: None,
++            }),
++        )
++        .await;
++        assert!(matches!(expired_code_res, Err((StatusCode::GONE, _))));
++
++        // 2. Token expiry
++        let (share_id, valid_code, _, _) = state
++            .share_manager
++            .create_exchange_code("session-expiry", SharePermission::View, Some(10))
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&valid_code, None).unwrap();
++        assert!(state.share_manager.validate_share_token(&grant.share_token).is_ok());
++
++        state.share_manager.expire_grant_for_test(&share_id);
++        assert_eq!(
++            state.share_manager.validate_share_token(&grant.share_token).unwrap_err(),
++            ShareError::ExpiredToken
++        );
++    }
++
++    #[tokio::test]
++    async fn test_route_revoke() {
++        let (state, control_token, view_token) = create_test_state(vec!["session-revoke".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-revoke".into(),
++            permission: SharePermission::Control,
++            ttl_seconds: None,
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        let exchanged = state
++            .share_manager
++            .exchange_code(&issue.exchange_code, None)
++            .unwrap();
++        let mut rev_rx = state
++            .share_manager
++            .revocation_receiver(&issue.share_id)
++            .unwrap();
++        assert!(!*rev_rx.borrow());
++
++        // View device cannot revoke
++        let view_revoke = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(issue.share_id.clone()),
++            auth_headers(&view_token),
++        )
++        .await;
++        assert!(matches!(view_revoke, Err((StatusCode::FORBIDDEN, _))));
++
++        // Control device revokes successfully
++        let revoke_res = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(issue.share_id.clone()),
++            auth_headers(&control_token),
++        )
++        .await
++        .expect("revoke should succeed");
++        assert_eq!(revoke_res.status(), StatusCode::OK);
++        assert_eq!(
++            revoke_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++
++        // Revocation channel signaled true via send_replace
++        assert!(*rev_rx.borrow_and_update());
++
++        // Token is now invalidated
++        assert_eq!(
++            state
++                .share_manager
++                .validate_share_token(&exchanged.share_token)
++                .unwrap_err(),
++            ShareError::RevokedToken
++        );
++
++        // Revoking non-existent share returns 404
++        let not_found_res = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath("non-existent-share".into()),
++            auth_headers(&control_token),
++        )
++        .await;
++        assert!(matches!(not_found_res, Err((StatusCode::NOT_FOUND, _))));
++    }
++
++    /// Revoking a HOST-SCOPED grant must clear exactly that host's holder from
++    /// the presence registry (keyed by the canonical requested id) and push the
++    /// convergence event under that same key — with NO collateral removal of a
++    /// same-named session under another host's scope.
++    #[tokio::test]
++    async fn test_route_revoke_clears_scoped_grant_presence_without_collateral() {
++        let (state, control_token, _) =
++            create_test_state(vec!["host-a::session-revoke-scoped".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "host-a::session-revoke-scoped".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++        let grant = state
++            .share_manager
++            .exchange_code(&issue.exchange_code, None)
++            .unwrap();
++
++        // The holder's terminal socket attaches under the canonical requested id
++        // with the `share-{client_id}` device id the server builds for share
++        // sockets (server ws attach contract)…
++        let holder = crate::remote::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            "host-a::session-revoke-scoped",
++            &format!("share-{}", grant.client_id),
++            "view",
++        )
++        .expect("presence admission at capacity 1/64");
++        // …and another host's identically named session sits in its OWN bucket.
++        let other_host = crate::remote::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            "host-b::session-revoke-scoped",
++            "share-other-client",
++            "view",
++        )
++        .expect("presence admission at capacity 2/64");
++        assert_eq!(
++            state.presence.snapshot("host-a::session-revoke-scoped").len(),
++            1
++        );
++        assert_eq!(
++            state.presence.snapshot("host-b::session-revoke-scoped").len(),
++            1
++        );
++
++        let mut rx = state.event_tx.subscribe();
++
++        let revoke_res = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(issue.share_id.clone()),
++            auth_headers(&control_token),
++        )
++        .await
++        .expect("revoke should succeed");
++        assert_eq!(revoke_res.status(), StatusCode::OK);
++
++        // The revoked grant's host bucket is cleared…
++        assert!(
++            state
++                .presence
++                .snapshot("host-a::session-revoke-scoped")
++                .is_empty()
++        );
++        // …and the same-named session under another host's scope is untouched:
++        // no cross-host collateral from a scope-stripped removal.
++        assert_eq!(
++            state.presence.snapshot("host-b::session-revoke-scoped").len(),
++            1
++        );
++
++        // Drain the synchronous frames: the LAST must be the revoke push — the
++        // canonical key with an empty projection.
++        let mut last: Option<String> = None;
++        while let Some(Ok(frame)) = futures_util::FutureExt::now_or_never(rx.recv()) {
++            last = Some(frame);
++        }
++        let frame = last.expect("revoke pushes a presence frame");
++        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
++        assert_eq!(
++            parsed["payload"]["sessionId"].as_str(),
++            Some("host-a::session-revoke-scoped")
++        );
++        assert_eq!(parsed["payload"]["count"].as_u64(), Some(0));
++
++        drop(holder);
++        drop(other_host);
++    }
++
++    #[tokio::test]
++    async fn test_route_referrer() {
++        let (state, control_token, _) = create_test_state(vec!["session-ref".into()]);
++
++        let headers = standard_security_headers();
++        assert_eq!(headers[0].0, header::REFERRER_POLICY);
++        assert_eq!(headers[0].1, "no-referrer");
++        assert_eq!(headers[1].0, header::CACHE_CONTROL);
++        assert_eq!(headers[1].1, "no-store");
++
++        // Verify on create_share_handler
++        let req = CreateShareRequest {
++            session_id: "session-ref".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++        assert_eq!(
++            res.headers().get(header::CACHE_CONTROL).unwrap(),
++            "no-store"
++        );
++
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        // Verify on exchange_share_handler
++        let join_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code,
++                client_name: None,
++            }),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            join_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++        assert_eq!(
++            join_res.headers().get(header::CACHE_CONTROL).unwrap(),
++            "no-store"
++        );
++
++        // Verify on get_share_handler
++        let get_res = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(issue.share_id.clone()),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            get_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++
++        // Verify on list_shares_handler
++        let list_res = list_shares_handler(
++            State(Arc::clone(&state)),
++            Query(ListSharesQuery { session_id: None }),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            list_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++
++        // Verify on revoke_share_handler
++        let revoke_res = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(issue.share_id),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            revoke_res.headers().get(header::REFERRER_POLICY).unwrap(),
++            "no-referrer"
++        );
++    }
++
++    #[tokio::test]
++    async fn test_route_viewwrite() {
++        let view_perm = SharePermission::View;
++        assert!(!view_perm.can_write());
++        assert!(!view_perm.can_resize());
++
++        let control_perm = SharePermission::Control;
++        assert!(control_perm.can_write());
++        assert!(control_perm.can_resize());
++
++        let (state, _, view_token) = create_test_state(vec!["session-vw".into()]);
++
++        // Read-only device cannot issue shares
++        let res_issue = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&view_token),
++            Json(CreateShareRequest {
++                session_id: "session-vw".into(),
++                permission: SharePermission::View,
++                ttl_seconds: None,
++            }),
++        )
++        .await;
++        assert!(matches!(res_issue, Err((StatusCode::FORBIDDEN, _))));
++
++        // Read-only device cannot list shares
++        let res_list = list_shares_handler(
++            State(Arc::clone(&state)),
++            Query(ListSharesQuery { session_id: None }),
++            auth_headers(&view_token),
++        )
++        .await;
++        assert!(matches!(res_list, Err((StatusCode::FORBIDDEN, _))));
++
++        // Read-only device cannot revoke shares
++        let res_revoke = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath("share-id-1".into()),
++            auth_headers(&view_token),
++        )
++        .await;
++        assert!(matches!(res_revoke, Err((StatusCode::FORBIDDEN, _))));
++    }
++
++    #[tokio::test]
++    async fn test_route_forgedidentity() {
++        let (state, control_token, _) =
++            create_test_state(vec!["session-orig".into(), "session-other".into()]);
++
++        let (share_id, code, _, _) = state
++            .share_manager
++            .create_exchange_code("session-orig", SharePermission::View, None)
++            .unwrap();
++        let grant = state
++            .share_manager
++            .exchange_code(&code, Some("adversary".into()))
++            .unwrap();
++
++        // 1. Client ID is server-derived UUID, not client-supplied
++        assert_ne!(grant.client_id, "adversary");
++        assert!(uuid::Uuid::parse_str(&grant.client_id).is_ok());
++
++        // 2. Share token cannot escalate to issue shares
++        let res_escalate = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(CreateShareRequest {
++                session_id: "session-orig".into(),
++                permission: SharePermission::Control,
++                ttl_seconds: None,
++            }),
++        )
++        .await;
++        assert!(matches!(res_escalate, Err((StatusCode::UNAUTHORIZED, _))));
++
++        // 3. Forged token string rejected
++        assert_eq!(
++            state
++                .share_manager
++                .validate_share_token("forged-token-string-32-chars-long")
++                .unwrap_err(),
++            ShareError::Unauthorized
++        );
++
++        // 4. Session mismatch check: share token scoped to session-orig cannot access session-other
++        let validated = state
++            .share_manager
++            .validate_share_token(&grant.share_token)
++            .unwrap();
++        assert_eq!(validated.session_id, "session-orig");
++        assert_ne!(validated.session_id, "session-other");
++
++        // 5. Socket ticket route validates target session matching
++        let forged_ticket = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/terminal/session-other".into(),
++            }),
++        )
++        .await;
++        assert!(matches!(forged_ticket, Err((StatusCode::FORBIDDEN, _))));
++
++        let valid_ticket = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/terminal/session-orig".into(),
++            }),
++        )
++        .await;
++        assert!(valid_ticket.is_ok());
++    }
++
++    #[tokio::test]
++    async fn test_get_share_binds_share_token_to_own_grant() {
++        let (state, control_token, _) = create_test_state(vec![
++            "session-share-a".into(),
++            "session-share-b".into(),
++        ]);
++        let (_, code_a, _, _) = state
++            .share_manager
++            .create_exchange_code("session-share-a", SharePermission::View, None)
++            .unwrap();
++        let grant_a = state.share_manager.exchange_code(&code_a, None).unwrap();
++        let (grant_b_id, code_b, _, _) = state
++            .share_manager
++            .create_exchange_code("session-share-b", SharePermission::View, None)
++            .unwrap();
++        let grant_b = state.share_manager.exchange_code(&code_b, None).unwrap();
++
++        // Own grant: readable (pre-fix this route served any grant to any share token).
++        let own = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(grant_a.share_id.clone()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(own.status(), StatusCode::OK);
++
++        // Grant A's token reading grant B's metadata: refused, B's contents never returned.
++        let cross = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(grant_b.share_id.clone()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await;
++        assert!(matches!(cross, Err((StatusCode::FORBIDDEN, _))));
++
++        // An owner (Machine + Control) device token reads any grant.
++        let device_read = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(grant_b_id),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(device_read.status(), StatusCode::OK);
++
++        // Unknown bearer: 401, never another grant's metadata.
++        let forged = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath("unrelated-share-id".into()),
++            auth_headers("forged-token-string-32-chars-long"),
++        )
++        .await;
++        assert!(matches!(forged, Err((StatusCode::UNAUTHORIZED, _))));
++    }
++
++    /// Route-level access matrix for GET /api/v1/shares/{shareId} and the share
++    /// management surface: the share-id bind rejects BEFORE get_share (an unknown
++    /// id answers 403, never 404 — no existence oracle, no data access), the
++    /// canonical session-target bind guards the record, owner scope + Control
++    /// gate every device path (not any device), and revoked/expired grants are
++    /// refused at token validation.
++    #[tokio::test]
++    async fn test_get_share_route_access_matrix() {
++        let (state, control_token, view_token) = create_test_state(vec![
++            "session-matrix-a".into(),
++            "session-matrix-b".into(),
++        ]);
++
++        // A mirror-scoped CONTROL device: valid pairing, but not owner scope.
++        let mirror_code = state
++            .auth_manager
++            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
++        let (mirror_token, _) = state
++            .auth_manager
++            .exchange_pairing_code(&mirror_code, "mirror-control")
++            .unwrap();
++
++        let (share_a_id, code_a, _, _) = state
++            .share_manager
++            .create_exchange_code("session-matrix-a", SharePermission::View, None)
++            .unwrap();
++        let grant_a = state.share_manager.exchange_code(&code_a, None).unwrap();
++        let (share_b_id, code_b, _, _) = state
++            .share_manager
++            .create_exchange_code("session-matrix-b", SharePermission::View, None)
++            .unwrap();
++        let _grant_b = state.share_manager.exchange_code(&code_b, None).unwrap();
++
++        // Owner (Machine + Control) device reads metadata.
++        let owner_read = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_a_id.clone()),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(owner_read.status(), StatusCode::OK);
++
++        // Mirror-scoped control device and view device: refused on get, list,
++        // issue and revoke — not any device.
++        for token in [&mirror_token, &view_token] {
++            let read = get_share_handler(
++                State(Arc::clone(&state)),
++                AxumPath(share_a_id.clone()),
++                auth_headers(token),
++            )
++            .await;
++            assert!(matches!(read, Err((StatusCode::FORBIDDEN, _))));
++
++            let list = list_shares_handler(
++                State(Arc::clone(&state)),
++                Query(ListSharesQuery {
++                    session_id: Some("session-matrix-a".into()),
++                }),
++                auth_headers(token),
++            )
++            .await;
++            assert!(matches!(list, Err((StatusCode::FORBIDDEN, _))));
++
++            let issue = create_share_handler(
++                State(Arc::clone(&state)),
++                auth_headers(token),
++                Json(CreateShareRequest {
++                    session_id: "session-matrix-a".into(),
++                    permission: SharePermission::View,
++                    ttl_seconds: None,
++                }),
++            )
++            .await;
++            assert!(matches!(issue, Err((StatusCode::FORBIDDEN, _))));
++
++            let revoke = revoke_share_handler(
++                State(Arc::clone(&state)),
++                AxumPath(share_a_id.clone()),
++                auth_headers(token),
++            )
++            .await;
++            assert!(matches!(revoke, Err((StatusCode::FORBIDDEN, _))));
++        }
++
++        // Token A against share B AND against an unknown id: 403 BEFORE the
++        // lookup — a post-lookup answer would be 404 (existence oracle) or B's
++        // metadata.
++        let cross = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_b_id.clone()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await;
++        assert!(matches!(cross, Err((StatusCode::FORBIDDEN, _))));
++
++        let unknown = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath("never-minted-share-id".into()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await;
++        assert!(
++            matches!(unknown, Err((StatusCode::FORBIDDEN, _))),
++            "share-id bind must reject before get_share (404 would leak existence)"
++        );
++
++        // Token A against its own grant: allowed.
++        let own = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_a_id.clone()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await
++        .expect("own grant reads its own metadata");
++        assert_eq!(own.status(), StatusCode::OK);
++
++        // Revoked: refused at validation, before any lookup.
++        state.share_manager.revoke_share(&share_a_id).unwrap();
++        let revoked = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_a_id.clone()),
++            auth_headers(&grant_a.share_token),
++        )
++        .await;
++        assert!(matches!(revoked, Err((StatusCode::UNAUTHORIZED, _))));
++
++        // Expired: refused at validation, before any lookup.
++        let (share_c_id, code_c, _, _) = state
++            .share_manager
++            .create_exchange_code("session-matrix-a", SharePermission::View, None)
++            .unwrap();
++        let grant_c = state.share_manager.exchange_code(&code_c, None).unwrap();
++        state.share_manager.expire_grant_for_test(&share_c_id);
++        let expired = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_c_id.clone()),
++            auth_headers(&grant_c.share_token),
++        )
++        .await;
++        assert!(matches!(expired, Err((StatusCode::UNAUTHORIZED, _))));
++    }
++
++    #[tokio::test]
++    async fn test_events_ticket_mint_allowed_for_share_grant() {
++        let (state, _, _) = create_test_state(vec!["session-events".into()]);
++        let (_, code, _, _) = state
++            .share_manager
++            .create_exchange_code("session-events", SharePermission::View, None)
++            .unwrap();
++        let grant = state.share_manager.exchange_code(&code, None).unwrap();
++
++        // The scoped events subscription mints for a live share grant; its handler
++        // filters per-event to the grant's own session.
++        let events_ticket = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/events".into(),
++            }),
++        )
++        .await;
++        assert!(events_ticket.is_ok());
++
++        // A foreign terminal target stays forbidden for the same token.
++        let foreign = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/terminal/session-other".into(),
++            }),
++        )
++        .await;
++        assert!(matches!(foreign, Err((StatusCode::FORBIDDEN, _))));
++    }
++
++    /// Control-join grants keep the canonical target on every production route:
++    /// the exchange mints the grant server-side, then presence, ticket and
++    /// metadata reads accept exactly the grant's own canonical session/share —
++    /// never a cross session or a foreign share id.
++    #[tokio::test]
++    async fn test_route_control_join_canonical_targets() {
++        let (state, control_token, _) = create_test_state(vec!["session-ctrl".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-ctrl".into(),
++            permission: SharePermission::Control,
++            ttl_seconds: Some(3600),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        let join_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code.clone(),
++                client_name: Some("control-guest".into()),
++            }),
++        )
++        .await
++        .expect("control exchange should succeed");
++        let join_bytes = axum::body::to_bytes(join_res.into_body(), 64 * 1024).await.unwrap();
++        let join_body: ExchangeShareResponse = serde_json::from_slice(&join_bytes).unwrap();
++        let grant = state
++            .share_manager
++            .get_share(&join_body.share_id)
++            .expect("exchanged grant exists");
++        assert_eq!(grant.permission, SharePermission::Control);
++
++        // The control holder's socket attaches under the canonical id.
++        let _holder = crate::remote::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            "session-ctrl",
++            &format!("share-{}", grant.client_id),
++            "control",
++        )
++        .expect("presence admission at capacity 1/64");
++
++        // Presence route: own canonical session OK, foreign session refused.
++        let own_presence = crate::remote::presence::get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-ctrl".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await
++        .expect("control grant reads its own canonical presence");
++        assert_eq!(own_presence.status(), StatusCode::OK);
++        let foreign_presence = crate::remote::presence::get_session_presence_handler(
++            State(Arc::clone(&state)),
++            AxumPath("session-other".to_string()),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(foreign_presence, Err((StatusCode::UNAUTHORIZED, _))));
++
++        // Ticket route: own canonical terminal target mints, cross target refused.
++        let own_ticket = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/terminal/session-ctrl".into(),
++            }),
++        )
++        .await;
++        assert!(own_ticket.is_ok());
++        let cross_ticket = super::server::issue_socket_ticket(
++            State(Arc::clone(&state)),
++            auth_headers(&grant.share_token),
++            Json(super::server::SocketTicketRequest {
++                target: "/api/v1/terminal/session-other".into(),
++            }),
++        )
++        .await;
++        assert!(matches!(cross_ticket, Err((StatusCode::FORBIDDEN, _))));
++
++        // Metadata route: own grant readable, foreign share id refused (cross-share).
++        let own_meta = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(join_body.share_id.clone()),
++            auth_headers(&grant.share_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(own_meta.status(), StatusCode::OK);
++        let (foreign_share_id, _, _, _) = state
++            .share_manager
++            .create_exchange_code("session-ctrl-other", SharePermission::View, None)
++            .unwrap();
++        let cross_meta = get_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(foreign_share_id),
++            auth_headers(&grant.share_token),
++        )
++        .await;
++        assert!(matches!(cross_meta, Err((StatusCode::FORBIDDEN, _))));
++    }
++
++    /// The metadata-authorization fix at the ACTUAL production route: a real
++    /// HTTP GET through `create_remote_router` lets share A read its own
++    /// metadata and refuses share B / an unknown id with 403 before lookup;
++    /// after production revoke or expiry the same bearer is 401 at the route.
++    #[tokio::test]
++    async fn test_route_get_share_http_cross_share_metadata() {
++        let (state, control_token, _) = create_test_state(vec![
++            "session-http-a".into(),
++            "session-http-b".into(),
++            "session-http-c".into(),
++        ]);
++        let (share_a, code_a, _, _) = state
++            .share_manager
++            .create_exchange_code("session-http-a", SharePermission::View, None)
++            .unwrap();
++        let grant_a = state.share_manager.exchange_code(&code_a, None).unwrap();
++        let (share_b, _, _, _) = state
++            .share_manager
++            .create_exchange_code("session-http-b", SharePermission::View, None)
++            .unwrap();
++        let (share_c, code_c, _, _) = state
++            .share_manager
++            .create_exchange_code("session-http-c", SharePermission::View, None)
++            .unwrap();
++        let grant_c = state.share_manager.exchange_code(&code_c, None).unwrap();
++
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        let router = super::server::create_remote_router(Arc::clone(&state));
++        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
++        tokio::spawn(async move {
++            let _ = axum::serve(listener, router)
++                .with_graceful_shutdown(async {
++                    let _ = stop_rx.await;
++                })
++                .await;
++        });
++
++        let client = reqwest::Client::new();
++        let bearer = format!("Bearer {}", grant_a.share_token);
++        let get = |share: String, token: String| {
++            let client = client.clone();
++            async move {
++                client
++                    .get(format!("http://{addr}/api/v1/shares/{share}"))
++                    .header(header::AUTHORIZATION, token)
++                    .send()
++                    .await
++                    .unwrap()
++                    .status()
++            }
++        };
++
++        // Own metadata 200; cross-share and unknown ids 403 before any lookup.
++        assert_eq!(get(share_a.clone(), bearer.clone()).await, StatusCode::OK);
++        assert_eq!(
++            get(share_b.clone(), bearer.clone()).await,
++            StatusCode::FORBIDDEN
++        );
++        assert_eq!(
++            get("share-unknown".into(), bearer.clone()).await,
++            StatusCode::FORBIDDEN
++        );
++
++        // Production revoke first; the same bearer is then 401 at the route.
++        let revoke = revoke_share_handler(
++            State(Arc::clone(&state)),
++            AxumPath(share_a.clone()),
++            auth_headers(&control_token),
++        )
++        .await
++        .unwrap();
++        assert_eq!(revoke.status(), StatusCode::OK);
++        assert_eq!(
++            get(share_a.clone(), bearer.clone()).await,
++            StatusCode::UNAUTHORIZED
++        );
++
++        // Expiry equally refuses at the actual route.
++        state.share_manager.expire_grant_for_test(&share_c);
++        assert_eq!(
++            get(share_c, format!("Bearer {}", grant_c.share_token)).await,
++            StatusCode::UNAUTHORIZED
++        );
++
++        let _ = stop_tx.send(());
++    }
++
++    #[tokio::test]
++    async fn test_route_concurrentconsume() {
++        let (state, control_token, _) = create_test_state(vec!["session-conc".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-conc".into(),
++            permission: SharePermission::View,
++            ttl_seconds: None,
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        let mut handles = Vec::new();
++        for i in 0..10 {
++            let state_c = Arc::clone(&state);
++            let code_c = issue.exchange_code.clone();
++            handles.push(tokio::spawn(async move {
++                exchange_share_handler(
++                    State(state_c),
++                    Json(ExchangeShareRequest {
++                        code: code_c,
++                        client_name: Some(format!("worker-{i}")),
++                    }),
++                )
++                .await
++            }));
++        }
++
++        let mut ok_count = 0;
++        let mut gone_count = 0;
++        for handle in handles {
++            match handle.await.unwrap() {
++                Ok(_) => ok_count += 1,
++                Err((StatusCode::GONE, _)) => gone_count += 1,
++                Err(other) => panic!("Unexpected error: {:?}", other),
++            }
++        }
++
++        assert_eq!(ok_count, 1, "Exactly one concurrent exchange must succeed");
++        assert_eq!(gone_count, 9, "All competing exchanges must fail with 410 GONE");
++    }
++
++    #[tokio::test]
++    async fn test_atomic_revoke_exchange_race_barrier_deterministic() {
++        // Deterministic synchronization barrier: no sleeps
++        let mgr = Arc::new(ShareManager::new());
++        let (share_id, code, _, _) = mgr
++            .create_exchange_code("session-atomic-race", SharePermission::Control, None)
++            .unwrap();
++
++        let barrier = Arc::new(tokio::sync::Barrier::new(2));
++
++        let barrier_rev = Arc::clone(&barrier);
++        let mgr_rev = Arc::clone(&mgr);
++        let sid_rev = share_id.clone();
++        let revoke_task = tokio::spawn(async move {
++            barrier_rev.wait().await;
++            mgr_rev.revoke_share(&sid_rev)
++        });
++
++        let barrier_exc = Arc::clone(&barrier);
++        let mgr_exc = Arc::clone(&mgr);
++        let code_exc = code.clone();
++        let exchange_task = tokio::spawn(async move {
++            barrier_exc.wait().await;
++            mgr_exc.exchange_code(&code_exc, Some("racer".into()))
++        });
++
++        let (revoke_outcome, exchange_outcome) = tokio::join!(revoke_task, exchange_task);
++        let revoke_res = revoke_outcome.unwrap();
++        let exchange_res = exchange_outcome.unwrap();
++
++        // Either revoke succeeded and exchange failed (InvalidOrExpiredCode/RevokedToken),
++        // OR exchange succeeded and revoke succeeded immediately afterwards.
++        // In ALL possible execution interleavings:
++        // No valid, unrevoked grant can ever be returned or remain valid!
++        assert!(revoke_res.is_ok(), "Revocation must succeed");
++        if let Ok(grant) = exchange_res {
++            // If exchange won the race, the grant must have been revoked by revoke_share
++            assert_eq!(
++                mgr.validate_share_token(&grant.share_token).unwrap_err(),
++                ShareError::RevokedToken,
++                "Resurrection must be impossible: grant must be marked revoked"
++            );
++        }
++
++        // Revocation receiver must consistently observe true
++        let rx = mgr.revocation_receiver(&share_id).unwrap();
++        assert!(*rx.borrow(), "Revocation receiver must observe true via send_replace");
++    }
++
++    #[tokio::test]
++    async fn test_checked_ttl_bounds_and_overflow_safety() {
++        let mgr = ShareManager::new();
++        let now = unix_now_secs();
++
++        // Pass u64::MAX ttl - must be clamped, never overflow/panic
++        let (share_id, _, code_exp, grant_exp) = mgr
++            .create_exchange_code("session-ttl", SharePermission::View, Some(u64::MAX))
++            .unwrap();
++
++        assert_eq!(code_exp, now.saturating_add(DEFAULT_EXCHANGE_CODE_TTL_SECS));
++        assert_eq!(grant_exp, now.saturating_add(MAX_SHARE_GRANT_TTL_SECS));
++
++        // Pass 0 ttl - must be clamped to MIN_SHARE_GRANT_TTL_SECS
++        let (_, _, _, min_grant_exp) = mgr
++            .create_exchange_code("session-ttl", SharePermission::View, Some(0))
++            .unwrap();
++        assert_eq!(min_grant_exp, now.saturating_add(MIN_SHARE_GRANT_TTL_SECS));
++    }
++    #[tokio::test]
++    async fn test_issue_join_ttl_response_consistency_no_extension() {
++        tokio::time::pause();
++
++        let (state, control_token, _) = create_test_state(vec!["session-ttl-consist".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-ttl-consist".into(),
++            permission: SharePermission::View,
++            ttl_seconds: Some(600),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        // Advance virtual clock by 30 seconds before exchange
++        tokio::time::advance(std::time::Duration::from_secs(30)).await;
++
++        let join_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code,
++                client_name: Some("client-consistent".into()),
++            }),
++        )
++        .await
++        .unwrap();
++        let join_bytes = axum::body::to_bytes(join_res.into_body(), 64 * 1024).await.unwrap();
++        let join_body: ExchangeShareResponse = serde_json::from_slice(&join_bytes).unwrap();
++
++        // Invariant: joining later does NOT reset or extend the TTL!
++        // issue.expires_at must equal join_body.expires_at!
++        assert_eq!(
++            issue.expires_at, join_body.expires_at,
++            "Exchange must not extend or reset the grant lifetime claimed at issue time"
++        );
++    }
++
++    #[tokio::test]
++    async fn test_live_share_expiry_deadline_cancellation_and_presence_cleanup() {
++        tokio::time::pause();
++
++        let (state, control_token, _) = create_test_state(vec!["session-exp-clean".into()]);
++
++        let req = CreateShareRequest {
++            session_id: "session-exp-clean".into(),
++            permission: SharePermission::Control,
++            ttl_seconds: Some(10),
++        };
++        let res = create_share_handler(
++            State(Arc::clone(&state)),
++            auth_headers(&control_token),
++            Json(req),
++        )
++        .await
++        .unwrap();
++        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
++        let issue: CreateShareResponse = serde_json::from_slice(&body_bytes).unwrap();
++
++        let join_res = exchange_share_handler(
++            State(Arc::clone(&state)),
++            Json(ExchangeShareRequest {
++                code: issue.exchange_code,
++                client_name: Some("exp-racer".into()),
++            }),
++        )
++        .await
++        .unwrap();
++        let join_bytes = axum::body::to_bytes(join_res.into_body(), 64 * 1024).await.unwrap();
++        let join_body: ExchangeShareResponse = serde_json::from_slice(&join_bytes).unwrap();
++
++        assert_eq!(issue.expires_at, join_body.expires_at);
++
++        let deadline = super::server::share_grant_deadline(join_body.expires_at);
++        let mut revocation = state
++            .share_manager
++            .revocation_receiver(&join_body.share_id)
++            .unwrap();
++
++        // Attach presence
++        let presence = super::presence::PresenceGuard::attach(
++            Arc::clone(&state),
++            &join_body.session_id,
++            &format!("share-{}", join_body.client_id),
++            "control",
++        );
++        assert!(presence.is_some());
++        assert_eq!(state.presence.count(&join_body.session_id), 1);
++
++        // 1. Simulate live terminal socket pump under while_authorized
++        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10);
++        let mut term_rev = revocation.clone();
++        let term_state = Arc::clone(&state);
++        let term_sid = join_body.session_id.clone();
++        let term_handle = tokio::spawn(async move {
++            let _p = presence;
++            super::server::while_authorized(&mut term_rev, Some(deadline), async move {
++                while let Some(data) = input_rx.recv().await {
++                    let _ = term_state.session_backend.write_input(&term_sid, &data).await;
++                }
++            })
++            .await
++        });
++
++        // 2. Simulate live events socket pump under while_authorized
++        let mut events_rx = state.event_tx.subscribe();
++        let mut events_rev = revocation.clone();
++        let events_handle = tokio::spawn(async move {
++            super::server::while_authorized(&mut events_rev, Some(deadline), async move {
++                while let Ok(_msg) = events_rx.recv().await {}
++            })
++            .await
++        });
++
++        // Before expiry: PTY input succeeds
++        assert!(input_tx.send(b"hello".to_vec()).await.is_ok());
++
++        // Fast-forward virtual clock past expiry deadline (10 seconds)
++        tokio::time::advance(std::time::Duration::from_secs(10)).await;
++
++        // Terminal socket must cancel immediately at >= expiry
++        let term_res = term_handle.await.unwrap();
++        assert_eq!(term_res, None, "Terminal socket must close on deadline");
++
++        // Events socket must cancel immediately at >= expiry
++        let events_res = events_handle.await.unwrap();
++        assert_eq!(events_res, None, "Events socket must close on deadline");
++
++        // PresenceGuard drop must have cleaned up presence count to 0!
++        assert_eq!(
++            state.presence.count(&join_body.session_id),
++            0,
++            "Presence must be cleaned up on expiry"
++        );
++
++        // Subsequent PTY input attempt on closed socket fails (sender dropped)
++        assert!(
++            input_tx.send(b"after-expiry".to_vec()).await.is_err(),
++            "PTY input must be denied on closed socket"
++        );
++
++        // Token is now expired at boundary
++        assert_eq!(
++            state
++                .share_manager
++                .validate_share_token(&join_body.share_token)
++                .unwrap_err(),
++            ShareError::ExpiredToken
++        );
++    }
++}
+--- a/src-tauri/src/remote/state.rs	2026-10-02 00:20:00
++++ b/src-tauri/src/remote/state.rs	2026-10-02 01:05:32
+@@ -796,6 +796,10 @@
+     /// Maps ticket -> (device token, target, expiry unix seconds).
+     pub socket_tickets:
+         parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
++    pub share_manager: Arc<crate::remote::share_token::ShareManager>,
++    /// Live collaborator presence for shared terminal sessions; the push source for
++    /// `session_presence_changed` fan-out and the snapshot behind the REST route.
++    pub presence: Arc<crate::remote::presence::PresenceRegistry>,
+     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
+     pub admission_controller: Arc<AdmissionController>,
+     pub browser_service_epoch: AtomicU64,
+@@ -995,6 +999,8 @@
+                 ),
+             )),
+             admission_controller: Arc::new(AdmissionController::new()),
++            share_manager: Arc::new(crate::remote::share_token::ShareManager::new()),
++            presence: Arc::new(crate::remote::presence::PresenceRegistry::new()),
+             browser_service_epoch: AtomicU64::new(1),
+             snapshot_cache: RwLock::new(None),
+             snapshot_lock: tokio::sync::Mutex::new(()),

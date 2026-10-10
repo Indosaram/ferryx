@@ -1,0 +1,160 @@
+{
+  "constants": {
+    "ghosttySnapshotMagic": "GHOSTSNP",
+    "ghosttySnapshotFormatVersion": 1,
+    "ghosttyCleanRevision": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+    "engineIdentifier": "ghostty-vt",
+    "maxSnapshotChunkBytes": 65536,
+    "maxCompressedPayloadBytes": 4194304,
+    "maxDecodedBytes": 33554432,
+    "maxPasteBytes": 524288,
+    "maxResizeCols": 1000,
+    "maxResizeRows": 1000
+  },
+  "crc32cVectors": [
+    {
+      "inputAscii": "123456789",
+      "expectedCrc32c": 3808858755,
+      "expectedHex": "E3069283"
+    },
+    {
+      "inputAscii": "",
+      "expectedCrc32c": 0,
+      "expectedHex": "00000000"
+    }
+  ],
+  "envelope": {
+    "hex": "47484f5354534e500100",
+    "base64": "R0hPU1RTTlABAA==",
+    "byteLength": 10,
+    "crc32c": 2179788654
+  },
+  "validSnapshotAssembly": {
+    "metadata": {
+      "snapshotId": "snap-9874-abcd",
+      "generation": 1,
+      "streamEpoch": 100,
+      "chunkSequence": 542,
+      "engineCompat": {
+        "engine": "ghostty-vt",
+        "sourceRevision": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+        "snapshotVersion": 1
+      },
+      "totalCompressedBytes": 24,
+      "totalDecodedBytes": 128,
+      "totalChunks": 2,
+      "hasUnfinishedContinuation": true,
+      "historyRowsPrimary": 50,
+      "historyRowsAlternate": 0
+    },
+    "chunks": [
+      {
+        "snapshotId": "snap-9874-abcd",
+        "generation": 1,
+        "chunkIndex": 0,
+        "chunkBase64": "R0hPU1RTTlABAAEA",
+        "chunkCrc32c": 732384763
+      },
+      {
+        "snapshotId": "snap-9874-abcd",
+        "generation": 1,
+        "chunkIndex": 1,
+        "chunkBase64": "CgAAABEiM0RVZneI",
+        "chunkCrc32c": 2676546491
+      }
+    ],
+    "commit": {
+      "snapshotId": "snap-9874-abcd",
+      "generation": 1,
+      "totalChunks": 2,
+      "totalCompressedBytes": 24,
+      "aggregateCrc32c": 2386394289
+    },
+    "expectedAssembledBase64": "R0hPU1RTTlABAAEACgAAABEiM0RVZneI"
+  },
+  "malformedRejections": {
+    "invalidMagicBase64": "Tk9UTUFHSUNBAQAA",
+    "unsupportedVersionBase64": "R0hPU1RTTlACAA==",
+    "truncatedEnvelopeBase64": "R0hPU1RTTg==",
+    "chunkExceedsLimitBytes": 65537,
+    "aggregateExceedsLimitBytes": 4194305,
+    "decodedExceedsLimitBytes": 33554433,
+    "pasteExceedsLimitBytes": 524289,
+    "zeroChunks": 0,
+    "staleGenerationCurrent": 5,
+    "staleGenerationIncoming": 4,
+    "chunkIndexOutOfBounds": 2,
+    "incompatibleEngine": "xterm-headless",
+    "incompatibleRevision": "deadbeef00000000000000000000000000000000"
+  },
+  "input": {
+    "valid": {
+      "inputEpoch": 1,
+      "inputSeq": 10,
+      "dataBase64": "ZWNobyAnaGVsbG8nCg=="
+    },
+    "zeroSeq": {
+      "inputEpoch": 1,
+      "inputSeq": 0,
+      "dataBase64": "AQ=="
+    }
+  },
+  "paste": {
+    "valid": {
+      "inputEpoch": 1,
+      "pasteId": "paste-1234",
+      "pasteSeq": 1,
+      "bracketed": true,
+      "payloadBase64": "cGFzdGVkIHRleHQ="
+    },
+    "emptyId": {
+      "inputEpoch": 1,
+      "pasteId": "",
+      "pasteSeq": 1,
+      "bracketed": true,
+      "payloadBase64": "cGFzdGVkIHRleHQ="
+    }
+  },
+  "resizeLease": {
+    "valid": {
+      "sessionId": "sess-main-1",
+      "leaseId": "lease-8899",
+      "leaseEpoch": 1,
+      "chunkSequence": 542,
+      "cols": 120,
+      "rows": 40,
+      "signatureOrToken": "valid_token_xyz_123",
+      "expiresAtUnixMillis": 4102444800000
+    },
+    "zeroCols": {
+      "sessionId": "sess-main-1",
+      "leaseId": "lease-8899",
+      "leaseEpoch": 1,
+      "chunkSequence": 542,
+      "cols": 0,
+      "rows": 40,
+      "signatureOrToken": "valid_token_xyz_123",
+      "expiresAtUnixMillis": 4102444800000
+    },
+    "exceededRows": {
+      "sessionId": "sess-main-1",
+      "leaseId": "lease-8899",
+      "leaseEpoch": 1,
+      "chunkSequence": 542,
+      "cols": 120,
+      "rows": 1001,
+      "signatureOrToken": "valid_token_xyz_123",
+      "expiresAtUnixMillis": 4102444800000
+    },
+    "expired": {
+      "sessionId": "sess-main-1",
+      "leaseId": "lease-8899",
+      "leaseEpoch": 1,
+      "chunkSequence": 542,
+      "cols": 120,
+      "rows": 40,
+      "signatureOrToken": "valid_token_xyz_123",
+      "expiresAtUnixMillis": 1000
+    }
+  }
+}

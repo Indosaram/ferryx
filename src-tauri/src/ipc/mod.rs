@@ -31,6 +31,7 @@ pub mod remote_drop;
 pub mod remote_file;
 pub mod session;
 pub mod ssh;
+pub mod system_resources;
 pub mod terminal;
 pub mod updater;
 pub mod worktree;

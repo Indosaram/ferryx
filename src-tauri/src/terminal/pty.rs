@@ -149,9 +149,67 @@ mod agent_state_rendezvous_tests {
     }
 }
 
+/// Authority resolved by the daemon under its worktree fence, not rediscovered here.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSpawnContext {
+    pub root: std::path::PathBuf,
+    pub cwd: std::path::PathBuf,
+    pub managed_workspace_id: Option<String>,
+}
+
+impl ResolvedSpawnContext {
+    fn apply(&self, command: &mut CommandBuilder, session_id: &str) {
+        command.cwd(crate::daemon::session_service::normalize_process_cwd(&self.cwd));
+        // A plain-root shell must not inherit the daemon's own managed identity.
+        command.env_remove("FERRYX_WORKSPACE_ID");
+        apply_session_env(
+            command,
+            session_id,
+            &self.root.to_string_lossy(),
+            self.managed_workspace_id.as_deref(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod preparation_context_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_resolved_context_keeps_root_cwd_and_managed_identity_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("subdirectory");
+        let context = ResolvedSpawnContext {
+            root: root.path().to_owned(), cwd: cwd.clone(),
+            managed_workspace_id: Some("managed-ws".into()),
+        };
+        let mut command = CommandBuilder::new("shell");
+        command.arg("custom-argument");
+        command.env("PATH", "inherited-path");
+        context.apply(&mut command, "backend-id");
+        assert_eq!(command.get_cwd().unwrap().to_str().unwrap(),
+            crate::daemon::session_service::normalize_process_cwd(&cwd));
+        assert_eq!(command.get_env("FERRYX_WORKTREE_PATH").unwrap().to_str().unwrap(),
+            crate::daemon::session_service::normalize_process_cwd(root.path()));
+        assert_eq!(command.get_env("FERRYX_WORKSPACE_ID").unwrap(), "managed-ws");
+        assert_eq!(command.get_env("FERRYX_SESSION_ID").unwrap(), "backend-id");
+        assert_eq!(command.get_env("PATH").unwrap(), "inherited-path");
+        assert_eq!(command.get_argv(), &["shell", "custom-argument"]);
+        ResolvedSpawnContext { managed_workspace_id: None, ..context }.apply(&mut command, "root-id");
+        assert!(command.get_env("FERRYX_WORKSPACE_ID").is_none());
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpawnPathPolicy {
+    LegacyDiscovery,
+    Inherited,
+}
+
 #[derive(Clone)]
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    cwd_probe_permits: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
 }
@@ -166,6 +224,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            cwd_probe_permits: Arc::new(Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
             output_hub: Arc::new(RwLock::new(None)),
         }
@@ -265,13 +324,42 @@ impl PtyManager {
         self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
+    pub(crate) fn spawn_resolved_with_id(
+        &self,
+        session_id: String,
+        mut cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        context: ResolvedSpawnContext,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
+        context.apply(&mut cmd, &session_id);
+        let rx = self.spawn_with_path_policy(
+            session_id.clone(), cmd, cols, rows, Some(context.root), SpawnPathPolicy::Inherited,
+        )?;
+        Ok((session_id, rx))
+    }
+
     fn spawn_with_id_and_worktree(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_path: Option<std::path::PathBuf>,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        self.spawn_with_path_policy(
+            session_id, cmd, cols, rows, worktree_path, SpawnPathPolicy::LegacyDiscovery,
+        )
+    }
+
+    fn spawn_with_path_policy(
         &self,
         session_id: String,
         mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_path: Option<std::path::PathBuf>,
+        path_policy: SpawnPathPolicy,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
         if self.has_session(&session_id) {
             return Err(PtyError::Other(format!(
@@ -314,8 +402,13 @@ impl PtyManager {
         // GUI-launched daemons inherit minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) on macOS.
         // Direct child spawns (such as agent resumes) fail to find binaries in Homebrew, bun,
         // cargo, nvm unless PATH is augmented with the user's login shell search paths.
-        if let Ok(augmented) = std::env::join_paths(crate::ipc::agents::search_paths()) {
-            cmd.env("PATH", augmented);
+        match path_policy {
+            SpawnPathPolicy::LegacyDiscovery => {
+                if let Ok(augmented) = std::env::join_paths(super::shell::legacy_search_paths()) {
+                    cmd.env("PATH", augmented);
+                }
+            }
+            SpawnPathPolicy::Inherited => {}
         }
 
         // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
@@ -441,8 +534,6 @@ impl PtyManager {
             let Some(session) = manager.get_session(&session_id) else {
                 return;
             };
-            let mut reader_task = session.take_reader_task();
-
             loop {
                 let Some(session) = manager.get_session(&session_id) else {
                     break;
@@ -488,16 +579,7 @@ impl PtyManager {
                     }
                 }
 
-                if let Some(ref mut handle) = reader_task {
-                    tokio::select! {
-                        _ = handle => {
-                            reader_task = None;
-                        }
-                        _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
-                    }
-                } else {
-                    tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
-                }
+                tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
             }
         });
     }
@@ -519,7 +601,12 @@ impl PtyManager {
 
     async fn join_reader_bounded(session: &Arc<PtySession>) -> Result<(), PtyError> {
         let Some(mut reader_task) = session.take_reader_task() else {
-            return Ok(());
+            if session.is_reader_finished() {
+                return Ok(());
+            }
+            return Err(PtyError::Other(
+                "PTY reader join handle was consumed before close completed".into(),
+            ));
         };
 
         match tokio::time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_task).await {
@@ -712,8 +799,23 @@ impl PtyManager {
         self.sessions.read().contains_key(session_id)
     }
 
+    pub(crate) fn try_acquire_cwd_probe(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let sessions = self.sessions.read();
+        sessions.get(session_id)?;
+        let semaphore = self.cwd_probe_permits.lock()
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone();
+        semaphore.try_acquire_owned().ok()
+    }
+
     fn remove_from_registry(&self, session_id: &str) -> Option<Arc<PtySession>> {
-        self.sessions.write().remove(session_id)
+        let mut sessions = self.sessions.write();
+        self.cwd_probe_permits.lock().remove(session_id);
+        sessions.remove(session_id)
     }
 
     pub fn list_sessions(&self) -> Vec<String> {

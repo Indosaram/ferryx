@@ -1,0 +1,31 @@
+Subject: [PATCH] win32compat: fix infinite recursion in pRtlNtStatusToDosError
+
+In pRtlNtStatusToDosError(), the return statement invokes
+pRtlNtStatusToDosError(status) recursively instead of calling the resolved
+function pointer s_pRtlNtStatusToDosError(status).
+
+When called on Windows during preauth virtual token generation
+(generate_sshd_virtual_token -> pRtlNtStatusToDosError), NTSTATUS error
+conversion (e.g. mapping STATUS_NO_SUCH_USER to ERROR_NO_SUCH_USER 1317)
+enters an infinite tail-call recursion loop pinning 100% of a single CPU core.
+
+Upstream-Repository: PowerShell/openssh-portable
+Upstream-Target: contrib/win32/win32compat/w32api_proxies.c
+Upstream-Release-v10.0.0.0-Commit: b8c08ef9da9450a94a9c5ef717d96a7bd83f3332
+Upstream-Release-v9.5.0.0-Commit: 59aba65cf2e2f423c09d12ad825c3b32a11f408f
+Raw-Source-SHA256: 71a4d38ff22cc1812347a93a47241089b9e9fa545a2e834be8b2c250176f9f8c
+---
+ contrib/win32/win32compat/w32api_proxies.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/contrib/win32/win32compat/w32api_proxies.c
++++ b/contrib/win32/win32compat/w32api_proxies.c
+@@ -256,7 +256,7 @@ ULONG pRtlNtStatusToDosError(NTSTATUS status)
+ 		if ((s_pRtlNtStatusToDosError = (RtlNtStatusToDosErrorType)get_proc_address(hm, "RtlNtStatusToDosError")) == NULL)
+ 			return STATUS_ASSERTION_FAILURE;
+ 	}	
+-	return pRtlNtStatusToDosError(status);
++	return s_pRtlNtStatusToDosError(status);
+ }
+ 
+NTSTATUS pLsaClose(LSA_HANDLE lsa_h)

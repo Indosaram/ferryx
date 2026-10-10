@@ -70,6 +70,13 @@ pub enum IpcErrorCode {
     InvalidArgument,
     InternalError,
     Unsupported,
+    UnsupportedCapability,
+    SpawnRequestConflict,
+    SpawnRequestExpired,
+    SpawnEpochChanged,
+    SpawnAttemptTimeout,
+    SpawnCancelled,
+    SessionIdConflict,
     // Paired host and machine protocol error codes (P08)
     SessionExpired,
     ParentSessionMismatch,
@@ -174,6 +181,13 @@ impl IpcErrorCode {
             "METHOD_NOT_ALLOWED" => Self::MethodNotAllowed,
             "INTERNAL_ERROR" => Self::InternalError,
             "UNSUPPORTED" => Self::Unsupported,
+            "UNSUPPORTED_CAPABILITY" => Self::UnsupportedCapability,
+            "SPAWN_REQUEST_CONFLICT" => Self::SpawnRequestConflict,
+            "SPAWN_REQUEST_EXPIRED" => Self::SpawnRequestExpired,
+            "SPAWN_EPOCH_CHANGED" => Self::SpawnEpochChanged,
+            "SPAWN_ATTEMPT_TIMEOUT" => Self::SpawnAttemptTimeout,
+            "SPAWN_CANCELLED" => Self::SpawnCancelled,
+            "SESSION_ID_CONFLICT" => Self::SessionIdConflict,
             "INVALID_ARGUMENT" => Self::InvalidArgument,
             "IO_ERROR" => Self::IoError,
             "PARSE_ERROR" => Self::ParseError,
@@ -492,6 +506,25 @@ impl std::fmt::Display for IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_split_reliability_typed_error_codes_roundtrip() {
+        let cases = [
+            (IpcErrorCode::UnsupportedCapability, "UNSUPPORTED_CAPABILITY"),
+            (IpcErrorCode::SpawnRequestConflict, "SPAWN_REQUEST_CONFLICT"),
+            (IpcErrorCode::SpawnRequestExpired, "SPAWN_REQUEST_EXPIRED"),
+            (IpcErrorCode::SpawnEpochChanged, "SPAWN_EPOCH_CHANGED"),
+            (IpcErrorCode::SpawnAttemptTimeout, "SPAWN_ATTEMPT_TIMEOUT"),
+            (IpcErrorCode::SpawnCancelled, "SPAWN_CANCELLED"),
+            (IpcErrorCode::SessionIdConflict, "SESSION_ID_CONFLICT"),
+        ];
+        for (code, wire) in cases {
+            let encoded = serde_json::to_value(&code).expect("encode typed error");
+            assert_eq!(encoded, json!(wire));
+            assert_eq!(serde_json::from_value::<IpcErrorCode>(encoded).expect("decode typed error"), code);
+            assert_eq!(IpcErrorCode::from_code_str(wire), code);
+        }
+    }
 
     #[test]
     fn test_ipc_error_code_custom_roundtrip() {

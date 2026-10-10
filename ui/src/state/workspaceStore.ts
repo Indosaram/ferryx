@@ -228,6 +228,11 @@ export type WorkspaceAction =
     }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
   | {
+      type: "LOCAL_SESSIONS_RECONCILED";
+      /** Live daemon inventory, or null when reconciliation gave up. */
+      live: Map<string, { daemonEpoch: string | null; running: boolean }> | null;
+    }
+  | {
       type: "SET_RECONNECT_LIFECYCLE";
       sessionId: string;
       lifecycle: ReconnectLifecycle;
@@ -2528,6 +2533,44 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         };
       }
       return settleActivityForDeadSessions({ ...state, sessions }, lostSessionIds);
+    }
+    case "LOCAL_SESSIONS_RECONCILED": {
+      // Local sessions restored without a daemon inventory stay "reconnecting" until this answer
+      // arrives; ssh/paired sessions reconcile through SESSION_REMOTE_STATUS instead.
+      let changed = false;
+      const deadSessionIds: string[] = [];
+      const sessions = { ...state.sessions };
+      for (const [id, session] of Object.entries(sessions)) {
+        if (session.remoteConnectionState !== "reconnecting") continue;
+        if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) continue;
+        changed = true;
+        if (action.live === null) {
+          sessions[id] = { ...session, remoteConnectionState: "disconnected" };
+          continue;
+        }
+        const liveInfo = session.backendSessionId ? action.live.get(session.backendSessionId) : undefined;
+        if (liveInfo && liveInfo.running !== false) {
+          const epochChanged = liveInfo.daemonEpoch != null && liveInfo.daemonEpoch !== session.daemonEpoch;
+          sessions[id] = {
+            ...session,
+            remoteConnectionState: undefined,
+            lifecycle: "running",
+            ...(liveInfo.daemonEpoch != null ? { daemonEpoch: liveInfo.daemonEpoch } : {}),
+            ...(epochChanged ? { lastOutputSequence: null } : {}),
+          };
+        } else {
+          deadSessionIds.push(id);
+          sessions[id] = {
+            ...session,
+            backendSessionId: null,
+            lifecycle: "exited",
+            reconnectLifecycle: "idle",
+            remoteConnectionState: undefined,
+          };
+        }
+      }
+      if (!changed) return state;
+      return settleActivityForDeadSessions({ ...state, sessions }, deadSessionIds);
     }
     case "SESSION_LIFECYCLE": {
       const matchedSessionIds: string[] = [];

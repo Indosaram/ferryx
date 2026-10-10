@@ -447,8 +447,62 @@ impl Drop for RetirementGuard {
     }
 }
 
+pub(crate) struct SpawnOwnerGuard {
+    manager: Arc<HandoverManager>,
+}
+
+impl Drop for SpawnOwnerGuard {
+    fn drop(&mut self) {
+        let _status = self.manager.status.write();
+        self.manager.spawn_owners.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod spawn_owner_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_split_reliability_handover_private_prepare_after_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().join("private.sock");
+        let manager = Arc::new(HandoverManager::new(canonical.clone()));
+        let terminals = Arc::new(TerminalService::default());
+        let owner = manager.retain_spawn_owner().unwrap();
+        assert_eq!(manager.prepare_handover(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        drop(owner);
+        let (legacy, sessions, listener) = manager.prepare_handover(&terminals).unwrap();
+        assert!(legacy.starts_with(root.path()));
+        assert!(sessions.is_empty());
+        assert!(manager.retain_spawn_owner().is_err());
+        manager.abort_handover().unwrap();
+        drop(listener);
+        assert!(!legacy.exists());
+        assert!(manager.retain_spawn_owner().is_ok());
+        eprintln!("HANDOVER_PRIVATE canonical={} legacy={} listenerClosed=true", canonical.display(), legacy.display());
+    }
+
+    #[test]
+    fn local_split_reliability_handover_prepared_owner_and_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(HandoverManager::new(root.path().join("private.sock")));
+        let owner = manager.retain_spawn_owner().unwrap();
+        let terminals = Arc::new(TerminalService::default());
+        assert_eq!(manager.commit_handover_v5(&terminals).unwrap_err(), "HANDOVER_BUSY");
+        drop(owner);
+        *manager.status.write() = HandoverStatus::Prepared;
+        assert!(manager.retain_spawn_owner().is_err());
+        manager.abort_handover().unwrap();
+        assert!(manager.retain_spawn_owner().is_ok());
+    }
+}
+
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
+    // Access only while holding status; owner admission and prepare are atomic.
+    spawn_owners: std::sync::atomic::AtomicUsize,
     legacy_socket_path: Arc<RwLock<Option<PathBuf>>>,
     canonical_lock_files: Arc<Mutex<Option<DaemonLockFiles>>>,
     canonical_socket_path: PathBuf,
@@ -461,10 +515,20 @@ pub struct HandoverManager {
 }
 
 impl HandoverManager {
+    pub(crate) fn retain_spawn_owner(self: &Arc<Self>) -> Result<SpawnOwnerGuard, String> {
+        let status = self.status.write();
+        if *status != HandoverStatus::Active {
+            return Err("HANDOVER_BUSY".into());
+        }
+        self.spawn_owners.fetch_add(1, Ordering::Relaxed);
+        Ok(SpawnOwnerGuard { manager: self.clone() })
+    }
+
     pub fn new(canonical_socket_path: PathBuf) -> Self {
         let (client_abort_tx, _) = broadcast::channel(16);
         Self {
             status: Arc::new(RwLock::new(HandoverStatus::Active)),
+            spawn_owners: std::sync::atomic::AtomicUsize::new(0),
             legacy_socket_path: Arc::new(RwLock::new(None)),
             canonical_lock_files: Arc::new(Mutex::new(None)),
             canonical_socket_path,
@@ -533,6 +597,9 @@ impl HandoverManager {
         terminal_service: &Arc<TerminalService>,
     ) -> Result<(PathBuf, Vec<String>, tokio::net::UnixListener), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot prepare handover in state {:?}",
@@ -540,7 +607,10 @@ impl HandoverManager {
             ));
         }
 
+        #[cfg(not(test))]
         let legacy_path = Self::generate_legacy_socket_path();
+        #[cfg(test)]
+        let legacy_path = self.canonical_socket_path.with_file_name(format!("legacy-{}.sock", uuid::Uuid::new_v4()));
         let _ = fs::remove_file(&legacy_path);
 
         let listener = tokio::net::UnixListener::bind(&legacy_path).map_err(|e| {
@@ -582,6 +652,9 @@ impl HandoverManager {
     /// descriptor, so it retires only once its last session ends (`check_retirement_if_empty`).
     pub fn commit_handover_v4(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot commit handover in state {:?}",
@@ -632,6 +705,9 @@ impl HandoverManager {
 
     pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
+        if self.spawn_owners.load(Ordering::Relaxed) != 0 {
+            return Err("HANDOVER_BUSY".into());
+        }
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
                 "Cannot commit v5 handover in state {:?}",

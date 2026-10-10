@@ -1493,6 +1493,76 @@ where
     Ok(())
 }
 
+pub async fn send_native_terminal_input_with_stage_logging<R: Runtime, F, Fut>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    input: &NativeTerminalInput,
+    generation: Option<u64>,
+    request_id: Option<String>,
+    write_op: F,
+) -> Result<(), IpcError>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let start_instant = std::time::Instant::now();
+    let started_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64() * 1000.0);
+    let op_id = request_id.clone();
+    crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+        "event": "terminal.surface.input.stage.backend_write_start",
+        "details": {
+            "operationId": op_id,
+            "sessionId": session_id,
+            "generation": generation,
+            "startedAt": started_at_unix_ms,
+        }
+    }));
+    let write_result = send_native_terminal_input_with_writer(
+        app,
+        state,
+        session_id,
+        input,
+        write_op,
+    )
+    .await;
+    let duration_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+    match &write_result {
+        Ok(()) => {
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": true,
+                    "errorCode": None::<String>,
+                }
+            }));
+        }
+        Err(err) => {
+            let code_str = serde_json::to_value(&err.code)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", err.code));
+            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                "event": "terminal.surface.input.stage.backend_write",
+                "details": {
+                    "operationId": op_id,
+                    "sessionId": session_id,
+                    "durationMs": duration_ms,
+                    "success": false,
+                    "errorCode": Some(crate::ipc::debug::normalize_error_code(&code_str)),
+                }
+            }));
+        }
+    }
+    write_result
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_send_input<R: Runtime>(
     app: AppHandle<R>,
@@ -1501,13 +1571,16 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
     generation: Option<u64>,
+    request_id: Option<String>,
 ) -> Result<(), IpcError> {
     let write_session_id = session_id.clone();
-    send_native_terminal_input_with_writer(
+    send_native_terminal_input_with_stage_logging(
         &app,
         state.inner(),
         &session_id,
         &input,
+        generation,
+        request_id,
         |bytes| async move {
             daemon_client
                 .write_terminal_at_generation(&write_session_id, generation, bytes)
@@ -1515,6 +1588,14 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
         },
     )
     .await
+}
+
+#[tauri::command]
+pub fn cmd_native_terminal_pane_liveness(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<Option<crate::ipc::debug::PaneLivenessSnapshot>, IpcError> {
+    Ok(state.session_liveness_observation(&session_id))
 }
 
 /// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
@@ -2422,6 +2503,95 @@ mod tests {
                 "{name} must accept captured generation"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pane_liveness_diagnostics_prearmed_producer_write_barrier() {
+        let app = tauri::test::mock_builder()
+            .manage(NativeTerminalSurfaceHostState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+
+        // Attach an active session to surface host state so encode_attached_input succeeds
+        // and establishes a real blocked producer on the write barrier.
+        let (_output_tx, messages) = tokio::sync::mpsc::channel(1);
+        let stream_task = tokio::spawn(std::future::pending());
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                "session-test-barrier",
+                crate::daemon::DaemonAttachment {
+                    session_id: "session-test-barrier".into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: bytes::Bytes::new(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task,
+                },
+                Some(app.handle().clone()),
+                None,
+            )
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let input = NativeTerminalInput::Text { text: "test input".into() };
+
+        let recorded_entries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_entries = std::sync::Arc::clone(&recorded_entries);
+
+        let _sink_guard = crate::ipc::debug::set_scoped_sink_for_operation("req-barrier-1", move |entry| {
+            if entry.event.starts_with("terminal.surface.input.stage.") {
+                sink_entries.lock().unwrap().push(entry.clone());
+            }
+        });
+
+        let write_fut = send_native_terminal_input_with_stage_logging(
+            &app.handle(),
+            &state,
+            "session-test-barrier",
+            &input,
+            Some(1),
+            Some("req-barrier-1".into()),
+            |_bytes| async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(())
+            },
+        );
+
+        tokio::pin!(write_fut);
+
+        tokio::select! {
+            _ = &mut write_fut => panic!("write_fut completed before release"),
+            res = started_rx => {
+                assert!(res.is_ok(), "writer entered write_op and signaled barrier");
+                let entries = recorded_entries.lock().unwrap();
+                assert_eq!(entries.len(), 1, "backend_write_start must be emitted before write_op");
+                assert_eq!(entries[0].event, "terminal.surface.input.stage.backend_write_start");
+                assert_eq!(entries[0].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+                assert_eq!(entries[0].details.get("sessionId").and_then(|v| v.as_str()), Some("session-test-barrier"));
+                drop(entries);
+                let _ = release_tx.send(());
+            }
+        }
+
+        let result = write_fut.await;
+        assert!(result.is_ok(), "production write pipeline settled successfully");
+
+        let entries = recorded_entries.lock().unwrap();
+        assert_eq!(entries.len(), 2, "both backend_write_start and backend_write must be emitted");
+        assert_eq!(entries[1].event, "terminal.surface.input.stage.backend_write");
+        assert_eq!(entries[1].details.get("operationId").and_then(|v| v.as_str()), Some("req-barrier-1"));
+        assert_eq!(entries[1].details.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        state.teardown();
     }
 
     #[tokio::test]

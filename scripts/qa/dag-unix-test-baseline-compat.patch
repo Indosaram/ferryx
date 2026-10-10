@@ -1,0 +1,514 @@
+# dag-unix-test-baseline-compat.patch
+#
+# Additive compatibility patch for an ISOLATED Unix snapshot only. Not applied to the shared
+# working tree, and it does not claim the current tree builds on Unix.
+#
+# Source of truth: /tmp/ferryx-dag-unix-first-spawn.log (66 errors). All 31 E0063 sites were
+# re-located by file:line from that log, so this covers exactly the logged failure set.
+#
+#   E0063 x31  DaemonResponse::HandshakeOk literals missing `capabilities` and
+#              `admission_time_unix_ms`
+#                src/daemon/client.rs                 11
+#                src/ipc/tests.rs                      17
+#                src/remote/tests.rs                    2
+#                src/ipc/agents_reset_event_tests.rs     1
+#   E0277 x5   ValidatedFile (src/ipc/remote_drop.rs:79) needs Debug for the drop tests
+#              -> #[derive(Debug)] (fields are String/String/u64; the derive is inert)
+#
+# Semantics of the two added fields, mirroring the production handshake
+# (src-tauri/src/daemon/server.rs:2835-2844):
+#   capabilities           -> vec![LOCAL_SPLIT_LIFECYCLE_CAPABILITY]; that is the only
+#                             capability the daemon advertises, and the client's
+#                             require_capability gate (daemon/client.rs:961-968) checks
+#                             exactly this capability plus a present admission time.
+#   admission_time_unix_ms -> Some(current unix ms), the same observed value
+#                             AdmissionClock::now() yields on first use
+#                             (daemon/session_service.rs:146-153).
+#   Why defaults are safe: all 31 literals live in #[cfg(all(test, unix))] modules that have
+#   not compiled since the local-split feature landed, so none of them can encode an
+#   "incapable daemon" expectation. The single test that asserts UnsupportedCapability builds
+#   its peer reply from JSON with accept(false) (daemon/client.rs:3911-3915; assertion at
+#   :3977), so this patch does not touch it.
+#
+# DELIBERATELY NOT INCLUDED:
+#   * src/terminal/shell.rs HRTB closure + src/terminal/pty.rs comparisons -> reuse
+#     scripts/qa/dag-test-baseline-compat.patch + scripts/qa/dag-pty-test-baseline-compat.patch
+#   * src/daemon/session_service.rs spawn-command shape -> scripts/qa/dag-baseline-compat.patch
+#   * src/ssh/operations.rs E0425/E0433 (upload_deadline_for_bytes, Duration,
+#     posix_drop_upload_script, windows_drop_upload_script): production in-flight work that
+#     needs its owner's semantic decision, not a compat default. BLOCKED here.
+#   * E0282/E0283 at src/remote/machine_agent_state_tests.rs:261,315: already fixed in the
+#     current tree (Ok::<AgentState, anyhow::Error>), so no hunk is emitted.
+#   * "couldn't read" errors for scripts/install.sh, scripts/install.ps1,
+#     docs/evidence/paired-daemon/fixtures/*.json, scripts/qa/daas-project-response.json:
+#     those files exist in the current tree and are missing from the snapshot. Include them
+#     when building the snapshot; a patch cannot add files that already exist here.
+#
+# Verify + apply (repo root, isolated snapshot):
+#   git apply --check -p1 scripts/qa/dag-unix-test-baseline-compat.patch
+#   git apply -p1 scripts/qa/dag-unix-test-baseline-compat.patch
+#
+# Additive only: no suppressions, no #[ignore]/#[cfg] additions, no removals, no production
+# behavior change (the derive is inert; every handshake field added is a test fixture value).
+diff --git a/src-tauri/src/daemon/client.rs b/src-tauri/src/daemon/client.rs
+index 1bc63f6..c612219 100644
+--- a/src-tauri/src/daemon/client.rs
++++ b/src-tauri/src/daemon/client.rs
+@@ -4568,6 +4568,13 @@ mod tests {
+                         binary_path: None,
+                         binary_mtime_ms: None,
+                         daemon_version: None,
++                        capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                        admission_time_unix_ms: Some(
++                            std::time::SystemTime::now()
++                                .duration_since(std::time::UNIX_EPOCH)
++                                .unwrap_or_default()
++                                .as_millis() as u64,
++                        ),
+                     };
+                     write
+                         .write_all(
+@@ -4652,6 +4659,13 @@ mod tests {
+                         binary_path: None,
+                         binary_mtime_ms: None,
+                         daemon_version: None,
++                        capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                        admission_time_unix_ms: Some(
++                            std::time::SystemTime::now()
++                                .duration_since(std::time::UNIX_EPOCH)
++                                .unwrap_or_default()
++                                .as_millis() as u64,
++                        ),
+                     };
+                     write
+                         .write_all(
+@@ -4740,6 +4754,13 @@ mod tests {
+                         binary_path: None,
+                         binary_mtime_ms: None,
+                         daemon_version: None,
++                        capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                        admission_time_unix_ms: Some(
++                            std::time::SystemTime::now()
++                                .duration_since(std::time::UNIX_EPOCH)
++                                .unwrap_or_default()
++                                .as_millis() as u64,
++                        ),
+                     };
+                     write
+                         .write_all(
+@@ -4888,6 +4909,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             write
+                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+@@ -4974,6 +5002,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             write
+                 .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+@@ -5024,6 +5059,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             // Connection 1 (desktop control): answer the handshake, receive the Ping,
+             // and hold the reply so the control slot stays busy for the whole test.
+@@ -5166,6 +5208,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             write
+                 .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
+@@ -5357,6 +5406,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
+             hs_json.push('\n');
+@@ -5434,6 +5490,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
+             hs_json.push('\n');
+@@ -5769,6 +5832,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
+             handshake_json.push('\n');
+@@ -5881,6 +5951,13 @@ mod tests {
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             };
+             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
+             handshake_json.push('\n');
+diff --git a/src-tauri/src/ipc/agents_reset_event_tests.rs b/src-tauri/src/ipc/agents_reset_event_tests.rs
+index 1773838..54b4b12 100644
+--- a/src-tauri/src/ipc/agents_reset_event_tests.rs
++++ b/src-tauri/src/ipc/agents_reset_event_tests.rs
+@@ -107,6 +107,13 @@ async fn reset_scenario(succeeds: bool) {
+             binary_path: None,
+             binary_mtime_ms: None,
+             daemon_version: Some(env!("CARGO_PKG_VERSION").into()),
++            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++            admission_time_unix_ms: Some(
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .unwrap_or_default()
++                    .as_millis() as u64,
++            ),
+         };
+         writer
+             .write_all(
+diff --git a/src-tauri/src/ipc/remote_drop.rs b/src-tauri/src/ipc/remote_drop.rs
+index 4dd03ec..4f69520 100644
+--- a/src-tauri/src/ipc/remote_drop.rs
++++ b/src-tauri/src/ipc/remote_drop.rs
+@@ -76,6 +76,7 @@ impl Drop for UploadGuard {
+     }
+ }
+ 
++#[derive(Debug)]
+ pub struct ValidatedFile {
+     pub local_path: String,
+     pub file_name: String,
+diff --git a/src-tauri/src/ipc/tests.rs b/src-tauri/src/ipc/tests.rs
+index 154ed6d..b7a0ef3 100644
+--- a/src-tauri/src/ipc/tests.rs
++++ b/src-tauri/src/ipc/tests.rs
+@@ -1088,6 +1088,13 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
+                                 binary_path: None,
+                                 binary_mtime_ms: None,
+                                 daemon_version: None,
++                                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                                admission_time_unix_ms: Some(
++                                    std::time::SystemTime::now()
++                                        .duration_since(std::time::UNIX_EPOCH)
++                                        .unwrap_or_default()
++                                        .as_millis() as u64,
++                                ),
+                             },
+                             DaemonRequest::Spawn { .. } => DaemonResponse::SpawnOk {
+                                 session_id: "remote-mock-session".into(),
+@@ -1443,6 +1450,13 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -1603,6 +1617,13 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -1779,6 +1800,13 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -1931,6 +1959,13 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2098,6 +2133,13 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2273,6 +2315,13 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2445,6 +2494,13 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2585,6 +2641,13 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2723,6 +2786,13 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2856,6 +2926,13 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -2967,6 +3044,13 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -3114,6 +3198,13 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -3273,6 +3364,13 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -3432,6 +3530,13 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -3563,6 +3668,13 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+@@ -3659,6 +3771,13 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
+                             binary_path: None,
+                             binary_mtime_ms: None,
+                             daemon_version: None,
++                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                            admission_time_unix_ms: Some(
++                                std::time::SystemTime::now()
++                                    .duration_since(std::time::UNIX_EPOCH)
++                                    .unwrap_or_default()
++                                    .as_millis() as u64,
++                            ),
+                         },
+                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                             capabilities: vec!["pairedHostInventoryV1".into()],
+diff --git a/src-tauri/src/remote/tests.rs b/src-tauri/src/remote/tests.rs
+index d911b10..87fa2a4 100644
+--- a/src-tauri/src/remote/tests.rs
++++ b/src-tauri/src/remote/tests.rs
+@@ -3887,6 +3887,13 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing()
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             })
+             .unwrap()
+                 + "\n";
+@@ -4204,6 +4211,13 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
+                 binary_path: None,
+                 binary_mtime_ms: None,
+                 daemon_version: None,
++                capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
++                admission_time_unix_ms: Some(
++                    std::time::SystemTime::now()
++                        .duration_since(std::time::UNIX_EPOCH)
++                        .unwrap_or_default()
++                        .as_millis() as u64,
++                ),
+             })
+             .unwrap()
+                 + "\n";

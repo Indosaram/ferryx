@@ -14,7 +14,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const worktree = process.argv[2];
 if (!worktree || !existsSync(path.join(worktree, "src-tauri/tauri.conf.json"))) {
@@ -22,10 +24,13 @@ if (!worktree || !existsSync(path.join(worktree, "src-tauri/tauri.conf.json"))) 
   process.exit(2);
 }
 
-const mainRepo = "/Volumes/T9-Mac/project/ferryx";
-const signingIdentity = "Developer ID Application: Indo Yoon (5DUM8WPB4C)";
+// This script lives at <main-repo>/scripts/build-notarized-local.mjs, so the repo holding the
+// uncommitted .env and the release pipeline is the script's parent directory.
+const mainRepo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const signingIdentity =
+  process.env.APPLE_SIGNING_IDENTITY || "Developer ID Application: Indo Yoon (5DUM8WPB4C)";
 const notaryProfile = "FerryxNotary";
-const targetDir = process.env.CARGO_TARGET_DIR || "/tmp/ferryx-notary-target";
+const targetDir = process.env.CARGO_TARGET_DIR || path.join(tmpdir(), "ferryx-notary-target");
 const runDir = path.join(worktree, ".notary-run");
 
 function run(cmd, args, extraEnv = {}, opts = {}) {

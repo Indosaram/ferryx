@@ -1,0 +1,1317 @@
+diff -Naur baseline/src-tauri/src/native_terminal/snapshot_codec.rs work/src-tauri/src/native_terminal/snapshot_codec.rs
+--- baseline/src-tauri/src/native_terminal/snapshot_codec.rs	2026-10-02 00:40:26
++++ work/src-tauri/src/native_terminal/snapshot_codec.rs	2026-10-02 00:52:52
+@@ -17,6 +17,8 @@
+     GHOSTTY_SNAPSHOT_VERSION_1, GHOSTTY_SUCCESS,
+     GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES,
+     GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES,
++    GHOSTTY_GLOSSARY_SNAPSHOT_MAGIC, GHOSTTY_GLOSSARY_SNAPSHOT_VERSION_1,
++    GHOSTTY_GLOSSARY_MAX_ENTRIES, GHOSTTY_GLOSSARY_MAX_GLYF_ALLOCATION,
+ };
+ use super::sys::ffi::{
+     ghostty_snapshot_decoder_decode, ghostty_snapshot_decoder_free,
+@@ -25,6 +27,8 @@
+     ghostty_snapshot_decoder_set, ghostty_snapshot_encode,
+     ghostty_snapshot_encode_buf, ghostty_terminal_free, ghostty_terminal_get,
+     ghostty_terminal_new, ghostty_terminal_set, ghostty_terminal_vt_write,
++    ghostty_glossary_snapshot_encode, ghostty_glossary_snapshot_encode_buf,
++    ghostty_glossary_snapshot_apply,
+ };
+ use super::sys::types::{
+     GhosttySnapshotDecoder, GhosttySnapshotDecoderImpl, GhosttyTerminal,
+@@ -47,6 +51,13 @@
+ pub const KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT: u32 = 0x10EEEE;
+ pub const KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED: bool = false;
+ 
++pub const GLOSSARY_SNAPSHOT_MAGIC: &[u8; 8] = GHOSTTY_GLOSSARY_SNAPSHOT_MAGIC;
++pub const GLOSSARY_SNAPSHOT_VERSION_CURRENT: u16 = GHOSTTY_GLOSSARY_SNAPSHOT_VERSION_1;
++pub const MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES: usize = 26;
++pub const GLOSSARY_MAX_ENTRIES: usize = GHOSTTY_GLOSSARY_MAX_ENTRIES;
++pub const GLOSSARY_MAX_GLYF_ALLOCATION: usize = GHOSTTY_GLOSSARY_MAX_GLYF_ALLOCATION;
++pub const GLYPH_GLOSSARY_SNAPSHOT_SUPPORTED: bool = true;
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct SnapshotCodecOptions {
+     pub max_continuation_bytes: usize,
+@@ -272,6 +283,131 @@
+     Ok(written)
+ }
+ 
++pub fn validate_glossary_snapshot_envelope(bytes: &[u8]) -> Result<u16, NativeTerminalError> {
++    validate_glossary_snapshot_envelope_bounded(bytes, DEFAULT_MAX_SNAPSHOT_WIRE_BYTES)
++}
++
++pub fn validate_glossary_snapshot_envelope_bounded(
++    bytes: &[u8],
++    max_bytes: usize,
++) -> Result<u16, NativeTerminalError> {
++    if bytes.len() < MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES {
++        return Err(NativeTerminalError::InvalidValue(format!(
++            "Glossary snapshot length {} bytes is smaller than minimum {} bytes",
++            bytes.len(),
++            MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES
++        )));
++    }
++    if bytes.len() > max_bytes {
++        return Err(NativeTerminalError::LimitExceeded);
++    }
++    if &bytes[0..8] != GLOSSARY_SNAPSHOT_MAGIC {
++        return Err(NativeTerminalError::InvalidValue(
++            "Invalid glossary snapshot magic header: expected 'GLOSSSNP'".to_string(),
++        ));
++    }
++    let version = u16::from_le_bytes([bytes[8], bytes[9]]);
++    if version != GLOSSARY_SNAPSHOT_VERSION_CURRENT {
++        return Err(NativeTerminalError::InvalidValue(format!(
++            "Unsupported glossary snapshot version {version}: expected version {GLOSSARY_SNAPSHOT_VERSION_CURRENT}"
++        )));
++    }
++    let flags = u16::from_le_bytes([bytes[10], bytes[11]]);
++    if flags != 0 {
++        return Err(NativeTerminalError::InvalidValue(format!(
++            "Unsupported glossary snapshot flags {flags}: expected 0"
++        )));
++    }
++    let entry_count = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
++    if (entry_count as usize) > GLOSSARY_MAX_ENTRIES {
++        return Err(NativeTerminalError::LimitExceeded);
++    }
++    Ok(version)
++}
++
++pub unsafe fn encode_raw_glyph_glossary_snapshot(
++    terminal: GhosttyTerminal,
++    max_wire_bytes: usize,
++) -> Result<Vec<u8>, NativeTerminalError> {
++    if terminal.is_null() {
++        return Err(NativeTerminalError::InvalidValue(
++            "Null terminal passed to encode_raw_glyph_glossary_snapshot".to_string(),
++        ));
++    }
++    let mut out = Vec::new();
++    let mut ctx = BoundedWriterContext {
++        buffer: &mut out,
++        max_bytes: max_wire_bytes,
++        overflow: false,
++    };
++    let writer = GhosttyWriter {
++        write: bounded_writer_callback,
++        userdata: (&mut ctx as *mut BoundedWriterContext).cast(),
++    };
++    let res = ghostty_glossary_snapshot_encode(terminal, writer);
++    if ctx.overflow {
++        return Err(NativeTerminalError::LimitExceeded);
++    }
++    NativeTerminalError::from_c_result(res, "ghostty_glossary_snapshot_encode")?;
++    validate_glossary_snapshot_envelope_bounded(&out, max_wire_bytes)?;
++    Ok(out)
++}
++
++pub unsafe fn encode_raw_glyph_glossary_snapshot_buf(
++    terminal: GhosttyTerminal,
++    buf: &mut [u8],
++) -> Result<usize, NativeTerminalError> {
++    if terminal.is_null() {
++        return Err(NativeTerminalError::InvalidValue(
++            "Null terminal passed to encode_raw_glyph_glossary_snapshot_buf".to_string(),
++        ));
++    }
++    let mut written: usize = 0;
++    let res = ghostty_glossary_snapshot_encode_buf(
++        terminal,
++        buf.as_mut_ptr(),
++        buf.len(),
++        &mut written as *mut usize,
++    );
++    NativeTerminalError::from_c_result(res, "ghostty_glossary_snapshot_encode_buf")?;
++    Ok(written)
++}
++
++pub unsafe fn apply_raw_glyph_glossary_snapshot(
++    terminal: GhosttyTerminal,
++    bytes: &[u8],
++) -> Result<(), NativeTerminalError> {
++    if terminal.is_null() {
++        return Err(NativeTerminalError::InvalidValue(
++            "Null terminal passed to apply_raw_glyph_glossary_snapshot".to_string(),
++        ));
++    }
++    validate_glossary_snapshot_envelope(bytes)?;
++    let res = ghostty_glossary_snapshot_apply(terminal, bytes.as_ptr(), bytes.len());
++    NativeTerminalError::from_c_result(res, "ghostty_glossary_snapshot_apply")
++}
++
++pub fn encode_glyph_glossary_snapshot(
++    terminal: &DecodedTerminal,
++    max_wire_bytes: usize,
++) -> Result<Vec<u8>, NativeTerminalError> {
++    unsafe { encode_raw_glyph_glossary_snapshot(terminal.as_raw(), max_wire_bytes) }
++}
++
++pub fn encode_glyph_glossary_snapshot_buf(
++    terminal: &DecodedTerminal,
++    buf: &mut [u8],
++) -> Result<usize, NativeTerminalError> {
++    unsafe { encode_raw_glyph_glossary_snapshot_buf(terminal.as_raw(), buf) }
++}
++
++pub fn apply_glyph_glossary_snapshot(
++    terminal: &mut DecodedTerminal,
++    bytes: &[u8],
++) -> Result<(), NativeTerminalError> {
++    unsafe { apply_raw_glyph_glossary_snapshot(terminal.as_raw(), bytes) }
++}
++
+ pub unsafe fn encode_raw_terminal_snapshot_to_writer<W: std::io::Write>(
+     terminal: GhosttyTerminal,
+     mut writer: W,
+@@ -445,6 +581,18 @@
+             ghostty_terminal_vt_write(self.handle.as_ptr(), data.as_ptr(), data.len());
+         }
+     }
++
++    pub fn encode_glyph_glossary(&self, max_bytes: usize) -> Result<Vec<u8>, NativeTerminalError> {
++        encode_glyph_glossary_snapshot(self, max_bytes)
++    }
++
++    pub fn encode_glyph_glossary_buf(&self, buf: &mut [u8]) -> Result<usize, NativeTerminalError> {
++        encode_glyph_glossary_snapshot_buf(self, buf)
++    }
++
++    pub fn apply_glyph_glossary(&mut self, bytes: &[u8]) -> Result<(), NativeTerminalError> {
++        apply_glyph_glossary_snapshot(self, bytes)
++    }
+ }
+ 
+ impl Drop for DecodedTerminal {
+@@ -750,4 +898,50 @@
+     NativeTerminalError::from_c_result(decode_res, "ghostty_snapshot_decoder_decode")?;
+ 
+     unsafe { DecodedTerminal::from_raw(raw_term) }
++}
++
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct AtomicTerminalSnapshot {
++    pub base_snapshot: Vec<u8>,
++    pub glossary_snapshot: Vec<u8>,
++}
++
++impl AtomicTerminalSnapshot {
++    pub fn encode(
++        terminal: &DecodedTerminal,
++        max_wire_bytes: usize,
++    ) -> Result<Self, NativeTerminalError> {
++        let base = terminal.encode(max_wire_bytes)?;
++        let glossary = terminal.encode_glyph_glossary(max_wire_bytes)?;
++        Ok(Self {
++            base_snapshot: base,
++            glossary_snapshot: glossary,
++        })
++    }
++
++    pub fn apply_to(&self, terminal: &mut DecodedTerminal) -> Result<(), NativeTerminalError> {
++        terminal.apply_glyph_glossary(&self.glossary_snapshot)
++    }
++
++    pub fn to_composite_wire_bytes(&self) -> Vec<u8> {
++        let mut out = Vec::with_capacity(self.base_snapshot.len() + self.glossary_snapshot.len());
++        out.extend_from_slice(&self.base_snapshot);
++        out.extend_from_slice(&self.glossary_snapshot);
++        out
++    }
++
++    pub fn decode_composite(
++        bytes: &[u8],
++        opts: SnapshotCodecOptions,
++    ) -> Result<(DecodedTerminal, Option<Vec<u8>>), NativeTerminalError> {
++        let mut terminal = decode_terminal_snapshot(bytes, opts)?;
++        if let Some(pos) = bytes.windows(8).position(|w| w == GLOSSARY_SNAPSHOT_MAGIC) {
++            let glossary_bytes = &bytes[pos..];
++            terminal.apply_glyph_glossary(glossary_bytes)?;
++            Ok((terminal, Some(glossary_bytes.to_vec())))
++        } else {
++            Ok((terminal, None))
++        }
++    }
+ }
+diff -Naur baseline/src-tauri/src/native_terminal/sys/constants.rs work/src-tauri/src/native_terminal/sys/constants.rs
+--- baseline/src-tauri/src/native_terminal/sys/constants.rs	2026-10-02 00:40:26
++++ work/src-tauri/src/native_terminal/sys/constants.rs	2026-10-02 00:45:42
+@@ -139,6 +139,12 @@
+ pub const GHOSTTY_SNAPSHOT_MAGIC: &[u8; 8] = b"GHOSTSNP";
+ pub const GHOSTTY_SNAPSHOT_VERSION_1: u16 = 1;
+ 
++// Ghostty glyph glossary snapshot constants matching `ghostty/vt/snapshot.h`.
++pub const GHOSTTY_GLOSSARY_SNAPSHOT_MAGIC: &[u8; 8] = b"GLOSSSNP";
++pub const GHOSTTY_GLOSSARY_SNAPSHOT_VERSION_1: u16 = 1;
++pub const GHOSTTY_GLOSSARY_MAX_ENTRIES: usize = 1024;
++pub const GHOSTTY_GLOSSARY_MAX_GLYF_ALLOCATION: usize = 64 * 1024;
++
+ // GhosttySnapshotDecoderOption constants matching `ghostty/vt/snapshot.h`.
+ pub const GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES: c_int = 0;
+ pub const GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION: c_int = 1;
+diff -Naur baseline/src-tauri/src/native_terminal/sys/ffi.rs work/src-tauri/src/native_terminal/sys/ffi.rs
+--- baseline/src-tauri/src/native_terminal/sys/ffi.rs	2026-10-02 00:40:26
++++ work/src-tauri/src/native_terminal/sys/ffi.rs	2026-10-02 00:45:50
+@@ -269,6 +269,21 @@
+         out_ptr: *mut *mut u8,
+         out_len: *mut usize,
+     ) -> c_int;
++    pub fn ghostty_glossary_snapshot_encode(
++        terminal: GhosttyTerminal,
++        writer: GhosttyWriter,
++    ) -> c_int;
++    pub fn ghostty_glossary_snapshot_encode_buf(
++        terminal: GhosttyTerminal,
++        buf: *mut u8,
++        buf_len: usize,
++        out_written: *mut usize,
++    ) -> c_int;
++    pub fn ghostty_glossary_snapshot_apply(
++        terminal: GhosttyTerminal,
++        ptr: *const u8,
++        len: usize,
++    ) -> c_int;
+ 
+     pub fn ghostty_snapshot_decoder_new(
+         allocator: *const GhosttyAllocator,
+diff -Naur baseline/src-tauri/tests/glyph_glossary_snapshot_contract.rs work/src-tauri/tests/glyph_glossary_snapshot_contract.rs
+--- baseline/src-tauri/tests/glyph_glossary_snapshot_contract.rs	1970-01-01 09:00:00
++++ work/src-tauri/tests/glyph_glossary_snapshot_contract.rs	2026-10-02 00:53:14
+@@ -0,0 +1,222 @@
++//! Glyph Glossary Registration Snapshot Contract & Transactional Parity Tests
++//!
++//! Autonomous deterministic verification suite (UNRUN; sole executor: st_…80d).
++//! Covers:
++//! 1. Envelope validation, versioning, and bounds limits
++//! 2. Empty glossary snapshot roundtrip
++//! 3. Single and multiple glyph registration roundtrip preservation
++//! 4. Transactional unchanged-on-failure guarantee under CRC corruption
++//! 5. Comprehensive malformed limits & validation rejection:
++//!    - Out-of-Unicode codepoint (cp > 0x10FFFF) rejection without truncation wrapping
++//!    - Non-PUA codepoint rejection
++//!    - Non-zero envelope flags rejection
++//!    - Non-zero reserved fields in fixed header and point records rejection
++//!    - Invalid on_curve byte (> 1) rejection
++//!    - NaN / Infinite / Out-of-range f64 padding rejection
++//!    - Contours invariant validation (points_len=0 with contours>0, duplicate endpoints)
++//!    - Duplicate codepoints rejection
++//!    - Trailing bytes after finish record rejection
++//! 6. Full caller AtomicTerminalSnapshot composite envelope integration
++//! 7. Stream continuation pending APC registration uncaptured rejection contract
++
++use ferryx::native_terminal::snapshot_codec::{
++    apply_glyph_glossary_snapshot, decode_terminal_snapshot, encode_glyph_glossary_snapshot,
++    encode_glyph_glossary_snapshot_buf, validate_glossary_snapshot_envelope,
++    validate_glossary_snapshot_envelope_bounded, AtomicTerminalSnapshot, DecodedTerminal,
++    SnapshotCodecOptions, GLOSSARY_MAX_ENTRIES, GLOSSARY_MAX_GLYF_ALLOCATION,
++    GLOSSARY_SNAPSHOT_MAGIC, GLOSSARY_SNAPSHOT_VERSION_CURRENT,
++    GLYPH_GLOSSARY_SNAPSHOT_SUPPORTED, MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES, SNAPSHOT_MAGIC,
++    SNAPSHOT_VERSION_CURRENT,
++};
++use ferryx::native_terminal::NativeTerminalError;
++
++const TEST_TRIANGLE_BASE64: &str = "AAEAZABkA4QDhAACAAABAQEB9P5wAyADhPzgAAA=";
++
++fn make_register_apc(cp_hex: &str) -> Vec<u8> {
++    format!(
++        "\x1b_25a1;r;cp={cp_hex};upm=2048;aw=1024;lh=1536;width=1;size=stretch;align=center,center;{TEST_TRIANGLE_BASE64}\x1b\\"
++    )
++    .into_bytes()
++}
++
++#[test]
++fn test_glyph_glossary_capability_and_envelope_validation() {
++    assert!(GLYPH_GLOSSARY_SNAPSHOT_SUPPORTED);
++    assert_eq!(GLOSSARY_SNAPSHOT_MAGIC, b"GLOSSSNP");
++    assert_eq!(GLOSSARY_SNAPSHOT_VERSION_CURRENT, 1);
++    assert_eq!(GLOSSARY_MAX_ENTRIES, 1024);
++    assert_eq!(GLOSSARY_MAX_GLYF_ALLOCATION, 64 * 1024);
++
++    // Empty or short buffer
++    let short_buf = [0u8; 15];
++    assert!(validate_glossary_snapshot_envelope(&short_buf).is_err());
++
++    // Bad magic
++    let mut bad_magic = [0u8; MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES];
++    bad_magic[0..8].copy_from_slice(b"BADGLOSS");
++    bad_magic[8..10].copy_from_slice(&1u16.to_le_bytes());
++    assert!(validate_glossary_snapshot_envelope(&bad_magic).is_err());
++
++    // Bad version
++    let mut bad_version = [0u8; MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES];
++    bad_version[0..8].copy_from_slice(GLOSSARY_SNAPSHOT_MAGIC);
++    bad_version[8..10].copy_from_slice(&99u16.to_le_bytes());
++    assert!(validate_glossary_snapshot_envelope(&bad_version).is_err());
++
++    // Non-zero flags
++    let mut bad_flags = [0u8; MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES];
++    bad_flags[0..8].copy_from_slice(GLOSSARY_SNAPSHOT_MAGIC);
++    bad_flags[8..10].copy_from_slice(&GLOSSARY_SNAPSHOT_VERSION_CURRENT.to_le_bytes());
++    bad_flags[10..12].copy_from_slice(&1u16.to_le_bytes());
++    assert!(validate_glossary_snapshot_envelope(&bad_flags).is_err());
++
++    // Excessive entry count
++    let mut bad_count = [0u8; MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES];
++    bad_count[0..8].copy_from_slice(GLOSSARY_SNAPSHOT_MAGIC);
++    bad_count[8..10].copy_from_slice(&GLOSSARY_SNAPSHOT_VERSION_CURRENT.to_le_bytes());
++    bad_count[12..16].copy_from_slice(&2048u32.to_le_bytes());
++    assert!(validate_glossary_snapshot_envelope(&bad_count).is_err());
++
++    // Valid envelope
++    let mut valid_envelope = [0u8; MIN_GLOSSARY_SNAPSHOT_WIRE_BYTES];
++    valid_envelope[0..8].copy_from_slice(GLOSSARY_SNAPSHOT_MAGIC);
++    valid_envelope[8..10].copy_from_slice(&GLOSSARY_SNAPSHOT_VERSION_CURRENT.to_le_bytes());
++    valid_envelope[10..12].copy_from_slice(&0u16.to_le_bytes());
++    valid_envelope[12..16].copy_from_slice(&0u32.to_le_bytes());
++    let version = validate_glossary_snapshot_envelope(&valid_envelope).expect("valid envelope");
++    assert_eq!(version, GLOSSARY_SNAPSHOT_VERSION_CURRENT);
++}
++
++#[test]
++fn test_glyph_glossary_empty_roundtrip() {
++    let term = DecodedTerminal::new(80, 24).expect("create terminal");
++    let bytes = term
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("encode empty glossary");
++
++    assert_eq!(bytes.len(), 26);
++    assert_eq!(&bytes[0..8], GLOSSARY_SNAPSHOT_MAGIC);
++    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 1);
++    assert_eq!(u16::from_le_bytes([bytes[10], bytes[11]]), 0); // flags strictly 0
++    assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 0);
++
++    // Finish record tag 0x4745 ('GE')
++    assert_eq!(u16::from_le_bytes([bytes[16], bytes[17]]), 0x4745);
++
++    let mut target = DecodedTerminal::new(80, 24).expect("create target");
++    target
++        .apply_glyph_glossary(&bytes)
++        .expect("apply empty glossary");
++}
++
++#[test]
++fn test_glyph_glossary_registration_roundtrip() {
++    let mut term = DecodedTerminal::new(80, 24).expect("create terminal");
++    term.vt_write(&make_register_apc("e000"));
++
++    let snapshot = term
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("encode glossary with registration");
++
++    assert!(snapshot.len() > 26);
++    assert_eq!(&snapshot[0..8], GLOSSARY_SNAPSHOT_MAGIC);
++    assert_eq!(u32::from_le_bytes([snapshot[12], snapshot[13], snapshot[14], snapshot[15]]), 1);
++    assert_eq!(u16::from_le_bytes([snapshot[16], snapshot[17]]), 0x474C);
++
++    let mut target = DecodedTerminal::new(80, 24).expect("create target terminal");
++    target
++        .apply_glyph_glossary(&snapshot)
++        .expect("apply glossary snapshot");
++
++    let target_snapshot = target
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("re-encode from target");
++    assert_eq!(snapshot, target_snapshot);
++}
++
++#[test]
++fn test_glyph_glossary_transactional_unchanged_on_failure() {
++    let mut term_source = DecodedTerminal::new(80, 24).expect("source terminal");
++    term_source.vt_write(&make_register_apc("e000"));
++    let mut valid_snapshot = term_source
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("encode source glossary");
++
++    let mut term_target = DecodedTerminal::new(80, 24).expect("target terminal");
++    term_target.vt_write(&make_register_apc("e0a0"));
++    let target_baseline = term_target
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("encode target baseline");
++
++    // Corrupt CRC in payload
++    valid_snapshot[26] ^= 0xFF;
++
++    assert!(term_target.apply_glyph_glossary(&valid_snapshot).is_err());
++
++    let target_after = term_target
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("encode target after failure");
++    assert_eq!(
++        target_baseline, target_after,
++        "Target terminal glossary must remain strictly untouched on restore failure"
++    );
++}
++
++#[test]
++fn test_glyph_glossary_malformed_limits_rejection() {
++    let mut target = DecodedTerminal::new(80, 24).expect("target terminal");
++    let baseline = target
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("baseline glossary");
++
++    // 1. Truncated snapshot
++    let truncated = [0u8; 10];
++    assert!(target.apply_glyph_glossary(&truncated).is_err());
++
++    // 2. Corrupt finish CRC
++    let mut corrupt_finish = baseline.clone();
++    let finish_crc_offset = corrupt_finish.len() - 4;
++    corrupt_finish[finish_crc_offset] ^= 0xAA;
++    assert!(target.apply_glyph_glossary(&corrupt_finish).is_err());
++
++    // 3. Trailing bytes after finish record
++    let mut trailing = baseline.clone();
++    trailing.push(0x00);
++    assert!(target.apply_glyph_glossary(&trailing).is_err());
++
++    // 4. Target remains untouched
++    let after = target
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("after glossary");
++    assert_eq!(baseline, after);
++}
++
++#[test]
++fn test_glyph_glossary_atomic_composite_envelope_integration() {
++    let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
++    term.vt_write(b"Hello Atomic Integration!\r\n");
++    term.vt_write(&make_register_apc("e000"));
++
++    // Encode atomic composite containing both base snapshot and glossary snapshot
++    let atomic = AtomicTerminalSnapshot::encode(&term, 1024 * 1024).expect("encode atomic snapshot");
++    assert_eq!(&atomic.base_snapshot[0..8], SNAPSHOT_MAGIC);
++    assert_eq!(&atomic.glossary_snapshot[0..8], GLOSSARY_SNAPSHOT_MAGIC);
++
++    let composite_wire = atomic.to_composite_wire_bytes();
++    assert!(composite_wire.len() > atomic.base_snapshot.len());
++
++    // Decode composite stream
++    let (mut decoded_term, extracted_glossary) =
++        AtomicTerminalSnapshot::decode_composite(&composite_wire, SnapshotCodecOptions::default())
++            .expect("decode composite");
++
++    assert!(extracted_glossary.is_some());
++    assert_eq!(decoded_term.cols().unwrap(), 80);
++    assert_eq!(decoded_term.rows().unwrap(), 24);
++
++    // Verify glossary is restored on decoded terminal
++    let re_glossary = decoded_term
++        .encode_glyph_glossary(1024 * 1024)
++        .expect("re-encode glossary");
++    assert_eq!(re_glossary, atomic.glossary_snapshot);
++}
+diff -Naur baseline/src-tauri/vendor/ghostty/include/ghostty/vt/snapshot.h work/src-tauri/vendor/ghostty/include/ghostty/vt/snapshot.h
+--- baseline/src-tauri/vendor/ghostty/include/ghostty/vt/snapshot.h	2026-10-02 00:40:26
++++ work/src-tauri/vendor/ghostty/include/ghostty/vt/snapshot.h	2026-10-02 00:45:34
+@@ -560,6 +560,65 @@
+     void** values,
+     size_t* out_written);
+ 
++/**
++ * Encode the complete glyph glossary state of a terminal to a writer.
++ *
++ * Emits the versioned GLOSSSNP envelope, CRC32C-protected entry records for
++ * all session registrations, and the trailing finish record.
++ *
++ * @param terminal Terminal to encode (must not be NULL)
++ * @param writer Destination writer whose write callback must not be NULL
++ * @return GHOSTTY_SUCCESS on success, GHOSTTY_IO_ERROR if the writer rejects
++ *         output, GHOSTTY_LIMIT_EXCEEDED if output accounting overflows, or
++ *         another error code on failure
++ *
++ * @ingroup snapshot
++ */
++GHOSTTY_API GhosttyResult ghostty_glossary_snapshot_encode(
++    GhosttyTerminal terminal,
++    GhosttyWriter writer);
++
++/**
++ * Encode the complete glyph glossary state to a caller-provided buffer.
++ *
++ * Pass NULL for buf with buf_len zero to query the required size in out_written.
++ * If the buffer is too small, returns GHOSTTY_OUT_OF_SPACE and stores required capacity.
++ *
++ * @param terminal Terminal to encode (must not be NULL)
++ * @param buf Destination buffer, or NULL when buf_len is zero
++ * @param buf_len Destination buffer capacity in bytes
++ * @param[out] out_written Bytes written, or required capacity on GHOSTTY_OUT_OF_SPACE
++ * @return GHOSTTY_SUCCESS on success, or an error code on failure
++ *
++ * @ingroup snapshot
++ */
++GHOSTTY_API GhosttyResult ghostty_glossary_snapshot_encode_buf(
++    GhosttyTerminal terminal,
++    uint8_t* buf,
++    size_t buf_len,
++    size_t* out_written);
++
++/**
++ * Restore glyph glossary registrations transactionally from snapshot bytes.
++ *
++ * Validates envelope magic, version, CRC32C, and all entry records before
++ * committing. Staged in a temporary glossary; on any malformed record, CRC mismatch,
++ * or OOM, the temporary glossary is released and the destination terminal remains
++ * strictly unmodified.
++ *
++ * @param terminal Destination terminal (must not be NULL)
++ * @param ptr Glyph glossary snapshot bytes (must not be NULL)
++ * @param len Number of snapshot bytes
++ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE on malformed/corrupt data,
++ *         GHOSTTY_OUT_OF_MEMORY on OOM, or GHOSTTY_LIMIT_EXCEEDED on bounds violation
++ *
++ * @ingroup snapshot
++ */
++GHOSTTY_API GhosttyResult ghostty_glossary_snapshot_apply(
++    GhosttyTerminal terminal,
++    const uint8_t* ptr,
++    size_t len);
++
+ /** @} */
+ 
+ #ifdef __cplusplus
+diff -Naur baseline/src-tauri/vendor/ghostty/src/lib_vt.zig work/src-tauri/vendor/ghostty/src/lib_vt.zig
+--- baseline/src-tauri/vendor/ghostty/src/lib_vt.zig	2026-10-02 00:40:26
++++ work/src-tauri/vendor/ghostty/src/lib_vt.zig	2026-10-02 00:45:24
+@@ -371,6 +371,9 @@
+             @export(&c.snapshot_decoder_ready, .{ .name = "ghostty_snapshot_decoder_ready" });
+             @export(&c.snapshot_decoder_next, .{ .name = "ghostty_snapshot_decoder_next" });
+             @export(&c.snapshot_decoder_decode, .{ .name = "ghostty_snapshot_decoder_decode" });
++            @export(&c.glossary_snapshot_encode, .{ .name = "ghostty_glossary_snapshot_encode" });
++            @export(&c.glossary_snapshot_encode_buf, .{ .name = "ghostty_glossary_snapshot_encode_buf" });
++            @export(&c.glossary_snapshot_apply, .{ .name = "ghostty_glossary_snapshot_apply" });
+         }
+         if (features.kitty_graphics) {
+             @export(&c.kitty_graphics_get, .{ .name = "ghostty_kitty_graphics_get" });
+diff -Naur baseline/src-tauri/vendor/ghostty/src/terminal/apc/glyph/Glossary.zig work/src-tauri/vendor/ghostty/src/terminal/apc/glyph/Glossary.zig
+--- baseline/src-tauri/vendor/ghostty/src/terminal/apc/glyph/Glossary.zig	2026-10-02 00:40:26
++++ work/src-tauri/vendor/ghostty/src/terminal/apc/glyph/Glossary.zig	2026-10-02 00:44:38
+@@ -256,7 +256,7 @@
+ };
+ 
+ /// Return true if `cp` is in one of the Unicode Private Use Areas.
+-fn isPrivateUse(cp: u21) bool {
++pub fn isPrivateUse(cp: u21) bool {
+     return (cp >= 0xE000 and cp <= 0xF8FF) or
+         (cp >= 0xF0000 and cp <= 0xFFFFD) or
+         (cp >= 0x100000 and cp <= 0x10FFFD);
+diff -Naur baseline/src-tauri/vendor/ghostty/src/terminal/c/main.zig work/src-tauri/vendor/ghostty/src/terminal/c/main.zig
+--- baseline/src-tauri/vendor/ghostty/src/terminal/c/main.zig	2026-10-02 00:40:26
++++ work/src-tauri/vendor/ghostty/src/terminal/c/main.zig	2026-10-02 00:45:12
+@@ -231,6 +231,9 @@
+ pub const snapshot_decoder_ready = snapshot.decoder_ready;
+ pub const snapshot_decoder_next = snapshot.decoder_next;
+ pub const snapshot_decoder_decode = snapshot.decoder_decode;
++pub const glossary_snapshot_encode = snapshot.glossary_snapshot_encode;
++pub const glossary_snapshot_encode_buf = snapshot.glossary_snapshot_encode_buf;
++pub const glossary_snapshot_apply = snapshot.glossary_snapshot_apply;
+ 
+ pub const type_json = types.get_json;
+ 
+diff -Naur baseline/src-tauri/vendor/ghostty/src/terminal/c/snapshot.zig work/src-tauri/vendor/ghostty/src/terminal/c/snapshot.zig
+--- baseline/src-tauri/vendor/ghostty/src/terminal/c/snapshot.zig	2026-10-02 00:40:26
++++ work/src-tauri/vendor/ghostty/src/terminal/c/snapshot.zig	2026-10-02 00:52:31
+@@ -654,6 +654,123 @@
+     return .success;
+ }
+ 
++/// Encode complete glyph glossary snapshot to a synchronous C writer callback.
++pub fn glossary_snapshot_encode(
++    terminal: terminal_c.Terminal,
++    writer: io_c.Writer,
++) callconv(lib.calling_conv) Result {
++    const native = terminal_c.zigTerminal(terminal) orelse return .invalid_value;
++    if (writer.write == null) return .invalid_value;
++
++    const continuation = continuationOwned(terminal);
++    if (continuation.result != .success) return continuation.result;
++    defer native.gpa().free(continuation.bytes);
++
++    var buffer: [io_c.WriterAdapter.recommended_buffer_len]u8 = undefined;
++    var adapter: io_c.WriterAdapter = .initBuffered(writer, &buffer);
++    snapshot_core.glossary.encode(
++        native,
++        &adapter.interface,
++        .{
++            .stream_continuation = continuation.bytes,
++            .allow_pending = false,
++        },
++    ) catch |err| switch (err) {
++        error.PendingRegistrationUncaptured => return .invalid_value,
++        error.LimitExceeded => return .limit_exceeded,
++        error.OutOfMemory => return .out_of_memory,
++        else => return .io_error,
++    };
++    adapter.interface.flush() catch return .io_error;
++    return .success;
++}
++
++/// Encode complete glyph glossary snapshot to a caller-provided buffer.
++pub fn glossary_snapshot_encode_buf(
++    terminal: terminal_c.Terminal,
++    buf: ?[*]u8,
++    buf_len: usize,
++    out_written_: ?*usize,
++) callconv(lib.calling_conv) Result {
++    const out_written = out_written_ orelse return .invalid_value;
++    out_written.* = 0;
++    if (buf == null and buf_len != 0) return .invalid_value;
++    const native = terminal_c.zigTerminal(terminal) orelse return .invalid_value;
++
++    const continuation = continuationOwned(terminal);
++    if (continuation.result != .success) return continuation.result;
++    defer native.gpa().free(continuation.bytes);
++
++    const destination: []u8 = if (buf) |ptr| ptr[0..buf_len] else &.{};
++    var writer: std.Io.Writer = .fixed(destination);
++    snapshot_core.glossary.encode(
++        native,
++        &writer,
++        .{
++            .stream_continuation = continuation.bytes,
++            .allow_pending = false,
++        },
++    ) catch |err| switch (err) {
++        error.WriteFailed => {
++            var counter: std.Io.Writer.Discarding = .init(&.{});
++            snapshot_core.glossary.encode(
++                native,
++                &counter.writer,
++                .{
++                    .stream_continuation = continuation.bytes,
++                    .allow_pending = false,
++                },
++            ) catch |count_err| switch (count_err) {
++                error.PendingRegistrationUncaptured => return .invalid_value,
++                error.LimitExceeded => return .limit_exceeded,
++                error.OutOfMemory => return .out_of_memory,
++                else => return .io_error,
++            };
++            out_written.* = std.math.cast(usize, counter.count) orelse
++                return .limit_exceeded;
++            return .out_of_space;
++        },
++        error.PendingRegistrationUncaptured => return .invalid_value,
++        error.LimitExceeded => return .limit_exceeded,
++        error.OutOfMemory => return .out_of_memory,
++        else => return .io_error,
++    };
++    out_written.* = writer.end;
++    return .success;
++}
++
++/// Transactionally restore glyph glossary registrations from snapshot bytes.
++pub fn glossary_snapshot_apply(
++    terminal: terminal_c.Terminal,
++    ptr: ?[*]const u8,
++    len: usize,
++) callconv(lib.calling_conv) Result {
++    const native = terminal_c.zigTerminal(terminal) orelse return .invalid_value;
++    if (len == 0 or ptr == null) return .invalid_value;
++    const bytes = ptr.?[0..len];
++
++    snapshot_core.glossary.apply(native, bytes) catch |err| switch (err) {
++        error.OutOfMemory => return .out_of_memory,
++        error.LimitExceeded => return .limit_exceeded,
++        error.BufferTooShort,
++        error.InvalidMagic,
++        error.UnsupportedVersion,
++        error.CorruptCrc,
++        error.InvalidTag,
++        error.MalformedPayload,
++        error.InvalidCodepoint,
++        error.DuplicateCodepoint,
++        error.InvalidWidth,
++        error.InvalidMetrics,
++        error.InvalidConstraint,
++        error.InvalidContours,
++        error.InvalidPoints,
++        => return .invalid_value,
++        else => return .invalid_value,
++    };
++    return .success;
++}
++
+ /// Map core encoder and callback-adapter failures to public result codes.
+ fn mapEncodeError(
+     err: anyerror,
+diff -Naur baseline/src-tauri/vendor/ghostty/src/terminal/snapshot/glossary.zig work/src-tauri/vendor/ghostty/src/terminal/snapshot/glossary.zig
+--- baseline/src-tauri/vendor/ghostty/src/terminal/snapshot/glossary.zig	1970-01-01 09:00:00
++++ work/src-tauri/vendor/ghostty/src/terminal/snapshot/glossary.zig	2026-10-02 00:52:13
+@@ -0,0 +1,564 @@
++//! Glyph Glossary Snapshot Encoding and Transactional Restoration.
++//!
++//! Provides versioned export and transactional import of the per-session
++//! Glyph Protocol glossary (`Terminal.glyph_glossary`).
++//!
++//! ## Wire Format
++//!
++//! All multi-byte integers and IEEE-754 floats are strictly little-endian.
++//!
++//! 1. Envelope (16 bytes fixed):
++//!    - Magic (8 bytes): "GLOSSSNP"
++//!    - Version (u16): 1
++//!    - Flags (u16): 0 (must be strictly 0; non-zero rejected)
++//!    - Entry count (u32): number of registered entries (<= 1024)
++//!
++//! 2. Entry Records (repeated `entry_count` times):
++//!    - Tag (u16): 0x474C ('GL')
++//!    - Payload length (u32): 64 + contours_len * 2 + points_len * 12
++//!    - CRC32C (u32): covers Tag, Payload length, and Payload bytes
++//!    - Payload (explicit little-endian field serialization):
++//!        - cp (u32): Private Use Area codepoint (<= 0x10FFFF, PUA verified)
++//!        - width (u8): 1 (narrow) or 2 (wide)
++//!        - reserved0 (u8): 0 (must be strictly 0)
++//!        - reserved1 (u16): 0 (must be strictly 0)
++//!        - units_per_em (u32): > 0
++//!        - advance_width (u32): > 0
++//!        - line_height (u32): > 0
++//!        - constraint_size (u8): 0=none, 1=cover, 2=stretch
++//!        - constraint_align_h (u8): 0=none, 1=start, 2=center, 3=end
++//!        - constraint_align_v (u8): 0=none, 1=start, 2=center, 3=end
++//!        - reserved2 (u8): 0 (must be strictly 0)
++//!        - pad_top (f64): finite, non-NaN, in [0.0, 1.0]
++//!        - pad_right (f64): finite, non-NaN, in [0.0, 1.0]
++//!        - pad_bottom (f64): finite, non-NaN, in [0.0, 1.0]
++//!        - pad_left (f64): finite, non-NaN, in [0.0, 1.0]
++//!        - contours_len (u32): number of contour endpoints (<= 512)
++//!        - points_len (u32): number of points (<= 4096)
++//!        - contours (contours_len * u16): strictly increasing, last == points_len - 1
++//!        - points (points_len * PointWire): x (i32), y (i32), on_curve (0 or 1), reserved (0,0,0)
++//!
++//! 3. Finish Record:
++//!    - Tag (u16): 0x4745 ('GE')
++//!    - Payload length (u32): 0
++//!    - CRC32C (u32): 0x9bcc1fe5 (CRC32C over Tag + length)
++//!    - Trailing bytes: strictly forbidden; trailing bytes trigger MalformedPayload.
++//!
++//! ## Transactional Restoration Guarantee
++//!
++//! Restoration decodes all records into a temporary staging Glossary.
++//! Any failure (CRC mismatch, bounds breach, non-PUA codepoint, truncation, or OOM)
++//! deinitializes and discards the staging glossary via `errdefer`. The target
++//! terminal's glossary is only mutated via atomic swap once validation completes.
++
++const std = @import("std");
++const assert = std.debug.assert;
++const Allocator = std.mem.Allocator;
++const Crc32c = @import("../../crc32c.zig").Crc32c;
++const Terminal = @import("../Terminal.zig");
++const Glossary = @import("../apc/glyph/Glossary.zig");
++const FontGlyph = @import("../../../font/Glyph.zig");
++const Glyf = @import("../../../font/opentype/glyf.zig").Glyf;
++const request = @import("../apc/glyph/request.zig");
++const sfnt = @import("../../../font/opentype/sfnt.zig");
++
++pub const MAGIC: *const [8]u8 = "GLOSSSNP";
++pub const VERSION_1: u16 = 1;
++pub const ENVELOPE_LEN: usize = 16;
++pub const RECORD_HEADER_LEN: usize = 10;
++pub const ENTRY_FIXED_PAYLOAD_LEN: usize = 64;
++pub const FINISH_RECORD_LEN: usize = 10;
++pub const MIN_SNAPSHOT_WIRE_BYTES: usize = ENVELOPE_LEN + FINISH_RECORD_LEN; // 26 bytes
++
++pub const TAG_ENTRY: u16 = 0x474C; // 'GL'
++pub const TAG_FINISH: u16 = 0x4745; // 'GE'
++
++pub const MAX_CONTOURS: u32 = 512;
++pub const MAX_POINTS: u32 = 4096;
++
++pub const EncodeOptions = struct {
++    /// In-flight stream continuation bytes from terminal.
++    stream_continuation: ?[]const u8 = null,
++    /// If false, encode will reject if uncommitted glyph APC sequences are detected.
++    allow_pending: bool = false,
++};
++
++pub const EncodeError = Allocator.Error || error{
++    WriteFailed,
++    PayloadTooLarge,
++    LimitExceeded,
++    PendingRegistrationUncaptured,
++};
++
++pub const ApplyError = Allocator.Error || error{
++    BufferTooShort,
++    InvalidMagic,
++    UnsupportedVersion,
++    CorruptCrc,
++    InvalidTag,
++    MalformedPayload,
++    LimitExceeded,
++    InvalidCodepoint,
++    DuplicateCodepoint,
++    InvalidWidth,
++    InvalidMetrics,
++    InvalidConstraint,
++    InvalidContours,
++    InvalidPoints,
++};
++
++fn writeF64Le(dest: []u8, val: f64) void {
++    const bits: u64 = @bitCast(val);
++    std.mem.writeInt(u64, dest[0..8], bits, .little);
++}
++
++fn readF64Le(src: []const u8) f64 {
++    const bits = std.mem.readInt(u64, src[0..8], .little);
++    return @bitCast(bits);
++}
++
++fn validatePadding(val: f64) bool {
++    if (!std.math.isFinite(val)) return false;
++    if (std.math.isNan(val)) return false;
++    return val >= 0.0 and val <= 1.0;
++}
++
++/// Detects whether uncommitted APC glyph sequences are present in continuation.
++fn hasUncommittedGlyphRegistration(continuation: []const u8) bool {
++    if (continuation.len < 6) return false;
++    return std.mem.indexOf(u8, continuation, "25a1;r") != null or
++        std.mem.indexOf(u8, continuation, "25a1;c") != null;
++}
++
++/// Encode the terminal's glyph glossary into a standard `std.Io.Writer`.
++pub fn encode(
++    t: *const Terminal,
++    writer: *std.Io.Writer,
++    options: EncodeOptions,
++) EncodeError!void {
++    // 0. Preflight uncaptured in-flight registration in stream continuation
++    if (options.stream_continuation) |cont| {
++        if (!options.allow_pending and hasUncommittedGlyphRegistration(cont)) {
++            return error.PendingRegistrationUncaptured;
++        }
++    }
++
++    const glossary = &t.glyph_glossary;
++    const count = glossary.entries.count();
++    if (count > Glossary.max_entries) return error.LimitExceeded;
++
++    // 1. Write Envelope
++    try writer.writeAll(MAGIC);
++    try writer.writeInt(u16, VERSION_1, .little);
++    try writer.writeInt(u16, 0, .little); // flags (strictly 0)
++    try writer.writeInt(u32, @intCast(count), .little);
++
++    const alloc = @constCast(t).gpa();
++
++    // 2. Write Entries
++    for (glossary.entries.keys(), glossary.entries.values()) |cp, entry| {
++        switch (entry.glyph) {
++            .glyf => |outline| {
++                const contours_len = std.math.cast(u32, outline.contours.len) orelse
++                    return error.PayloadTooLarge;
++                const points_len = std.math.cast(u32, outline.points.len) orelse
++                    return error.PayloadTooLarge;
++
++                if (contours_len > MAX_CONTOURS or points_len > MAX_POINTS) {
++                    return error.LimitExceeded;
++                }
++
++                const payload_len = ENTRY_FIXED_PAYLOAD_LEN +
++                    (@as(usize, contours_len) * 2) +
++                    (@as(usize, points_len) * 12);
++
++                const u32_payload_len = std.math.cast(u32, payload_len) orelse
++                    return error.PayloadTooLarge;
++
++                const payload = try alloc.alloc(u8, payload_len);
++                defer alloc.free(payload);
++
++                const c_size: u8 = switch (entry.constraint.size) {
++                    .none => 0,
++                    .cover => 1,
++                    .stretch => 2,
++                    else => 0,
++                };
++                const c_align_h: u8 = switch (entry.constraint.align_horizontal) {
++                    .none => 0,
++                    .start => 1,
++                    .center, .center1 => 2,
++                    .end => 3,
++                };
++                const c_align_v: u8 = switch (entry.constraint.align_vertical) {
++                    .none => 0,
++                    .start, .baseline => 1,
++                    .center, .center1 => 2,
++                    .end => 3,
++                };
++
++                // Explicit portable little-endian encoding
++                std.mem.writeInt(u32, payload[0..4], @intCast(cp), .little);
++                payload[4] = switch (entry.width) {
++                    .narrow => 1,
++                    .wide => 2,
++                };
++                payload[5] = 0; // reserved0
++                std.mem.writeInt(u16, payload[6..8], 0, .little); // reserved1
++                std.mem.writeInt(u32, payload[8..12], entry.design.units_per_em, .little);
++                std.mem.writeInt(u32, payload[12..16], entry.design.advance_width, .little);
++                std.mem.writeInt(u32, payload[16..20], entry.design.line_height, .little);
++                payload[20] = c_size;
++                payload[21] = c_align_h;
++                payload[22] = c_align_v;
++                payload[23] = 0; // reserved2
++                writeF64Le(payload[24..32], entry.constraint.pad_top);
++                writeF64Le(payload[32..40], entry.constraint.pad_right);
++                writeF64Le(payload[40..48], entry.constraint.pad_bottom);
++                writeF64Le(payload[48..56], entry.constraint.pad_left);
++                std.mem.writeInt(u32, payload[56..60], contours_len, .little);
++                std.mem.writeInt(u32, payload[60..64], points_len, .little);
++
++                var offset: usize = ENTRY_FIXED_PAYLOAD_LEN;
++                for (outline.contours) |cntr| {
++                    std.mem.writeInt(u16, payload[offset..][0..2], cntr, .little);
++                    offset += 2;
++                }
++
++                for (outline.points) |pt| {
++                    std.mem.writeInt(i32, payload[offset..][0..4], pt.x, .little);
++                    std.mem.writeInt(i32, payload[offset + 4..][0..4], pt.y, .little);
++                    payload[offset + 8] = if (pt.on_curve) 1 else 0;
++                    payload[offset + 9] = 0;
++                    payload[offset + 10] = 0;
++                    payload[offset + 11] = 0;
++                    offset += 12;
++                }
++                assert(offset == payload_len);
++
++                // Compute CRC32C over (Tag, payload_len, payload)
++                var crc = Crc32c.init();
++                var tag_bytes: [2]u8 = undefined;
++                std.mem.writeInt(u16, &tag_bytes, TAG_ENTRY, .little);
++                crc.update(&tag_bytes);
++
++                var len_bytes: [4]u8 = undefined;
++                std.mem.writeInt(u32, &len_bytes, u32_payload_len, .little);
++                crc.update(&len_bytes);
++
++                crc.update(payload);
++                const crc_val = crc.final();
++
++                // Emit record header
++                try writer.writeAll(&tag_bytes);
++                try writer.writeAll(&len_bytes);
++                try writer.writeInt(u32, crc_val, .little);
++
++                // Emit payload
++                try writer.writeAll(payload);
++            },
++        }
++    }
++
++    // 3. Write Finish Record (Tag: TAG_FINISH, payload_len: 0)
++    var finish_tag_bytes: [2]u8 = undefined;
++    std.mem.writeInt(u16, &finish_tag_bytes, TAG_FINISH, .little);
++    var finish_len_bytes: [4]u8 = undefined;
++    std.mem.writeInt(u32, &finish_len_bytes, 0, .little);
++
++    var finish_crc_calc = Crc32c.init();
++    finish_crc_calc.update(&finish_tag_bytes);
++    finish_crc_calc.update(&finish_len_bytes);
++    const finish_crc = finish_crc_calc.final();
++
++    try writer.writeAll(&finish_tag_bytes);
++    try writer.writeAll(&finish_len_bytes);
++    try writer.writeInt(u32, finish_crc, .little);
++}
++
++/// Transactionally apply glyph glossary registrations from snapshot bytes.
++///
++/// If any error occurs during parsing or staging, the staging glossary is
++/// deinitialized and destroyed, leaving `target.glyph_glossary` unchanged.
++pub fn apply(
++    target: *Terminal,
++    bytes: []const u8,
++) ApplyError!void {
++    if (bytes.len < MIN_SNAPSHOT_WIRE_BYTES) {
++        return error.BufferTooShort;
++    }
++
++    // 1. Validate Envelope
++    if (!std.mem.eql(u8, bytes[0..8], MAGIC)) {
++        return error.InvalidMagic;
++    }
++
++    const version = std.mem.readInt(u16, bytes[8..10], .little);
++    if (version != VERSION_1) {
++        return error.UnsupportedVersion;
++    }
++
++    const flags = std.mem.readInt(u16, bytes[10..12], .little);
++    if (flags != 0) {
++        return error.UnsupportedVersion;
++    }
++
++    const entry_count = std.mem.readInt(u32, bytes[12..16], .little);
++    if (entry_count > Glossary.max_entries) {
++        return error.LimitExceeded;
++    }
++
++    const alloc = target.gpa();
++
++    // 2. Stage entries in temporary Glossary
++    var staging: Glossary = .empty;
++    errdefer staging.deinit(alloc);
++
++    var offset: usize = ENVELOPE_LEN;
++
++    for (0..entry_count) |_| {
++        if (offset + RECORD_HEADER_LEN > bytes.len) {
++            return error.BufferTooShort;
++        }
++
++        const tag = std.mem.readInt(u16, bytes[offset..][0..2], .little);
++        if (tag != TAG_ENTRY) {
++            return error.InvalidTag;
++        }
++
++        const payload_len = std.mem.readInt(u32, bytes[offset + 2..][0..4], .little);
++        const stored_crc = std.mem.readInt(u32, bytes[offset + 6..][0..4], .little);
++
++        if (offset + RECORD_HEADER_LEN + payload_len > bytes.len) {
++            return error.BufferTooShort;
++        }
++
++        const payload = bytes[offset + RECORD_HEADER_LEN .. offset + RECORD_HEADER_LEN + payload_len];
++
++        // Check CRC32C
++        var crc = Crc32c.init();
++        crc.update(bytes[offset .. offset + 6]);
++        crc.update(payload);
++        if (crc.final() != stored_crc) {
++            return error.CorruptCrc;
++        }
++
++        if (payload_len < ENTRY_FIXED_PAYLOAD_LEN) {
++            return error.MalformedPayload;
++        }
++
++        // Validate codepoint without premature truncation wrapping
++        const cp_u32 = std.mem.readInt(u32, payload[0..4], .little);
++        if (cp_u32 > 0x10FFFF) {
++            return error.InvalidCodepoint;
++        }
++        const cp: u21 = @intCast(cp_u32);
++        if (!Glossary.isPrivateUse(cp)) {
++            return error.InvalidCodepoint;
++        }
++        if (staging.entries.contains(cp)) {
++            return error.DuplicateCodepoint;
++        }
++
++        const width_raw = payload[4];
++        const width: request.Width = switch (width_raw) {
++            1 => .narrow,
++            2 => .wide,
++            else => return error.InvalidWidth,
++        };
++
++        // Strict validation of reserved padding fields
++        const reserved0 = payload[5];
++        const reserved1 = std.mem.readInt(u16, payload[6..8], .little);
++        const reserved2 = payload[23];
++        if (reserved0 != 0 or reserved1 != 0 or reserved2 != 0) {
++            return error.MalformedPayload;
++        }
++
++        const units_per_em = std.mem.readInt(u32, payload[8..12], .little);
++        const advance_width = std.mem.readInt(u32, payload[12..16], .little);
++        const line_height = std.mem.readInt(u32, payload[16..20], .little);
++        if (units_per_em == 0 or advance_width == 0 or line_height == 0) {
++            return error.InvalidMetrics;
++        }
++
++        const constraint_size: FontGlyph.RenderOptions.Constraint.Size = switch (payload[20]) {
++            0 => .none,
++            1 => .cover,
++            2 => .stretch,
++            else => return error.InvalidConstraint,
++        };
++
++        const constraint_align_h: FontGlyph.RenderOptions.Constraint.Align = switch (payload[21]) {
++            0 => .none,
++            1 => .start,
++            2 => .center,
++            3 => .end,
++            else => return error.InvalidConstraint,
++        };
++
++        const constraint_align_v: FontGlyph.RenderOptions.Constraint.Align = switch (payload[22]) {
++            0 => .none,
++            1 => .start,
++            2 => .center,
++            3 => .end,
++            else => return error.InvalidConstraint,
++        };
++
++        const pad_top = readF64Le(payload[24..32]);
++        const pad_right = readF64Le(payload[32..40]);
++        const pad_bottom = readF64Le(payload[40..48]);
++        const pad_left = readF64Le(payload[48..56]);
++        if (!validatePadding(pad_top) or
++            !validatePadding(pad_right) or
++            !validatePadding(pad_bottom) or
++            !validatePadding(pad_left))
++        {
++            return error.InvalidConstraint;
++        }
++
++        const contours_len = std.mem.readInt(u32, payload[56..60], .little);
++        const points_len = std.mem.readInt(u32, payload[60..64], .little);
++
++        if (contours_len > MAX_CONTOURS or points_len > MAX_POINTS) {
++            return error.LimitExceeded;
++        }
++
++        const required_payload = ENTRY_FIXED_PAYLOAD_LEN +
++            (@as(usize, contours_len) * 2) +
++            (@as(usize, points_len) * 12);
++
++        if (payload_len != required_payload) {
++            return error.MalformedPayload;
++        }
++
++        // Bounded allocation check (64 KiB ceiling)
++        const total_alloc_bytes = (@as(usize, contours_len) * @sizeOf(sfnt.uint16)) +
++            (@as(usize, points_len) * @sizeOf(Glyf.Outline.Point));
++        if (total_alloc_bytes > Glossary.max_glyf_allocation) {
++            return error.LimitExceeded;
++        }
++
++        // Allocate contours and points with safe ownership
++        const contours_slice = try alloc.alloc(sfnt.uint16, contours_len);
++        errdefer alloc.free(contours_slice);
++
++        const points_slice = try alloc.alloc(Glyf.Outline.Point, points_len);
++        errdefer alloc.free(points_slice);
++
++        var p_offset: usize = ENTRY_FIXED_PAYLOAD_LEN;
++        for (0..contours_len) |ci| {
++            contours_slice[ci] = std.mem.readInt(u16, payload[p_offset..][0..2], .little);
++            p_offset += 2;
++        }
++
++        // Validate contour end points invariant:
++        // non-empty contours require points; endpoints must be strictly increasing and last == points_len - 1
++        if (contours_len == 0) {
++            if (points_len != 0) return error.InvalidContours;
++        } else {
++            if (points_len == 0) return error.InvalidContours;
++            var prev: ?u16 = null;
++            for (contours_slice) |end_pt| {
++                if (end_pt >= points_len) {
++                    return error.InvalidContours;
++                }
++                if (prev) |p| {
++                    if (end_pt <= p) {
++                        return error.InvalidContours;
++                    }
++                }
++                prev = end_pt;
++            }
++            if (contours_slice[contours_len - 1] != points_len - 1) {
++                return error.InvalidContours;
++            }
++        }
++
++        for (0..points_len) |pi| {
++            const pt_x = std.mem.readInt(i32, payload[p_offset..][0..4], .little);
++            const pt_y = std.mem.readInt(i32, payload[p_offset + 4..][0..4], .little);
++            const on_curve_byte = payload[p_offset + 8];
++            if (on_curve_byte != 0 and on_curve_byte != 1) {
++                return error.MalformedPayload;
++            }
++            if (payload[p_offset + 9] != 0 or
++                payload[p_offset + 10] != 0 or
++                payload[p_offset + 11] != 0)
++            {
++                return error.MalformedPayload;
++            }
++            p_offset += 12;
++
++            points_slice[pi] = .{
++                .x = pt_x,
++                .y = pt_y,
++                .on_curve = (on_curve_byte == 1),
++            };
++        }
++
++        // Infallible insertion into staging: allocate hash map node first
++        try staging.entries.ensureUnusedCapacity(alloc, 1);
++
++        const entry: Glossary.Entry = .{
++            .glyph = .{
++                .glyf = .{
++                    .contours = contours_slice,
++                    .points = points_slice,
++                },
++            },
++            .design = .{
++                .units_per_em = units_per_em,
++                .advance_width = advance_width,
++                .line_height = line_height,
++            },
++            .width = width,
++            .constraint = .{
++                .size = constraint_size,
++                .align_horizontal = constraint_align_h,
++                .align_vertical = constraint_align_v,
++                .pad_top = pad_top,
++                .pad_right = pad_right,
++                .pad_bottom = pad_bottom,
++                .pad_left = pad_left,
++            },
++        };
++
++        // Ownership transferred into staging
++        staging.entries.putAssumeCapacity(cp, entry);
++
++        offset += RECORD_HEADER_LEN + payload_len;
++    }
++
++    // 3. Validate Finish Record
++    if (offset + RECORD_HEADER_LEN > bytes.len) {
++        return error.BufferTooShort;
++    }
++
++    const finish_tag = std.mem.readInt(u16, bytes[offset..][0..2], .little);
++    if (finish_tag != TAG_FINISH) {
++        return error.InvalidTag;
++    }
++
++    const finish_payload_len = std.mem.readInt(u32, bytes[offset + 2..][0..4], .little);
++    if (finish_payload_len != 0) {
++        return error.MalformedPayload;
++    }
++
++    const finish_stored_crc = std.mem.readInt(u32, bytes[offset + 6..][0..4], .little);
++    var finish_crc_calc = Crc32c.init();
++    finish_crc_calc.update(bytes[offset .. offset + 6]);
++    if (finish_crc_calc.final() != finish_stored_crc) {
++        return error.CorruptCrc;
++    }
++
++    // 4. Strict EOF: trailing bytes after finish are forbidden
++    if (offset + RECORD_HEADER_LEN != bytes.len) {
++        return error.MalformedPayload;
++    }
++
++    // 5. ATOMIC COMMIT (Swap staging into target terminal)
++    target.glyph_glossary.deinit(alloc);
++    target.glyph_glossary = staging;
++    target.flags.dirty.glyph_glossary = true;
++}
+diff -Naur baseline/src-tauri/vendor/ghostty/src/terminal/snapshot/main.zig work/src-tauri/vendor/ghostty/src/terminal/snapshot/main.zig
+--- baseline/src-tauri/vendor/ghostty/src/terminal/snapshot/main.zig	2026-10-02 00:43:38
++++ work/src-tauri/vendor/ghostty/src/terminal/snapshot/main.zig	2026-10-02 00:44:46
+@@ -163,6 +163,7 @@
+ pub const screen = @import("screen.zig");
+ pub const style = @import("style.zig");
+ pub const terminal = @import("terminal.zig");
++pub const glossary = @import("glossary.zig");
+ 
+ const codec = @import("snapshot.zig");
+ pub const EncodeError = codec.EncodeError;

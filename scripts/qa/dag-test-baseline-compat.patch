@@ -1,0 +1,11 @@
+--- a/src-tauri/src/terminal/shell.rs
++++ b/src-tauri/src/terminal/shell.rs
+@@ -635,7 +635,7 @@
+         std::fs::write(root.path().join("pwsh.exe"), b"").unwrap();
+         std::fs::write(root.path().join("custom.CMD"), b"").unwrap();
+         let path = std::env::join_paths([root.path()]).unwrap();
+-        let environment = |key| match key {
++        let environment = |key: &str| match key {
+             "PATH" => Some(path.clone()),
+             "PATHEXT" => Some(std::ffi::OsString::from(".CMD;.EXE")),
+             _ => None,

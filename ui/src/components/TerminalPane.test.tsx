@@ -590,4 +590,43 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.getByTestId("paired-terminal-unavailable")).toBeInTheDocument();
     remoteHostStore.reset();
   });
+
+  it("shows Reconnecting session... overlay when a local session is reconnecting", () => {
+    const reconnectingSession: TerminalSession = {
+      ...createSession("session-reconnecting"),
+      remoteConnectionState: "reconnecting",
+    };
+    render(<TerminalPane session={reconnectingSession} active={true} />);
+
+    expect(screen.getByText("Reconnecting session...")).toBeInTheDocument();
+    expect(screen.getByText("Reconnecting to session...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+  });
+
+  it("offers Reconnect shell on an exited local session when backendSessionId is present and onReconnect is wired", () => {
+    const onReconnect = vi.fn();
+    const onOpenNewShell = vi.fn();
+    const sessionWithBackend: TerminalSession = {
+      ...createSession("session-recoverable"),
+      backendSessionId: "backend-recoverable-pty",
+      lifecycle: "exited",
+    };
+    render(
+      <TerminalPane
+        session={sessionWithBackend}
+        active={true}
+        onReconnect={onReconnect}
+        onOpenNewShell={onOpenNewShell}
+      />,
+    );
+
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+    const reconnectBtn = screen.getByRole("button", { name: "Reconnect shell" });
+    expect(reconnectBtn).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
+
+    fireEvent.click(reconnectBtn);
+    expect(onReconnect).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledWith("session-recoverable");
+  });
 });

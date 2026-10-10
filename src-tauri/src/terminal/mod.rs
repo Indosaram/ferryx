@@ -34,6 +34,7 @@ pub mod output_hub;
 pub mod paired_daemon;
 pub mod paired_runtime;
 pub mod preferences;
+pub mod protocol_dto;
 pub mod pty;
 pub mod remote;
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub mod shell;
 
 pub use output_hub::*;
 pub use preferences::*;
+pub use protocol_dto::*;
 pub use pty::*;
 pub use service::*;
 pub use session::*;

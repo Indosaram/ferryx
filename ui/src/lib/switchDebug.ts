@@ -57,14 +57,29 @@ export function resolveSwitchDebugEnabled(env: SwitchDebugEnv): boolean {
   return env.DEV || env.VITE_SWITCH_DEBUG === "1";
 }
 
+export function isReleasePersistedInputEvent(event: string): boolean {
+  return (
+    event === "terminal.surface.input.dropped.overflow" ||
+    event.startsWith("terminal.surface.input.dropped") ||
+    event.startsWith("terminal.surface.input.gate") ||
+    event.startsWith("terminal.surface.input.slow") ||
+    event.startsWith("terminal.surface.input.in_flight") ||
+    event.startsWith("terminal.surface.input.backend") ||
+    event.startsWith("terminal.surface.input.stage") ||
+    event.startsWith("terminal.surface.input.stall")
+  );
+}
+
 const debugEnabled = resolveSwitchDebugEnabled({
   DEV: import.meta.env.DEV,
   MODE: import.meta.env.MODE,
   VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
 });
 const runId = safeRandomUUID();
+export const switchDebugRunId = runId;
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();
+let releaseSequence = 0;
 
 const logger = createSwitchDebugLogger({
   enabled: debugEnabled,
@@ -85,5 +100,20 @@ export function switchDebug(
   event: string,
   details?: Record<string, unknown>,
 ): SwitchDebugEntry | null {
+  if (!debugEnabled && isTauri && isReleasePersistedInputEvent(event)) {
+    const entry: SwitchDebugEntry = {
+      runId,
+      sequence: ++releaseSequence,
+      event,
+      wallTimeMs: Date.now(),
+      details: details ?? {},
+    };
+    sinkTail = sinkTail
+      .then(() => invoke<void>("cmd_switch_debug_log", { entry }))
+      .catch((error: unknown) => {
+        console.warn("[ferryx:switch] log sink failed", String(error));
+      });
+    return entry;
+  }
   return logger(event, details);
 }

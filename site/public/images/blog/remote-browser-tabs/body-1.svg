@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900">
+  <defs>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="24" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <marker id="arrow" viewBox="0 0 14 14" refX="10" refY="7" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 1 2 L 11 7 L 1 12 Z" fill="#2dd4bf" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="900" fill="#0b0b0d" />
+
+  <!-- Subtle ambient aura behind highlighted target -->
+  <circle cx="1160" cy="450" r="260" fill="#2dd4bf" opacity="0.07" filter="url(#glow)" />
+
+  <!-- Box 1: Terminal Pane (dimmed) -->
+  <rect x="220" y="310" width="460" height="280" rx="24" fill="#131720" stroke="#252f40" stroke-width="2.5" />
+  <text x="450" y="462" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="44" font-weight="600" fill="#64748b" letter-spacing="-0.5px">Terminal Pane</text>
+
+  <!-- Single Flow Arrow -->
+  <line x1="720" y1="450" x2="880" y2="450" stroke="#2dd4bf" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)" />
+
+  <!-- Box 2: CI Tab (bold highlighted) -->
+  <rect x="920" y="310" width="460" height="280" rx="24" fill="#0f2327" stroke="#2dd4bf" stroke-width="3" />
+  <text x="1150" y="462" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="44" font-weight="700" fill="#2dd4bf" letter-spacing="-0.5px">CI Tab</text>
+</svg>

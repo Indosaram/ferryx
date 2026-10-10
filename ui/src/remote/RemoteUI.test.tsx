@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useId } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,7 +6,7 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp, RemoteHostConnection } from "./RemoteApp";
-import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
+import { normalizeRemoteWorkspaceState, RemoteWorkspaceMirror, type RemoteContextOption } from "./RemoteSessionList";
 import { remoteHostStore } from "../state/remoteHostStore";
 import { clearRemoteAuthToken, setRemoteAuthToken } from "../lib/remoteClient";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
@@ -236,6 +237,54 @@ async function openWorktreeSheet(): Promise<HTMLElement> {
   });
   return screen.getByRole("tablist", { name: /terminal tabs/i });
 }
+
+describe("account worktree picker", () => {
+  afterEach(() => cleanup());
+
+  it("lists worktrees grouped by project without machine names and dispatches the hidden machine", () => {
+    const options: RemoteContextOption[] = [
+      { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "mach-a" },
+      { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "mach-b" },
+      { workspaceId: "ws-infra", worktreeSlug: "prod", worktreeLabel: "prod", machineId: "mach-b" },
+    ];
+    const onSelect = vi.fn();
+    render(
+      <RemoteWorkspaceMirror
+        model={{
+          context: { workspaceId: null, worktreeSlug: null, worktreeLabel: null, activeTerminal: null },
+          options,
+        }}
+        pending={null}
+        selectorOpen
+        onSelectorOpenChange={() => {}}
+        onSelect={onSelect}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+    // One project group per machine and workspace: the same workspace on two machines stays two
+    // distinct groups, and the machine itself is never rendered.
+    const groupKeys = within(dialog)
+      .getAllByTestId("remote-worktree-group")
+      .map((group) => group.closest("[data-project-key]")?.getAttribute("data-project-key"));
+    expect(groupKeys).toEqual([
+      "mach-a\u0000ws-ferryx",
+      "mach-b\u0000ws-ferryx",
+      "mach-b\u0000ws-infra",
+    ]);
+    expect(new Set(groupKeys).size).toBe(3);
+    expect(
+      within(dialog).getAllByRole("region").every((section) => (section.getAttribute("aria-label") ?? "").length > 0),
+    ).toBe(true);
+    expect(dialog.textContent).not.toMatch(/mach-a|mach-b/);
+
+    // Same workspace/worktree on two machines stays two distinct targets.
+    const mainRows = within(dialog).getAllByRole("button", { name: "ws-ferryx / main" });
+    expect(mainRows).toHaveLength(2);
+    fireEvent.click(mainRows[1]);
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ machineId: "mach-b", workspaceId: "ws-ferryx", worktreeSlug: "main" }));
+  });
+});
 
 describe("selection request lifetime", () => {
   const snapshot = (tabId: string) => ({

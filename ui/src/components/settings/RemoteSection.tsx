@@ -133,6 +133,7 @@ export interface RemoteSectionProps {
   accountSessionToken?: string | null;
   accountOrigin?: string;
   accountOriginResolver?: () => string;
+  onAccountSessionChange?: (token: string | null, origin: string) => void;
 }
 
 export function RemoteSection({
@@ -146,6 +147,7 @@ export function RemoteSection({
   accountSessionToken: accountSessionTokenProp,
   accountOrigin: accountOriginProp,
   accountOriginResolver = getConfiguredAccountOrigin,
+  onAccountSessionChange,
 }: RemoteSectionProps) {
   const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
   const accountOrigin = accountOriginProp ?? configuredOrigin;
@@ -161,6 +163,13 @@ export function RemoteSection({
       setAccountToken(accountSessionTokenProp);
     }
   }, [accountSessionTokenProp]);
+
+  const onAccountSessionChangeRef = useRef(onAccountSessionChange);
+  onAccountSessionChangeRef.current = onAccountSessionChange;
+
+  useEffect(() => {
+    onAccountSessionChangeRef.current?.(accountToken, accountOrigin);
+  }, [accountToken, accountOrigin]);
 
   const [accountMachines, setAccountMachines] = useState<AccountMachineView[]>([]);
   const [accountMachinesLoading, setAccountMachinesLoading] = useState(false);

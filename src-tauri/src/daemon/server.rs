@@ -1,6 +1,9 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+#[cfg(test)]
+#[path = "local_split_reliability_tests.rs"]
+mod local_split_reliability_tests;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 #[cfg(test)]
@@ -1045,6 +1048,9 @@ pub struct DaemonServer {
     paired_hosts: crate::paired_host::service::PairedHostService,
     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
     pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
+    /// Sampled on demand while answering `ResourceUsage`; it holds only the previous CPU
+    /// counters, so an idle daemon runs no collector.
+    resource_sampler: Arc<crate::daemon::resource_usage::ResourceSampler>,
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
     remote_state: Arc<RemoteGatewayState>,
@@ -1790,15 +1796,44 @@ impl DaemonServer {
                 .join()
                 .expect("workspace catalog initialization panicked")
         });
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
+        let identity_dir = isolated_dir.clone().unwrap_or_else(|| {
+            crate::remote::auth::canonical_identity_dir()
+                .expect("daemon requires a private data directory")
+        });
+        let machine_id = crate::remote::auth::load_or_generate_machine_identity(&identity_dir)
+            .map(|id| id.machine_id);
         let session_service = Arc::new(DaemonSessionService {
             workspace_service,
+            machine_id,
             terminal_service: Arc::clone(&terminal_service),
             session_router: Arc::clone(&session_router),
             handover_manager: Arc::downgrade(&handover_manager),
             remote_event_tx: remote_event_tx.clone(),
             agent_states: Arc::new(AgentStateHub::default()),
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
-            spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            spawn_operations: Mutex::new(HashMap::new()),
+            admission_clock: Mutex::new(Default::default()),
+            epoch,
+            machine_capacity: Arc::new(Mutex::new(Default::default())),
+            capacity_initialized: tokio::sync::OnceCell::new(),
+            pending_provider_claims: Arc::new(Mutex::new(HashMap::new())),
+            requested_session_ids: Arc::new(Mutex::new(Default::default())),
+            #[cfg(test)]
+            split_probe: RwLock::new(None),
+            #[cfg(test)]
+            cwd_probe: RwLock::new(None),
+            #[cfg(test)]
+            split_wire_tasks: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            split_git_observer: RwLock::new(None),
+            #[cfg(test)]
+            split_probe_workers: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            split_close_failure: std::sync::atomic::AtomicBool::new(false),
             machine_controllers: tokio::sync::Mutex::new(HashMap::new()),
             machine_lifecycles: Arc::new(Mutex::new(HashMap::new())),
             remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1853,11 +1888,6 @@ impl DaemonServer {
                 .unwrap_or_else(|_| unreachable!("gateway not published yet"))
                 .with_machine_services(Arc::clone(&session_service)),
         );
-
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(1);
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -1916,6 +1946,7 @@ impl DaemonServer {
             paired_hosts,
             session_router,
             handover_manager,
+            resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
             terminal_service,
             workspace_registry,
             remote_state,
@@ -1949,6 +1980,10 @@ impl DaemonServer {
         self.paired_hosts = service;
     }
 
+    async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
+        self.session_service.handle_unregister_workspace(workspace_id).await
+    }
+
     async fn handle_spawn(
         &self,
         client_request_id: &str,
@@ -1970,6 +2005,7 @@ impl DaemonServer {
                 rows,
                 shell,
                 startup,
+                None,
                 #[cfg(test)]
                 self.helper_home.clone(),
             )
@@ -2760,6 +2796,25 @@ impl DaemonServer {
         Ok(())
     }
 
+    /// One probe per live session this daemon owns. A remote or paired session has no local
+    /// process tree, so `get_session` returning `None` for it is the filter, not a gap.
+    fn resource_probes(&self) -> Vec<crate::daemon::resource_usage::SessionProbe> {
+        self.terminal_service
+            .list_sessions()
+            .into_iter()
+            .filter_map(|session_id| {
+                let session = self.terminal_service.get_session(&session_id)?;
+                Some(crate::daemon::resource_usage::SessionProbe {
+                    session_id,
+                    pid: session.pid(),
+                    worktree_path: session
+                        .worktree_path()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+            })
+            .collect()
+    }
+
     pub async fn handle_client<S>(self: Arc<Self>, stream: S)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -2830,10 +2885,21 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                            capabilities: vec![crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.into()],
+                            admission_time_unix_ms: Some(self.session_service.admission_time_unix_ms()),
                         }
                     }
                 }
                 Ok(DaemonRequest::Ping) => DaemonResponse::Pong,
+                Ok(DaemonRequest::ResourceUsage) => {
+                    let probes = self.resource_probes();
+                    let sampler = Arc::clone(&self.resource_sampler);
+                    let runtime_dir = get_runtime_dir();
+                    match tokio::task::spawn_blocking(move || sampler.sample(&probes, &runtime_dir)).await {
+                        Ok(snapshot) => DaemonResponse::ResourceUsageOk { snapshot },
+                        Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -2995,9 +3061,11 @@ impl DaemonServer {
                     rows,
                     shell,
                     startup,
+                    local_split,
+                    session_id: requested_session_id,
                 }) => {
-                    let res = self
-                        .handle_spawn(
+                    let res = self.session_service
+                        .admit_spawn(
                             &client_request_id,
                             &workspace_id,
                             worktree,
@@ -3006,6 +3074,11 @@ impl DaemonServer {
                             rows,
                             shell,
                             startup,
+                            requested_session_id,
+                            None,
+                            local_split,
+                            #[cfg(test)]
+                            self.helper_home.clone(),
                         )
                         .await;
                     match res {
@@ -3034,7 +3107,24 @@ impl DaemonServer {
                         Err(SpawnError::InvalidAgentResume(message)) => {
                             DaemonResponse::AgentResumeInvalid { message }
                         }
+                        Err(SpawnError::Structured(error)) => DaemonResponse::Error {
+                            code: serde_json::to_value(&error.code).ok().and_then(|code| code.as_str().map(str::to_owned)), message: error.message, details: error.details,
+                        },
                         Err(e) => daemon_error(e.to_string(),),
+                    }
+                }
+                Ok(DaemonRequest::SpawnOperationStatus { client_request_id, origin_epoch, expires_at_unix_ms }) => {
+                    match self.session_service.split_operation(&client_request_id, origin_epoch, expires_at_unix_ms, false) {
+                        Ok(operation) => DaemonResponse::SpawnOperationOk { operation },
+                        Err(SpawnError::Structured(error)) => DaemonResponse::Error { code: serde_json::to_value(&error.code).ok().and_then(|code| code.as_str().map(str::to_owned)), message: error.message, details: error.details },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
+                Ok(DaemonRequest::CancelSpawnOperation { client_request_id, origin_epoch, expires_at_unix_ms }) => {
+                    match self.session_service.cancel_split_until(&client_request_id, origin_epoch, expires_at_unix_ms).await {
+                        Ok(operation) => DaemonResponse::SpawnOperationOk { operation },
+                        Err(SpawnError::Structured(error)) => DaemonResponse::Error { code: serde_json::to_value(&error.code).ok().and_then(|code| code.as_str().map(str::to_owned)), message: error.message, details: error.details },
+                        Err(error) => daemon_error(error.to_string()),
                     }
                 }
                 Ok(DaemonRequest::DetectManualSsh { session_id }) => {
@@ -3074,16 +3164,8 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
-                        let mut response = self.handle_describe_session(&session_id);
-                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
-                            let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
-                                Ok(crate::ipc::terminal::process_cwd(pid))
-                            }).await;
-                            if let DaemonResponse::DescribeSessionOk { session } = &mut response {
-                                session.cwd = cwd.ok().flatten().map(|path| path.to_string_lossy().into_owned());
-                            }
-                        }
-                        response
+                        self.session_service.describe_session_until(&session_id,
+                            tokio::time::Instant::now() + Duration::from_millis(500)).await
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.describe_session(&session_id).await {
                             Ok(session) => DaemonResponse::DescribeSessionOk { session },
@@ -3729,6 +3811,10 @@ impl DaemonServer {
                                     active_sessions,
                                 }
                             }
+                            Err(e) if e == "HANDOVER_BUSY" => DaemonResponse::Error {
+                                message: e, code: Some("HANDOVER_BUSY".into()),
+                                details: Some(serde_json::json!({"retryable":true})),
+                            },
                             Err(e) => daemon_error(e),
                         }
                     }
@@ -5576,7 +5662,7 @@ mod tests {
             let server = Arc::clone(&server);
             async move {
                 barrier.wait().await;
-                let _guard = server.spawn_lock.lock().await;
+                let _guard = server.workspace_service.spawn_queue("provider-test").lock_owned().await;
                 if let Some(meta) = server
                     .session_metadata
                     .read()
@@ -5613,7 +5699,7 @@ mod tests {
             let server = Arc::clone(&server);
             async move {
                 barrier.wait().await;
-                let _guard = server.spawn_lock.lock().await;
+                let _guard = server.workspace_service.spawn_queue("provider-test").lock_owned().await;
                 server.reserve_provider_claim_for_test(
                     request_id,
                     session_id,
@@ -6588,6 +6674,7 @@ mod tests {
                 binary_path,
                 binary_mtime_ms,
                 daemon_version,
+                ..
             } => {
                 assert_eq!(version, DAEMON_PROTOCOL_VERSION);
                 assert_eq!(pid, std::process::id());

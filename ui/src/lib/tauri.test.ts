@@ -43,6 +43,8 @@ import {
   signalTerminal,
   spawnTerminal,
   spawnTerminalDetailed,
+  spawnTerminalSplitOperation,
+  saveSession,
   publishFocusedTerminal,
   onRemoteSelectionRequested,
   normalizeBadgeCount,
@@ -76,6 +78,22 @@ describe("describeRejection", () => {
 });
 
 describe("Tauri IPC wrapper contract", () => {
+  it("propagates save failure without issuing any terminal close", async () => {
+    const error = { code: "INTERNAL_ERROR", message: "disk full", details: null };
+    core.invoke.mockRejectedValueOnce(error);
+    await expect(saveSession({ version: 3, timestamp: 0, activeWorkspaceId: "default", workspaces: {} })).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual(["cmd_session_save"]);
+  });
+  it("preserves reliable prepare and attach attempt identity without changing legacy payloads", async () => {
+    core.invoke.mockResolvedValue({});
+    const identity = { requestId: "27be1fd6-7182-4fba-b42c-27c0288fb460", originEpoch: "7", expiresAtUnixMs: 600_000 };
+    const request = { action: "status" as const, identity, remainingMs: 900 };
+    await spawnTerminalSplitOperation(request);
+    expect(core.invoke).toHaveBeenLastCalledWith("cmd_terminal_spawn_operation", { request });
+    const splitAttempt = { identity, frontendSessionId: "front", generation: 2, remainingMs: 800 };
+    await attachTerminal("back", null, splitAttempt);
+    expect(core.invoke).toHaveBeenLastCalledWith("cmd_terminal_attach", { sessionId: "back", afterSequence: null, splitAttempt });
+  });
   it("routes remote status, retry and generation-fenced control without remapping arguments", async () => {
     core.invoke.mockResolvedValue({ type: "retryRemoteSessionOk" });
     await getTerminalRemoteStatus("stable");

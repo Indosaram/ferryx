@@ -33,10 +33,25 @@ fn switch_debug_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join("ferryx-switch-debug.jsonl")
 }
 
+pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
+    debug_enabled
+        || event == "terminal.surface.input.dropped.overflow"
+        || event.starts_with("terminal.surface.input.dropped")
+        || event.starts_with("terminal.surface.input.gate")
+        || event.starts_with("terminal.surface.input.slow")
+        || event.starts_with("terminal.surface.input.in_flight")
+        || event.starts_with("terminal.surface.input.backend")
+        || event.starts_with("terminal.surface.input.stage")
+        || event.starts_with("terminal.surface.input.stall")
+        || event.starts_with("app.watchdog")
+        || event.starts_with("terminal.render.")
+}
+
 /// Native callbacks must not perform filesystem I/O on the UI thread.
 /// Unlike the IPC command, they cannot return sink errors to a caller.
 pub(crate) fn log_native_switch_debug(entry: Value) {
-    if !switch_debug_sink_enabled_here() {
+    let event = entry.get("event").and_then(|v| v.as_str()).unwrap_or("");
+    if !should_persist_entry(switch_debug_sink_enabled_here(), event) {
         return;
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -66,7 +81,7 @@ fn append_switch_debug_entry(
 
 #[tauri::command]
 pub async fn cmd_switch_debug_log(entry: SwitchDebugEntry) -> Result<(), IpcError> {
-    if !switch_debug_sink_enabled_here() {
+    if !should_persist_entry(switch_debug_sink_enabled_here(), &entry.event) {
         return Ok(());
     }
 
@@ -123,6 +138,50 @@ mod tests {
     #[test]
     fn release_builds_stay_silent_by_default() {
         assert!(!switch_debug_sink_enabled(false, None));
+        assert!(!should_persist_entry(false, "terminal.surface.input.sent"));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.dropped.overflow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.dropped.outage"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.gate.unclaimed"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.in_flight_slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.backend.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.stage.slow"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "terminal.surface.input.stall.resolved"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "app.watchdog.hang_detected"
+        ));
+        assert!(should_persist_entry(
+            false,
+            "app.watchdog.recovered"
+        ));
+        assert!(should_persist_entry(false, "terminal.render.attach"));
+        assert!(should_persist_entry(false, "terminal.render.reattach"));
+        assert!(should_persist_entry(false, "terminal.render.redraw"));
     }
 
     #[test]

@@ -78,7 +78,7 @@ ssh maho-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\sook\
   2. Stamps version via `sync-version.mjs`.
   3. Incrementally builds UI (`bun run --cwd ui build`).
   4. Incrementally builds NSIS setup (`cargo tauri build --bundles nsis`) with sccache.
-  5. Builds MSIX package via `scripts\build-msix.ps1 -Version <version> -SkipSigning`.
+  5. Builds MSIX package via `scripts\build-msix.ps1 -ExePath <release-ferryx.exe> -Version <version> -SkipSigning`.
   6. Stages artifacts into `C:\Users\sook\ferryx-winbuild\ferryx-release-artifacts\`.
 
 ### C. macOS (MacBook)

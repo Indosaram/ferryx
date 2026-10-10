@@ -183,6 +183,9 @@ const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, 
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
 const SettingsDialog = lazy(loadSettingsDialog);
+const SystemResourcesDialog = lazy(() =>
+  import("./components/SystemResourcesDialog").then((m) => ({ default: m.SystemResourcesDialog }))
+);
 const WelcomeWizard = lazy(() =>
   import("./components/onboarding/WelcomeWizard").then((m) => ({
     default: m.WelcomeWizard,
@@ -1313,6 +1316,7 @@ function WorkspaceApp({
     workspaceId: activeProject.workspaceId,
     recoveredFromHmr,
     restoreWorkspace: restoreWorkspaceAndReconnect,
+    reconcileLocalSessions: (live) => dispatchWorkspaceAction({ type: "LOCAL_SESSIONS_RECONCILED", live }),
     enabled: registeredProjectId === activeProject.workspaceId,
   });
 
@@ -1579,6 +1583,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isResourcesOpen, setIsResourcesOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
@@ -3299,6 +3304,7 @@ function WorkspaceApp({
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
+          onOpenResources={() => setIsResourcesOpen(true)}
           attention={sidebarAttention}
           onToggle={toggleSidebar}
         />
@@ -3511,6 +3517,11 @@ function WorkspaceApp({
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
             onOpenSshProject={handleOpenSshProject} />
+        </Suspense>
+      ) : null}
+      {isResourcesOpen ? (
+        <Suspense fallback={null}>
+          <SystemResourcesDialog onClose={() => setIsResourcesOpen(false)} />
         </Suspense>
       ) : null}
       {!activeRemoteHost && onboardingSteps && onboardingSteps.length > 0 ? (

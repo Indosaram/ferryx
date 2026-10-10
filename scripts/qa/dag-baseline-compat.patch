@@ -1,0 +1,28 @@
+--- a/src-tauri/src/daemon/session_service.rs
++++ b/src-tauri/src/daemon/session_service.rs
+@@ -2447,15 +2447,14 @@
+                 } else {
+                     default_cwd
+                 };
+ 
+-                let command = if reliable {
++                let mut cmd = if reliable {
+                     crate::terminal::shell::resolve_ordinary_shell_command(shell.as_deref())
+-                } else { crate::terminal::shell::resolve_startup_command(
+-                    shell.as_deref(),
+-                    spawn_startup.as_ref(),
+-                ) };
+-                let mut cmd = match command {
+-                    Ok(cmd) => cmd,
+-                    Err(err) if reliable => return Err(SpawnError::Structured(err.into())),
+-                    Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
++                        .map_err(|err| SpawnError::Structured(err.into()))?
++                } else {
++                    crate::terminal::shell::resolve_startup_command(
++                        shell.as_deref(),
++                        spawn_startup.as_ref(),
++                    )
++                    .map_err(|err| SpawnError::InvalidAgentResume(err.to_string()))?
+                 };
+                 cmd.env("PROMPT_EOL_MARK", "");
+                 cmd.cwd(normalize_process_cwd(&resolved_cwd));

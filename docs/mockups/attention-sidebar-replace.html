@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Ferryx — 사이드바 전체 대체 (B안) 목업</title>
+<style>
+  :root{
+    --bg-app:#0d0d0f;
+    --side:#151518;
+    --side-2:#1b1c20;
+    --card:#1e1f23;
+    --card-hover:#24252a;
+    --line:#2a2c31;
+    --line-soft:#232529;
+    --text:#e9eaee;
+    --text-2:#b6b8bf;
+    --muted:#83858c;
+    --muted-2:#63656b;
+    --amber:#f5c84c;
+    --amber-soft:rgba(245,200,76,.13);
+    --amber-line:rgba(245,200,76,.34);
+    --needs:#f5a524;
+    --done:#3fbf6f;
+    --font:-apple-system,BlinkMacSystemFont,"Pretendard","Apple SD Gothic Neo","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:#08080a;color:var(--text);font:13px/1.45 var(--font);
+    padding:26px;display:flex;gap:26px;align-items:flex-start;
+  }
+  .cap{font-size:10.5px;color:var(--muted-2);letter-spacing:.07em;text-transform:uppercase;margin-bottom:9px}
+  .note{margin-top:11px;font-size:10.5px;color:var(--muted-2);line-height:1.65;max-width:352px}
+  .note b{color:var(--muted);font-weight:600}
+
+  /* ============ app frame ============ */
+  .app{display:flex;background:var(--bg-app);border:1px solid var(--line);border-radius:12px;overflow:hidden;height:640px}
+  .app.desktop{width:940px}
+  .app.mobile{width:392px;height:768px;flex-direction:column}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .main-bar{
+    height:34px;flex:none;display:flex;align-items:center;gap:6px;padding:0 10px;
+    border-bottom:1px solid var(--line-soft);background:#111114;
+  }
+  .tab{
+    height:24px;padding:0 9px;display:inline-flex;align-items:center;gap:5px;border-radius:6px;
+    font-size:11.5px;color:var(--text-2);background:#1a1b1f;
+  }
+  .tab.on{background:#232429;color:var(--text)}
+  .tab .dot{width:5px;height:5px;border-radius:50%;background:var(--needs)}
+  .main-body{flex:1;display:grid;place-items:center;color:var(--muted-2);font-size:11.5px}
+
+  /* ============ the sidebar (fully replaced) ============ */
+  .side{
+    width:336px;flex:none;background:var(--side);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;min-height:0;
+  }
+  .app.mobile .side{width:auto;border-right:0;flex:1}
+
+  /* --- top: nav compressed to one row --- */
+  .nav{
+    flex:none;padding:9px 10px 8px;border-bottom:1px solid var(--line-soft);
+  }
+  .nav .r1{display:flex;align-items:center;gap:6px}
+  .traffic{width:64px;flex:none;height:12px;display:flex;gap:6px;align-items:center;opacity:.5}
+  .traffic i{width:9px;height:9px;border-radius:50%;background:#3a3c42;display:block}
+  .brand{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;min-width:0}
+  .brand .mark{width:15px;height:15px;border-radius:4px;background:var(--amber-soft);color:var(--amber);display:grid;place-items:center;font-size:9px;flex:none}
+  .grow{flex:1}
+  .ibtn{
+    width:24px;height:24px;flex:none;display:grid;place-items:center;border-radius:6px;
+    border:1px solid transparent;color:var(--muted);font-size:12px;
+  }
+  .ibtn:hover{background:var(--card-hover);color:var(--text)}
+  .ibtn.bordered{border-color:var(--line)}
+  .pill{
+    display:flex;align-items:center;gap:7px;height:28px;padding:0 9px;margin-top:8px;
+    border:1px solid var(--line);border-radius:7px;background:var(--side-2);
+    font-size:11.5px;min-width:0;
+  }
+  .pill .ico{color:var(--muted);flex:none;font-size:11px}
+  .pill .val{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pill .sub{color:var(--muted-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .pill .caret{margin-left:auto;color:var(--muted-2);flex:none;font-size:9px}
+
+  /* --- status chips --- */
+  .chips{flex:none;display:flex;gap:6px;padding:9px 10px;border-bottom:1px solid var(--line-soft);overflow-x:auto;scrollbar-width:none}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{
+    height:24px;flex:none;padding:0 9px;display:inline-flex;align-items:center;gap:5px;border-radius:999px;
+    border:1px solid var(--line);background:transparent;color:var(--muted);font-size:11.5px;
+  }
+  .chip.on{background:var(--amber-soft);border-color:var(--amber-line);color:var(--amber);font-weight:600}
+  .chip .n{font-size:10px;opacity:.75;font-variant-numeric:tabular-nums}
+
+  /* --- list --- */
+  .list{flex:1;min-height:0;overflow-y:auto;padding:10px 10px 14px}
+  .grp + .grp{margin-top:14px}
+  .grp-h{display:flex;align-items:center;gap:6px;padding:0 2px 7px}
+  .grp-h .mk{width:6px;height:6px;border-radius:50%;flex:none}
+  .grp-h .mk.needs{background:var(--needs)}
+  .grp-h .mk.done{background:var(--done)}
+  .grp-h .t{font-size:11px;font-weight:600;color:var(--text-2);letter-spacing:.01em}
+  .grp-h .n{margin-left:auto;font-size:10px;color:var(--muted-2);font-variant-numeric:tabular-nums}
+
+  .row{
+    position:relative;display:flex;gap:9px;padding:9px 10px 9px 11px;border-radius:8px;
+    border:1px solid transparent;background:var(--card);cursor:default;
+  }
+  .row + .row{margin-top:5px}
+  .row:hover{background:var(--card-hover)}
+  .row.unread{border-color:#313339}
+  .row::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:0 2px 2px 0}
+  .row.needs::before{background:var(--needs)}
+  .row.done::before{background:var(--done)}
+  .row .body{flex:1;min-width:0}
+  .row .l1{display:flex;align-items:baseline;gap:6px;min-width:0}
+  .row .who{font-size:12.5px;font-weight:600;white-space:nowrap}
+  .row .where{font-size:11px;color:var(--muted-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .row .when{margin-left:auto;flex:none;font-size:10.5px;color:var(--muted-2);font-variant-numeric:tabular-nums}
+  .row .l2{margin-top:4px;display:flex;align-items:center;gap:6px;min-width:0}
+  .row .kind{
+    flex:none;font-size:10.5px;font-weight:600;color:var(--amber);
+    background:var(--amber-soft);border-radius:4px;padding:1px 5px;
+  }
+  .row .kind.ok{color:var(--done);background:rgba(63,191,111,.12)}
+  .row .q{
+    font-family:var(--mono);font-size:10.5px;color:var(--text-2);background:#16171a;
+    border:1px solid var(--line-soft);border-radius:4px;padding:1px 5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;
+  }
+  .row .unread{width:6px;height:6px;border-radius:50%;background:var(--amber);flex:none;align-self:center}
+  .row .x{color:var(--muted-2);font-size:10px;flex:none;align-self:center;padding:2px 3px;opacity:0}
+  .row:hover .x{opacity:1}
+
+  /* --- footer --- */
+  .foot{
+    flex:none;display:flex;align-items:center;gap:8px;padding:8px 10px;
+    border-top:1px solid var(--line-soft);background:#131316;
+  }
+  .foot .stat{font-size:10.5px;color:var(--muted-2);display:flex;align-items:center;gap:6px;min-width:0}
+  .foot .live{width:6px;height:6px;border-radius:50%;background:var(--done);flex:none}
+
+  /* --- empty --- */
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px 22px}
+  .empty .g{font-size:24px;color:var(--amber);margin-bottom:13px}
+  .empty .h{font-size:12.5px;font-weight:600}
+  .empty .h em{font-style:normal;color:var(--amber)}
+  .empty .m{margin-top:7px;font-size:11px;color:var(--muted)}
+  .empty .m b{color:var(--text-2);font-weight:600}
+  .empty .d{margin-top:9px;font-size:10.5px;color:var(--muted-2);line-height:1.6;max-width:260px}
+</style>
+</head>
+<body>
+
+<div>
+  <div class="cap">Desktop · 사이드바 전체 대체</div>
+  <div class="app desktop">
+    <aside class="side">
+      <div class="nav">
+        <div class="r1">
+          <div class="traffic"><i></i><i></i><i></i></div>
+          <span class="brand"><span class="mark">●</span>에이전트</span>
+          <span class="grow"></span>
+          <span class="ibtn" title="모두 읽음">✓</span>
+          <span class="ibtn bordered" title="새 세션">+</span>
+          <span class="ibtn" title="설정">⚙</span>
+        </div>
+        <div class="pill">
+          <span class="ico">📁</span>
+          <span class="val">ferryx</span>
+          <span class="sub">/ feat-attention</span>
+          <span class="caret">▾</span>
+        </div>
+      </div>
+
+      <div class="chips">
+        <span class="chip on">전체 <span class="n">3</span></span>
+        <span class="chip">유저 인풋 요구 <span class="n">2</span></span>
+        <span class="chip">작업 종료 <span class="n">1</span></span>
+      </div>
+
+      <div class="list">
+        <div class="grp">
+          <div class="grp-h"><span class="mk needs"></span><span class="t">유저 인풋 요구</span><span class="n">2</span></div>
+
+          <div class="row needs unread">
+            <div class="body">
+              <div class="l1"><span class="who">claude</span><span class="where">ferryx / main</span><span class="when">2분 전</span></div>
+              <div class="l2"><span class="kind">권한 승인</span><span class="q">do you want to proceed?</span></div>
+            </div>
+            <span class="unread"></span><span class="x">✕</span>
+          </div>
+
+          <div class="row needs unread">
+            <div class="body">
+              <div class="l1"><span class="who">builder</span><span class="where">ferryx / feat-attention</span><span class="when">1분 전</span></div>
+              <div class="l2"><span class="kind">입력 대기</span><span class="q">run a dynamic workflow?</span></div>
+            </div>
+            <span class="unread"></span><span class="x">✕</span>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-h"><span class="mk done"></span><span class="t">작업 종료</span><span class="n">1</span></div>
+
+          <div class="row done">
+            <div class="body">
+              <div class="l1"><span class="who">worker</span><span class="where">site / feat-compare</span><span class="when">5분 전</span></div>
+              <div class="l2"><span class="kind ok">완료</span><span>확인 필요</span></div>
+            </div>
+            <span class="x">✕</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <span class="stat"><span class="live"></span>감시 중 7개 세션 · 감지 켜짐</span>
+        <span class="grow"></span>
+        <span class="ibtn" title="기록">🕘</span>
+      </div>
+    </aside>
+
+    <div class="main">
+      <div class="main-bar">
+        <span class="tab on"><span class="dot"></span>claude · main</span>
+        <span class="tab">worker · feat-compare</span>
+        <span class="grow"></span>
+        <span class="tab">브라우저</span>
+      </div>
+      <div class="main-body">메인 영역 (터미널 / 브라우저)</div>
+    </div>
+  </div>
+  <div class="note">
+    <b>워크트리 전환은 상단 한 줄(폴더 pill)로 압축</b>했습니다 — 클릭하면 목록이 열립니다.
+    인박스가 사이드바 전체를 차지하고, 감시 상태는 하단에 남깁니다.
+  </div>
+</div>
+
+<div>
+  <div class="cap">Mobile · 같은 패널</div>
+  <div class="app mobile">
+    <div class="nav" style="padding-top:12px">
+      <div class="r1">
+        <span class="brand"><span class="mark">●</span>에이전트</span>
+        <span class="grow"></span>
+        <span class="ibtn" title="모두 읽음">✓</span>
+        <span class="ibtn bordered" title="새 세션">+</span>
+      </div>
+      <div class="pill">
+        <span class="ico">📁</span>
+        <span class="val">ferryx</span>
+        <span class="sub">/ feat-attention</span>
+        <span class="caret">▾</span>
+      </div>
+    </div>
+
+    <div class="chips">
+      <span class="chip on">전체 <span class="n">3</span></span>
+      <span class="chip">인풋 요구 <span class="n">2</span></span>
+      <span class="chip">종료 <span class="n">1</span></span>
+    </div>
+
+    <div class="list">
+      <div class="grp">
+        <div class="grp-h"><span class="mk needs"></span><span class="t">유저 인풋 요구</span><span class="n">2</span></div>
+
+        <div class="row needs unread">
+          <div class="body">
+            <div class="l1"><span class="who">claude</span><span class="when">2분</span></div>
+            <div class="l2"><span class="where">ferryx / main</span></div>
+            <div class="l2"><span class="kind">권한 승인</span><span class="q">do you want to proceed?</span></div>
+          </div>
+          <span class="unread"></span>
+        </div>
+
+        <div class="row needs unread">
+          <div class="body">
+            <div class="l1"><span class="who">builder</span><span class="when">1분</span></div>
+            <div class="l2"><span class="where">ferryx / feat-attention</span></div>
+            <div class="l2"><span class="kind">입력 대기</span><span class="q">run a dynamic workflow?</span></div>
+          </div>
+          <span class="unread"></span>
+        </div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-h"><span class="mk done"></span><span class="t">작업 종료</span><span class="n">1</span></div>
+        <div class="row done">
+          <div class="body">
+            <div class="l1"><span class="who">worker</span><span class="when">5분</span></div>
+            <div class="l2"><span class="where">site / feat-compare</span></div>
+            <div class="l2"><span class="kind ok">완료</span><span>확인 필요</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span class="stat"><span class="live"></span>감시 중 7개 세션</span>
+      <span class="grow"></span>
+      <span class="ibtn" title="기록">🕘</span>
+    </div>
+  </div>
+  <div class="note">
+    같은 컴포넌트, 폭만 다름. 좁으면 워크스페이스를 둘째 줄로 내리고 칩 이름을 줄입니다.
+  </div>
+</div>
+
+<div>
+  <div class="cap">빈 상태</div>
+  <div class="app" style="width:336px;height:470px">
+    <aside class="side" style="width:auto;border-right:0">
+      <div class="nav">
+        <div class="r1">
+          <div class="traffic"><i></i><i></i><i></i></div>
+          <span class="brand"><span class="mark">●</span>에이전트</span>
+          <span class="grow"></span>
+          <span class="ibtn" title="설정">⚙</span>
+        </div>
+        <div class="pill">
+          <span class="ico">📁</span><span class="val">ferryx</span><span class="sub">/ main</span><span class="caret">▾</span>
+        </div>
+      </div>
+      <div class="empty">
+        <div class="g">✧</div>
+        <div class="h">지금은 <em>아무도 기다리지 않습니다</em>.</div>
+        <div class="m">감시 중 <b>7</b>개 세션 · 감지 <b>켜짐</b></div>
+        <div class="d">에이전트가 입력을 요구하거나 작업을 끝내면 여기에 나타납니다. 실행 중인 세션은 조용히 지나갑니다.</div>
+      </div>
+      <div class="foot">
+        <span class="stat"><span class="live"></span>감시 중 7개 세션</span>
+        <span class="grow"></span>
+        <span class="ibtn" title="기록">🕘</span>
+      </div>
+    </aside>
+  </div>
+</div>
+
+</body>
+</html>

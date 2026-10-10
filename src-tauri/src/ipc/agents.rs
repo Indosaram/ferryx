@@ -265,6 +265,80 @@ fn omo_session_id_from_environment(pid: u32, agent_type: &str) -> Option<String>
         .and_then(|stdout| session_id_from_env_output(agent_type, &stdout))
 }
 
+/// The omo conversation id of the agent running inside a Ferryx session, read from the process
+/// table rather than from a report.
+///
+/// The daemon learns an agent's conversation only when the agent reports a state change, and a
+/// daemon started by handover begins with none, so an agent that has been idle since keeps its
+/// session unresolved. Ferryx puts `FERRYX_SESSION_ID` into every PTY environment, which makes it
+/// an exact owner key; the conversation comes from the agent's `--session <id>` argument or its
+/// `PI_SESSION_FILE`. Two different conversations under one session answer `None` rather than a
+/// guess, since a wrong answer would show another agent's chat.
+pub(crate) fn omo_session_id_for_ferryx_session(ferryx_session_id: &str) -> Option<String> {
+    let table = process_environment_table()?;
+    omo_session_id_in_table(&table, ferryx_session_id)
+}
+
+fn omo_session_id_in_table(table: &str, ferryx_session_id: &str) -> Option<String> {
+    let owner = format!("FERRYX_SESSION_ID={ferryx_session_id}");
+    let mut found: Option<String> = None;
+    for line in table.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if !tokens.iter().any(|token| *token == owner) {
+            continue;
+        }
+        let from_arg = tokens
+            .windows(2)
+            .find(|pair| pair[0] == "--session")
+            .map(|pair| pair[1].to_string());
+        let id = from_arg.or_else(|| session_id_from_env_output("omo", line));
+        let Some(id) = id.filter(|id| crate::agent_transcript::is_valid_session_id(id)) else {
+            continue;
+        };
+        match &found {
+            Some(existing) if *existing != id => return None,
+            _ => found = Some(id),
+        }
+    }
+    found
+}
+
+// One line per process: its arguments followed by its environment, as `ps -E` prints them.
+#[cfg(all(not(target_os = "linux"), not(windows)))]
+fn process_environment_table() -> Option<String> {
+    let ps = resolve_tool("ps")?;
+    let stdout = probe_stdout(
+        "ps",
+        crate::util::no_window_command(ps).args(["-axwwE", "-o", "command="]),
+    )?;
+    String::from_utf8(stdout).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn process_environment_table() -> Option<String> {
+    let mut table = String::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let path = entry.path();
+        let (Ok(cmdline), Ok(environ)) = (
+            std::fs::read(path.join("cmdline")),
+            std::fs::read(path.join("environ")),
+        ) else {
+            continue;
+        };
+        table.push_str(&String::from_utf8_lossy(&cmdline).replace('\0', " "));
+        table.push(' ');
+        table.push_str(&String::from_utf8_lossy(&environ).replace('\0', " "));
+        table.push('\n');
+    }
+    Some(table)
+}
+
+#[cfg(windows)]
+fn process_environment_table() -> Option<String> {
+    tracing::debug!("agent session discovery: environment discovery unavailable on Windows");
+    None
+}
+
 // procps-ng ps rejects BSD's `-E`, so Linux reads the target process's
 // NUL-separated /proc environment block instead of listing it through ps.
 #[cfg(target_os = "linux")]
@@ -684,17 +758,77 @@ pub(crate) fn search_paths() -> Vec<PathBuf> {
 // Terminals spawn through the user's login shell, so its PATH (Homebrew, nvm,
 // mise, ~/.local/bin) is the search space that matches what a launched agent
 // would actually resolve against - the GUI process PATH alone misses most of it.
+//
+// The wait below is bounded because of a measured hang: `-lic` makes the shell
+// source the user's whole rc chain, and on a host whose rc chain runs `pyenv
+// rehash` (pyenv's 60 s lock wait) the spawned child outlives any fixed caller
+// budget - a live sample showed `zsh -lic printf %s "$PATH"` hanging alongside
+// an 18 s-old `pyenv-rehash`, with `zsh -lic true` measuring 60.41 s wall, so
+// session creation (`POST /api/v1/sessions`) never returned inside its 10 s
+// budget. Resolution is now capped: on expiry the child is killed and reaped,
+// and `None` keeps meaning "could not resolve", so callers fall back to the
+// process PATH that `search_paths()` already collected.
+//
+// Reachable from async code: `search_paths()` initializes its OnceLock inline
+// on the first caller, which can be `SessionService::spawn_owned` (async
+// session creation), so this blocking wait runs on a Tokio worker thread for up
+// to the bound below. Reported here; call sites deliberately not restructured.
 fn login_shell_path() -> Option<OsString> {
+    // 2 s: a healthy login shell resolves PATH in the tens-to-hundreds of ms
+    // range (the measured pathological case was 60 s, 30x this bound), this
+    // OnceLock runs at most once per process, and the caller's session-creation
+    // budget is 10 s - leaving room for the rest of spawn on the fallback path.
+    const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
-    let output = crate::util::no_window_command(&shell)
+    let mut child = crate::util::no_window_command(&shell)
         .args(["-lic", "printf %s \"$PATH\""])
         .env("PROMPT_EOL_MARK", "")
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        // Captured-and-discarded, matching the old `.output()` semantics; we
+        // never read stderr, so piping it could let a chatty rc chain fill the
+        // pipe and trip the deadline.
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    // Drain stdout on its own thread so a shell that writes more than a pipe
+    // buffer cannot block on write until the deadline kills it (same pattern as
+    // `run_clipboard_tool` in clipboard_image.rs).
+    let Some(mut stdout_pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let drain = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + RESOLVE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Deadline expired or the child is unreapable: kill so it cannot
+            // leak, then reap it, and treat the resolution as "could not
+            // resolve" (None). Note this reaps the direct child only; a
+            // grandchild the rc chain already spawned (e.g. `pyenv-rehash`)
+            // is orphaned and finishes on its own.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = drain.join();
+                return None;
+            }
+        }
+    };
+    let bytes = drain.join().unwrap_or_default();
+    if !status.success() {
         return None;
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let value = String::from_utf8_lossy(&bytes).trim().to_string();
     if value.is_empty() {
         return None;
     }
@@ -819,6 +953,36 @@ fn probe_stdout(tool: &str, command: &mut std::process::Command) -> Option<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omo_session_id_in_table_uses_the_owning_process_only() {
+        let table = concat!(
+            "bun /x/senpi/dist/bundle/cli.js --session 01a0-mine FERRYX_SESSION_ID=pty-a HOME=/h\n",
+            "bun /x/senpi/dist/bundle/cli.js --session 01a0-other FERRYX_SESSION_ID=pty-b\n",
+            "bun /x/senpi/dist/bundle/cli.js FERRYX_SESSION_ID=pty-c PI_SESSION_FILE=/h/.omo/sessions/--p--/2026_01a0d650-db7a-7817-a21b-7be552a81e89.jsonl\n",
+            "/bin/zsh -l FERRYX_SESSION_ID=pty-a\n",
+        );
+        assert_eq!(omo_session_id_in_table(table, "pty-a").as_deref(), Some("01a0-mine"));
+        assert_eq!(omo_session_id_in_table(table, "pty-b").as_deref(), Some("01a0-other"));
+        assert_eq!(
+            omo_session_id_in_table(table, "pty-c").as_deref(),
+            Some("01a0d650-db7a-7817-a21b-7be552a81e89")
+        );
+        assert_eq!(omo_session_id_in_table(table, "pty-"), None, "prefix must not match");
+        assert_eq!(omo_session_id_in_table(table, "pty-z"), None);
+    }
+
+    #[test]
+    fn omo_session_id_in_table_refuses_two_conversations_in_one_session() {
+        let table = concat!(
+            "bun cli.js --session 01a0-one FERRYX_SESSION_ID=pty-a\n",
+            "bun cli.js --session 01a0-two FERRYX_SESSION_ID=pty-a\n",
+            "bun cli.js --session 01a0-one FERRYX_SESSION_ID=pty-b\n",
+            "bun cli.js --session 01a0-one FERRYX_SESSION_ID=pty-b\n",
+        );
+        assert_eq!(omo_session_id_in_table(table, "pty-a"), None);
+        assert_eq!(omo_session_id_in_table(table, "pty-b").as_deref(), Some("01a0-one"));
+    }
 
     #[test]
     fn test_agents_detect_existing_and_nonexistent_binaries() {

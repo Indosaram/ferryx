@@ -116,7 +116,7 @@ describe("updater status machine", () => {
     });
   });
 
-  it("reports monotonic download progress and relaunches after installation", async () => {
+  it("reports monotonic download progress and stages installation without automatic relaunch", async () => {
     check.mockResolvedValue(
       updateHandle([
         { event: "Started", data: { contentLength: 100 } },
@@ -138,6 +138,25 @@ describe("updater status machine", () => {
     expect(progress).toEqual([...progress].sort((a, b) => a - b));
     expect(progress.at(-1)).toBe(1);
     expect(updater.getUpdateStatus().state).toBe("downloaded");
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("does not relaunch on its own after installation until explicit confirmation entry point is called", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "Started", data: { contentLength: 100 } },
+        { event: "Finished" },
+      ]),
+    );
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+    await updater.downloadAndInstallUpdate();
+
+    expect(updater.getUpdateStatus().state).toBe("downloaded");
+    expect(relaunch).not.toHaveBeenCalled();
+
+    await updater.relaunchApp();
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 

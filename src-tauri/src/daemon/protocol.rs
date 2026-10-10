@@ -12,6 +12,144 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
+pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
+pub const LOCAL_SPLIT_VALIDITY_MS: u64 = 600_000;
+
+/// Tauri identity: epochs remain decimal strings across JavaScript boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitIdentity {
+    pub request_id: String,
+    pub origin_epoch: String,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedLocalSplit {
+    pub identity: SplitIdentity,
+    pub workspace_id: String,
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: String,
+    pub shell: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Daemon admission envelope. Attempt budget is deliberately not identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSplitEnvelope {
+    pub origin_epoch: u64,
+    pub expires_at_unix_ms: u64,
+    pub remaining_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitOwnership {
+    Created,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitUnknownReason {
+    EpochChanged,
+    PublicationUncertain,
+}
+
+/// A failed operation proves no child exists; false is not a legal wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "bool", into = "bool")]
+pub struct SplitNoChild;
+
+impl TryFrom<bool> for SplitNoChild {
+    type Error = &'static str;
+
+    fn try_from(value: bool) -> Result<Self, Self::Error> {
+        if value {
+            Ok(Self)
+        } else {
+            Err("noChild must be true")
+        }
+    }
+}
+
+impl From<SplitNoChild> for bool {
+    fn from(_: SplitNoChild) -> Self {
+        true
+    }
+}
+
+/// Daemon uses u64; Tauri uses SplitOperationResult<String>, preserving descriptor fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationResult<Epoch = u64> {
+    Absent { can_create: bool },
+    Pending { cancel_requested: bool },
+    Created {
+        session_id: String,
+        daemon_epoch: Epoch,
+        session: DaemonSessionDetails,
+        ownership: SplitOwnership,
+    },
+    Cancelled,
+    Exited,
+    Failed { error: crate::ipc::IpcError, no_child: SplitNoChild },
+    Unknown { reason: SplitUnknownReason },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationRequest {
+    Prepare {
+        request_id: String,
+        request: crate::ipc::SpawnTerminalRequest,
+        remaining_ms: u64,
+    },
+    Status { identity: SplitIdentity, remaining_ms: u64 },
+    Cancel { identity: SplitIdentity, remaining_ms: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SplitOperationResponse {
+    Prepare { prepared: PreparedLocalSplit },
+    Status { operation: SplitOperationResult<String> },
+    Cancel { operation: SplitOperationResult<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitAttachAttempt {
+    pub identity: SplitIdentity,
+    pub frontend_session_id: String,
+    pub generation: u64,
+    pub remaining_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitDelivery { NotSent, Ambiguous, Confirmed }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitErrorDetails {
+    pub request_id: String,
+    pub origin_epoch: String,
+    pub stage: String,
+    pub delivery: SplitDelivery,
+    pub operation_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_local_split: Option<PreparedLocalSplit>,
+}
+
+/// IpcErrorCode::from_code_str maps these codes to typed Spawn variants.
+pub const SPAWN_REQUEST_CONFLICT: &str = "SPAWN_REQUEST_CONFLICT";
+pub const SPAWN_REQUEST_EXPIRED: &str = "SPAWN_REQUEST_EXPIRED";
+pub const SPAWN_EPOCH_CHANGED: &str = "SPAWN_EPOCH_CHANGED";
+pub const SPAWN_ATTEMPT_TIMEOUT: &str = "SPAWN_ATTEMPT_TIMEOUT";
+pub const SPAWN_CANCELLED: &str = "SPAWN_CANCELLED";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +344,25 @@ pub enum DaemonRequest {
         shell: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         startup: Option<TerminalStartup>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_split: Option<LocalSplitEnvelope>,
+        /// GUI-minted session id (canonical UUID) so the pane can mount before the
+        /// daemon replies. Older daemons ignore it; callers always adopt the id in
+        /// `SpawnOk.session_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SpawnOperationStatus {
+        client_request_id: String,
+        origin_epoch: u64,
+        expires_at_unix_ms: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    CancelSpawnOperation {
+        client_request_id: String,
+        origin_epoch: u64,
+        expires_at_unix_ms: u64,
     },
     #[serde(rename_all = "camelCase")]
     Write {
@@ -293,6 +450,8 @@ pub enum DaemonRequest {
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
+    /// Host load and per-session process cost, sampled by the daemon on demand.
+    ResourceUsage,
     PairedHostList,
     PairedTerminalReattach {
         descriptor: crate::terminal::paired_daemon::Descriptor,
@@ -474,8 +633,16 @@ pub enum DaemonResponse {
         binary_mtime_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         daemon_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission_time_unix_ms: Option<u64>,
     },
     Pong,
+    #[serde(rename_all = "camelCase")]
+    ResourceUsageOk {
+        snapshot: crate::daemon::resource_usage::HostResourceSnapshot,
+    },
     #[serde(rename_all = "camelCase")]
     ProtocolMismatch {
         expected_version: u32,
@@ -500,6 +667,10 @@ pub enum DaemonResponse {
         session_id: String,
         epoch: u64,
         session: DaemonSessionDetails,
+    },
+    #[serde(rename_all = "camelCase")]
+    SpawnOperationOk {
+        operation: SplitOperationResult,
     },
     #[serde(rename_all = "camelCase")]
     AgentResumeInvalid {
@@ -788,6 +959,178 @@ pub fn decode_daemon_stream_frame(frame: &str) -> serde_json::Result<DaemonStrea
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_session_id_roundtrips_and_defaults_to_none() {
+        let id = "0b8f5a3e-3c1d-4f6a-9b2e-7d4c1a2b3c4d";
+        let with_id = DaemonRequest::Spawn {
+            client_request_id: "req-sid".into(), workspace_id: "ws".into(), worktree: None,
+            cwd: None, cols: 80, rows: 24, shell: None, startup: None, local_split: None,
+            session_id: Some(id.into()),
+        };
+        let encoded = serde_json::to_value(&with_id).expect("encode spawn with sessionId");
+        assert_eq!(encoded["sessionId"], id);
+        let decoded: DaemonRequest = serde_json::from_value(encoded).expect("decode spawn with sessionId");
+        assert!(matches!(decoded, DaemonRequest::Spawn { session_id: Some(ref got), .. } if got == id));
+
+        let without_id = DaemonRequest::Spawn {
+            client_request_id: "req-sid".into(), workspace_id: "ws".into(), worktree: None,
+            cwd: None, cols: 80, rows: 24, shell: None, startup: None, local_split: None,
+            session_id: None,
+        };
+        let encoded = serde_json::to_value(&without_id).expect("encode spawn without sessionId");
+        assert!(encoded.get("sessionId").is_none(), "absent id must not be serialized");
+        let decoded: DaemonRequest = serde_json::from_value(encoded).expect("decode spawn without sessionId");
+        assert!(matches!(decoded, DaemonRequest::Spawn { session_id: None, .. }));
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+    }
+
+    #[test]
+    fn local_split_reliability_dto_legacy_defaults() {
+        let legacy = serde_json::json!({"type":"spawn", "clientRequestId":"legacy-not-a-uuid",
+            "workspaceId":"ws", "worktree":null, "cwd":null, "cols":80, "rows":24});
+        let decoded: DaemonRequest = serde_json::from_value(legacy.clone()).expect("legacy spawn");
+        assert!(matches!(&decoded, DaemonRequest::Spawn { local_split: None, .. }));
+        assert_eq!(serde_json::to_value(decoded).expect("encode legacy spawn"), legacy);
+        let handshake = serde_json::json!({"type":"handshakeOk", "version":5, "pid":1, "epoch":42});
+        let decoded: DaemonResponse = serde_json::from_value(handshake.clone()).expect("legacy handshake");
+        assert!(matches!(&decoded, DaemonResponse::HandshakeOk {
+            capabilities, admission_time_unix_ms: None, .. } if capabilities.is_empty()));
+        assert_eq!(serde_json::to_value(decoded).expect("encode legacy handshake"), handshake);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+    }
+
+    #[test]
+    fn local_split_reliability_dto_handshake_capability_and_time() {
+        let wire = serde_json::json!({"type":"handshakeOk", "version":5, "pid":1,
+            "epoch":u64::MAX, "capabilities":[LOCAL_SPLIT_LIFECYCLE_CAPABILITY],
+            "admissionTimeUnixMs":1700000000000_u64});
+        let decoded: DaemonResponse = serde_json::from_value(wire.clone()).expect("handshake");
+        assert_eq!(serde_json::to_value(decoded).expect("handshake encode"), wire);
+    }
+
+    #[test]
+    fn local_split_reliability_dto_operation_requests_roundtrip() {
+        for kind in ["spawnOperationStatus", "cancelSpawnOperation"] {
+            let wire = serde_json::json!({"type":kind,
+                "clientRequestId":"550e8400-e29b-41d4-a716-446655440000",
+                "originEpoch":u64::MAX, "expiresAtUnixMs":600001});
+            let request: DaemonRequest = serde_json::from_value(wire.clone()).expect("operation request");
+            assert_eq!(serde_json::to_value(request).expect("encode operation"), wire);
+        }
+    }
+
+    #[test]
+    fn local_split_reliability_dto_attempt_budget_is_not_prepared_identity() {
+        let prepared: PreparedLocalSplit = serde_json::from_value(serde_json::json!({
+            "identity":{"requestId":"550e8400-e29b-41d4-a716-446655440000",
+                "originEpoch":"18446744073709551615", "expiresAtUnixMs":600001},
+            "workspaceId":"ws", "worktree":null, "cwd":"/repo", "shell":null,
+            "cols":80, "rows":24})).expect("prepared inputs");
+        let first = SplitOperationRequest::Status { identity: prepared.identity.clone(), remaining_ms: 9000 };
+        let retry = SplitOperationRequest::Status { identity: prepared.identity.clone(), remaining_ms: 2000 };
+        let first = serde_json::to_value(first).expect("first budget");
+        let retry = serde_json::to_value(retry).expect("retry budget");
+        assert_eq!(first["identity"], retry["identity"]);
+        assert_ne!(first["remainingMs"], retry["remainingMs"]);
+        let frozen = serde_json::to_value(&prepared).expect("frozen preparation");
+        assert!(frozen.get("remainingMs").is_none());
+        assert!(frozen["identity"].get("remainingMs").is_none());
+        assert_eq!(serde_json::from_value::<PreparedLocalSplit>(frozen).expect("decode frozen"), prepared);
+    }
+
+    #[test]
+    fn local_split_reliability_dto_reliable_spawn_roundtrip() {
+        let wire = serde_json::json!({"type":"spawn", "clientRequestId":"550e8400-e29b-41d4-a716-446655440000",
+            "workspaceId":"ws", "worktree":null, "cwd":"/repo", "cols":80, "rows":24,
+            "localSplit":{"originEpoch":42, "expiresAtUnixMs":600001, "remainingMs":9000}});
+        let decoded: DaemonRequest = serde_json::from_value(wire.clone()).expect("reliable spawn");
+        assert_eq!(serde_json::to_value(decoded).expect("encode reliable spawn"), wire);
+    }
+
+    #[test]
+    fn local_split_reliability_dto_all_operation_states_roundtrip() {
+        let session = serde_json::json!({"sessionId":"pty", "workspaceId":"ws", "worktree":null,
+            "cwd":"/repo", "cols":80, "rows":24, "running":true,
+            "startSequence":1, "endSequence":2, "lastOutputAgeMs":3});
+        for operation in [
+            serde_json::json!({"state":"absent", "canCreate":false}),
+            serde_json::json!({"state":"pending", "cancelRequested":true}),
+            serde_json::json!({"state":"created", "sessionId":"pty", "daemonEpoch":u64::MAX,
+                "session":session, "ownership":"created"}),
+            serde_json::json!({"state":"cancelled"}),
+            serde_json::json!({"state":"exited"}),
+            serde_json::json!({"state":"failed", "error":{"code":SPAWN_REQUEST_EXPIRED,
+                "message":"expired"}, "noChild":true}),
+            serde_json::json!({"state":"unknown", "reason":"epochChanged"}),
+            serde_json::json!({"state":"unknown", "reason":"publicationUncertain"}),
+        ] {
+            let wire = serde_json::json!({"type":"spawnOperationOk", "operation":operation});
+            let decoded: DaemonResponse = serde_json::from_value(wire.clone()).expect("operation result");
+            assert_eq!(serde_json::to_value(decoded).expect("encode result"), wire);
+        }
+    }
+
+    #[test]
+    fn local_split_reliability_dto_failed_requires_no_child_true() {
+        for no_child in [serde_json::Value::Bool(false), serde_json::Value::Null] {
+            let wire = serde_json::json!({"state":"failed", "error":{"code":SPAWN_CANCELLED,
+                "message":"cancelled"}, "noChild":no_child});
+            assert!(serde_json::from_value::<SplitOperationResult>(wire).is_err());
+        }
+        assert!(serde_json::from_value::<SplitOperationResult>(serde_json::json!({
+            "state":"failed", "error":{"code":SPAWN_CANCELLED,"message":"cancelled"}})).is_err());
+    }
+
+    #[test]
+    fn local_split_reliability_dto_tauri_epoch_and_prepare_roundtrip() {
+        let identity = serde_json::json!({"requestId":"550e8400-e29b-41d4-a716-446655440000",
+            "originEpoch":"18446744073709551615", "expiresAtUnixMs":600001});
+        for action in ["status", "cancel"] {
+            let wire = serde_json::json!({"action":action, "identity":identity, "remainingMs":3000});
+            let decoded: SplitOperationRequest = serde_json::from_value(wire.clone()).expect("Tauri request");
+            assert_eq!(serde_json::to_value(decoded).expect("encode request"), wire);
+            let wire = serde_json::json!({"action":action, "operation":{"state":"created",
+                "sessionId":"pty", "daemonEpoch":"18446744073709551615", "ownership":"created",
+                "session":{"sessionId":"pty","workspaceId":null,"worktree":null,"cwd":null,
+                    "cols":80,"rows":24,"running":true,"startSequence":null,"endSequence":null,"lastOutputAgeMs":null}}});
+            let decoded: SplitOperationResponse = serde_json::from_value(wire.clone()).expect("Tauri response");
+            assert_eq!(serde_json::to_value(decoded).expect("encode response"), wire);
+        }
+        let wire = serde_json::json!({"action":"prepare", "prepared":{"identity":identity,
+            "workspaceId":"ws","worktree":null,"cwd":"/repo","shell":null,"cols":80,"rows":24}});
+        let decoded: SplitOperationResponse = serde_json::from_value(wire.clone()).expect("prepared response");
+        assert_eq!(serde_json::to_value(decoded).expect("encode prepared"), wire);
+        let request: SplitOperationRequest = serde_json::from_value(serde_json::json!({
+            "action":"prepare", "requestId":"550e8400-e29b-41d4-a716-446655440000",
+            "request":{"workspaceId":"ws","worktree":null}, "remainingMs":9000})).expect("prepare request");
+        assert!(matches!(request, SplitOperationRequest::Prepare { remaining_ms: 9000, .. }));
+    }
+
+    #[test]
+    fn local_split_reliability_dto_error_codes_and_delivery_roundtrip() {
+        for code in [SPAWN_REQUEST_CONFLICT, SPAWN_REQUEST_EXPIRED, SPAWN_EPOCH_CHANGED,
+            SPAWN_ATTEMPT_TIMEOUT, SPAWN_CANCELLED, "UNSUPPORTED_CAPABILITY"] {
+            let wire = serde_json::json!({"code":code, "message":"failure", "details":{
+                "requestId":"550e8400-e29b-41d4-a716-446655440000", "originEpoch":"42",
+                "stage":"handshake", "delivery":"notSent", "operationState":"absent"}});
+            let error: crate::ipc::IpcError = serde_json::from_value(wire.clone()).expect("structured error");
+            assert_eq!(serde_json::to_value(error).expect("encode error"), wire);
+            let details: SplitErrorDetails = serde_json::from_value(wire["details"].clone()).expect("typed details");
+            assert_eq!(serde_json::to_value(details).expect("encode details"), wire["details"]);
+        }
+    }
+
+    #[test]
+    fn local_split_reliability_dto_qa_feature_is_nondefault() {
+        let manifest: toml::Value = toml::from_str(include_str!("../../Cargo.toml")).expect("manifest");
+        let features = manifest["features"].as_table().expect("features");
+        assert_eq!(features["local-split-qa"].as_array().expect("QA feature").len(), 0);
+        assert!(!features["default"].as_array().expect("defaults").iter()
+            .any(|value| value.as_str() == Some("local-split-qa")));
+        assert!(manifest["dev-dependencies"]["tokio"]["features"].as_array().expect("test features")
+            .iter().any(|value| value.as_str() == Some("test-util")));
+    }
 
     #[test]
     fn upload_clipboard_image_protocol_round_trip() {
@@ -1378,6 +1721,8 @@ mod tests {
             rows: 40,
             shell: None,
             startup: None,
+            local_split: None,
+            session_id: None,
         };
         let spawn_json = serde_json::to_string(&spawn_req).expect("serialize spawn");
         assert!(spawn_json.contains(r#""clientRequestId":"req-abc-123""#));
@@ -1470,6 +1815,8 @@ mod tests {
             binary_path: Some("/bin/ferryx".to_string()),
             binary_mtime_ms: Some(1700000000000),
             daemon_version: Some("2026.902.2".to_string()),
+            capabilities: Vec::new(),
+            admission_time_unix_ms: None,
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
@@ -1520,7 +1867,10 @@ mod tests {
                 rows,
                 shell,
                 startup,
+                local_split,
+                session_id,
             } => {
+                assert_eq!(session_id, None);
                 assert_eq!(client_request_id, "req-1");
                 assert_eq!(workspace_id, "ws-1");
                 assert_eq!(worktree, None);
@@ -1529,6 +1879,7 @@ mod tests {
                 assert_eq!(rows, 24);
                 assert_eq!(shell, None);
                 assert_eq!(startup, None);
+                assert_eq!(local_split, None);
             }
             _ => panic!("Expected Spawn variant"),
         }
@@ -1554,6 +1905,8 @@ mod tests {
             rows: 30,
             shell: Some("pwsh".to_string()),
             startup: None,
+            local_split: None,
+            session_id: None,
         };
         let serialized =
             serde_json::to_string(&spawn_with_shell).expect("serialize spawn with shell");

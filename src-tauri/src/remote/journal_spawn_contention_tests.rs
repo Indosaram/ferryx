@@ -43,7 +43,7 @@ async fn spawn_contention(expire: bool) {
     let service = state.machine_services.as_ref().unwrap().workspaces.clone();
     let slots = service.project_mutations.clone();
     let capacity = slots.available_permits();
-    let (spawn_lock, terminals) = sessions.journal_spawn_probe_handles();
+    let (spawn_lock, terminals) = sessions.journal_spawn_probe_handles(&workspace);
     let mut gate = Some(spawn_lock.clone().lock_owned().await);
     let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
     let queued_tx = Mutex::new(Some(queued_tx));

@@ -2463,6 +2463,17 @@ impl NativeTerminalSurfaceHostState {
                                 }
                                 sess.last_sequence = Some(sequence);
                                 sess.publish_frame();
+                                crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                                    "event": "terminal.render.vt_consumed",
+                                    "details": {
+                                        "sessionId": session_id_owned,
+                                        "consumedSequence": sequence,
+                                        "renderedAt": std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .ok()
+                                            .map(|d| d.as_secs_f64() * 1000.0),
+                                    }
+                                }));
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, false),
@@ -3138,6 +3149,71 @@ impl NativeTerminalSurfaceHostState {
             .lock()
             .get(session_id)
             .and_then(|session| session.last_sequence)
+    }
+
+    #[cfg(test)]
+    pub fn attach_test_session_for_liveness(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        last_sequence: Option<u64>,
+    ) -> Result<Arc<RenderScheduleCoordinator>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut terminal = NativeTerminal::new(80, 24)?;
+        let _ = terminal.set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
+        let (update_sender, _) = tokio::sync::watch::channel(());
+        let (detach_sender, _) = tokio::sync::watch::channel(());
+        let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
+        let session = NativeTerminalSession {
+            terminal,
+            focused: false,
+            preedit: None,
+            layout: None,
+            logical_bounds: None,
+            cell_metrics: None,
+            stream_task: None,
+            pump_task: None,
+            pty_write_task: None,
+            is_remote: false,
+            remote_generation: None,
+            last_sequence,
+            daemon_epoch: epoch,
+            pump_generation: 1,
+            update_sender,
+            detach_sender,
+            render_coordinator: Arc::clone(&render_coordinator),
+            last_agent_activity: None,
+            last_provider_session: None,
+            last_agent_detect_at: None,
+            agent_detect_pending: false,
+            last_scrollbar: None,
+            scrollbar_overlay: ScrollbarOverlayState::default(),
+            attention_frame: false,
+            agent_reports_own_state: false,
+            bracketed_paste_seen: false,
+            surface_attached: true,
+            output_stream_ended: false,
+            snapshot_slot: Arc::new(SnapshotSlot::new()),
+        };
+        self.sessions.lock().insert(session_id.to_string(), session);
+        Ok(render_coordinator)
+    }
+
+    pub fn session_liveness_observation(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::ipc::debug::PaneLivenessSnapshot> {
+        let sessions = self.sessions.lock();
+        let session = sessions.get(session_id)?;
+        Some(crate::ipc::debug::PaneLivenessSnapshot {
+            telemetry_available: true,
+            session_id: Some(session_id.to_string()),
+            vt_session_id: Some(session_id.to_string()),
+            vt_epoch: Some(session.daemon_epoch.to_string()),
+            vt_consumed_sequence: session.last_sequence,
+            has_unpresented_frames: Some(session.render_coordinator.is_render_pending()),
+            ..Default::default()
+        })
     }
 
     /// Resident replay cursor as `(daemon_epoch, last_sequence)`. The epoch travels with the
@@ -8533,5 +8609,61 @@ mod tests {
         }
 
         state.teardown();
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::ipc::debug::{classify_pane_liveness, PaneLivenessVerdict};
+
+    #[test]
+    fn pane_liveness_diagnostics_prearmed_held_presentation_barrier() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-live-presentation-session";
+
+        let coordinator = state
+            .attach_test_session_for_liveness(session_id, 1, Some(42))
+            .expect("attach test session");
+
+        // 1. Prearm presentation dependency: schedule a pending frame
+        assert!(coordinator.schedule_render(), "schedule render must succeed");
+        assert!(coordinator.is_render_pending(), "coordinator frame must be pending");
+
+        // 2. Observe real surface-owner production state via session_liveness_observation
+        let held_obs = state
+            .session_liveness_observation(session_id)
+            .expect("observation must exist");
+        assert_eq!(held_obs.session_id.as_deref(), Some(session_id));
+        assert_eq!(held_obs.vt_epoch.as_deref(), Some("1"));
+        assert_eq!(held_obs.vt_consumed_sequence, Some(42));
+        assert_eq!(held_obs.has_unpresented_frames, Some(true));
+
+        // 3. Classify: must yield BlockedInPresentation while held
+        assert_eq!(
+            classify_pane_liveness(&held_obs),
+            PaneLivenessVerdict::BlockedInPresentation
+        );
+
+        // 4. Release controllable presentation dependency: consume/finish the render
+        let owner = coordinator.begin_owned_render().expect("begin render");
+        coordinator.finish_owned_render(owner, false);
+        assert!(!coordinator.is_render_pending(), "frame must be rendered");
+
+        // 5. Observe released state via session_liveness_observation
+        let released_obs = state
+            .session_liveness_observation(session_id)
+            .expect("observation must exist");
+        assert_eq!(released_obs.has_unpresented_frames, Some(false));
+
+        // 6. Complete negative confirmations to assert IDLE after release
+        let mut idle_candidate = released_obs;
+        idle_candidate.reader_paused = Some(false);
+        idle_candidate.kernel_stopped = Some(false);
+        idle_candidate.suspended = Some(false);
+        assert_eq!(
+            classify_pane_liveness(&idle_candidate),
+            PaneLivenessVerdict::Idle
+        );
     }
 }

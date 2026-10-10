@@ -126,6 +126,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -206,6 +207,7 @@ async fn poisoned_requested_cwd_falls_back_to_the_worktree_root() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -268,6 +270,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -467,6 +470,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -545,6 +549,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -605,6 +610,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -811,6 +817,7 @@ async fn test_project_registration_then_daemon_spawn() {
             shell: None,
             startup: None,
             inherit_from_session_id: None,
+            session_id: None,
         },
     )
     .await
@@ -853,6 +860,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         rows: Some(24),
         client_request_id: Some("req-invalid-id".into()),
         inherit_from_session_id: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -893,6 +901,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         rows: Some(24),
         client_request_id: Some("req-wrong-key".into()),
         inherit_from_session_id: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -964,6 +973,7 @@ async fn agent_resume_startup_cwd_jail_enforcement() {
         rows: Some(24),
         client_request_id: Some("req-outside-cwd".into()),
         inherit_from_session_id: None,
+        session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -1187,6 +1197,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         rows: Some(30),
         client_request_id: Some("req-forward-wt".into()),
         inherit_from_session_id: None,
+        session_id: None,
         shell: None,
         startup: None,
     };
@@ -1258,6 +1269,7 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         rows: Some(24),
         client_request_id: None,
         inherit_from_session_id: None,
+        session_id: None,
         shell: None,
         startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
             agent_type: "claude".into(),

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Ferryx Attention Sidebar — 목업</title>
+<style>
+  :root{
+    --bg:#141416;
+    --panel:#1c1d20;
+    --panel-2:#202124;
+    --line:#2e3034;
+    --line-soft:#26282c;
+    --text:#e8e9ec;
+    --muted:#8b8d93;
+    --muted-2:#6b6d73;
+    --amber:#f5c84c;
+    --amber-soft:rgba(245,200,76,.14);
+    --amber-text:#f5c84c;
+    --dot-needs:#f5a524;
+    --dot-done:#4ade80;
+    --danger:#f0736a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:#0e0e10;color:var(--text);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Pretendard","Apple SD Gothic Neo","Segoe UI",sans-serif;
+    padding:28px;display:flex;gap:28px;align-items:flex-start;
+  }
+  .caption{font-size:11px;color:var(--muted-2);letter-spacing:.04em;text-transform:uppercase;margin-bottom:10px}
+
+  /* ---------- shared panel chrome (mirrors the reference screenshot) ---------- */
+  .panel{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  .head{
+    display:flex;align-items:center;gap:8px;
+    padding:10px 12px;border-bottom:1px solid var(--line-soft);
+  }
+  .head .brand{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13px;min-width:0}
+  .head .brand .mark{
+    width:16px;height:16px;border-radius:4px;background:var(--amber-soft);
+    display:grid;place-items:center;color:var(--amber);font-size:10px;flex:none;
+  }
+  .head .spacer{flex:1}
+  .ctl{
+    display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;
+    border:1px solid var(--line);border-radius:6px;background:var(--panel-2);
+    color:var(--text);font-size:11.5px;white-space:nowrap;
+  }
+  .ctl.ghost{background:transparent}
+  .btn-primary{
+    display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 11px;
+    border:0;border-radius:6px;background:var(--amber);color:#1a1508;
+    font-size:11.5px;font-weight:600;white-space:nowrap;
+  }
+  .icon-x{
+    width:26px;height:26px;display:grid;place-items:center;border-radius:6px;
+    color:var(--muted);font-size:13px;flex:none;
+  }
+
+  /* ---------- scope / filter chip row ---------- */
+  .scope{padding:9px 12px 10px;border-bottom:1px solid var(--line-soft)}
+  .scope .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .scope .label{color:var(--muted);font-size:11.5px;margin-right:2px}
+  .chip{
+    height:24px;padding:0 9px;display:inline-flex;align-items:center;border-radius:6px;
+    border:1px solid var(--line);background:transparent;color:var(--muted);font-size:11.5px;
+  }
+  .chip.on{background:var(--amber-soft);border-color:rgba(245,200,76,.4);color:var(--amber-text);font-weight:600}
+  .scope .sub{margin-top:7px;color:var(--muted-2);font-size:11px}
+
+  /* ---------- list ---------- */
+  .list{flex:1;min-height:0;overflow:auto;padding:10px 12px 12px}
+  .group + .group{margin-top:12px}
+  .group-head{
+    display:flex;align-items:center;gap:6px;padding:2px 2px 7px;
+    font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--muted);
+  }
+  .group-head .count{
+    font-weight:500;color:var(--muted-2);
+    background:var(--panel-2);border:1px solid var(--line-soft);
+    border-radius:20px;padding:0 6px;font-size:10px;
+  }
+  .card{
+    border:1px solid var(--line-soft);border-radius:8px;background:var(--panel-2);
+    padding:9px 10px;display:flex;gap:9px;align-items:flex-start;
+  }
+  .card + .card{margin-top:6px}
+  .card.unread{border-color:#33363b;background:#232427}
+  .card .rail{width:3px;border-radius:2px;align-self:stretch;flex:none}
+  .rail.needs{background:var(--dot-needs)}
+  .rail.done{background:var(--dot-done)}
+  .card .body{min-width:0;flex:1}
+  .card .l1{display:flex;align-items:baseline;gap:6px}
+  .card .who{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .where{font-size:11px;color:var(--muted-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .when{margin-left:auto;font-size:10.5px;color:var(--muted-2);flex:none}
+  .card .l2{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;min-width:0}
+  .card .l2 .k{color:var(--muted-2);flex:none}
+  .card .l2 .q{
+    color:#c9cad0;background:#1a1b1e;border:1px solid var(--line-soft);border-radius:4px;
+    padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .card .unread-dot{width:6px;height:6px;border-radius:50%;background:var(--amber);flex:none;align-self:center}
+  .card .dismiss{color:var(--muted-2);font-size:11px;flex:none;align-self:center;padding:2px 4px}
+
+  /* ---------- empty state (mirrors the reference) ---------- */
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:34px 22px;gap:0}
+  .empty .glyph{font-size:26px;color:var(--amber);margin-bottom:14px}
+  .empty .headline{font-size:12.5px;font-weight:600;color:var(--text)}
+  .empty .headline em{font-style:normal;color:var(--amber)}
+  .empty .meta{margin-top:8px;font-size:11px;color:var(--muted)}
+  .empty .meta b{color:#c9cad0;font-weight:600}
+  .empty .desc{margin-top:9px;font-size:10.5px;color:var(--muted-2);max-width:290px;line-height:1.55}
+
+  /* ---------- frames ---------- */
+  .desktop{width:900px;display:flex;height:620px}
+  .sidebar-host{width:330px;flex:none;display:flex}
+  .main{
+    flex:1;border-left:1px solid var(--line-soft);background:#111113;
+    display:flex;align-items:center;justify-content:center;color:var(--muted-2);font-size:11.5px;
+  }
+  .mobile{width:390px;height:760px;display:flex}
+  .mobile .panel{border-radius:14px}
+
+  .legend{margin-top:12px;font-size:11px;color:var(--muted-2);max-width:330px;line-height:1.6}
+  .legend b{color:var(--muted)}
+</style>
+</head>
+<body>
+
+  <div>
+    <div class="caption">Desktop · 사이드바 대체</div>
+    <div class="desktop">
+      <div class="sidebar-host">
+        <div class="panel" style="flex:1">
+          <div class="head">
+            <span class="brand"><span class="mark">●</span>에이전트</span>
+            <span class="spacer"></span>
+            <span class="ctl">최근 순 ▾</span>
+            <button class="btn-primary">모두 읽음</button>
+            <span class="icon-x">✕</span>
+          </div>
+
+          <div class="scope">
+            <div class="row">
+              <span class="label">상태:</span>
+              <span class="chip on">전체 3</span>
+              <span class="chip">유저 인풋 요구 2</span>
+              <span class="chip">작업 종료 1</span>
+            </div>
+            <div class="sub">워크스페이스 선택 ▾</div>
+          </div>
+
+          <div class="list">
+            <div class="group">
+              <div class="group-head">유저 인풋 요구 <span class="count">2</span></div>
+
+              <div class="card unread">
+                <span class="rail needs"></span>
+                <div class="body">
+                  <div class="l1">
+                    <span class="who">claude</span>
+                    <span class="where">ferryx / main</span>
+                    <span class="when">2분 전</span>
+                  </div>
+                  <div class="l2">
+                    <span class="k">권한 승인</span>
+                    <span class="q">do you want to proceed?</span>
+                  </div>
+                </div>
+                <span class="unread-dot"></span>
+                <span class="dismiss">🗑</span>
+              </div>
+
+              <div class="card unread">
+                <span class="rail needs"></span>
+                <div class="body">
+                  <div class="l1">
+                    <span class="who">builder</span>
+                    <span class="where">ferryx / feat-attention</span>
+                    <span class="when">1분 전</span>
+                  </div>
+                  <div class="l2">
+                    <span class="k">입력 대기</span>
+                    <span class="q">run a dynamic workflow?</span>
+                  </div>
+                </div>
+                <span class="unread-dot"></span>
+                <span class="dismiss">🗑</span>
+              </div>
+            </div>
+
+            <div class="group">
+              <div class="group-head">작업 종료 <span class="count">1</span></div>
+
+              <div class="card">
+                <span class="rail done"></span>
+                <div class="body">
+                  <div class="l1">
+                    <span class="who">worker</span>
+                    <span class="where">site / feat-compare</span>
+                    <span class="when">5분 전</span>
+                  </div>
+                  <div class="l2">
+                    <span class="k">완료</span>
+                    <span>확인 필요</span>
+                  </div>
+                </div>
+                <span class="dismiss">🗑</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="main">메인 영역 (터미널 / 브라우저)</div>
+    </div>
+    <div class="legend">
+      <b>행 = 상태 + 에이전트 · 워크스페이스 / 워크트리 + 시각.</b><br>
+      왼쪽 레일 색이 상태(주황=유저 인풋 요구, 초록=작업 종료), 점은 미확인 표시입니다.
+      두 번째 줄(권한 승인 / 입력 대기 / 완료)은 감지 엔진의 규칙 id를 라벨로 옮긴 자리입니다.
+    </div>
+  </div>
+
+  <div>
+    <div class="caption">Mobile · 같은 패널</div>
+    <div class="mobile">
+      <div class="panel" style="flex:1">
+        <div class="head">
+          <span class="brand"><span class="mark">●</span>에이전트</span>
+          <span class="spacer"></span>
+          <span class="ctl">최근 순 ▾</span>
+          <span class="icon-x">✕</span>
+        </div>
+
+        <div class="scope">
+          <div class="row">
+            <span class="chip on">전체 3</span>
+            <span class="chip">인풋 요구 2</span>
+            <span class="chip">종료 1</span>
+          </div>
+        </div>
+
+        <div class="list">
+          <div class="group">
+            <div class="group-head">유저 인풋 요구 <span class="count">2</span></div>
+
+            <div class="card unread">
+              <span class="rail needs"></span>
+              <div class="body">
+                <div class="l1">
+                  <span class="who">claude</span>
+                  <span class="when">2분</span>
+                </div>
+                <div class="l2"><span class="where">ferryx / main</span></div>
+                <div class="l2">
+                  <span class="k">권한 승인</span>
+                  <span class="q">do you want to proceed?</span>
+                </div>
+              </div>
+              <span class="unread-dot"></span>
+            </div>
+
+            <div class="card unread">
+              <span class="rail needs"></span>
+              <div class="body">
+                <div class="l1">
+                  <span class="who">builder</span>
+                  <span class="when">1분</span>
+                </div>
+                <div class="l2"><span class="where">ferryx / feat-attention</span></div>
+                <div class="l2">
+                  <span class="k">입력 대기</span>
+                  <span class="q">run a dynamic workflow?</span>
+                </div>
+              </div>
+              <span class="unread-dot"></span>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-head">작업 종료 <span class="count">1</span></div>
+            <div class="card">
+              <span class="rail done"></span>
+              <div class="body">
+                <div class="l1">
+                  <span class="who">worker</span>
+                  <span class="when">5분</span>
+                </div>
+                <div class="l2"><span class="where">site / feat-compare</span></div>
+                <div class="l2"><span class="k">완료</span><span>확인 필요</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="legend">
+      좁은 폭에서는 워크스페이스를 둘째 줄로 내리고, 시간은 “2분”으로 줄이고,
+      필터 칩은 짧은 이름(인풋 요구 / 종료)을 씁니다. 구조·색·간격은 데스크탑과 동일합니다.
+    </div>
+  </div>
+
+  <div>
+    <div class="caption">빈 상태 (스크린샷의 빈 화면과 같은 문법)</div>
+    <div class="panel" style="width:330px;height:420px">
+      <div class="head">
+        <span class="brand"><span class="mark">●</span>에이전트</span>
+        <span class="spacer"></span>
+        <span class="ctl">최근 순 ▾</span>
+        <span class="icon-x">✕</span>
+      </div>
+      <div class="empty">
+        <div class="glyph">✧</div>
+        <div class="headline">지금은 <em>아무도 기다리지 않습니다</em>.</div>
+        <div class="meta">감시 중 <b>7</b>개 세션 · 상태 감지 <b>켜짐</b></div>
+        <div class="desc">에이전트가 유저 입력을 요구하거나 작업을 끝내면 여기에 나타납니다. 실행 중인 세션은 조용히 지나갑니다.</div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
