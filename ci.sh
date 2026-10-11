@@ -175,7 +175,11 @@ cargo test --manifest-path src-tauri/Cargo.toml \
   --test worktree_safety \
   -- --test-threads=1 \
   --skip native_terminal::renderer:: \
-  --skip terminal::tests::test_spawn_startup_command_omo
+  --skip terminal::tests::test_spawn_startup_command_omo \
+  `# XenoCI build VMs are headless daemons: +[NSPasteboard pasteboardWithUniqueName]` \
+  `# returns NULL without a window-server session (observed rb_6c8565d4). The test` \
+  `# still runs on the GitHub Actions runner, which has a GUI session.` \
+  --skip ipc::native_terminal::tests::test_native_terminal_drag_selection_written_to_unique_pasteboard
 
 echo '== remote grid frame seam (Rust -> TypeScript) =='
 bun run --cwd ui src/remote/gridFrameSeam.check.ts
