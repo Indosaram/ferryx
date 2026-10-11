@@ -127,7 +127,11 @@ export function SoftwareUpdateCard() {
 
   const handleInstallAndRelaunch = () => {
     if (isAvailable) {
-      void downloadAndInstallUpdate();
+      // The button promises install AND relaunch, so finish the job once the download stages;
+      // otherwise the card sits on "ready to install" waiting for an identical second click.
+      void downloadAndInstallUpdate().then(() => {
+        if (getUpdateStatus().state === "downloaded") return relaunchApp();
+      });
       return;
     }
     if (isDownloaded) void relaunchApp();

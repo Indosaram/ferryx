@@ -104,6 +104,24 @@ describe("Settings > General software update control", () => {
     expect(relaunchApp).not.toHaveBeenCalled();
   });
 
+  it("relaunches right after the download stages when Install and Relaunch is clicked once", async () => {
+    await renderGeneralSection();
+    await screen.findByRole("button", { name: /check for updates/i });
+
+    act(() => emit({ state: "available", version: "2026.08.26.1" }));
+    downloadAndInstallUpdate.mockImplementationOnce(async () => {
+      emit({ state: "downloaded", version: "2026.08.26.1", downloadProgress: 1 });
+    });
+
+    const card = getSoftwareUpdateCard();
+    await act(async () => {
+      fireEvent.click(within(card).getByRole("button", { name: /install and relaunch/i }));
+    });
+
+    expect(downloadAndInstallUpdate).toHaveBeenCalledTimes(1);
+    expect(relaunchApp).toHaveBeenCalledTimes(1);
+  });
+
   it("disables Install and Relaunch during download while keeping two-action layout and reporting progress", async () => {
     await renderGeneralSection();
     await screen.findByRole("button", { name: /check for updates/i });
