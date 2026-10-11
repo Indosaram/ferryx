@@ -89,7 +89,7 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         let pre_published = backend.output_hub().session_published_bytes(id).expect("registered session");
         // Two-phase actual shell writer: fill transport kernel buffer to establish
         // actual Poll::Pending backpressure, then release the continuous 64 MiB overflow.
-        held.send(Message::Binary(b"stty -opost || exit 1; dd if=/dev/zero bs=65536 count=4 2>/dev/null & read _release; printf '\nA10_%s:END\n' RELEASED; dd if=/dev/zero bs=65536 count=1024 2>/dev/null; printf '\nA10_%s:END\n' DRAINED\r".to_vec().into())).await.unwrap();
+        held.send(Message::Binary(b"stty -opost || exit 1; dd if=/dev/zero bs=65536 count=4 2>/dev/null & read _release; printf '\nA10_%s:END\n' RELEASED; dd if=/dev/zero bs=1048576 count=64 2>/dev/null; printf '\nA10_%s:END\n' DRAINED\r".to_vec().into())).await.unwrap();
         let start = tokio::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.pending))
             .await
