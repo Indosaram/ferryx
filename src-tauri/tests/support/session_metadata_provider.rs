@@ -24,7 +24,7 @@ pub async fn publish_discovered(owner: &DaemonServer, root: &Path, session: &Val
     .expect("owner transcript");
     // The user-installed shell keeps a descendant with /omo.js in argv, exactly the
     // production discovery matcher; no mock discovery return value is injected.
-    std::fs::write(&script, "test -n \"$PI_SESSION_FILE\" || exit 1\nprintf '\\nA12_%s\\n' PROVIDER_READY\nread answer\n").expect("provider executable script");
+    std::fs::write(&script, "test -n \"$PI_SESSION_FILE\" || exit 1\nexec 3<\"$PI_SESSION_FILE\"\nprintf '\\nA12_%s\\n' PROVIDER_READY\nread answer\n").expect("provider executable script");
     let (_, mut receiver) = owner
         .terminal_service()
         .output_hub()

@@ -76,7 +76,8 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
     let agent_pid = process_table_entries()
         .and_then(|entries| descendant_agent_pid(&entries, root_pid, normalized));
     match agent_pid {
-        Some(pid) if normalized == "omo" => omo_session_id_from_environment(pid, normalized),
+        Some(pid) if normalized == "omo" => omo_session_id_from_environment(pid, normalized)
+            .or_else(|| lsof_session_id(pid, normalized)),
         Some(pid) if normalized == "antigravity" => antigravity_session_id(Some(pid), root_pid),
         None if normalized == "antigravity" => antigravity_session_id(None, root_pid),
         Some(pid) if normalized == "opencode" => opencode_session_id(Some(pid), root_pid),
@@ -374,7 +375,7 @@ fn process_environment_output(pid: u32) -> Option<String> {
     let ps = resolve_tool("ps")?;
     let stdout = probe_stdout(
         "ps",
-        crate::util::no_window_command(ps).args(["-E", "-p", &pid.to_string()]),
+        crate::util::no_window_command(ps).args(["-Eww", "-p", &pid.to_string()]),
     )?;
     String::from_utf8(stdout).ok()
 }
@@ -1289,6 +1290,14 @@ mod tests {
         ];
 
         assert_eq!(descendant_agent_pid(&entries, 100, "omo"), Some(102));
+        assert_eq!(
+            descendant_agent_pid(
+                &[(100, 1, "/bin/zsh -l".into()), (101, 100, "/bin/zsh /Users/x/home/omo.js".into())],
+                100,
+                "omo"
+            ),
+            Some(101)
+        );
     }
 
     #[test]
