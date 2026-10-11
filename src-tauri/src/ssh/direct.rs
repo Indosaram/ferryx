@@ -6,6 +6,9 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
+#[cfg(windows)]
+const WINDOWS_STDOUT_CHECK_INTERVAL: Duration = Duration::from_millis(25);
+
 fn invalid(message: &str) -> IpcError {
     IpcError::new(IpcErrorCode::InvalidPath, message)
 }
@@ -309,11 +312,19 @@ pub(crate) fn spawn_child(
     plan: &ShellCommandPlan,
     stdin: Stdio,
 ) -> Result<tokio::process::Child, IpcError> {
+    spawn_child_with_stdout(plan, stdin, Stdio::piped())
+}
+
+fn spawn_child_with_stdout(
+    plan: &ShellCommandPlan,
+    stdin: Stdio,
+    stdout: Stdio,
+) -> Result<tokio::process::Child, IpcError> {
     tokio::process::Command::new(&plan.program)
         .args(&plan.args)
         .envs(super::password::environment(&plan.args)?)
         .stdin(stdin)
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -342,7 +353,7 @@ pub(crate) async fn bounded_output(
     plan: &ShellCommandPlan,
     deadline: Duration,
 ) -> Result<Vec<u8>, IpcError> {
-    collect_output(spawn_child(plan, Stdio::null())?, deadline, PROBE_OUTPUT_LIMIT).await
+    collect_finite_output(plan, Stdio::null(), deadline, PROBE_OUTPUT_LIMIT).await
 }
 
 /// For callers that legitimately expect a large body - a transcript file, not a probe.
@@ -355,7 +366,7 @@ pub(crate) async fn bounded_output_with_limit(
     deadline: Duration,
     max_bytes: usize,
 ) -> Result<Vec<u8>, IpcError> {
-    collect_output(spawn_child(plan, Stdio::null())?, deadline, max_bytes).await
+    collect_finite_output(plan, Stdio::null(), deadline, max_bytes).await
 }
 
 pub(crate) async fn bounded_output_with_stdin(
@@ -363,27 +374,91 @@ pub(crate) async fn bounded_output_with_stdin(
     deadline: Duration,
     input: Vec<u8>,
 ) -> Result<Vec<u8>, IpcError> {
-    let mut child = spawn_child(plan, Stdio::piped())?;
+    #[cfg(windows)]
+    { bounded_output_with_stdin_limit(plan, deadline, input, PROBE_OUTPUT_LIMIT).await }
+    #[cfg(not(windows))]
+    {
+        let mut child = spawn_child(plan, Stdio::piped())?;
+        let mut stdin = child.stdin.take().ok_or_else(|| IpcError::internal("Missing SSH stdin"))?;
+        let write = async move {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        };
+        let result = tokio::time::timeout(deadline, async {
+            let output = collect_pipe_output(child, deadline, PROBE_OUTPUT_LIMIT);
+            let write = async { write.await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string())) };
+            tokio::try_join!(write, output).map(|(_, bytes)| bytes)
+        }).await;
+        match result {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(super::runtime::error(IpcErrorCode::IoError,"transport","SSH operation timed out")),
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn bounded_output_with_stdin_limit(
+    plan: &ShellCommandPlan,
+    deadline: Duration,
+    input: Vec<u8>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, IpcError> {
+    let (stdout_file, child_stdout) = crate::ipc::run_blocking(|| {
+        let file = tempfile::tempfile().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+        let child_file = file.try_clone().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+        Ok((std::sync::Arc::new(file), child_file))
+    }).await?;
+    let mut child = spawn_child_with_stdout(plan, Stdio::piped(), Stdio::from(child_stdout))?;
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| IpcError::internal("Missing SSH stdin"))?;
-    // A payload larger than the pipe buffer deadlocks if the write completes before the
-    // output is drained, so the two run concurrently. Write errors surface as the exit status.
-    tokio::spawn(async move {
+    let write = async move {
         use tokio::io::AsyncWriteExt;
-        if stdin.write_all(&input).await.is_ok() {
-            let _ = stdin.shutdown().await;
-        }
-    });
-    collect_output(child, deadline, PROBE_OUTPUT_LIMIT).await
+        stdin.write_all(&input).await?;
+        stdin.shutdown().await
+    };
+    collect_windows_output(child, stdout_file, deadline, max_bytes, Some(Box::pin(write))).await
 }
 
 /// Ceiling for probe-style commands (listings, reports, probes). Not a universal limit: see
 /// [`bounded_output_with_limit`].
 pub(crate) const PROBE_OUTPUT_LIMIT: usize = 16 * 1024;
 
+async fn collect_finite_output(
+    plan: &ShellCommandPlan,
+    stdin: Stdio,
+    deadline: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, IpcError> {
+    #[cfg(windows)]
+    {
+        let (stdout_file, child_stdout) = crate::ipc::run_blocking(|| {
+            let file = tempfile::tempfile().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            let child_stdout = file.try_clone().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            Ok((std::sync::Arc::new(file), child_stdout))
+        }).await?;
+        let child = spawn_child_with_stdout(plan, stdin, Stdio::from(child_stdout))?;
+        collect_windows_output(child, stdout_file, deadline, max_bytes, None).await
+    }
+    #[cfg(not(windows))]
+    {
+        let child = spawn_child(plan, stdin)?;
+        collect_pipe_output(child, deadline, max_bytes).await
+    }
+}
+
 async fn collect_output(
+    child: tokio::process::Child,
+    deadline: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, IpcError> {
+    collect_pipe_output(child, deadline, max_bytes).await
+}
+
+async fn collect_pipe_output(
     mut child: tokio::process::Child,
     deadline: Duration,
     max_bytes: usize,
@@ -463,6 +538,114 @@ async fn collect_output(
         )
     })?;
     Err(error)
+}
+
+#[cfg(windows)]
+async fn collect_windows_output(
+    mut child: tokio::process::Child,
+    stdout_file: std::sync::Arc<std::fs::File>,
+    deadline: Duration,
+    max_bytes: usize,
+    stdin_write: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+    >,
+) -> Result<Vec<u8>, IpcError> {
+    use tokio::io::AsyncReadExt;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| IpcError::internal("Missing SSH stderr"))?;
+    let stderr_read = async move {
+        let mut bytes = Vec::new();
+        stderr.take(max_bytes as u64 + 1).read_to_end(&mut bytes).await?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::other(format!("SSH stderr exceeds {max_bytes} bytes")));
+        }
+        Ok::<_, std::io::Error>(bytes)
+    };
+    tokio::pin!(stderr_read);
+    let mut stdin_write = stdin_write;
+    let mut stderr_bytes = None;
+    let mut stdin_done = stdin_write.is_none();
+    let result = tokio::time::timeout(deadline, async {
+        let mut interval = tokio::time::interval(WINDOWS_STDOUT_CHECK_INTERVAL);
+        let mut status = None;
+        loop {
+            if status.is_some() && stderr_bytes.is_some() && stdin_done { break; }
+            tokio::select! {
+                result = child.wait(), if status.is_none() => {
+                    status = Some(result?);
+                }
+                result = &mut stderr_read, if stderr_bytes.is_none() => {
+                    stderr_bytes = Some(result?);
+                }
+                result = async { stdin_write.as_mut().expect("stdin writer present").as_mut().await }, if !stdin_done => {
+                    stdin_done = true;
+                    result?;
+                }
+                _ = interval.tick() => {
+                    let file = stdout_file.clone();
+                    let len = crate::ipc::run_blocking(move || {
+                        let metadata_file = file.try_clone().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+                        metadata_file.metadata().map(|metadata| metadata.len())
+                            .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
+                    }).await.map_err(|error| std::io::Error::other(error.to_string()))?;
+                    if len > max_bytes as u64 {
+                        return Err(std::io::Error::other(format!("SSH output exceeds {max_bytes} bytes")));
+                    }
+                }
+            }
+        }
+        let status = status.expect("child wait completed");
+        let stderr = stderr_bytes.expect("stderr read completed");
+        use std::io::{Read, Seek, SeekFrom};
+        let file = stdout_file.clone();
+        let stdout = crate::ipc::run_blocking(move || {
+            let mut file = file.try_clone().map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            file.seek(SeekFrom::Start(0)).map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            let mut bytes = Vec::new();
+            file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)
+                .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
+            Ok(bytes)
+        }).await.map_err(|error| std::io::Error::other(error.to_string()))?;
+        if stdout.len() > max_bytes { return Err(std::io::Error::other(format!("SSH output exceeds {max_bytes} bytes"))); }
+        Ok((status, stderr, stdout))
+    }).await;
+    match result {
+        Ok(Ok((status, stderr, stdout))) => {
+            if status.success() { return Ok(stdout); }
+            return Err(ssh_status_error(status, &stderr));
+        }
+        Err(_) => {
+            child.kill().await.map_err(|error| IpcError::new(IpcErrorCode::IoError, format!("Failed to terminate SSH probe: {error}")))?;
+            Err(super::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out"))
+        }
+        Ok(Err(error)) => {
+            child.kill().await.map_err(|kill_error| IpcError::new(IpcErrorCode::IoError, format!("Failed to terminate SSH probe: {kill_error}")))?;
+            Err(IpcError::new(IpcErrorCode::IoError, format!("SSH probe output failed: {error}")))
+        }
+    }
+}
+
+fn ssh_status_error(status: std::process::ExitStatus, stderr: &[u8]) -> IpcError {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let text = std::str::from_utf8(stderr).ok();
+    let diagnostic = if stderr.is_empty() {
+        "Remote stderr was empty; raw bytes are available in details".to_string()
+    } else {
+        match text.map(str::trim) {
+            Some(s) if !s.is_empty() => strip_ansi_colors(s),
+            Some(_) => "Remote stderr was whitespace only; raw bytes are available in details".to_string(),
+            None => "Remote stderr contained non-UTF-8 data; raw bytes are available in details".to_string(),
+        }
+    };
+    IpcError::new(
+        IpcErrorCode::IoError,
+        format!("SSH command failed (exit {}): {diagnostic}", status.code().map_or_else(|| "signal".into(), |code| code.to_string())),
+    ).with_details(serde_json::json!({
+        "stage":"execution", "exitCode":status.code(), "stderr":text,
+        "stderrBase64":STANDARD.encode(stderr), "encoding":if text.is_some(){"utf-8"}else{"unknown"}
+    }))
 }
 
 #[cfg(test)]

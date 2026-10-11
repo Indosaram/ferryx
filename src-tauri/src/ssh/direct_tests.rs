@@ -27,6 +27,103 @@ async fn failed_windows_probe_keeps_raw_stderr_but_displays_plain_text() {
     assert_eq!(details["exitCode"], 7);
 }
 
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_finite_stdout_uses_tempfile_and_honors_output_bound() {
+    let plan = ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "$bytes = [Text.Encoding]::UTF8.GetBytes('finite-output'); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); exit 0".into(),
+        ],
+    };
+    assert_eq!(
+        bounded_output_with_limit(&plan, Duration::from_secs(5), 32)
+            .await
+            .unwrap(),
+        b"finite-output"
+    );
+
+    let plan = ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "$bytes = [Text.Encoding]::UTF8.GetBytes('too-large-output'); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); exit 0".into(),
+        ],
+    };
+    let error = bounded_output_with_limit(&plan, Duration::from_secs(5), 4)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("exceeds 4 bytes"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_finite_stdin_is_written_while_stdout_is_collected() {
+    let plan = ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "$inputBytes = [Console]::OpenStandardInput(); $outputBytes = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 4096; while (($count = $inputBytes.Read($buffer, 0, $buffer.Length)) -gt 0) { $outputBytes.Write($buffer, 0, $count) }; $outputBytes.Flush(); exit 0".into(),
+        ],
+    };
+    assert_eq!(
+        bounded_output_with_stdin(&plan, Duration::from_secs(5), b"stdin-payload\r\n".to_vec())
+            .await
+            .unwrap(),
+        b"stdin-payload\r\n"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_finite_collector_rejects_oversized_stderr() {
+    let plan = ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "[Console]::Error.Write('x' * 20000)".into(),
+        ],
+    };
+    let error = bounded_output(&plan, Duration::from_secs(5)).await.unwrap_err();
+    assert!(error.message.contains("SSH stderr exceeds 16384 bytes"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_finite_deadline_kills_and_reaps_exact_child_pid() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    let (stdout_file, child_stdout) = crate::ipc::run_blocking(|| {
+        let file = tempfile::tempfile().map_err(|error| crate::ipc::error::IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))?;
+        let child_file = file.try_clone().map_err(|error| crate::ipc::error::IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))?;
+        Ok((std::sync::Arc::new(file), child_file))
+    }).await.unwrap();
+    let plan = ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec!["-NoProfile".into(), "-Command".into(), "Start-Sleep -Seconds 30".into()],
+    };
+    let child = spawn_child_with_stdout(&plan, Stdio::null(), Stdio::from(child_stdout)).unwrap();
+    let pid = child.id().expect("spawned child has PID");
+    let process = unsafe { OpenProcess(0x0010_0000, 0, pid) };
+    assert!(!process.is_null());
+
+    let result = collect_windows_output(child, stdout_file, Duration::from_millis(100), 64, None).await;
+    assert!(result.unwrap_err().message.contains("timed out"));
+    assert_eq!(unsafe { WaitForSingleObject(process, 0) }, 0);
+    unsafe { CloseHandle(process); }
+}
+
 fn host() -> SshHost {
     let identity_file = if cfg!(windows) {
         r"C:\keys\key with 'quote'"
