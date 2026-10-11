@@ -19,6 +19,7 @@ import {
   Activity,
   CheckCheck,
   ChevronRight,
+  CircleSlash,
   Folder,
   History,
   Inbox,
@@ -38,6 +39,7 @@ import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
 import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
+import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
@@ -709,6 +711,10 @@ function ProjectHeader({
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const listingFailure = useSyncExternalStore(
+    worktreeListingFailureStore.subscribe,
+    worktreeListingFailureStore.getState,
+  )[project.workspaceId];
   const remote = project.target && project.target.kind !== "local" ? project.target : null;
   const hostLabel = remote?.kind === "pairedDaemon"
     ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
@@ -802,7 +808,20 @@ function ProjectHeader({
           title={remote ? `SSH: ${hostLabel} - ${project.repoRoot}` : project.repoRoot}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
-          <Folder className="size-3.5 shrink-0" />
+          <span className="relative inline-flex shrink-0">
+            <Folder className="size-3.5" />
+            {listingFailure ? (
+              <span
+                data-testid="project-worktrees-unavailable"
+                role="img"
+                aria-label={`Couldn't load worktrees: ${listingFailure}`}
+                title={`Couldn't load worktrees: ${listingFailure}`}
+                className="absolute -bottom-1 -right-1 inline-flex rounded-full bg-worktree-sidebar"
+              >
+                <CircleSlash className="size-2.5 text-destructive" strokeWidth={3} />
+              </span>
+            ) : null}
+          </span>
           <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
           {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{staleSummary ?? pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
           {activity.runningCount > 0 ? (

@@ -8,10 +8,7 @@ import {
   useInactiveProjectWorktrees,
   type InactiveProjectWorktreeServices,
 } from "./inactiveProjectWorktrees";
-
-const toastMocks = vi.hoisted(() => ({ error: vi.fn(), dismiss: vi.fn() }));
-
-vi.mock("sonner", () => ({ toast: toastMocks }));
+import { worktreeListingFailureStore } from "./worktreeListingFailures";
 
 type WorktreeChangedHandler = (payload: WorktreeChangedPayload) => void;
 let worktreeChangedHandlerRef: WorktreeChangedHandler | null = null;
@@ -60,8 +57,7 @@ async function settleServices(services: InactiveProjectWorktreeServices) {
 describe("useInactiveProjectWorktrees", () => {
   beforeEach(() => {
     clearWorkspaceSnapshot();
-    toastMocks.error.mockClear();
-    toastMocks.dismiss.mockClear();
+    worktreeListingFailureStore.reset();
   });
 
   it("pre-seeds inactive project worktrees synchronously from cached workspace snapshots", () => {
@@ -156,7 +152,7 @@ describe("useInactiveProjectWorktrees", () => {
     expect(services.registerProject).toHaveBeenCalled();
     expect(services.listWorktrees).not.toHaveBeenCalledWith("orca-lite");
     expect(result.current["orca-lite"] ?? []).toEqual([]);
-    expect(toastMocks.error).not.toHaveBeenCalled();
+    expect(worktreeListingFailureStore.getState()).toEqual({});
   });
 
   it("keeps other projects usable when one listing fails", async () => {
@@ -175,7 +171,7 @@ describe("useInactiveProjectWorktrees", () => {
     expect(result.current[plainProject.workspaceId]).toHaveLength(1);
   });
 
-  it("reports a failed listing with a retry that lists again", async () => {
+  it("marks a failed listing as unavailable and clears it once a later listing succeeds", async () => {
     let failListing = true;
     const services = createServices({
       listWorktrees: vi.fn(async (workspaceId: string) => {
@@ -185,27 +181,38 @@ describe("useInactiveProjectWorktrees", () => {
         return workspaceId === "orca-lite" ? [mainWorktree] : [];
       }),
     });
-    const { result } = renderHook(() =>
-      useInactiveProjectWorktrees([gitProject, plainProject], "other", [], services),
+    const { result, rerender } = renderHook(
+      ({ activeId }) => useInactiveProjectWorktrees([gitProject, plainProject], activeId, [], services),
+      { initialProps: { activeId: "other" } },
     );
 
     await settleServices(services);
-    expect(toastMocks.error).toHaveBeenCalledTimes(1);
-    const [message, options] = toastMocks.error.mock.calls[0];
-    expect(message).toBe("Couldn't load worktrees for orca-lite");
-    expect(options).toMatchObject({
-      id: "inactive-worktrees:orca-lite",
-      description: "git worktree list failed",
-      action: { label: "Retry" },
-    });
+    expect(worktreeListingFailureStore.getState()).toEqual({ "orca-lite": "git worktree list failed" });
 
     failListing = false;
-    await act(async () => {
-      options.action.onClick();
-    });
+    rerender({ activeId: plainProject.workspaceId });
     await settleServices(services);
     expect(result.current["orca-lite"]).toEqual([mainWorktree]);
-    expect(toastMocks.dismiss).toHaveBeenCalledWith("inactive-worktrees:orca-lite");
+    expect(worktreeListingFailureStore.getState()).toEqual({});
+  });
+
+  it("drops the unavailable mark when the failing project becomes active", async () => {
+    const services = createServices({
+      listWorktrees: vi.fn(async (workspaceId: string) => {
+        if (workspaceId === "orca-lite") throw { code: "GIT_FAILED", message: "connection reset" };
+        return [];
+      }),
+    });
+    const { rerender } = renderHook(
+      ({ activeId }) => useInactiveProjectWorktrees([gitProject, plainProject], activeId, [], services),
+      { initialProps: { activeId: "other" } },
+    );
+    await settleServices(services);
+    expect(worktreeListingFailureStore.getState()).toEqual({ "orca-lite": "connection reset" });
+
+    rerender({ activeId: gitProject.workspaceId });
+    await settleServices(services);
+    expect(worktreeListingFailureStore.getState()).toEqual({});
   });
 
   it("retains outgoing active project rows in cache immediately after active project changes before async listing resolves", async () => {
