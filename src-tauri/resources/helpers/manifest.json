@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "helperVersion": "2026.1009.1",
   "protocolVersion": 1,
-  "sourceFingerprint": "b7ef427003d87f2e0852f7252a89b3fc0bbf9aa0add3c296ed5f97c62c6c529c",
+  "sourceFingerprint": "836b4f88dfa5c7f7719d8aa1a993b14ac65ca67ac789af4ca1fc35a7288ab7ac",
   "requiredCapabilities": [
     "sshHelperV1",
     "dagSubscribeV1",
@@ -12,8 +12,8 @@
     {
       "target": "x86_64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "c9abf267bd97b1e866707c2920c74d9d60711358f4c1849ea4586f42cde8f39f",
-      "byteLength": 1931072,
+      "sha256": "da25c217445a051971cce578670caa2929aa0ea19634591dd0b92f155ffcd2b1",
+      "byteLength": 1931096,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -24,8 +24,8 @@
     {
       "target": "aarch64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "5c1e5276f7d2a245ae15ce93b3bd6d1ae4af370c73591470d9c016ad1e8d7499",
-      "byteLength": 1913184,
+      "sha256": "de65bd084899c78bae31b181a6d1f7dbd94cc80627eaa6b365aa3a116608aa8d",
+      "byteLength": 1317456,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -36,7 +36,7 @@
     {
       "target": "aarch64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "db06a36bf1f16ed5c12540090087bd2436493b9100451b5916e58e24fe0f4410",
+      "sha256": "093d5d64e53574a7e24dcdc2cf9f6c89acca397a3fc059c05e5391f956d56e62",
       "byteLength": 1494112,
       "capabilities": [
         "sshHelperV1",
@@ -48,7 +48,7 @@
     {
       "target": "x86_64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "000c9e0f26297757363f55b98419c067db1c63dc81ac306e4a2035666a16dd91",
+      "sha256": "1843cc2143b9d712d30ed4864e0eddeba5463171da8c812743f64f7a78bd5a63",
       "byteLength": 1562208,
       "capabilities": [
         "sshHelperV1",
@@ -60,7 +60,7 @@
     {
       "target": "x86_64-pc-windows-msvc",
       "filename": "ferryx-remote-helper.exe",
-      "sha256": "ce7d007b4e95c66fd869bf171f73ee676861a920763e689136053b22f42cfff7",
+      "sha256": "42b85b372a29aa9b8a39c15fb786367c95829a038f98ec90479a895c463c2c23",
       "byteLength": 1291264,
       "capabilities": [
         "sshHelperV1",
