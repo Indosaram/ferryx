@@ -3,6 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CliLauncherStatus } from "../lib/types";
+import { GeneralSettings } from "./settings/GeneralSection";
 
 if (typeof window === "undefined") {
   const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", {
@@ -20,8 +21,10 @@ if (typeof window === "undefined") {
   globalThis.MouseEvent = dom.window.MouseEvent;
 }
 
-const getCliLauncherStatus = vi.fn<() => Promise<CliLauncherStatus>>();
-const installCliLauncher = vi.fn<() => Promise<CliLauncherStatus>>();
+const { getCliLauncherStatus, installCliLauncher } = vi.hoisted(() => ({
+  getCliLauncherStatus: vi.fn<() => Promise<CliLauncherStatus>>(),
+  installCliLauncher: vi.fn<() => Promise<CliLauncherStatus>>(),
+}));
 
 vi.mock("../lib/tauri", () => ({
   DEFAULT_TERMINAL_FONT_STACK: 'MesloLGS NF, "Noto Sans KR", monospace',
@@ -71,7 +74,6 @@ const unsupportedLauncher: CliLauncherStatus = {
 };
 
 async function renderGeneralSettings() {
-  const { GeneralSettings } = await import("./SettingsDialog");
   return render(<GeneralSettings />);
 }
 
