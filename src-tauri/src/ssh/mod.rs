@@ -188,6 +188,8 @@ pub enum SshHostSource {
     #[default]
     #[serde(alias = "MANUAL", alias = "Manual")]
     Manual,
+    #[serde(alias = "TAILSCALE", alias = "Tailscale")]
+    Tailscale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

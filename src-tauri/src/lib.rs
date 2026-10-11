@@ -1551,6 +1551,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_project_unregister,
         cmd_path_reveal,
         ipc::ssh::cmd_ssh_list_hosts,
+        ipc::ssh::cmd_ssh_sync_tailscale,
         ipc::ssh::cmd_ssh_read_system_config,
         ipc::ssh::cmd_ssh_import_config,
         ipc::ssh::cmd_ssh_update_host,

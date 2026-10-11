@@ -52,6 +52,9 @@ async function boot() {
     void bootTrace("app.import.start");
     const { bootstrapPairedHostInventory } = await import("./lib/pairedHostInventory");
     void bootstrapPairedHostInventory();
+    const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");
+    const stopDiscovery = startTailscaleDiscovery();
+    import.meta.hot?.dispose(stopDiscovery);
     const { default: App } = await import("./App");
     void bootTrace("app.imported");
     ReactDOM.createRoot(el).render(

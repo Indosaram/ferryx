@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { SSH_CONFIG_PATH_STORAGE_KEY } from "./storageKeys";
 
-export type SshHostSource = "config" | "manual";
+export type SshHostSource = "config" | "manual" | "tailscale";
 export type SshAuthMethod = "agent" | "key" | "password";
 
 export interface SshHost {
@@ -97,6 +97,10 @@ export function subscribeSshHosts(listener: (hosts: SshHost[]) => void): () => v
 
 export function getCachedSshHosts(): SshHost[] | null {
   return cachedHosts;
+}
+
+export function mergeTailscaleSshHosts(hosts: SshHost[]): SshHost[] {
+  return notifyListeners(hosts);
 }
 
 export function resetSshHostsCache(options?: { clearListeners?: boolean }): void {

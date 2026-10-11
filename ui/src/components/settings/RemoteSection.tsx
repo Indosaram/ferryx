@@ -36,6 +36,7 @@ import {
   type SshHost,
   type SshRemoteEnvironment,
 } from "../../lib/sshHosts";
+import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
 import {
   remoteHostKey,
   remoteHostStore,
@@ -300,6 +301,8 @@ export function RemoteSection({
   // Store & Host inventory
   const state = useSyncExternalStore(store.subscribe, store.getState);
   const { hosts: sshHosts } = useSshHosts();
+  const tailscaleState = useTailscaleDiscovery();
+  const tailscaleTargets = useTailscaleTargetsByHost();
   const hostsRef = useRef(sshHosts);
 
   // Paired host states
@@ -703,6 +706,15 @@ export function RemoteSection({
   return (
     <section aria-label="Remote" className="space-y-5">
       <h1 className="text-xl font-semibold">Remote</h1>
+
+      {tailscaleState.status !== "idle" && (tailscaleState.refreshing || tailscaleState.status === "error" || tailscaleState.hosts.length === 0) ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2">
+          <p role={tailscaleState.status === "error" ? "alert" : "status"} className={`text-xs ${tailscaleState.status === "error" ? "text-status-warning" : "text-muted-foreground"}`}>
+            {tailscaleState.refreshing ? "Discovering Tailscale machines…" : tailscaleState.status === "error" ? tailscaleState.discoveryError?.message ?? tailscaleState.lastError : "No Tailscale machines discovered."}
+          </p>
+          {!tailscaleState.refreshing ? <Button type="button" size="sm" variant="outline" onClick={() => void syncTailscaleMachines().catch(() => undefined)}>Retry discovery</Button> : null}
+        </div>
+      ) : null}
 
       {!accountOriginProp ? (
         <div className="rounded-lg border border-border bg-card p-4 space-y-2">
@@ -1133,9 +1145,18 @@ export function RemoteSection({
                   // SSH machine
                   const host = item.host;
                   const testState = sshTestResults[host.id];
+                  const tailscaleTarget = tailscaleTargets.get(host.id);
                   const isPrepared = sshPreparedHosts[host.id];
                   const code = host.disabled
                     ? "DISABLED"
+                    : tailscaleState.refreshing && !tailscaleTarget && host.source === "tailscale"
+                    ? "CONNECTING"
+                    : tailscaleTarget?.diagnostic
+                    ? tailscaleTarget.diagnostic.code
+                    : tailscaleTarget && !tailscaleTarget.reachable
+                    ? "OFFLINE"
+                    : isTailscaleProvisioned(tailscaleTarget)
+                    ? "READY"
                     : testState?.testing
                     ? "TESTING"
                     : testState?.reachable === true
@@ -1148,6 +1169,16 @@ export function RemoteSection({
 
                   const statusText = host.disabled
                     ? "Disabled"
+                    : tailscaleState.refreshing && !tailscaleTarget && host.source === "tailscale"
+                    ? "Connecting…"
+                    : tailscaleTarget?.diagnostic
+                    ? "Needs attention"
+                    : tailscaleTarget && !tailscaleTarget.reachable
+                    ? tailscaleTarget.lastError || "Offline"
+                    : isTailscaleProvisioned(tailscaleTarget)
+                    ? "Ready"
+                    : tailscaleTarget?.reachable
+                    ? "Provisioning required"
                     : testState?.testing
                     ? "Testing…"
                     : testState?.reachable === true
@@ -1178,12 +1209,12 @@ export function RemoteSection({
                     >
                       {/* Common row: Name, Status, Add Project, Details */}
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 min-w-0">
                           <span className="text-sm font-medium text-foreground truncate">
                             {host.label}
                           </span>
                           <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                            SSH
+                            {host.source === "tailscale" ? "Tailscale · SSH" : "SSH"}
                           </Badge>
                           {/* Concise status on row */}
                           <span
@@ -1208,7 +1239,7 @@ export function RemoteSection({
                             type="button"
                             size="sm"
                             aria-label={`Add Project on ${host.label}`}
-                            disabled={busy || Boolean(host.disabled) || (!onOpenProject && !onOpenSshProject)}
+                            disabled={busy || Boolean(host.disabled) || ((host.source === "tailscale" || tailscaleTarget) && !isTailscaleProvisioned(tailscaleTarget)) || (!onOpenProject && !onOpenSshProject)}
                             onClick={() => handleOpenProject({ kind: "ssh", hostId: host.id })}
                           >
                             Add Project
@@ -1231,6 +1262,8 @@ export function RemoteSection({
                         </div>
                       </div>
 
+                      {tailscaleTarget?.diagnostic ? <p role="note" className="break-words text-xs text-muted-foreground">{tailscaleTarget.diagnostic.details?.stage ?? tailscaleTarget.diagnostic.code}: {tailscaleTarget.diagnostic.message}</p> : null}
+                      {(host.source === "tailscale" || tailscaleTarget) && !isTailscaleProvisioned(tailscaleTarget) ? <Button type="button" size="sm" variant="outline" disabled={tailscaleState.refreshing} onClick={() => void syncTailscaleMachines().catch(() => undefined)}>Retry Tailscale</Button> : null}
                       {/* Technical metadata hidden in details, wrapping long items */}
                       {isExpanded ? (
                         <div className="pt-2 border-t border-border/60 text-xs space-y-3">

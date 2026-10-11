@@ -6,6 +6,7 @@ import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStor
 import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
 import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
 import type { AccountMachineView } from "../../remote/accountSession";
+import { resetTailscaleDiscoveryForTests, syncTailscaleMachines } from "../../lib/tailscaleDiscovery";
 
 const grantMocks = vi.hoisted(() => ({
   attachKey: vi.fn(),
@@ -99,6 +100,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetSshHostsCache();
+    resetTailscaleDiscoveryForTests();
     localStorage.clear();
     isTauriMock.mockReturnValue(true);
 
@@ -136,7 +138,43 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    resetTailscaleDiscoveryForTests();
+  });
+
+  it("automatically enables a provisioned Tailnet machine without opening its project", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:ready", source: "tailscale" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "installed", checkedAt: 1 }] };
+      if (command === "cmd_ssh_list_hosts") return [tailnet];
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory([]);
+    const openProject = vi.fn();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={openProject} />); });
+    expect(screen.getByTestId("machine-status")).toHaveAttribute("data-code", "READY");
+    expect(screen.getByRole("button", { name: `Add Project on ${tailnet.label}` })).toBeEnabled();
+    expect(openProject).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: `Add Project on ${tailnet.label}` }));
+    expect(openProject).toHaveBeenCalledWith(tailnet.id);
+  });
+
+  it("keeps a reachable Tailnet machine unavailable when helper provisioning fails", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:failed", source: "tailscale" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "unknown", checkedAt: 1, diagnostic: { code: "CLI_EXECUTABLE_NOT_FOUND", message: "Fixture helper unavailable", details: { stage: "provisioning" } } }] };
+      if (command === "cmd_ssh_list_hosts") return [tailnet];
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory([]);
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+    expect(screen.getByTestId("machine-status")).toHaveAttribute("data-code", "CLI_EXECUTABLE_NOT_FOUND");
+    expect(screen.getByRole("button", { name: `Add Project on ${tailnet.label}` })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry Tailscale" })).toBeEnabled();
+  });
 
   it("authenticates SSH with a separate password before probing and never saves it in the host", async () => {
     const { store, inventory } = createTestInventory();

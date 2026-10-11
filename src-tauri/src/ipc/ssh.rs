@@ -18,6 +18,7 @@ static SSH_STORE_LOCK: Mutex<()> = Mutex::new(());
 // other process. This lock spans the GUI/daemon transaction, not network I/O on
 // the credential store's synchronous mutex.
 static SSH_CREDENTIAL_TRANSACTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SSH_TAILSCALE_SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Acquires the store lock, recovering from a poisoned mutex.
 ///
@@ -44,6 +45,14 @@ pub struct SshTargetSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SshTailscaleSyncResult {
+    pub hosts: Vec<SshHost>,
+    pub targets: Vec<SshTargetSummary>,
+    pub discovery_error: Option<IpcError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemSshConfigResult {
     pub path: String,
     pub exists: bool,
@@ -58,6 +67,89 @@ pub struct SshHostStore {
     pub hosts: Vec<SshHost>,
     #[serde(default)]
     pub tombstones: Vec<String>,
+}
+
+#[cfg(test)]
+mod tailscale_sync_tests {
+    use super::*;
+    use crate::remote::discovery::tailscale::TailscaleSshPeer;
+
+    fn peer(id: &str, online: bool) -> TailscaleSshPeer {
+        TailscaleSshPeer { node_id: id.into(), hostname: id.into(), dns_name: Some(format!("{id}.tailnet.ts.net")), ipv4: format!("100.64.0.{}", id.len()), online, os: Some("linux".into()) }
+    }
+
+    fn host(id: &str, name: &str, source: crate::ssh::SshHostSource) -> SshHost {
+        SshHost { id: id.into(), label: name.into(), hostname: name.into(), username: Some("alice".into()), port: Some(2222), identity_file: Some("~/.ssh/id_test".into()), jump_host: Some("bastion".into()), source, auth_method: crate::ssh::SshAuthMethod::Key, disabled: None }
+    }
+
+    #[test]
+    fn merge_preserves_saved_identity_credentials_and_stable_node_updates() {
+        let p = peer("node-a", true);
+        let alias = host("cfg-box", &p.hostname, crate::ssh::SshHostSource::Config);
+        let mut store = SshHostStore { hosts: vec![alias.clone()], tombstones: Vec::new() };
+        merge_tailscale_peers(&mut store, &[p.clone()], &[alias.clone()]);
+        assert_eq!(store.hosts, vec![alias.clone()]);
+        let mut deleted = SshHostStore { hosts: Vec::new(), tombstones: vec![format!("tailscale-host:{}", p.hostname)] };
+        merge_tailscale_peers(&mut deleted, &[p.clone()], &[alias.clone()]);
+        assert!(deleted.hosts.is_empty());
+        let mut imported = SshHostStore::default();
+        merge_tailscale_peers(&mut imported, &[p.clone()], &[alias]);
+        assert_eq!(imported.hosts[0].id, "tailscale:node-a");
+        assert_eq!(imported.hosts[0].username.as_deref(), Some("alice"));
+        imported.hosts[0].label = "Custom label".into();
+        let changed = TailscaleSshPeer { ipv4: "100.64.9.9".into(), hostname: "new-name".into(), dns_name: None, ..p.clone() };
+        merge_tailscale_peers(&mut imported, &[changed], &[]);
+        assert_eq!(imported.hosts.len(), 1);
+        assert_eq!(imported.hosts[0].hostname, "100.64.9.9");
+        assert_eq!(imported.hosts[0].label, "Custom label");
+        imported.hosts.clear();
+        imported.tombstones.push("tailscale:node-a".into());
+        merge_tailscale_peers(&mut imported, &[p], &[]);
+        assert!(imported.hosts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn production_orchestration_skips_ineligible_hosts_and_processes_entire_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.json");
+        let ids = ["disabled-a", "disabled-b", "disabled-c", "disabled-d", "online-a", "online-b", "offline", "mobile"];
+        let mut peers: Vec<_> = ids.iter().enumerate().map(|(index, id)| TailscaleSshPeer { ipv4: format!("100.64.0.{}", index + 1), ..peer(id, *id != "offline") }).collect();
+        peers.last_mut().unwrap().os = Some("android".into());
+        let mut store = SshHostStore::default();
+        merge_tailscale_peers(&mut store, &peers, &[]);
+        for h in &mut store.hosts { if h.id.contains("disabled") { h.disabled = Some(true); } }
+        save_store(&path, &store).unwrap();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let result = sync_tailscale_peers_with(path, peers, Vec::new(), move |host, _| {
+            let calls = recorded.clone();
+            async move {
+                calls.lock().unwrap().push(host.id.clone());
+                Ok(SshTargetSummary { host, reachable: true, last_error: None, environment: None, helper: Some(crate::ssh::helper_setup::HelperProbeState::Installed), diagnostic: None, checked_at: 1 })
+            }
+        }).await.unwrap();
+        let mut called = calls.lock().unwrap().clone(); called.sort();
+        assert_eq!(called, vec!["tailscale:online-a", "tailscale:online-b"]);
+        assert_eq!(result.hosts.len(), 8);
+        assert_eq!(result.targets.len(), 4);
+        assert!(result.targets.iter().filter(|t| !t.reachable).all(|t| t.diagnostic.is_some()));
+    }
+
+    #[tokio::test]
+    async fn target_reports_authentication_and_provisioning_failures() {
+        let env = crate::ssh::runtime::RemoteEnvironment { platform: crate::ssh::runtime::RemotePlatform::Posix, executor: crate::ssh::runtime::RemoteExecutor::Sh, version: "Linux".into(), home: "/home/test".into(), temp: "/tmp".into(), git: true };
+        let h = host("test", "host", crate::ssh::SshHostSource::Tailscale);
+        let failed = sync_tailscale_target_with(h.clone(), || async { Err(IpcError::new(IpcErrorCode::IoError, "authentication failed")) }, |_| async { panic!("must not provision after failed detection") }).await.unwrap();
+        assert!(!failed.reachable);
+        assert!(failed.diagnostic.is_some());
+        let failed = sync_tailscale_target_with(h.clone(), || async { Ok(env.clone()) }, |_| async { Err(IpcError::new(IpcErrorCode::IoError, "helper startup failed")) }).await.unwrap();
+        assert!(failed.reachable);
+        assert_eq!(failed.helper, Some(crate::ssh::helper_setup::HelperProbeState::Unknown));
+        assert!(failed.diagnostic.is_some());
+        let ready = sync_tailscale_target_with(h, || async { Ok(env.clone()) }, |_| async { Ok(()) }).await.unwrap();
+        assert_eq!(ready.helper, Some(crate::ssh::helper_setup::HelperProbeState::Installed));
+        assert!(ready.diagnostic.is_none());
+    }
 }
 
 pub fn deserialize_resilient_hosts<'de, D>(deserializer: D) -> Result<Vec<SshHost>, D::Error>
@@ -337,6 +429,15 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
         let mut store = load_store(&path)?;
         if let Some(position) = store.hosts.iter().position(|host| host.id == id) {
             let removed = store.hosts.remove(position);
+            let discovery_key = format!("tailscale-host:{}", removed.hostname.to_ascii_lowercase());
+            if !store.tombstones.contains(&discovery_key) {
+                store.tombstones.push(discovery_key);
+            }
+            if removed.id.starts_with("tailscale:") {
+                if !store.tombstones.contains(&removed.id) {
+                    store.tombstones.push(removed.id.clone());
+                }
+            }
             if removed.source == crate::ssh::SshHostSource::Config {
                 let key = removed.key();
                 if !store.tombstones.contains(&key) {
@@ -669,6 +770,167 @@ pub async fn ensure_qualified_ssh_helper(
     crate::ssh::helper_setup::install(host, environment, &location, &binary_path).await?;
     crate::ssh::helper_setup::ensure_started(host, environment, &location).await?;
     Ok(location)
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<SshTailscaleSyncResult, IpcError> {
+    let _sync = SSH_TAILSCALE_SYNC.lock().await;
+    let path = get_ssh_store_path(&app)?;
+    match crate::remote::discovery::tailscale::TailscaleDiscoveryProvider::new().discover_ssh_peers_async().await {
+        Err(crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout) => {
+            let hosts = run_blocking(move || Ok(load_store(&path)?.hosts)).await?;
+            return Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(IpcErrorCode::Timeout, "Tailscale status discovery timed out").with_details(serde_json::json!({"stage":"discovery"}))) });
+        }
+        Err(error) => {
+            let hosts = run_blocking(move || Ok(load_store(&path)?.hosts)).await?;
+            let (code, stage) = match &error { crate::remote::discovery::tailscale::TailscaleDiscoveryError::Command(_) => (IpcErrorCode::CliExecutableNotFound, "command"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Parse(_) => (IpcErrorCode::InvalidRequest, "parse"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout => unreachable!() };
+            return Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(code, error.to_string()).with_details(serde_json::json!({"stage":stage}))) });
+        }
+        Ok(peers) => sync_tailscale_peers(path, peers).await,
+    }
+}
+
+async fn sync_tailscale_peers(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>) -> Result<SshTailscaleSyncResult, IpcError> {
+    let config_hosts = run_blocking(|| Ok(system_ssh_config_for_sync())).await?;
+    sync_tailscale_peers_with(path, peers, config_hosts, sync_tailscale_target).await
+}
+
+async fn sync_tailscale_peers_with<F, Fut>(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>, config_hosts: Vec<SshHost>, provision: F) -> Result<SshTailscaleSyncResult, IpcError>
+where
+    F: Fn(SshHost, Option<String>) -> Fut + Clone,
+    Fut: std::future::Future<Output = Result<SshTargetSummary, IpcError>> + Send + 'static,
+{
+    let provisioning_peers: Vec<_> = peers.iter().filter(|peer| peer.online && !matches!(peer.os.as_deref().map(str::to_ascii_lowercase).as_deref(), Some("android" | "ios" | "ipados"))).cloned().collect();
+    let merge_path = path.clone();
+    let merge_peers = peers.clone();
+    let hosts = run_blocking(move || {
+        let _guard = lock_ssh_store();
+        let mut store = load_store(&merge_path)?;
+        merge_tailscale_peers(&mut store, &merge_peers, &config_hosts);
+        save_store(&merge_path, &store)?;
+        Ok(store.hosts)
+    }).await?;
+    use tokio::task::JoinSet;
+    let mut targets = peers.iter().filter(|peer| !peer.online || matches!(peer.os.as_deref().map(str::to_ascii_lowercase).as_deref(), Some("android" | "ios" | "ipados"))).filter_map(|peer| {
+        let host = hosts.iter().find(|host| host.id == format!("tailscale:{}", peer.node_id) || tailnet_host_matches(host, peer))?.clone();
+        let diagnostic = if !peer.online { IpcError::new(IpcErrorCode::HostUnavailable, "Tailscale peer is offline").with_details(serde_json::json!({"stage":"discovery","backendState":"offline"})) }
+            else { IpcError::new(IpcErrorCode::Unsupported, "Unsupported Tailscale peer operating system").with_details(serde_json::json!({"stage":"platform","os":peer.os})) };
+        let summary = SshTargetSummary { host, reachable: false, last_error: Some(diagnostic.message.clone()), environment: None, helper: Some(crate::ssh::helper_setup::HelperProbeState::Unknown), diagnostic: Some(diagnostic), checked_at: now_millis() };
+        (summary.host.disabled != Some(true)).then_some(summary)
+    }).collect::<Vec<_>>();
+    let mut set = JoinSet::new();
+    let mut pending = provisioning_peers.into_iter().filter_map(|peer| {
+        let host = hosts.iter().find(|host| host.id == format!("tailscale:{}", peer.node_id) || tailnet_host_matches(host, &peer))?;
+        (host.disabled != Some(true)).then_some((host.clone(), peer.os))
+    });
+    for _ in 0..4 {
+        if let Some((host, os)) = pending.next() {
+            set.spawn(provision(host, os));
+        }
+    }
+    while let Some(result) = set.join_next().await {
+        match result { Ok(Ok(target)) => targets.push(target), Ok(Err(error)) => return Err(error), Err(error) => return Err(IpcError::new(IpcErrorCode::InternalError, format!("Tailscale target task failed: {error}"))) }
+        if let Some((host, os)) = pending.next() {
+            set.spawn(provision(host, os));
+        }
+    }
+    let (hosts, targets) = run_blocking(move || {
+        let _guard = lock_ssh_store();
+        let current = load_store(&path)?;
+        let valid: Vec<_> = targets.into_iter().filter(|target| current.hosts.iter().any(|host| host.id == target.host.id && host == &target.host)).collect();
+        Ok((current.hosts, valid))
+    }).await?;
+    Ok(SshTailscaleSyncResult { hosts, targets, discovery_error: None })
+}
+
+fn system_ssh_config_for_sync() -> Vec<SshHost> {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return Vec::new(); };
+    let path = PathBuf::from(home).join(".ssh/config");
+    std::fs::read_to_string(path)
+        .map(|text| crate::ssh::config::import_aliases(&parse_ssh_config(&text), &[]))
+        .unwrap_or_default()
+}
+
+async fn sync_tailscale_target(host: SshHost, os: Option<String>) -> Result<SshTargetSummary, IpcError> {
+    let platform = match os.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("windows") => Some(crate::ssh::runtime::RemotePlatform::Windows),
+        Some("linux" | "darwin" | "macos" | "freebsd" | "openbsd") => Some(crate::ssh::runtime::RemotePlatform::Posix),
+        Some(_) => return Ok(SshTargetSummary { host, reachable: false, last_error: Some("Unsupported Tailscale peer operating system".into()), environment: None, helper: Some(crate::ssh::helper_setup::HelperProbeState::Unknown), diagnostic: Some(IpcError::new(IpcErrorCode::Unsupported, "Unsupported Tailscale peer operating system").with_details(serde_json::json!({"stage":"platform"}))), checked_at: now_millis() }),
+        None => None,
+    };
+    let probe_host = host.clone();
+    let provision_host = host.clone();
+    sync_tailscale_target_with(host,
+        move || async move { crate::ssh::runtime::detect_for(&probe_host, platform).await },
+        move |environment| async move {
+            let location = ensure_qualified_ssh_helper(&provision_host, &environment).await?;
+            crate::ssh::helper_setup::ensure_started(&provision_host, &environment, &location).await
+        }).await
+}
+
+async fn sync_tailscale_target_with<D, DFut, P, PFut>(
+    host: SshHost,
+    detect: D,
+    provision: P,
+) -> Result<SshTargetSummary, IpcError>
+where
+    D: FnOnce() -> DFut,
+    DFut: std::future::Future<Output = Result<crate::ssh::runtime::RemoteEnvironment, IpcError>>,
+    P: FnOnce(crate::ssh::runtime::RemoteEnvironment) -> PFut,
+    PFut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let environment = match detect().await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(SshTargetSummary { host, reachable: false, last_error: Some(error.message.clone()), environment: None, helper: None, diagnostic: Some(error), checked_at: now_millis() }),
+    };
+    let helper = match provision(environment.clone()).await {
+        Ok(()) => Some(crate::ssh::helper_setup::HelperProbeState::Installed),
+        Err(error) => {
+            return Ok(SshTargetSummary { host, reachable: true, last_error: Some(error.message.clone()), environment: Some(environment), helper: Some(crate::ssh::helper_setup::HelperProbeState::Unknown), diagnostic: Some(error), checked_at: now_millis() });
+        }
+    };
+    Ok(SshTargetSummary { host, reachable: true, last_error: None, environment: Some(environment), helper, diagnostic: None, checked_at: now_millis() })
+}
+
+fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::discovery::tailscale::TailscaleSshPeer], config_hosts: &[SshHost]) {
+    for peer in peers {
+        let id = format!("tailscale:{}", peer.node_id);
+        if store.tombstones.contains(&id) { continue; }
+        if [Some(peer.ipv4.as_str()), Some(peer.hostname.as_str()), peer.dns_name.as_deref()]
+            .into_iter().flatten().any(|name| store.tombstones.contains(&format!("tailscale-host:{}", name.to_ascii_lowercase()))) { continue; }
+        let saved = store.hosts.iter().find(|host| host.id == id)
+            .or_else(|| store.hosts.iter().find(|host| tailnet_host_matches(host, peer)));
+        let matched = saved.or_else(|| config_hosts.iter().find(|host| tailnet_host_matches(host, peer)));
+        let host = if let Some(existing) = matched {
+            let mut host = existing.clone();
+            if store.tombstones.contains(&host.key()) || store.tombstones.contains(&id) { continue; }
+            if saved.is_none() {
+                host.id = id.clone();
+                host.source = crate::ssh::SshHostSource::Tailscale;
+            }
+            if host.source == crate::ssh::SshHostSource::Tailscale {
+                host.hostname = peer.ipv4.clone();
+            }
+            host
+        } else {
+            SshHost { id: id.clone(), label: peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone()), hostname: peer.ipv4.clone(), username: None, port: None, identity_file: None, jump_host: None, source: crate::ssh::SshHostSource::Tailscale, auth_method: crate::ssh::SshAuthMethod::Agent, disabled: None }
+        };
+        if let Some(index) = store.hosts.iter().position(|current| current.id == host.id) {
+            store.hosts[index] = host;
+        } else if !store.hosts.iter().any(|current| current.id == id) {
+            store.hosts.push(host);
+        }
+    }
+}
+
+fn tailnet_host_matches(host: &SshHost, peer: &crate::remote::discovery::tailscale::TailscaleSshPeer) -> bool {
+    let direct = [Some(peer.ipv4.as_str()), Some(peer.hostname.as_str()), peer.dns_name.as_deref()];
+    if direct.iter().flatten().any(|name| host.hostname.eq_ignore_ascii_case(name)) { return true; }
+    let Some(dns) = peer.dns_name.as_deref() else { return false; };
+    let short_dns = dns.split('.').next().unwrap_or(dns);
+    !host.hostname.parse::<std::net::Ipv4Addr>().is_ok()
+        && !host.hostname.contains('.')
+        && host.hostname.eq_ignore_ascii_case(short_dns)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
