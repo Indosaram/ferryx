@@ -62,7 +62,7 @@ fi
 # docs/XENOCAST_MACOS_BUILDS.md). This wrapper redirects zig's global cache
 # there; ferryx's build script otherwise uses a per-build OUT_DIR cache that a
 # fresh VM always starts empty.
-if [ -d "$HOME/ferryx-zig-global-cache/p" ] && [ ! -e "$HOME/.local/bin/zig" ]; then
+if [ -d "$HOME/ferryx-zig-global-cache/p" ]; then
   cat > "$HOME/.local/bin/zig" <<'WRAP'
 #!/bin/bash
 REAL_ZIG="$HOME/.local/zig/zig"
