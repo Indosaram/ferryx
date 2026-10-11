@@ -151,6 +151,10 @@ ifconfig -a | grep "$OVERLAY_ADDRESS" && echo "PROVISION overlay_alias=present" 
 # the renderer suite builds a real WGPU device; the omo startup test needs the
 # omo agent CLI on PATH.
 echo '== cargo test (unit and integration suites) =='
+# The pasteboard skip: XenoCI build VMs are headless daemons and
+# +[NSPasteboard pasteboardWithUniqueName] returns NULL without a window-server
+# session, panicking objc2_app_kit (observed in rb_6c8565d4: 3173 passed, 1
+# failed). The test still runs on the GitHub Actions runner (GUI session).
 cargo test --manifest-path src-tauri/Cargo.toml \
   --target aarch64-apple-darwin \
   --no-fail-fast \
@@ -176,9 +180,6 @@ cargo test --manifest-path src-tauri/Cargo.toml \
   -- --test-threads=1 \
   --skip native_terminal::renderer:: \
   --skip terminal::tests::test_spawn_startup_command_omo \
-  `# XenoCI build VMs are headless daemons: +[NSPasteboard pasteboardWithUniqueName]` \
-  `# returns NULL without a window-server session (observed rb_6c8565d4). The test` \
-  `# still runs on the GitHub Actions runner, which has a GUI session.` \
   --skip ipc::native_terminal::tests::test_native_terminal_drag_selection_written_to_unique_pasteboard
 
 echo '== remote grid frame seam (Rust -> TypeScript) =='
