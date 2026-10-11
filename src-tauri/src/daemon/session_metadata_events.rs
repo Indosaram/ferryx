@@ -96,17 +96,19 @@ impl MetadataOwner {
     }
 
     fn refresh(&self, target: &RemoteTerminalTarget, title: Option<String>) -> Result<(), String> {
-        // Holding metadata through commit fences removal/replacement. The local PID
-        // is acquired only after exact durable/in-memory ownership agrees.
         let _workspace_gate = self.workspaces.mutation_gate.lock();
-        let mut metadata = self.metadata.write();
-        let meta = metadata
-            .get_mut(&target.session_id)
-            .ok_or("SESSION_NOT_FOUND")?;
-        let session = meta.machine_session.as_mut().ok_or("SESSION_NOT_FOUND")?;
-        if session.target != *target {
-            return Err("STALE_EPOCH".into());
-        }
+        let previous = {
+            let metadata = self.metadata.read();
+            let meta = metadata
+                .get(&target.session_id)
+                .ok_or("SESSION_NOT_FOUND")?;
+            let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            session.clone()
+        };
+        let mut updated = previous.clone();
         if !self
             .workspaces
             .catalog
@@ -114,7 +116,7 @@ impl MetadataOwner {
             .as_ref()
             .map_err(Clone::clone)?
             .workspaces
-            .contains_key(&session.workspace_id)
+            .contains_key(&updated.workspace_id)
         {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
@@ -124,27 +126,44 @@ impl MetadataOwner {
             .ok_or("SESSION_EXPIRED")?;
         let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
         let cwd = crate::ipc::terminal::process_cwd(pid).ok_or("CWD_UNAVAILABLE")?;
-        let mut updated = session.clone();
         updated.cwd = cwd.to_str().ok_or("INVALID_PATH")?.to_owned();
         if let Some(title) = title {
             updated.title = Some(title);
         }
-        if updated == *session {
+        if updated == previous {
             return Ok(());
         }
-        if let Some((committed, revision)) =
-            self.workspaces.journal.update_session_metadata(&updated)?
-        {
-            meta.cwd = cwd;
-            *session = committed.clone();
-            self.workspaces.machine_events.publish_revision(
-                revision.0,
-                "sessionMetadataChanged",
-                Some(&committed.workspace_id),
-                Some(&target.session_id),
-                serde_json::json!(committed),
-            );
+        let Some((committed, revision)) = self
+            .workspaces
+            .journal
+            .update_session_metadata(&updated)?
+        else {
+            return Ok(());
+        };
+
+        let mut metadata = self.metadata.write();
+        let meta = metadata
+            .get_mut(&target.session_id)
+            .ok_or("SESSION_NOT_FOUND")?;
+        let session = meta.machine_session.as_mut().ok_or("SESSION_NOT_FOUND")?;
+        if session.target != *target {
+            return Err("STALE_EPOCH".into());
         }
+        if meta.workspace_id != committed.workspace_id
+            || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+                != committed.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+        {
+            return Err("SESSION_OWNERSHIP_CHANGED".into());
+        }
+        meta.cwd = cwd;
+        *session = committed.clone();
+        self.workspaces.machine_events.publish_revision(
+            revision.0,
+            "sessionMetadataChanged",
+            Some(&committed.workspace_id),
+            Some(&target.session_id),
+            serde_json::json!(committed),
+        );
         Ok(())
     }
 }

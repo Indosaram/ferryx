@@ -6,8 +6,13 @@ use std::{
 };
 use tokio::sync::watch;
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Progress {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Progress {
+    pub(crate) started: u64,
+    pub(crate) completed: u64,
+    pub(crate) succeeded: u64,
+    pub(crate) failed: u64,
+    pub(crate) last_error: Option<String>,
     pub pending: bool,
     pub dropped: bool,
     pub queue_full: bool,
@@ -15,9 +20,9 @@ pub(super) struct Progress {
 static OBSERVERS: LazyLock<Mutex<HashMap<String, watch::Sender<Progress>>>> =
     LazyLock::new(Mutex::default);
 
-pub(super) struct Observation(pub watch::Receiver<Progress>, String);
+pub(crate) struct Observation(pub watch::Receiver<Progress>, String);
 impl Observation {
-    pub fn register(id: &str) -> Self {
+    pub(crate) fn register(id: &str) -> Self {
         let (sender, receiver) = watch::channel(Progress::default());
         OBSERVERS.lock().unwrap().insert(id.into(), sender);
         Self(receiver, id.into())
@@ -33,7 +38,11 @@ pub(super) fn queue_full(id: &str) {
         sender.send_modify(|state| state.queue_full = true);
     }
 }
-pub(super) async fn observe<F: std::future::Future>(id: &str, future: F) -> F::Output {
+pub(super) async fn observe<F, T, E>(id: &str, future: F) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
     struct Pending(Option<Arc<watch::Sender<Progress>>>);
     impl Drop for Pending {
         fn drop(&mut self) {
@@ -44,12 +53,35 @@ pub(super) async fn observe<F: std::future::Future>(id: &str, future: F) -> F::O
     }
     let sender = OBSERVERS.lock().unwrap().get(id).cloned().map(Arc::new);
     let pending = Pending(sender);
+    let mut started = false;
     tokio::pin!(future);
     std::future::poll_fn(|cx| {
-        let result = future.as_mut().poll(cx);
-        if matches!(result, Poll::Pending) {
+        if !started {
             if let Some(sender) = &pending.0 {
-                sender.send_modify(|state| state.pending = true);
+                sender.send_modify(|state| state.started += 1);
+            }
+            started = true;
+        }
+        let result = future.as_mut().poll(cx);
+        if let Some(sender) = &pending.0 {
+            match &result {
+                Poll::Pending => {
+                    sender.send_modify(|state| state.pending = true);
+                }
+                Poll::Ready(Ok(_)) => {
+                    sender.send_modify(|state| {
+                        state.completed += 1;
+                        state.succeeded += 1;
+                    });
+                }
+                Poll::Ready(Err(err)) => {
+                    let err_str = err.to_string();
+                    sender.send_modify(|state| {
+                        state.completed += 1;
+                        state.failed += 1;
+                        state.last_error = Some(err_str);
+                    });
+                }
             }
         }
         result

@@ -108,14 +108,18 @@ impl DaemonSessionService {
             ProviderSessionClaimKey::from_startup(Some(&startup)).ok_or("AGENT_RESUME_INVALID")?;
         // Revalidate after discovery; use the spawn/catalog lock order.
         let _workspace_gate = self.workspace_service.mutation_gate.lock();
-        let mut metadata = self.session_metadata.write();
-        let meta = metadata
-            .get_mut(&target.session_id)
-            .ok_or("SESSION_EXPIRED")?;
-        let session = meta.machine_session.as_mut().ok_or("SESSION_NOT_FOUND")?;
-        if session.target != *target {
-            return Err("STALE_EPOCH".into());
-        }
+        let previous = {
+            let metadata = self.session_metadata.read();
+            let meta = metadata
+                .get(&target.session_id)
+                .ok_or("SESSION_EXPIRED")?;
+            let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            session.clone()
+        };
+        let mut updated = previous.clone();
         if !self
             .workspace_service
             .catalog
@@ -123,9 +127,48 @@ impl DaemonSessionService {
             .as_ref()
             .map_err(Clone::clone)?
             .workspaces
-            .contains_key(&session.workspace_id)
+            .contains_key(&updated.workspace_id)
         {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
+        }
+        updated.agent_type = Some(agent.into());
+        updated.provider_session = Some(provider.clone());
+        updated.cwd = cwd.to_str().ok_or("INVALID_PATH")?.into();
+        if updated == previous {
+            {
+                let claims = self.provider_session_claims.lock();
+                if claims
+                    .get(&claim)
+                    .is_some_and(|owner| owner != &target.session_id)
+                {
+                    return Err("AGENT_SESSION_CONFLICT".into());
+                }
+            }
+            if !matches!(
+                pty.state(),
+                crate::terminal::PtySessionState::Running
+                    | crate::terminal::PtySessionState::Starting
+            ) {
+                return Err("SESSION_EXPIRED".into());
+            }
+            let metadata = self.session_metadata.read();
+            let meta = metadata
+                .get(&target.session_id)
+                .ok_or("SESSION_EXPIRED")?;
+            let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            return Ok(session.clone());
+        }
+        {
+            let claims = self.provider_session_claims.lock();
+            if claims
+                .get(&claim)
+                .is_some_and(|owner| owner != &target.session_id)
+            {
+                return Err("AGENT_SESSION_CONFLICT".into());
+            }
         }
         if !matches!(
             pty.state(),
@@ -133,37 +176,81 @@ impl DaemonSessionService {
         ) {
             return Err("SESSION_EXPIRED".into());
         }
-        let mut claims = self.provider_session_claims.lock();
-        if claims
-            .get(&claim)
-            .is_some_and(|owner| owner != &target.session_id)
-        {
-            return Err("AGENT_SESSION_CONFLICT".into());
-        }
-        let mut updated = session.clone();
-        updated.agent_type = Some(agent.into());
-        updated.provider_session = Some(provider.clone());
-        updated.cwd = cwd.to_str().ok_or("INVALID_PATH")?.into();
-        if let Some((committed, revision)) = self
+        let Some((committed, revision)) = self
             .workspace_service
             .journal
             .update_session_metadata(&updated)?
+        else {
+            let metadata = self.session_metadata.read();
+            let meta = metadata
+                .get(&target.session_id)
+                .ok_or("SESSION_EXPIRED")?;
+            let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            return Ok(session.clone());
+        };
+        let metadata = self.session_metadata.read();
+        let meta = metadata
+            .get(&target.session_id)
+            .ok_or("SESSION_EXPIRED")?;
+        let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
+        if session.target != *target {
+            return Err("STALE_EPOCH".into());
+        }
+        if meta.workspace_id != committed.workspace_id
+            || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+                != committed.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
         {
+            return Err("SESSION_OWNERSHIP_CHANGED".into());
+        }
+        drop(metadata);
+        if !matches!(
+            pty.state(),
+            crate::terminal::PtySessionState::Starting
+                | crate::terminal::PtySessionState::Running
+        ) {
+            return Err("SESSION_EXPIRED".into());
+        }
+        {
+            let mut metadata = self.session_metadata.write();
+            let meta = metadata
+                .get_mut(&target.session_id)
+                .ok_or("SESSION_EXPIRED")?;
+            let session = meta.machine_session.as_mut().ok_or("SESSION_NOT_FOUND")?;
+            if session.target != *target {
+                return Err("STALE_EPOCH".into());
+            }
+            if !matches!(
+                pty.state(),
+                crate::terminal::PtySessionState::Running
+                    | crate::terminal::PtySessionState::Starting
+            ) {
+                return Err("SESSION_EXPIRED".into());
+            }
+            let mut claims = self.provider_session_claims.lock();
+            if claims
+                .get(&claim)
+                .is_some_and(|owner| owner != &target.session_id)
+            {
+                return Err("AGENT_SESSION_CONFLICT".into());
+            }
             if let Some(previous) = &meta.provider_claim {
                 claims.remove(previous);
             }
             claims.insert(claim.clone(), target.session_id.clone());
             meta.provider_claim = Some(claim);
-            meta.cwd = cwd;
+            meta.cwd = cwd.clone();
             *session = committed.clone();
-            self.workspace_service.machine_events.publish_revision(
-                revision.0,
-                "sessionMetadataChanged",
-                Some(&committed.workspace_id),
-                Some(&target.session_id),
-                serde_json::json!(committed),
-            );
         }
-        Ok(session.clone())
+        self.workspace_service.machine_events.publish_revision(
+            revision.0,
+            "sessionMetadataChanged",
+            Some(&committed.workspace_id),
+            Some(&target.session_id),
+            serde_json::json!(committed),
+        );
+        Ok(committed)
     }
 }

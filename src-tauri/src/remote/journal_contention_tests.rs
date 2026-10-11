@@ -86,30 +86,19 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         let ready_sentinel = format!("{ready_prefix}{ready_suffix}");
 
         #[cfg(windows)]
+        let prompt_prefix = format!("JOURNAL_PROMPT_{}", &ready_nonce[..8]);
+        #[cfg(windows)]
+        let prompt_sentinel = format!("{prompt_prefix}>");
+        #[cfg(windows)]
         let (program, args) = {
-            use base64::Engine as _;
-            let has_pwsh = std::env::var_os("PATH").is_some_and(|paths| {
-                std::env::split_paths(&paths).any(|dir| {
-                    dir.join("pwsh.exe").is_file() || dir.join("pwsh").is_file()
-                })
-            });
-            let program = if has_pwsh { "pwsh.exe" } else { "powershell.exe" };
-            let ready_cmd = format!(
-                "[Console]::WriteLine('{ready_prefix}' + '{ready_suffix}'); while($null -ne ($line=[Console]::ReadLine())){{[Console]::WriteLine($line)}}"
-            );
-            let utf16_bytes: Vec<u8> = ready_cmd
-                .encode_utf16()
-                .flat_map(|u| u.to_le_bytes())
-                .collect();
-            let encoded_cmd = base64::engine::general_purpose::STANDARD.encode(&utf16_bytes);
             (
-                program,
+                "cmd.exe",
                 vec![
-                    "-NoLogo".to_string(),
-                    "-NoProfile".to_string(),
-                    "-NonInteractive".to_string(),
-                    "-EncodedCommand".to_string(),
-                    encoded_cmd,
+                    "/D".to_string(),
+                    "/Q".to_string(),
+                    "/K".to_string(),
+                    "prompt".to_string(),
+                    format!("{prompt_prefix}$G"),
                 ],
             )
         };
@@ -133,6 +122,12 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         assert_eq!(created.status(), 201);
         let session: Value = serde_json::from_str(&created.text().await.unwrap()).unwrap();
         let id = session["target"]["sessionId"].as_str().unwrap();
+        #[cfg(windows)]
+        let (mut raw_history, mut raw_rx) = owner
+            .terminal_service()
+            .output_hub()
+            .observe_for_test(id)
+            .expect("output hub session must exist");
         let target = format!("/api/v1/terminal/{id}");
         let ticket: Value = serde_json::from_str(&client.post(format!("http://{address}/api/v1/socket-ticket"))
             .bearer_auth(&token).header("content-type", "application/json").body(json!({"target":target}).to_string())
@@ -160,21 +155,78 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         let attached: Value = serde_json::from_str(attached.to_text().unwrap()).unwrap();
         assert_eq!(attached["type"], "attached");
         assert_eq!(attached["target"], session["target"]);
+        #[cfg(windows)]
+        let input_observation = crate::remote::server::machine_input_probe::Observation::register(id);
         let mut ready_output = Vec::new();
-        let mut dsr_answered = false;
+        #[cfg(windows)]
+        let mut sent_dsr_count = 0;
+        #[cfg(windows)]
+        let mut ready_command_sent = false;
         let ready_result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                #[cfg(windows)]
+                while let Ok(chunk) = raw_rx.try_recv() {
+                    raw_history.extend_from_slice(&chunk);
+                }
                 let frame = socket.next().await.unwrap().unwrap();
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = &frame {
+                    if serde_json::from_str::<Value>(text)
+                        .ok()
+                        .is_some_and(|value| value["type"] == "error")
+                    {
+                        panic!("terminal socket returned error during READY: {text}");
+                    }
+                }
                 if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = frame {
-                    ready_output.extend_from_slice(crate::remote::terminal_wire::decode_frame(&bytes).unwrap().terminal_bytes);
-                    if !dsr_answered && ready_output.windows(4).any(|w| w == b"\x1b[6n") {
-                        socket
-                            .send(tokio_tungstenite::tungstenite::Message::Binary(
-                                b"\x1b[1;1R".to_vec().into(),
-                            ))
-                            .await
-                            .unwrap();
-                        dsr_answered = true;
+                    let terminal_bytes = crate::remote::terminal_wire::decode_frame(&bytes)
+                        .unwrap()
+                        .terminal_bytes;
+                    ready_output.extend_from_slice(terminal_bytes);
+                    #[cfg(windows)]
+                    {
+                        let dsr_count = ready_output
+                            .windows(4)
+                            .filter(|window| *window == b"\x1b[6n")
+                            .count();
+                        if dsr_count > sent_dsr_count {
+                            for _ in sent_dsr_count..dsr_count {
+                                let response = b"\x1b[1;1R".to_vec();
+                                socket
+                                    .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                        response.clone().into(),
+                                    ))
+                                    .await
+                                    .unwrap();
+                                eprintln!(
+                                    "JOURNAL_INPUT sent=dsr_reply len={}",
+                                    response.len()
+                                );
+                            }
+                            sent_dsr_count = dsr_count;
+                        }
+                        if !ready_command_sent
+                            && ready_output
+                                .windows(prompt_sentinel.len())
+                                .any(|p| p == prompt_sentinel.as_bytes())
+                        {
+                            eprintln!(
+                                "JOURNAL_INPUT prompt_observed={}",
+                                prompt_sentinel
+                            );
+                            let command = format!("echo {ready_prefix}^{ready_suffix}\r\n")
+                                .into_bytes();
+                            socket
+                                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                    command.clone().into(),
+                                ))
+                                .await
+                                .unwrap();
+                            eprintln!(
+                                "JOURNAL_INPUT sent=ready_command len={}",
+                                command.len()
+                            );
+                            ready_command_sent = true;
+                        }
                     }
                     if ready_output.windows(ready_sentinel.len()).any(|p| p == ready_sentinel.as_bytes()) {
                         break;
@@ -182,6 +234,41 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
                 }
             }
         }).await;
+        #[cfg(windows)]
+        {
+            while let Ok(chunk) = raw_rx.try_recv() {
+                raw_history.extend_from_slice(&chunk);
+            }
+            let input_progress = input_observation.0.borrow().clone();
+            eprintln!(
+                "JOURNAL_INPUT result started={} completed={} succeeded={} failed={} last_error={:?} pending={} dropped={} queue_full={}",
+                input_progress.started,
+                input_progress.completed,
+                input_progress.succeeded,
+                input_progress.failed,
+                input_progress.last_error,
+                input_progress.pending,
+                input_progress.dropped,
+                input_progress.queue_full,
+            );
+            eprintln!(
+                "JOURNAL_HUB_COMPARE raw_len={} socket_len={} raw_has_prompt={} socket_has_prompt={}",
+                raw_history.len(),
+                ready_output.len(),
+                raw_history.windows(prompt_sentinel.len()).any(|p| p == prompt_sentinel.as_bytes()),
+                ready_output.windows(prompt_sentinel.len()).any(|p| p == prompt_sentinel.as_bytes()),
+            );
+            if raw_history.len() != ready_output.len() {
+                eprintln!(
+                    "JOURNAL_HUB_DIFF raw_bytes={:?} socket_bytes={:?}",
+                    String::from_utf8_lossy(&raw_history),
+                    String::from_utf8_lossy(&ready_output),
+                );
+            }
+            if let Err(error) = &ready_result {
+                eprintln!("JOURNAL_INPUT ready_result={error:?}");
+            }
+        }
         if ready_result.is_err() {
             panic!(
                 "shell fixture failed to emit READY sentinel within 5s; buffered ready_output={:?}",
@@ -194,6 +281,14 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         let echo_result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let frame = socket.next().await.unwrap().unwrap();
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = &frame {
+                    if serde_json::from_str::<Value>(text)
+                        .ok()
+                        .is_some_and(|value| value["type"] == "error")
+                    {
+                        panic!("terminal socket returned error during PTY echo: {text}");
+                    }
+                }
                 if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = frame {
                     output.extend_from_slice(crate::remote::terminal_wire::decode_frame(&bytes).unwrap().terminal_bytes);
                     if output.windows(marker.len()).any(|part| part == marker.as_bytes()) { break; }
