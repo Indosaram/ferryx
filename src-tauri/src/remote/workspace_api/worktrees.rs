@@ -94,7 +94,18 @@ fn identity(workspace: &str, identity: &WorktreeIdentity) -> Result<(), String> 
 }
 fn rows(workspace: &str, manager: &WorktreeManager) -> Result<Vec<Worktree>, String> {
     if !manager.is_git_backed() {
-        return Err("NOT_A_GIT_REPOSITORY".into());
+        return Ok(vec![Worktree {
+            workspace_id: workspace.into(),
+            managed: false,
+            identity: None,
+            path: manager.repo_root().to_str().ok_or("INVALID_PATH")?.into(),
+            head: String::new(),
+            branch: None,
+            bare: false,
+            detached: false,
+            locked: None,
+            prunable: None,
+        }]);
     }
     // NUL-separated porcelain preserves quotes, whitespace and Unicode paths.
     // Keep the legacy parser unchanged outside the machine projection.
@@ -657,6 +668,52 @@ pub async fn legacy(
 #[cfg(test)]
 mod publication_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn plain_folder_listing_returns_project_root() {
+        let (root, server, workspace, path) = tokio::task::spawn_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("plain-folder");
+            std::fs::create_dir(&path).unwrap();
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            let workspace = server.remote_state().machine_services.as_ref().unwrap()
+                .workspaces.register_machine(path.to_str().unwrap()).unwrap();
+            let path = std::fs::canonicalize(path).unwrap();
+            (root, server, workspace, path)
+        }).await.unwrap();
+        let state = server.remote_state().clone();
+        let pin = state.auth_manager.create_scoped_pairing_code(
+            DevicePermission::Control, DeviceAccessScope::Machine,
+        ).unwrap();
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "folder-listing").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+        let response = read(state.clone(), headers.clone(), Some(format!("workspaceId={workspace}")), false).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let listed = value["worktrees"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["workspaceId"], workspace);
+        assert_eq!(listed[0]["path"], path.to_str().unwrap());
+        assert_eq!(listed[0]["managed"], false);
+        assert!(listed[0]["identity"].is_null());
+        assert!(listed[0]["branch"].is_null());
+        assert_eq!(listed[0]["head"], "");
+        let repeated = read(state.clone(), headers, Some(format!("workspaceId={workspace}")), false).await;
+        assert_eq!(repeated.status(), StatusCode::OK);
+        let repeated = axum::body::to_bytes(repeated.into_body(), 65536).await.unwrap();
+        assert_eq!(body, repeated);
+        drop(state);
+        drop(server);
+        tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_publication_preserves_unknown_after_git() {
         for revoke in [false, true] {
