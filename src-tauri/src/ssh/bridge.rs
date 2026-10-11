@@ -1,7 +1,7 @@
 //! Async framed OpenSSH client for remote helper communication and daemon reconnection.
 
 #[cfg(windows)]
-use super::transport_windows::{ChildSpec, TransportChild, TransportOwner};
+use super::transport_windows::{ChildSpec, TransportChild, TransportOwner, TransportStdout};
 use crate::ipc::IpcError;
 use crate::scoped_contracts::{Epoch, TargetRef};
 use crate::ssh::direct;
@@ -408,25 +408,44 @@ pub async fn read_frame_async<R: AsyncRead + Unpin>(
     reader: &mut R,
     timeout_dur: Duration,
 ) -> Result<Option<Value>, BridgeError> {
-    tokio::time::timeout(timeout_dur, async {
-        let mut header = [0u8; 4];
+    let mut stage = "awaiting_header_byte_0";
+    let mut header = [0u8; 4];
+    let mut header_read = 0;
+    let mut body_len = 0;
+    let mut body_read = 0;
+
+    let res = tokio::time::timeout(timeout_dur, async {
         match reader.read(&mut header[..1]).await? {
             0 => return Ok(None),
-            _ => (),
+            _ => {
+                header_read = 1;
+            }
         }
+        stage = "awaiting_header_remaining_3_bytes";
         reader.read_exact(&mut header[1..4]).await?;
+        header_read = 4;
         let len = u32::from_be_bytes(header) as usize;
+        body_len = len;
         if len > MAX_FRAME {
             return Err(BridgeError::FrameTooLarge(len));
         }
+        stage = "awaiting_body";
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf).await?;
+        body_read = len;
         let val: Value = serde_json::from_slice(&buf)
             .map_err(|e| BridgeError::Protocol(format!("Invalid response JSON: {e}")))?;
         Ok(Some(val))
     })
-    .await
-    .map_err(|_| BridgeError::Timeout("Frame read timed out".into()))?
+    .await;
+
+    match res {
+        Ok(inner) => inner,
+        Err(_) => Err(BridgeError::Timeout(format!(
+            "Frame read timed out at stage '{stage}' (header_read={header_read}/4, header_raw={:?}, body_len={body_len}, body_read={body_read})",
+            &header[..header_read]
+        ))),
+    }
 }
 
 /// Duplicates a raw file descriptor and sets FD_CLOEXEC on the duplicate.
@@ -452,9 +471,51 @@ pub fn dup_fd(_fd: i32) -> Result<i32, std::io::Error> {
 
 /// Underlying stream for BridgeConnection BufReader that can supply captured
 /// prefetch bytes before delegating to the live child stdout pipe.
-pub enum BridgeReaderStream {
+pub enum BridgeStdoutStream {
     Child(tokio::process::ChildStdout),
-    Prefetched(tokio::io::Chain<std::io::Cursor<Vec<u8>>, tokio::process::ChildStdout>),
+    #[cfg(windows)]
+    NamedPipe(TransportStdout),
+}
+
+impl AsyncRead for BridgeStdoutStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeStdoutStream::Child(c) => Pin::new(c).poll_read(cx, buf),
+            #[cfg(windows)]
+            BridgeStdoutStream::NamedPipe(p) => Pin::new(p).poll_read(cx, buf),
+        }
+    }
+}
+
+impl From<tokio::process::ChildStdout> for BridgeStdoutStream {
+    fn from(c: tokio::process::ChildStdout) -> Self {
+        BridgeStdoutStream::Child(c)
+    }
+}
+
+#[cfg(windows)]
+impl From<TransportStdout> for BridgeStdoutStream {
+    fn from(p: TransportStdout) -> Self {
+        BridgeStdoutStream::NamedPipe(p)
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for BridgeStdoutStream {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        match self {
+            BridgeStdoutStream::Child(c) => c.as_raw_fd(),
+        }
+    }
+}
+
+pub enum BridgeReaderStream {
+    Child(BridgeStdoutStream),
+    Prefetched(tokio::io::Chain<std::io::Cursor<Vec<u8>>, BridgeStdoutStream>),
 }
 
 impl AsyncRead for BridgeReaderStream {
@@ -848,7 +909,7 @@ impl BridgeConnection {
         }
         #[cfg(windows)]
         {
-            return Self::spawn_supervised(&plan);
+            return Self::spawn_supervised(&plan).await;
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -888,7 +949,7 @@ impl BridgeConnection {
     }
 
     #[cfg(windows)]
-    fn spawn_supervised(plan: &ShellCommandPlan) -> Result<Self, BridgeError> {
+    async fn spawn_supervised(plan: &ShellCommandPlan) -> Result<Self, BridgeError> {
         let envs = crate::ssh::password::environment(&plan.args)
             .map_err(|e| BridgeError::ProcessSpawn(e.message))?;
         let owner = TransportOwner::prepare().map_err(|e| {
@@ -924,7 +985,7 @@ impl BridgeConnection {
         child: TransportChild,
         owner: TransportOwner,
         stdin: tokio::process::ChildStdin,
-        stdout: tokio::process::ChildStdout,
+        stdout: TransportStdout,
         stderr: tokio::process::ChildStderr,
     ) -> Result<Self, BridgeError> {
         let transport_pid = child.id();
@@ -999,10 +1060,11 @@ impl BridgeConnection {
 
     fn assemble(
         stdin: tokio::process::ChildStdin,
-        stdout: tokio::process::ChildStdout,
+        stdout: impl Into<BridgeStdoutStream>,
         mut stderr: tokio::process::ChildStderr,
         guard: impl FnOnce() -> BridgeChildGuard,
     ) -> Result<Self, BridgeError> {
+        let stdout = stdout.into();
         #[cfg(unix)]
         let stderr_fd = {
             use std::os::unix::io::AsRawFd;
@@ -1156,10 +1218,23 @@ impl BridgeConnection {
             }
             Err(e) => {
                 let stderr = self.check_stderr();
+                let exit_code = if let Some(guard) = self.child_guard.as_mut() {
+                    guard.try_wait_code()
+                } else {
+                    None
+                };
+                let pid = self.child_id();
                 let _ = self.close().await;
                 return Err(match e {
                     BridgeError::Io(_) if !stderr.is_empty() => {
-                        BridgeError::ProcessExited { code: None, stderr }
+                        BridgeError::ProcessExited { code: exit_code, stderr }
+                    }
+                    BridgeError::Timeout(msg) => {
+                        BridgeError::Timeout(format!(
+                            "{msg} [ssh_pid={pid:?}, exit_code={exit_code:?}, stderr_bytes={}: {:?}]",
+                            stderr.len(),
+                            stderr
+                        ))
                     }
                     other => other,
                 });
@@ -1604,10 +1679,10 @@ impl BridgeConnection {
             };
 
             let stream = if state.prefetch.is_empty() {
-                BridgeReaderStream::Child(tokio_stdout)
+                BridgeReaderStream::Child(BridgeStdoutStream::Child(tokio_stdout))
             } else {
                 BridgeReaderStream::Prefetched(
-                    std::io::Cursor::new(state.prefetch).chain(tokio_stdout),
+                    std::io::Cursor::new(state.prefetch).chain(BridgeStdoutStream::Child(tokio_stdout)),
                 )
             };
 

@@ -315,6 +315,7 @@ pub(crate) fn parse_ready_output(bytes: &[u8]) -> Result<(), IpcError> {
     )
     .with_details(serde_json::json!({
         "stage": "startup",
+        "operation": "helper_startup_readiness",
         "output": text.trim(),
     })))
 }
@@ -364,6 +365,7 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
     if is_missing {
         let mut details = serde_json::json!({
             "stage": "helper_missing",
+            "operation": "helper_startup_readiness",
             "executable": location.executable,
             "root": location.root,
         });
@@ -381,6 +383,7 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
     } else if is_permissions {
         let mut details = serde_json::json!({
             "stage": "helper_permissions",
+            "operation": "helper_startup_readiness",
             "executable": location.executable,
             "root": location.root,
         });
@@ -421,7 +424,10 @@ pub async fn ensure_started(
         RemotePlatform::Windows => format!(
             "$exe = {}; $root = {}; $hostId = {}; \
              if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
-             & $exe start --root $root --host-id $hostId",
+             & $exe start --root $root --host-id $hostId 2>&1 | ForEach-Object {{ \
+                 if ($_ -is [System.Management.Automation.ErrorRecord]) {{ [Console]::Error.WriteLine($_.ToString()) }} \
+                 else {{ [Console]::Out.WriteLine($_.ToString()) }} \
+             }}; exit $LASTEXITCODE",
             runtime::powershell_data(&location.executable),
             runtime::powershell_data(&location.root),
             runtime::powershell_data(&host.id)
@@ -429,10 +435,20 @@ pub async fn ensure_started(
     };
 
     let plan = direct::ssh_plan(host, env.executor.command(&script), false)?;
-    let output = direct::bounded_output(&plan, Duration::from_secs(15)).await;
+    let output = direct::bounded_output(&plan, Duration::from_secs(15))
+        .await
+        .map_err(|mut err| {
+            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+            details["operation"] = "helper_startup_readiness".into();
+            err
+        });
 
     match output {
-        Ok(stdout_bytes) => parse_ready_output(&stdout_bytes),
+        Ok(stdout_bytes) => parse_ready_output(&stdout_bytes).map_err(|mut err| {
+            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+            details["operation"] = "helper_startup_readiness".into();
+            err
+        }),
         Err(err) => Err(map_ensure_started_error(err, location)),
     }
 }
@@ -588,7 +604,12 @@ where
 pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
     probe_ready_with(host, environment, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await
+        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
+            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+            details["operation"] = "helper_readiness_probe".into();
+            details["executor"] = executor.program().into();
+            err
+        })
     })
     .await
 }
@@ -600,7 +621,12 @@ pub async fn probe_ready_at(
 ) -> HelperProbeState {
     probe_ready_at_with(environment, location, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await
+        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
+            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+            details["operation"] = "helper_readiness_probe".into();
+            details["executor"] = executor.program().into();
+            err
+        })
     })
     .await
 }

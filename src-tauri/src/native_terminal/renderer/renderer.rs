@@ -21,7 +21,6 @@ use crate::native_terminal::snapshot::RenderSnapshot;
 
 pub struct NativeTerminalRenderer {
     config: RendererConfig,
-    gpu: GpuContext,
     pipelines: RenderPipelines,
     atlas: GlyphAtlas,
     target: Option<RenderTarget>,
@@ -34,6 +33,8 @@ pub struct NativeTerminalRenderer {
     preparation_attempts: usize,
     #[cfg(test)]
     fail_rebuild_after: Option<usize>,
+    // Keep the instance owner alive until all renderer GPU resources have dropped.
+    gpu: GpuContext,
 }
 
 #[cfg(test)]

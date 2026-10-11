@@ -176,12 +176,12 @@ pub async fn detect_for(
 ) -> Result<RemoteEnvironment, IpcError> {
     detect_with(host, platform, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        #[cfg(test)]
-        eprintln!(
-            "[DIAGNOSTIC runtime::detect] executor: {:?}, program: {:?}, args: {:?}",
-            executor, plan.program, plan.args
-        );
-        direct::bounded_output(&plan, timeout).await
+        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
+            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+            details["operation"] = "environment_detection_probe".into();
+            details["executor"] = executor.program().into();
+            err
+        })
     })
     .await
 }

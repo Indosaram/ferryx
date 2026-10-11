@@ -133,7 +133,8 @@ fn validate_windows_acl(path: &Path) -> Result<(), String> {
             "-Command",
             &script,
         ])
-        .output()
+        .output();
+    let output = output
         .map_err(|e| format!("FORBIDDEN: cannot execute PowerShell ACL validation: {e}"))?;
 
     if !output.status.success() {
@@ -406,7 +407,9 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
     }
 
     #[cfg(windows)]
-    return process_windows::start(&root, &host);
+    {
+        return process_windows::start(&root, &host);
+    }
 
     #[cfg(not(windows))]
     {
@@ -689,7 +692,8 @@ pub fn bridge(root: &Path, mut input: impl Read, mut output: impl Write) -> Resu
         if !address.ip().is_loopback() {
             return Err("FORBIDDEN: helper IPC must be loopback".into());
         }
-        std::net::TcpStream::connect(address).map_err(|e| e.to_string())?
+        let s = std::net::TcpStream::connect(address).map_err(|e| e.to_string())?;
+        s
     };
     while let Some(mut request) = read_frame(&mut input)? {
         let op = request.get("op").and_then(Value::as_str).unwrap_or("");

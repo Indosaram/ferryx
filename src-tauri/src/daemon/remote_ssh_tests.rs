@@ -693,8 +693,22 @@ async fn exercise_child(root: &Path) {
         .await
         .unwrap();
     phase!("Phase 8c: Persist complete; dropping daemon");
+    let mut teardown = daemon.terminal_service.remote().subscribe(&retained).unwrap();
+    teardown.borrow_and_update();
     let old_runtime = Arc::downgrade(daemon.terminal_service.remote());
     drop(daemon);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            teardown.changed().await.expect("runtime teardown event");
+            if teardown.borrow_and_update().state
+                == crate::terminal::remote::RemoteConnectionState::Disconnected
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("in-flight watcher checkpoints release the old runtime");
     phase!("Phase 8d: Daemon dropped; checking old runtime");
     assert!(
         old_runtime.upgrade().is_none(),

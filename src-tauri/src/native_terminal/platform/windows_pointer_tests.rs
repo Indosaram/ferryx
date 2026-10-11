@@ -7,7 +7,18 @@ struct Point {
     y: i32,
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
 const DESKTOP_READOBJECTS: u32 = 0x0001;
+const HWND_TOPMOST: isize = -1;
+const SW_SHOWNORMAL: i32 = 1;
 
 #[repr(C)]
 #[derive(Default)]
@@ -26,8 +37,22 @@ unsafe extern "system" {
     fn WindowFromPoint(point: Point) -> Hwnd;
     fn ClientToScreen(hwnd: Hwnd, point: *mut Point) -> i32;
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
-    fn CloseDesktop(desktop: Hwnd) -> i32;
+    fn IsWindowEnabled(hwnd: Hwnd) -> i32;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
+    fn GetClassNameW(hwnd: Hwnd, class_name: *mut u16, max_count: i32) -> i32;
+    fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
+    fn GetThreadDesktop(thread_id: u32) -> Hwnd;
+    fn GetProcessWindowStation() -> Hwnd;
     fn OpenInputDesktop(flags: u32, inherit: i32, access: u32) -> Hwnd;
+    fn CloseDesktop(desktop: Hwnd) -> i32;
+    fn GetUserObjectInformationW(
+        object: Hwnd,
+        index: i32,
+        info: *mut c_void,
+        length: u32,
+        needed: *mut u32,
+    ) -> i32;
     fn UnregisterClassW(class_name: *const u16, instance: Hinstance) -> i32;
     fn PeekMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32, remove: u32) -> i32;
     fn TranslateMessage(msg: *const Msg) -> i32;
@@ -39,6 +64,61 @@ unsafe extern "system" {
         milliseconds: u32,
         wake_mask: u32,
     ) -> u32;
+}
+
+fn user_object_name(object: Hwnd) -> String {
+    if object.is_null() {
+        return "<null>".to_owned();
+    }
+    let mut name = [0u16; 256];
+    let mut needed = 0;
+    let ok = unsafe {
+        GetUserObjectInformationW(
+            object,
+            2,
+            name.as_mut_ptr().cast(),
+            std::mem::size_of_val(&name) as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return format!("<error:{}>", std::io::Error::last_os_error());
+    }
+    let length = name.iter().position(|unit| *unit == 0).unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..length])
+}
+
+fn pointer_window_diagnostic(label: &str, hwnd: Hwnd) -> String {
+    if hwnd.is_null() {
+        return format!("{label}=NULL");
+    }
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
+    let mut class_name = [0u16; 256];
+    let class_length = unsafe {
+        GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32)
+    };
+    let class_name = if class_length > 0 {
+        String::from_utf16_lossy(&class_name[..class_length as usize])
+    } else {
+        format!("<error:{}>", std::io::Error::last_os_error())
+    };
+    let mut rect = Rect::default();
+    let rect_ok = unsafe { GetWindowRect(hwnd, &mut rect) } != 0;
+    let style = unsafe { GetWindowLongPtrW(hwnd, -16) };
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, -20) };
+    format!(
+        "{label}=0x{:X} owner_pid={process_id} owner_tid={thread_id} class={class_name:?} rect_ok={rect_ok} rect=({},{}-{}, {}) style=0x{:X} ex_style=0x{:X} visible={} enabled={}",
+        hwnd as usize,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        style as usize,
+        ex_style as usize,
+        unsafe { IsWindowVisible(hwnd) } != 0,
+        unsafe { IsWindowEnabled(hwnd) } != 0,
+    )
 }
 
 #[link(name = "kernel32")]
@@ -103,12 +183,12 @@ impl InputWindow {
         let class_name = ensure_input_fixture_class(instance);
         let parent = unsafe {
             CreateWindowExW(
-                0x0000_0008 | WS_EX_NOACTIVATE,
+                0x0000_0008,
                 class_name.as_ptr(),
                 std::ptr::null(),
                 0x8000_0000 | 0x1000_0000,
-                16,
-                16,
+                0,
+                0,
                 32,
                 32,
                 std::ptr::null_mut(),
@@ -141,11 +221,26 @@ impl InputWindow {
             )
         };
         assert!(!window.input.is_null(), "create input child");
-        unsafe { ShowWindow(parent.get() as Hwnd, SW_SHOWNOACTIVATE) };
+        unsafe {
+            ShowWindow(parent.get() as Hwnd, SW_SHOWNORMAL);
+            assert_ne!(
+                SetWindowPos(
+                    parent.get() as Hwnd,
+                    HWND_TOPMOST as Hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE,
+                ),
+                0,
+                "set input fixture parent window topmost"
+            );
+        };
         window
     }
 
-    fn pointer_target_from_other_thread(&self) -> isize {
+    fn pointer_target_from_other_thread(&self) -> (Point, isize) {
         let mut point = Point { x: 8, y: 8 };
         assert_ne!(
             unsafe { ClientToScreen(self.parent.get() as Hwnd, &mut point) },
@@ -158,7 +253,7 @@ impl InputWindow {
         let child = std::thread::spawn(move || {
             let target = unsafe { WindowFromPoint(point) as isize };
             assert_ne!(unsafe { SetEvent(child_event.0) }, 0);
-            target
+            (point, target)
         });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -240,10 +335,28 @@ fn presented_terminal_yields_cross_thread_pointer_hit_testing_to_input() {
     let window = InputWindow::new();
     let target = WindowsCompositorTarget::from_parent_hwnd(window.parent)
         .expect("create production compositor target");
-    assert_eq!(
-        window.pointer_target_from_other_thread(),
-        window.input as isize
-    );
+    let (point, actual_target) = window.pointer_target_from_other_thread();
+    if actual_target != window.input as isize {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        let desktop = unsafe { GetThreadDesktop(thread_id) };
+        let station = unsafe { GetProcessWindowStation() };
+        let input_desktop = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
+        eprintln!(
+            "pointer hit-test diagnostic: screen_point=({}, {}) current_tid={thread_id} session_id={session_id} desktop={} input_desktop={} window_station={} {} {} {}",
+            point.x,
+            point.y,
+            user_object_name(desktop),
+            user_object_name(input_desktop),
+            user_object_name(station),
+            pointer_window_diagnostic("fixture_parent", window.parent.get() as Hwnd),
+            pointer_window_diagnostic("fixture_input", window.input),
+            pointer_window_diagnostic("returned", actual_target as Hwnd),
+        );
+        if !input_desktop.is_null() {
+            unsafe { CloseDesktop(input_desktop) };
+        }
+    }
+    assert_eq!(actual_target, window.input as isize);
 
     target.update_viewport(Some(LogicalBounds {
         x: 0.0,
@@ -258,8 +371,9 @@ fn presented_terminal_yields_cross_thread_pointer_hit_testing_to_input() {
         unsafe { IsWindowVisible(target.handle.hwnd.get() as Hwnd) },
         0
     );
+    let (_, actual_target) = window.pointer_target_from_other_thread();
     assert_eq!(
-        window.pointer_target_from_other_thread(),
+        actual_target,
         window.input as isize,
         "the visible renderer must not become the pointer target above WebView2",
     );

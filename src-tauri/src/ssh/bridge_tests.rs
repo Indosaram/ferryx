@@ -99,7 +99,7 @@ struct TestFixture {
     project_dir: PathBuf,
     host_id: String,
     helper_bin: PathBuf,
-    daemon_child: Option<std::process::Child>,
+    daemon_child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 impl TestFixture {
@@ -147,7 +147,7 @@ impl TestFixture {
             project_dir,
             host_id,
             helper_bin,
-            daemon_child: Some(child),
+            daemon_child: std::sync::Mutex::new(Some(child)),
         };
 
         // Bounded channel to receive readiness from reader thread
@@ -208,9 +208,11 @@ impl TestFixture {
 
 impl Drop for TestFixture {
     fn drop(&mut self) {
-        if let Some(mut child) = self.daemon_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Ok(mut guard) = self.daemon_child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 }
@@ -1017,153 +1019,6 @@ fn live_loopback_host(fixture: &TestFixture, root: &Path) -> SshHost {
     }
 }
 
-#[cfg(not(unix))]
-async fn diagnose_live_loopback_probe_ab(host: &SshHost) {
-    // Bounded cfg(test) live fixture A/B diagnostic on exact actual encoded PowerShell probe script:
-    // (A) Default bounded_output (no -n) with 4s timeout
-    // (B) Identical plan with only "-n" prepended with 4s timeout
-    let marker = "FERRYX_ENV_V1_diag_live_ab";
-    let ps_script = format!(
-        "if ([Environment]::OSVersion.Platform -ne 'Win32NT') {{ exit 2 }}; \
-         $g='0'; if (Get-Command git -ErrorAction SilentlyContinue) {{ $g='1' }}; \
-         $ds=''; $k=Get-ItemProperty 'HKLM:\\SOFTWARE\\OpenSSH' -ErrorAction SilentlyContinue; \
-         if ($k -and $k.DefaultShell) {{ $ds=[string]$k.DefaultShell }}; \
-         [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,$ds,'' -join [char]0))"
-    );
-    let cmd = RemoteExecutor::Powershell.command(&ps_script);
-    if let Ok(plan_default) = crate::ssh::direct::ssh_plan(host, cmd, false) {
-        let mut plan_with_n = plan_default.clone();
-        plan_with_n.args.insert(0, "-n".to_string());
-
-        let res_default =
-            crate::ssh::direct::bounded_output(&plan_default, Duration::from_secs(4)).await;
-        let res_with_n =
-            crate::ssh::direct::bounded_output(&plan_with_n, Duration::from_secs(4)).await;
-
-        eprintln!(
-            "[DIAGNOSTIC live-loopback A/B default] outcome: err={:?}, stdout_len={}",
-            res_default.as_ref().err(),
-            res_default.as_ref().map(|o| o.len()).unwrap_or(0),
-        );
-        eprintln!(
-            "[DIAGNOSTIC live-loopback A/B with-n] outcome: err={:?}, stdout_len={}",
-            res_with_n.as_ref().err(),
-            res_with_n.as_ref().map(|o| o.len()).unwrap_or(0),
-        );
-    }
-}
-
-#[cfg(windows)]
-async fn diagnose_local_helper_start(fixture: &TestFixture) -> String {
-    use tokio::io::AsyncReadExt;
-
-    let daemon_live = fixture
-        .daemon_child
-        .as_ref()
-        .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()));
-    if !daemon_live {
-        return "local_start_not_run=fixture-owned-daemon-not-live".into();
-    }
-
-    let stdout_path = fixture.root.join("diagnostic-local-start.stdout");
-    let stderr_path = fixture.root.join("diagnostic-local-start.stderr");
-    let stdout_path_for_create = stdout_path.clone();
-    let stderr_path_for_create = stderr_path.clone();
-    let files = crate::ipc::run_blocking(move || {
-        let stdout = std::fs::File::create(stdout_path_for_create)
-            .map_err(|error| crate::ipc::error::IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))?;
-        let stderr = std::fs::File::create(stderr_path_for_create)
-            .map_err(|error| crate::ipc::error::IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))?;
-        Ok((stdout, stderr))
-    })
-    .await;
-    let (stdout_file, stderr_file) = match files {
-        Ok(files) => files,
-        Err(error) => return format!("local_start_file_create_error={error}"),
-    };
-
-    let mut child = match tokio::process::Command::new(&fixture.helper_bin)
-        .args(["start", "--root"])
-        .arg(&fixture.root)
-        .args(["--host-id", &fixture.host_id])
-        .stdout(std::process::Stdio::from(stdout_file))
-        .stderr(std::process::Stdio::from(stderr_file))
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => return format!("local_start_spawn_error={error}"),
-    };
-    let child_pid = child.id();
-    let wait = tokio::time::timeout(Duration::from_secs(15), child.wait()).await;
-    let (timed_out, status) = match wait {
-        Ok(Ok(status)) => (false, format!("{status:?}")),
-        Ok(Err(error)) => {
-            let kill = child.start_kill();
-            let reap = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            (
-                false,
-                format!("wait_error={error}; cleanup_kill={kill:?}; cleanup_reap={reap:?}"),
-            )
-        }
-        Err(_) => {
-            let kill = child.start_kill();
-            let reap = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            let cleanup = match (kill, reap) {
-                (Ok(()), Ok(Ok(status))) => format!("reaped:{status:?}"),
-                (kill, reap) => format!("kill={kill:?}; reap={reap:?}"),
-            };
-            (true, format!("timeout_cleanup={cleanup}"))
-        }
-    };
-
-    let stdout_path_for_read = stdout_path.clone();
-    let stderr_path_for_read = stderr_path.clone();
-    let captures = crate::ipc::run_blocking(move || {
-        fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::fs::File::open(path)?.take(8193).read_to_end(&mut bytes)?;
-            bytes.truncate(8192);
-            Ok(bytes)
-        }
-        Ok((read_capped(&stdout_path_for_read)?, read_capped(&stderr_path_for_read)?))
-    })
-    .await;
-    let (stdout_report, stderr_report) = match captures {
-        Ok((stdout, stderr)) => {
-            let ready = serde_json::from_slice::<serde_json::Value>(&stdout)
-                .ok()
-                .and_then(|value| value.get("event").and_then(serde_json::Value::as_str).map(str::to_owned));
-            let stages = String::from_utf8_lossy(&stderr)
-                .lines()
-                .filter(|line| line.starts_with("[FERRYX_HELPER_DIAG pid=") && line.contains("] "))
-                .filter_map(|line| line.split_once("] ").map(|(_, stage)| stage))
-                .filter(|stage| matches!(
-                    *stage,
-                    "startdaemon_before"
-                        | "startdaemon_after"
-                        | "validate_root_acl_before"
-                        | "validate_root_acl_after"
-                        | "validate_endpoint_acl_before"
-                        | "validate_endpoint_acl_after"
-                        | "acl_powershell_before"
-                        | "acl_powershell_after"
-                        | "endpoint_loaded"
-                ))
-                .collect::<Vec<_>>();
-            (
-                format!("ready_event={ready:?}; stdout_bytes={}", stdout.len()),
-                format!("diagnostic_stages={stages:?}; stderr_bytes={}", stderr.len()),
-            )
-        }
-        Err(error) => (String::new(), format!("capture_read_error={error}")),
-    };
-    format!(
-        "local_start_probe_only=true; child_pid={child_pid:?}; timed_out={timed_out}; status={status}; {stdout_report}; {stderr_report}"
-    )
-}
-
 /// The child half of the live loopback SSH test: connects the bridge client over real OpenSSH.
 async fn exercise_live_loopback_bridge(root: &Path) {
     // Use owned daemon fixture; ensure_started preserves the already-live owned daemon,
@@ -1172,8 +1027,6 @@ async fn exercise_live_loopback_bridge(root: &Path) {
     let host = live_loopback_host(&fixture, root);
     #[cfg(unix)]
     let env = sample_env();
-    #[cfg(not(unix))]
-    diagnose_live_loopback_probe_ab(&host).await;
     #[cfg(not(unix))]
     let env = crate::ssh::runtime::detect(&host)
         .await
@@ -1193,29 +1046,10 @@ async fn exercise_live_loopback_bridge(root: &Path) {
         root: normalize_path(&fixture.root),
     };
 
-    // Isolated fixture opt-in to first-handshake helper diagnostic over stderr
-    let _ = std::fs::File::create(fixture.root.join(".ferryx_helper_diag"));
-
     let endpoint_path = fixture.root.join("endpoint.json");
     let client = match SshBridgeClient::connect(&host, &env, &location).await {
         Ok(c) => c,
         Err(e) => {
-            #[cfg(windows)]
-            let local_start_diagnostic = match &e {
-                BridgeError::SshSetup(error)
-                    if error
-                        .details
-                        .as_ref()
-                        .and_then(|details| details.get("operation"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some("helper_startup_readiness") =>
-                {
-                    diagnose_local_helper_start(&fixture).await
-                }
-                _ => "not_run=not_helper_startup_readiness_failure".into(),
-            };
-            #[cfg(not(windows))]
-            let local_start_diagnostic = "not_run=windows_only";
             let ep_path = endpoint_path.clone();
             let (exists, content) = tokio::task::spawn_blocking(move || {
                 let exists = ep_path.exists();
@@ -1243,7 +1077,7 @@ async fn exercise_live_loopback_bridge(root: &Path) {
             };
 
             panic!(
-                "connect SshBridgeClient over OpenSSH failed: {e:?}\n  endpoint_exists={exists}\n  endpoint_content={content:?}\n  direct_helper_probe={direct_probe}\n  local_start_diagnostic={local_start_diagnostic}",
+                "connect SshBridgeClient over OpenSSH failed: {e:?}\n  endpoint_exists={exists}\n  endpoint_content={content:?}\n  direct_helper_probe={direct_probe}",
             );
         }
     };

@@ -41,7 +41,10 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, ReadBuf};
 
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -84,6 +87,9 @@ const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const STD_ERROR_HANDLE: u32 = -12i32 as u32;
 /// The bit bucket opened for [`ChildStdio::Null`].
 const NUL_DEVICE: &str = r"\\.\NUL";
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const OPEN_EXISTING: u32 = 3;
+const INVALID_HANDLE_VALUE: isize = -1;
 
 /// `JOBOBJECT_BASIC_LIMIT_INFORMATION` (winnt.h).
 #[repr(C)]
@@ -182,6 +188,16 @@ extern "system" {
         attributes: *const c_void,
         size: u32,
     ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *const c_void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: HANDLE,
+    ) -> HANDLE;
     #[allow(clippy::too_many_arguments)]
     fn CreateProcessW(
         application: *const u16,
@@ -343,7 +359,7 @@ impl TransportOwner {
         let (stdin_child, stdin_parent) =
             prepare_stdio(&spec.stdin, STD_INPUT_HANDLE, &mut inherited)?;
         let (stdout_child, stdout_parent) =
-            prepare_stdio(&spec.stdout, STD_OUTPUT_HANDLE, &mut inherited)?;
+            prepare_stdout(&spec.stdout, &mut inherited)?;
         let (stderr_child, stderr_parent) =
             prepare_stdio(&spec.stderr, STD_ERROR_HANDLE, &mut inherited)?;
 
@@ -446,8 +462,7 @@ impl TransportOwner {
                 OwnedHandle::from_raw_handle(thread_handle as RawHandle),
             )
         };
-        let (stdin, stdout, stderr) = match adopt_stdio(stdin_parent, stdout_parent, stderr_parent)
-        {
+        let (stdin, stderr) = match adopt_stdio(stdin_parent, stderr_parent) {
             Ok(stdio) => stdio,
             Err(error) => {
                 // SAFETY: the child is alive and its handle is owned by `process` in this scope.
@@ -459,7 +474,7 @@ impl TransportOwner {
             process,
             thread: Some(thread),
             stdin,
-            stdout,
+            stdout: stdout_parent,
             stderr,
         })
     }
@@ -560,7 +575,7 @@ pub(super) struct TransportChild {
     process: OwnedHandle,
     thread: Option<OwnedHandle>,
     stdin: Option<tokio::process::ChildStdin>,
-    stdout: Option<tokio::process::ChildStdout>,
+    stdout: Option<TransportStdout>,
     stderr: Option<tokio::process::ChildStderr>,
 }
 
@@ -569,7 +584,9 @@ impl TransportChild {
         self.stdin.take()
     }
 
-    pub(super) fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+    pub(super) fn take_stdout(
+        &mut self,
+    ) -> Option<TransportStdout> {
         self.stdout.take()
     }
 
@@ -655,11 +672,9 @@ impl TransportChild {
 /// the anonymous pipe handles this module creates are exactly what those streams accept.
 fn adopt_stdio(
     stdin: Option<OwnedHandle>,
-    stdout: Option<OwnedHandle>,
     stderr: Option<OwnedHandle>,
 ) -> io::Result<(
     Option<tokio::process::ChildStdin>,
-    Option<tokio::process::ChildStdout>,
     Option<tokio::process::ChildStderr>,
 )> {
     Ok((
@@ -667,15 +682,117 @@ fn adopt_stdio(
             .map(ChildStdin::from)
             .map(tokio::process::ChildStdin::from_std)
             .transpose()?,
-        stdout
-            .map(ChildStdout::from)
-            .map(tokio::process::ChildStdout::from_std)
-            .transpose()?,
         stderr
             .map(ChildStderr::from)
             .map(tokio::process::ChildStderr::from_std)
             .transpose()?,
     ))
+}
+
+/// Asynchronous stdout reader stream for Windows transport child processes.
+/// Automatically connects the named pipe server on the first `poll_read` before reading data.
+pub struct TransportStdout {
+    server: tokio::net::windows::named_pipe::NamedPipeServer,
+    connected: bool,
+}
+
+impl TransportStdout {
+    pub(super) fn new(server: tokio::net::windows::named_pipe::NamedPipeServer) -> Self {
+        Self {
+            server,
+            connected: false,
+        }
+    }
+}
+
+impl AsyncRead for TransportStdout {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        if !this.connected {
+            let mut connect = std::pin::pin!(this.server.connect());
+            match std::future::Future::poll(connect.as_mut(), cx) {
+                Poll::Ready(Ok(())) => {
+                    this.connected = true;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Pin::new(&mut this.server).poll_read(cx, buf)
+    }
+}
+
+/// Prepares the child's stdout slot: creates an asynchronous overlapped named pipe server for the
+/// parent, and an inheritable synchronous client handle for the child.
+fn prepare_stdout(
+    stdio: &ChildStdio,
+    inherited: &mut Vec<OwnedHandle>,
+) -> io::Result<(HANDLE, Option<TransportStdout>)> {
+    match stdio {
+        ChildStdio::Piped => {
+            static PIPE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let counter = PIPE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pipe_name = format!(
+                r"\\.\pipe\ferryx-bridge-stdout-{}-{}",
+                std::process::id(),
+                counter
+            );
+
+            // Server side: asynchronous (overlapped) named pipe server registered with Tokio IOCP.
+            let server = tokio::net::windows::named_pipe::ServerOptions::new()
+                .access_inbound(true)
+                .access_outbound(false)
+                .first_pipe_instance(true)
+                .in_buffer_size(65536)
+                .out_buffer_size(65536)
+                .create(&pipe_name)?;
+
+            // Client side: synchronous so ssh.exe can write stdout without an OVERLAPPED.
+            // The parent's separate server handle remains asynchronous for Tokio IOCP.
+            let mut pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().collect();
+            pipe_name_wide.push(0);
+
+            let client_handle = unsafe {
+                CreateFileW(
+                    pipe_name_wide.as_ptr(),
+                    GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if client_handle.is_null() || client_handle as isize == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let client_owned = unsafe { OwnedHandle::from_raw_handle(client_handle as RawHandle) };
+            let child = duplicate_inheritable(client_owned.as_raw_handle() as HANDLE, inherited)?;
+            drop(client_owned);
+
+            Ok((child, Some(TransportStdout::new(server))))
+        }
+        ChildStdio::Null => {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(NUL_DEVICE)?;
+            let handle = file.into_raw_handle();
+            let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+            Ok((
+                duplicate_inheritable(handle.as_raw_handle() as HANDLE, inherited)?,
+                None,
+            ))
+        }
+        ChildStdio::Handle(handle) => Ok((
+            duplicate_inheritable(handle.as_raw_handle() as HANDLE, inherited)?,
+            None,
+        )),
+    }
 }
 
 /// Prepares one stdio slot: returns the child-side inheritable handle plus the parent-side handle
@@ -1551,5 +1668,33 @@ mod tests {
             println!("{line}");
             std::io::Write::flush(&mut stdout).expect("flush echo");
         }
+    }
+
+    #[tokio::test]
+    async fn named_pipe_stdout_streams_bytes_until_eof() {
+        use tokio::io::AsyncReadExt;
+        let owner = TransportOwner::prepare().expect("prepare");
+        let mut spec = ChildSpec::new("cmd.exe");
+        spec.args = vec![
+            OsString::from("/c"),
+            OsString::from("echo hello-named-pipe"),
+        ];
+        spec.stdin = ChildStdio::Null;
+        spec.stdout = ChildStdio::Piped;
+        spec.stderr = ChildStdio::Null;
+        let mut child = owner.spawn(spec).expect("spawn cmd child");
+        let mut stdout = child.take_stdout().expect("named pipe stdout");
+        let mut bytes = Vec::new();
+        tokio::time::timeout(AWAIT_CEILING, stdout.read_to_end(&mut bytes))
+            .await
+            .expect("read_to_end timeout")
+            .expect("read_to_end ok");
+        assert!(bytes.starts_with(b"hello-named-pipe"));
+        let status = tokio::time::timeout(AWAIT_CEILING, child.wait())
+            .await
+            .expect("wait timeout")
+            .expect("wait ok");
+        assert_eq!(status.code(), Some(0));
+        drop(owner);
     }
 }

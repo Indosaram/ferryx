@@ -32,6 +32,14 @@ impl Fixture {
                 Some(root.path().join("config")),
                 Some(root.path().join("auth")),
             );
+            // Attached acknowledges the gateway, not completion of a user's
+            // login shell startup. These Unix input tests need a shell that
+            // reads commands without profiles, prompt hooks, or line editors.
+            let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+            command.args(["-s"]);
+            command.env_remove("ENV");
+            command.env_remove("BASH_ENV");
+            owner.session_service().set_test_shell_command(command);
             (root, owner)
         })
         .await

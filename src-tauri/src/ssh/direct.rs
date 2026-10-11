@@ -299,13 +299,65 @@ pub fn bridge_command(
     }
 }
 
+fn quote_windows_cmd_arg(arg: &str) -> String {
+    let mut quoted = String::from('"');
+    let mut slashes = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => {
+                slashes += 1;
+            }
+            '"' => {
+                quoted.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                quoted.push('"');
+                slashes = 0;
+            }
+            _ => {
+                quoted.extend(std::iter::repeat_n('\\', slashes));
+                quoted.push(ch);
+                slashes = 0;
+            }
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+pub fn windows_bridge_command(
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+) -> Result<String, IpcError> {
+    super::runtime::RemotePlatform::Windows.validate_path(&location.executable)?;
+    super::runtime::RemotePlatform::Windows.validate_path(&location.root)?;
+    // Start the binary without PowerShell's native-command pipeline: bridge frames
+    // must inherit the SSH channel's raw stdio, not be decoded as shell text.
+    let arguments = format!("bridge --stdio --root {}", quote_windows_cmd_arg(&location.root));
+    let script = format!(
+        "$psi = New-Object System.Diagnostics.ProcessStartInfo; \
+         $psi.FileName = {}; $psi.Arguments = {}; $psi.UseShellExecute = $false; \
+         $child = [System.Diagnostics.Process]::Start($psi); $child.WaitForExit(); exit $child.ExitCode",
+        super::runtime::powershell_data(&location.executable),
+        super::runtime::powershell_data(&arguments),
+    );
+    Ok(env.executor.command(&script))
+}
+
 pub fn bridge_plan(
     host: &SshHost,
     env: &super::runtime::RemoteEnvironment,
     location: &super::helper_setup::HelperLocation,
 ) -> Result<ShellCommandPlan, IpcError> {
-    let command = bridge_command(env, location);
-    ssh_plan(host, env.executor.command(&command), false)
+    match env.platform {
+        super::runtime::RemotePlatform::Posix => {
+            let command = bridge_command(env, location);
+            ssh_plan(host, env.executor.command(&command), false)
+        }
+        super::runtime::RemotePlatform::Windows => {
+            let command = windows_bridge_command(env, location)?;
+            ssh_plan(host, command, false)
+        }
+    }
 }
 
 pub(crate) fn spawn_child(
@@ -555,9 +607,21 @@ async fn collect_windows_output(
         .stderr
         .take()
         .ok_or_else(|| IpcError::internal("Missing SSH stderr"))?;
+    let stderr_prefix = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_prefix_reader = stderr_prefix.clone();
     let stderr_read = async move {
         let mut bytes = Vec::new();
-        stderr.take(max_bytes as u64 + 1).read_to_end(&mut bytes).await?;
+        let mut stderr = stderr.take(max_bytes as u64 + 1);
+        let mut chunk = [0u8; 1024];
+        loop {
+            let count = stderr.read(&mut chunk).await?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            let captured_len = bytes.len().min(max_bytes);
+            *stderr_prefix_reader.lock().unwrap() = bytes[..captured_len].to_vec();
+        }
         if bytes.len() > max_bytes {
             return Err(std::io::Error::other(format!("SSH stderr exceeds {max_bytes} bytes")));
         }
@@ -618,13 +682,26 @@ async fn collect_windows_output(
         }
         Err(_) => {
             child.kill().await.map_err(|error| IpcError::new(IpcErrorCode::IoError, format!("Failed to terminate SSH probe: {error}")))?;
-            Err(super::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out"))
+            let stderr = stderr_prefix.lock().unwrap().clone();
+            Err(timeout_error_with_stderr(&stderr))
         }
         Ok(Err(error)) => {
             child.kill().await.map_err(|kill_error| IpcError::new(IpcErrorCode::IoError, format!("Failed to terminate SSH probe: {kill_error}")))?;
             Err(IpcError::new(IpcErrorCode::IoError, format!("SSH probe output failed: {error}")))
         }
     }
+}
+
+fn timeout_error_with_stderr(stderr: &[u8]) -> IpcError {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let text = std::str::from_utf8(stderr).ok();
+    super::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out")
+        .with_details(serde_json::json!({
+            "stage": "transport",
+            "stderr": text,
+            "stderrBase64": STANDARD.encode(stderr),
+            "encoding": if text.is_some() { "utf-8" } else { "unknown" },
+        }))
 }
 
 fn ssh_status_error(status: std::process::ExitStatus, stderr: &[u8]) -> IpcError {

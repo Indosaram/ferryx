@@ -5,6 +5,19 @@ use std::sync::{Arc, OnceLock};
 
 use crate::native_terminal::error::NativeTerminalError;
 
+// Serialize independent instance initialization and final release, not GPU work.
+static INSTANCE_LIFECYCLE: Mutex<()> = Mutex::new(());
+
+struct OwnedInstance(Option<wgpu::Instance>);
+
+impl Drop for OwnedInstance {
+    fn drop(&mut self) {
+        let _guard = INSTANCE_LIFECYCLE.lock();
+        // Drop the value here: automatic field drop would run after the guard unlocks.
+        drop(self.0.take());
+    }
+}
+
 fn opaque_composite_alpha_mode(
     alpha_modes: &[wgpu::CompositeAlphaMode],
 ) -> wgpu::CompositeAlphaMode {
@@ -43,9 +56,14 @@ pub struct GpuContext {
     pub queue: Arc<wgpu::Queue>,
     pub adapter_info: wgpu::AdapterInfo,
     uncaptured_error: Arc<Mutex<Option<String>>>,
+    // Last field: all context-owned handles release before the retained instance.
+    // Cloned contexts retain the same owner until their last release.
+    _owned_instance: Option<Arc<OwnedInstance>>,
 }
 
 impl GpuContext {
+    // Share one process-lifetime instance across production surfaces only.
+    // Independent contexts use separate instances so they do not share one EGL context.
     pub(crate) fn shared_surface_instance() -> wgpu::Instance {
         static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
         INSTANCE.get_or_init(|| {
@@ -63,17 +81,29 @@ impl GpuContext {
 
     /// Initializes a real wgpu device and queue, selecting the primary native backend.
     pub fn new() -> Result<Self, NativeTerminalError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::default(),
-            backend_options: wgpu::BackendOptions::default(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        Self::with_instance(instance)
+        let (instance, owner) = {
+            let _guard = INSTANCE_LIFECYCLE.lock();
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                flags: wgpu::InstanceFlags::default(),
+                backend_options: wgpu::BackendOptions::default(),
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let owner = Arc::new(OwnedInstance(Some(instance.clone())));
+            (instance, owner)
+        };
+        Self::with_owned_instance(Some(owner), instance)
     }
 
     pub(crate) fn with_instance(instance: wgpu::Instance) -> Result<Self, NativeTerminalError> {
+        Self::with_owned_instance(None, instance)
+    }
+
+    fn with_owned_instance(
+        // Arguments drop in reverse order on failure, after local adapter/device handles.
+        owned_instance: Option<Arc<OwnedInstance>>,
+        instance: wgpu::Instance,
+    ) -> Result<Self, NativeTerminalError> {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -119,6 +149,7 @@ impl GpuContext {
             queue: Arc::new(queue),
             adapter_info,
             uncaptured_error,
+            _owned_instance: owned_instance,
         })
     }
 

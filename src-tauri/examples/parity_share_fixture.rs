@@ -1,4 +1,14 @@
-#![cfg(unix)]
+#[cfg(unix)]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    unix_fixture::run().await
+}
+
+#[cfg(not(unix))]
+fn main() {}
+
+#[cfg(unix)]
+mod unix_fixture {
 
 use std::{
     env,
@@ -187,8 +197,7 @@ fn required(name: &str) -> Result<String> {
     env::var(name).with_context(|| format!("missing {name}"))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run() -> Result<()> {
     let root = PathBuf::from(required("FERRYX_QA_FIXTURE_ROOT")?);
     let fixture_path = PathBuf::from(required("FERRYX_QA_FIXTURE_FILE")?);
     fs::create_dir_all(&root)?;
@@ -270,4 +279,5 @@ async fn main() -> Result<()> {
         || !receipt["session"]["readerFinished"].as_bool().unwrap_or(false)
     { bail!("fixture teardown receipt did not prove clean shutdown: {receipt}"); }
     Ok(())
+}
 }

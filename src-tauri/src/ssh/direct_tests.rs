@@ -111,7 +111,11 @@ async fn windows_finite_deadline_kills_and_reaps_exact_child_pid() {
     }).await.unwrap();
     let plan = ShellCommandPlan {
         program: "powershell.exe".into(),
-        args: vec!["-NoProfile".into(), "-Command".into(), "Start-Sleep -Seconds 30".into()],
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 30".into(),
+        ],
     };
     let child = spawn_child_with_stdout(&plan, Stdio::null(), Stdio::from(child_stdout)).unwrap();
     let pid = child.id().expect("spawned child has PID");
@@ -119,9 +123,28 @@ async fn windows_finite_deadline_kills_and_reaps_exact_child_pid() {
     assert!(!process.is_null());
 
     let result = collect_windows_output(child, stdout_file, Duration::from_millis(100), 64, None).await;
-    assert!(result.unwrap_err().message.contains("timed out"));
+    let error = result.unwrap_err();
+    assert!(error.message.contains("timed out"));
+    let details = error.details.expect("timeout details");
+    assert_eq!(details["stage"], "transport");
     assert_eq!(unsafe { WaitForSingleObject(process, 0) }, 0);
     unsafe { CloseHandle(process); }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_probe_timeout_preserves_bounded_stderr_details() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let error = timeout_error_with_stderr(b"probe stderr\n");
+    let details = error.details.unwrap();
+    assert_eq!(details["stage"], "transport");
+    assert_eq!(details["stderr"], "probe stderr\n");
+    assert_eq!(
+        details["stderrBase64"],
+        STANDARD.encode(b"probe stderr\n")
+    );
+    assert_eq!(details["encoding"], "utf-8");
 }
 
 fn host() -> SshHost {
@@ -712,9 +735,35 @@ fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
         .args
         .windows(2)
         .any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
-    let cmd = bridge_command(&env, &location);
-    assert!(cmd.starts_with("& "));
-    assert!(cmd.contains("bridge --stdio --root"));
+    let remote_cmd = plan.args.last().unwrap();
+    assert_eq!(remote_cmd, &windows_bridge_command(&env, &location).unwrap());
+    assert!(remote_cmd.starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "));
+}
+
+#[test]
+fn windows_bridge_command_quotes_spaces_and_metachars() {
+    let location = crate::ssh::helper_setup::HelperLocation {
+        executable: r"C:\Program Files\Ferryx Helper\bin\helper.exe".into(),
+        root: r"C:\Users\QA Person\项目 & workdir\".into(),
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let env = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Pwsh,
+        version: "fixture".into(),
+        home: r"C:\Users\QA Person".into(),
+        temp: r"C:\Temp".into(),
+        git: false,
+    };
+    let cmd = windows_bridge_command(&env, &location).expect("windows_bridge_command");
+    assert!(cmd.starts_with("pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand "));
+    let encoded = cmd.rsplit_once(' ').unwrap().1;
+    let bytes = STANDARD.decode(encoded).unwrap();
+    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let script = String::from_utf16(&utf16).unwrap();
+    assert!(script.contains(&crate::ssh::runtime::powershell_data(&location.executable)));
+    let arguments = format!("bridge --stdio --root {}", quote_windows_cmd_arg(&location.root));
+    assert!(script.contains(&crate::ssh::runtime::powershell_data(&arguments)));
 }
 
 #[cfg(unix)]

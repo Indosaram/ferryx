@@ -2641,10 +2641,14 @@ mod tests {
         tokio::join!(peer, action, clock);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn native_attach_failure_rolls_back_new_session_reservation() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+        // This tests daemon rejection, not elapsed time during native initialization.
+        // A running blocking task inhibits paused-clock auto-advance during socket I/O.
+        let (release_clock, hold_clock) = std::sync::mpsc::channel::<()>();
+        let clock_guard = tokio::task::spawn_blocking(move || hold_clock.recv().unwrap());
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("attach-fail-rollback");
         #[cfg(unix)]
@@ -2662,6 +2666,12 @@ mod tests {
             .unwrap();
 
         let session_id = "test-fail-rollback-session";
+        let state = app.state::<NativeTerminalSurfaceHostState>();
+        // Reservation layout also emits a resize; keep that separate RPC out of this peer.
+        assert!(state.set_pty_resize_sink_if_absent(Arc::new(move |id, cols, rows| {
+            assert_eq!(id, session_id);
+            assert!(cols > 0 && rows > 0);
+        })));
         let tuple = crate::daemon::protocol::PaneAttachTuple {
             backend_session_id: session_id.into(),
             incarnation: Some("inc-1".into()),
@@ -2696,6 +2706,11 @@ mod tests {
 
             // 2. Attach -> return SessionNotFound error
             assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            assert!(matches!(
+                serde_json::from_str::<crate::daemon::DaemonRequest>(&line).unwrap(),
+                crate::daemon::DaemonRequest::Attach { session_id: id, after_sequence: None }
+                    if id == session_id
+            ));
             let err_resp = serde_json::to_string(&crate::daemon::DaemonResponse::Error {
                 code: Some("SESSION_NOT_FOUND".into()),
                 message: "Session not found".into(),
@@ -2705,7 +2720,6 @@ mod tests {
             write_half.flush().await.unwrap();
         };
 
-        let state = app.state::<NativeTerminalSurfaceHostState>();
         let action = async {
             let res = cmd_native_terminal_attach(
                 app.handle().clone(),
@@ -2719,11 +2733,14 @@ mod tests {
                 Some(1000),
             ).await;
             assert!(res.is_err(), "attach must fail when daemon returns error");
+            assert_eq!(res.unwrap_err().code, IpcErrorCode::SessionNotFound);
             assert!(state.session_attempt_generation(session_id).is_none(), "session reservation must be rolled back on attach failure");
             assert!(!state.has_session(session_id), "session must not be leaked in sessions map");
         };
 
         tokio::join!(peer, action);
+        release_clock.send(()).unwrap();
+        clock_guard.await.unwrap();
         state.teardown();
     }
 
