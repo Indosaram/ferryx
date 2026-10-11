@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "xenoci": {
-      "command": "npx",
-      "args": ["-y", "-p", "github:xeno-ci/xenocast", "xenoci-mcp"],
-      "timeout": 600000
-    }
-  }
-}

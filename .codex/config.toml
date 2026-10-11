@@ -1,8 +1,0 @@
-# xenoci MCP server: build this project on a rented XenoCI Mac mini M4.
-# One-time per machine: install the CLI and `xenocast login` (GitHub device link).
-# No tokens live here; the MCP server uses the machine's own xenocast login.
-[mcp_servers.xenoci]
-command = "npx"
-args = ["-y", "-p", "github:xeno-ci/xenocast", "xenoci-mcp"]
-startup_timeout_sec = 60 # first npx download
-tool_timeout_sec = 600 # build with wait: true waits until the build ends
