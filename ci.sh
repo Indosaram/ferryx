@@ -54,7 +54,33 @@ if ! command -v zig >/dev/null 2>&1; then
   echo "$ZIG_SHA256  /tmp/$ZIG_TARBALL" | shasum -a 256 -c -
   tar -xJ -f "/tmp/$ZIG_TARBALL" -C "$HOME/.local/zig" --strip-components 1
   rm -f "/tmp/$ZIG_TARBALL"
-  ln -sf "$HOME/.local/zig/zig" "$HOME/.local/bin/zig"
+fi
+# XenoCI build VMs run behind an egress allowlist (HTTP 403 "Egress Blocked",
+# realm xeno-ci) that blocks deps.files.ghostty.org, so ghostty's zig deps
+# cannot be fetched during the build. A pre-seeded package cache lives at
+# $HOME/ferryx-zig-global-cache (seed it once per rental; see
+# docs/XENOCAST_MACOS_BUILDS.md). This wrapper redirects zig's global cache
+# there; ferryx's build script otherwise uses a per-build OUT_DIR cache that a
+# fresh VM always starts empty.
+if [ -d "$HOME/ferryx-zig-global-cache/p" ] && [ ! -e "$HOME/.local/bin/zig" ]; then
+  cat > "$HOME/.local/bin/zig" <<'WRAP'
+#!/bin/bash
+REAL_ZIG="$HOME/.local/zig/zig"
+SEED_CACHE="$HOME/ferryx-zig-global-cache"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --global-cache-dir) args+=(--global-cache-dir "$SEED_CACHE"); shift 2;;
+    --global-cache-dir=*) args+=(--global-cache-dir "$SEED_CACHE"); shift;;
+    *) args+=("$1"); shift;;
+  esac
+done
+exec "$REAL_ZIG" "${args[@]}"
+WRAP
+  chmod +x "$HOME/.local/bin/zig"
+fi
+if [ ! -d "$HOME/ferryx-zig-global-cache/p" ]; then
+  echo 'WARNING: $HOME/ferryx-zig-global-cache is not seeded; on the XenoCI build VM the ghostty dependency fetch will fail (egress allowlist). Seed it once per rental - see docs/XENOCAST_MACOS_BUILDS.md.'
 fi
 cargo --version && bun --version && zig version
 
