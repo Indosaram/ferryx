@@ -103,6 +103,7 @@ features = [
     "consoleapi",
     "handleapi",
     "fileapi",
+    "winsock2",
     "namedpipeapi",
     "synchapi",
     # Cancellable output reader: OVERLAPPED is declared in minwinbase, and

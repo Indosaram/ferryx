@@ -5,7 +5,7 @@ use anyhow::Error;
 use filedescriptor::{FileDescriptor, Pipe};
 use std::io::Read;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED};
@@ -15,12 +15,27 @@ use winapi::um::synchapi::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitF
 use winapi::um::winbase::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0};
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
+use winapi::um::winsock2::{WSAStartup, WSADATA};
+
+fn ensure_winsock_initialized() -> anyhow::Result<()> {
+    static INITIALIZATION: OnceLock<Result<(), i32>> = OnceLock::new();
+    let result = INITIALIZATION.get_or_init(|| {
+        let mut data = std::mem::MaybeUninit::<WSADATA>::zeroed();
+        let status = unsafe { WSAStartup(0x0202, data.as_mut_ptr()) };
+        if status == 0 { Ok(()) } else { Err(status) }
+    });
+    result
+        .as_ref()
+        .map(|()| ())
+        .map_err(|status| anyhow::anyhow!("WSAStartup failed: {status}"))
+}
 
 #[derive(Default)]
 pub struct ConPtySystem {}
 
 impl PtySystem for ConPtySystem {
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
+        ensure_winsock_initialized()?;
         let stdin = nonblocking_input_pipe()?;
         let stdout = overlapped_output_pipe()?;
         let cancel = ReaderCancel::new()?;

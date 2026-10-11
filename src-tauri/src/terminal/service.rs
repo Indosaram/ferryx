@@ -846,10 +846,13 @@ mod preparation_tests {
     async fn regression_local_pty_create_6_fast_exit_keeps_output_for_the_first_attach() {
         let service = TerminalService::default();
         let root = tempfile::tempdir().unwrap();
-        let mut command = portable_pty::CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+        let mut command = portable_pty::CommandBuilder::new(if cfg!(windows) {
+            std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into())
+        } else {
+            "/bin/sh".into()
+        });
         if cfg!(windows) {
-            command.arg("/c");
-            command.arg("echo quick_exit_output");
+            command.args(["/D", "/Q", "/K"]);
         } else {
             command.arg("-c");
             command.arg("echo quick_exit_output; exit 0");
@@ -862,7 +865,49 @@ mod preparation_tests {
         let (id, mut output_pump) = service
             .spawn_resolved_with_id(uuid::Uuid::new_v4().to_string(), command, 80, 24, context)
             .expect("spawn fast exiting command");
-        // The output pump drops this sender once the PTY output has ended.
+        #[cfg(windows)]
+        {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let (initial_snapshot, mut output) = service
+                .output_hub()
+                .observe_for_test(&id)
+                .expect("observe spawned session output without attaching");
+            let mut accumulated = initial_snapshot;
+            let mut dsr_answers = 0usize;
+            let mut command_sent = false;
+            tokio::time::timeout_at(deadline, async {
+                loop {
+                    while let Some(query_start) = accumulated
+                        .windows(4)
+                        .position(|w| w == b"\x1b[6n")
+                    {
+                        accumulated.drain(..query_start + 4);
+                        dsr_answers += 1;
+                        service.write_input(&id, b"\x1b[1;1R").expect("reply to ConPTY DSR");
+                        if !command_sent {
+                            command_sent = true;
+                            service
+                                .write_input(&id, b"echo quick_exit_ou^tput&exit 0\r")
+                                .expect("run and exit fixture command");
+                        }
+                    }
+                    if accumulated.windows(b"quick_exit_output".len())
+                        .any(|w| w == b"quick_exit_output")
+                    {
+                        break;
+                    }
+                    let chunk = output.recv().await.expect("PTY output broadcast remains open");
+                    accumulated.extend_from_slice(&chunk);
+                }
+                assert!(dsr_answers > 0, "ConPTY did not issue a DSR query");
+                tokio::time::timeout_at(deadline, output_pump.changed())
+                    .await
+                    .expect("the command's output ended within the shared drain bound");
+            })
+            .await
+            .expect("ConPTY handshake, command output, and pump completion within one drain bound");
+        }
+        #[cfg(not(windows))]
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), output_pump.changed())
             .await
             .expect("the command's output ended");

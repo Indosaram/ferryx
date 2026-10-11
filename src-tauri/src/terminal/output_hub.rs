@@ -971,6 +971,21 @@ impl TerminalOutputHub {
         Some((history, rx))
     }
 
+    #[cfg(test)]
+    pub(crate) fn observe_for_test(
+        &self,
+        session_id: &str,
+    ) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let hub = session_hub.read();
+        let rx = hub.raw_sender.subscribe();
+        let history = hub.buffer.snapshot();
+        Some((history, rx))
+    }
+
     pub fn subscribe_with_sequence(
         &self,
         session_id: &str,
