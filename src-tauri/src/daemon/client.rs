@@ -1388,6 +1388,36 @@ impl DaemonClient {
         }
     }
 
+    /// Split preparation registers its workspace over a dedicated connection, so an unrelated
+    /// request queued on the shared general connection cannot consume the split's stage budget.
+    pub async fn register_workspace_until(
+        &self,
+        workspace_id: &str,
+        repo_root: &str,
+        identity: &SplitIdentity,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), IpcError> {
+        match self
+            .split_request_until(
+                DaemonRequest::RegisterWorkspace {
+                    workspace_id: workspace_id.into(),
+                    repo_root: repo_root.into(),
+                },
+                identity,
+                deadline,
+            )
+            .await?
+        {
+            DaemonResponse::RegisterWorkspaceOk => Ok(()),
+            _ => Err(split_transport_error(
+                IpcError::internal("Unexpected register workspace response"),
+                Some(identity),
+                "response",
+                SplitDelivery::Ambiguous,
+            )),
+        }
+    }
+
     pub async fn describe_session_bounded_until(
         &self, session_id: &str, deadline: tokio::time::Instant,
     ) -> Result<DaemonSessionDetails, IpcError> {

@@ -4106,8 +4106,9 @@ pub async fn cmd_terminal_spawn_operation(
                     qa_pinned_shell()
                         .or_else(|| crate::terminal::cached_terminal_preferences().default_shell.clone())))
             })).await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split preparation timed out"))??;
-            tokio::time::timeout_at(deadline, daemon_client.register_workspace(&request.workspace_id, &repo_root))
-                .await.map_err(|_| IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "Split workspace registration timed out"))??;
+            daemon_client
+                .register_workspace_until(&request.workspace_id, &repo_root, &identity, deadline)
+                .await?;
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             eprintln!(
                 "FERRYX_QA_SPLIT_OP_PREPARED: request_id={} origin_epoch={} workspace_id={} cwd={}",
