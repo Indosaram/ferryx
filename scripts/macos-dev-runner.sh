@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 if [[ "$(uname -s)" != "Darwin" || "${1:-}" != "run" ]]; then
     exec cargo "$@"
 fi
@@ -22,9 +26,6 @@ for arg in "$@"; do
 done
 
 cargo "${cargo_args[@]}"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ -d "$ROOT_DIR/src-tauri" ]]; then
     SRC_TAURI_DIR="$ROOT_DIR/src-tauri"

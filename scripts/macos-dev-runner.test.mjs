@@ -70,6 +70,7 @@ source ./scripts/macos-dev-runner.sh run
         new Response(child.stderr).text(),
         child.exited,
       ]);
+      expect(exitCode, stderr).toBe(signingExit);
       const args = (await readFile(join(root, "sign-args"), "utf8")).trim().split("\n");
       const shellRoot = (await readFile(join(root, "shell-root"), "utf8")).trim();
       expect(args).toEqual([
@@ -78,7 +79,6 @@ source ./scripts/macos-dev-runner.sh run
       ]);
       expect((await readFile(join(root, "tool-calls"), "utf8")).trim().split("\n"))
         .toEqual(["uname", "cargo", "build", "codesign"]);
-      expect(exitCode, stderr).toBe(signingExit);
       expect(stdout.includes("APP_LAUNCHED")).toBe(signingExit === 0);
     } finally {
       if (child) {
