@@ -205,15 +205,23 @@ async fn machine_streams_use_original_owner_and_ignore_mirror_focus() {
     // Revocation cancels every upgrade before joining the listener, including on assertion failure.
     for id in ["owner", "other", "mirror", "view"] { state.auth_manager.revoke_device(id); }
     for id in backend.list_sessions() {
-        let pty = backend.get_session(&id).unwrap();
-        backend.close_session(&id).await.unwrap();
-        assert!(pty.is_reaped());
-        eprintln!("A10 cleanup reaped session={id} pid={:?}", pty.pid());
+        let pty = backend.get_session(&id);
+        let pid = pty.as_ref().and_then(|p| p.pid());
+        if pty.is_some() {
+            backend.close_session(&id).await.unwrap();
+        }
+        if let Some(services) = state.machine_services.as_ref() {
+            services.sessions.wait_machine_lifecycle(&id).await.unwrap();
+        }
+        if let Some(pty) = pty {
+            assert!(pty.is_reaped());
+        }
+        eprintln!("A10 cleanup reaped session={id} pid={pid:?}");
     }
     stop.send(()).unwrap();
     tokio::time::timeout(DEADLINE, task).await.unwrap().unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
-    drop(owner); drop(state);
+    drop(backend); drop(owner); drop(state);
     tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
     eprintln!("A10 cleanup listener joined/refused; original PTYs reaped; private root removed");
     if let Err(panic) = result { std::panic::resume_unwind(panic); }
