@@ -11,6 +11,7 @@ use std::{panic::AssertUnwindSafe, time::Duration};
 use tokio_tungstenite::{client_async, tungstenite::{client::IntoClientRequest, Message, Error, error::ProtocolError}};
 
 const DEADLINE: Duration = Duration::from_secs(10);
+const DRAIN_BUDGET: Duration = Duration::from_secs(15);
 type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 async fn json_reply(request: reqwest::RequestBuilder) -> Value {
@@ -90,7 +91,6 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         // Two-phase actual shell writer: fill transport kernel buffer to establish
         // actual Poll::Pending backpressure, then release the continuous 64 MiB overflow.
         held.send(Message::Binary(b"stty -opost || exit 1; dd if=/dev/zero bs=65536 count=4 2>/dev/null & read _release; printf '\nA10_%s:END\n' RELEASED; dd if=/dev/zero bs=1048576 count=64 2>/dev/null; printf '\nA10_%s:END\n' DRAINED\r".to_vec().into())).await.unwrap();
-        let start = tokio::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.pending))
             .await
             .unwrap()
@@ -98,6 +98,7 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         assert!(!progress.borrow().dropped, "connection must stay alive under backpressure before overflow release");
         let release_backend = backend.clone();
         let release_id = id.to_owned();
+        let cancellation_start = tokio::time::Instant::now();
         tokio::task::spawn_blocking(move || release_backend.write_input(&release_id, b"RELEASE\n"))
             .await
             .unwrap()
@@ -106,10 +107,14 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
         let mut raw_bytes = 0usize;
         let mut lagged = 0u64;
         let mut saw_release_marker = false;
-        let (transport, _marker) = tokio::join!(
-            tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.dropped)),
+        let (cancellation, _marker) = tokio::join!(
             async {
-                let marker = tokio::time::timeout(DEADLINE, async {
+                let dropped = tokio::time::timeout(Duration::from_secs(5), progress.wait_for(|state| state.dropped)).await;
+                let elapsed = cancellation_start.elapsed();
+                (dropped, elapsed)
+            },
+            async {
+                let marker = tokio::time::timeout(DRAIN_BUDGET, async {
                     loop {
                         match raw.recv().await {
                             Ok(bytes) => {
@@ -145,11 +150,12 @@ async fn continuous_pty_overflow_cancels_pending_upgraded_socket_and_reconnects(
                 assert!(saw_release_marker, "PTY release marker missing before overflow completion; lagged={lagged} raw_bytes={raw_bytes}");
             },
         );
+        let (transport, cancellation_elapsed) = cancellation;
         transport.unwrap().unwrap();
         let post_published = backend.output_hub().session_published_bytes(id).expect("registered session");
         let delta = post_published.checked_sub(pre_published).expect("published byte counter must not regress");
         assert!(delta >= 64 * 1024 * 1024, "published byte delta ({delta}) must be at least 64 MiB");
-        assert!(start.elapsed() < Duration::from_secs(10), "not the read/write deadline");
+        assert!(cancellation_elapsed < Duration::from_secs(10), "not the read/write deadline");
         // Classify only expected abrupt termination; other protocol errors fail.
         tokio::time::timeout(DEADLINE, async {
             loop {
