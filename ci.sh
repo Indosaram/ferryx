@@ -32,8 +32,28 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 if ! command -v zig >/dev/null 2>&1; then
   mkdir -p "$HOME/.local/zig" "$HOME/.local/bin"
-  curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz \
-    | tar -xJ -C "$HOME/.local/zig" --strip-components 1
+  # ziglang.org is unreachable from the XenoCI build VM (403/timeout on both
+  # probes), so fall back to the official community mirrors
+  # (ziglang.org/download/community-mirrors.txt). The tarball is pinned to the
+  # official 0.16.0 SHA256 taken from ziglang.org - a bad mirror fails the check.
+  ZIG_SHA256=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+  ZIG_TARBALL=zig-aarch64-macos-0.16.0.tar.xz
+  for base in \
+    https://ziglang.org/download/0.16.0 \
+    https://pkg.hexops.org/zig \
+    https://zigmirror.hryx.net/zig \
+    https://zig.linus.dev/zig \
+    https://zig.squirl.dev \
+    https://ziglang.freetls.fastly.net \
+    https://zig.chainsafe.dev ; do
+    echo "zig: trying $base/$ZIG_TARBALL"
+    if curl -fsSL --max-time 180 -o "/tmp/$ZIG_TARBALL" "$base/$ZIG_TARBALL" 2>/dev/null; then
+      break
+    fi
+  done
+  echo "$ZIG_SHA256  /tmp/$ZIG_TARBALL" | shasum -a 256 -c -
+  tar -xJ -f "/tmp/$ZIG_TARBALL" -C "$HOME/.local/zig" --strip-components 1
+  rm -f "/tmp/$ZIG_TARBALL"
   ln -sf "$HOME/.local/zig/zig" "$HOME/.local/bin/zig"
 fi
 cargo --version && bun --version && zig version
