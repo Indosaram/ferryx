@@ -1771,7 +1771,7 @@ impl DaemonSessionService {
         fingerprint: SpawnRequestFingerprint,
         #[cfg(test)] helper_home: Option<String>,
     ) -> Result<String, SpawnError> {
-        let environment = crate::ssh::runtime::detect(&host)
+        let environment = crate::ssh::runtime::detect_for(&host, project.platform)
             .await
             .map_err(SpawnError::Structured)?;
         if project

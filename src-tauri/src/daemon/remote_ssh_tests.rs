@@ -231,7 +231,7 @@ async fn direct_ssh_real_transport_registration_and_pty() {
         );
     }
     let config = dir.path().join("sshd_config");
-    std::fs::write(&config, format!("HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\n",
+    std::fs::write(&config, format!("HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\nUseDNS no\n",
         dir.path().join("host_key").display(), dir.path().join("user_key.pub").display())).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -390,7 +390,12 @@ impl Drop for OwnedTestHelper {
 }
 
 async fn install_test_helper(host: &SshHost, home: &Path) -> OwnedTestHelper {
-    let mut environment = crate::ssh::runtime::detect(host).await.unwrap();
+    let mut environment = crate::ssh::runtime::detect_for(
+        host,
+        Some(crate::ssh::runtime::RemotePlatform::Posix),
+    )
+    .await
+    .unwrap();
     environment.home = home.to_string_lossy().into_owned();
     let location = crate::ssh::helper_setup::qualified_location(
         host,
@@ -969,7 +974,7 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_automatically() {
         );
     }
     let config = dir.path().join("sshd_config");
-    std::fs::write(&config, format!("HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\n",
+    std::fs::write(&config, format!("HostKey {}\nAuthorizedKeysFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel ERROR\nUseDNS no\n",
         dir.path().join("host_key").display(), dir.path().join("user_key.pub").display())).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1116,7 +1121,12 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
         Some(root.join("gateway.json")),
         Some(root.join("auth.json")),
     );
-    let mut environment = crate::ssh::runtime::detect(&host).await.unwrap();
+    let mut environment = crate::ssh::runtime::detect_for(
+        &host,
+        Some(crate::ssh::runtime::RemotePlatform::Posix),
+    )
+    .await
+    .unwrap();
     environment.home = root.to_string_lossy().into_owned();
     let qualified = crate::ssh::helper_setup::qualified_location(
         &host,
