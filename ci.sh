@@ -63,6 +63,10 @@ fi
 # there; ferryx's build script otherwise uses a per-build OUT_DIR cache that a
 # fresh VM always starts empty.
 if [ -d "$HOME/ferryx-zig-global-cache/p" ]; then
+  # rm first: if ~/.local/bin/zig is a symlink into ~/.local/zig (the install
+  # layout), writing through it would truncate the real zig binary and the
+  # wrapper would exec itself forever.
+  rm -f "$HOME/.local/bin/zig"
   cat > "$HOME/.local/bin/zig" <<'WRAP'
 #!/bin/bash
 REAL_ZIG="$HOME/.local/zig/zig"
