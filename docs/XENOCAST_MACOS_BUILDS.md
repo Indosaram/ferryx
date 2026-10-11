@@ -78,7 +78,10 @@ ghostty commit's build.zig.zon):
 3. Rerun the normal build. ci.sh detects the cache and installs the wrapper.
 
 If the rental expires, the cache dies with the VM - reseed on the new rental
-the same way.
+the same way. The same applies to a VM reset (`xenocast reset` without
+`--keep-cache`) and to platform reprovisioning: a wedged build whose VM comes
+back with a fresh home directory needs the full reseed (zig + cache). One such
+reprovision was observed on 2026-10-11 after cancelling a hung build.
 
 ## Caveats
 
