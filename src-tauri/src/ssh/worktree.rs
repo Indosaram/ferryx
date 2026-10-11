@@ -333,11 +333,20 @@ pub async fn list_remote(
     let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
     let script = worktree_list_script(environment.platform, repo_root, &marker);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
-    let output = direct::bounded_output(&plan, Duration::from_secs(30))
+    list_output(&plan, &marker).await
+}
+
+async fn list_output(
+    plan: &crate::terminal::shell::ShellCommandPlan,
+    marker: &str,
+) -> Result<Vec<RemoteWorktree>, IpcError> {
+    // A complete porcelain inventory grows with the number and path length of worktrees;
+    // it is not a small probe report. Keep a bounded 8 MiB budget without truncating entries.
+    let output = direct::bounded_output_with_limit(plan, Duration::from_secs(30), 8 * 1024 * 1024)
         .await
         .map_err(|err| tag_error(err, "worktree-list"))?;
     let fields =
-        parse_fields(&output, &marker, 1).map_err(|err| tag_error(err, "worktree-list"))?;
+        parse_fields(&output, marker, 1).map_err(|err| tag_error(err, "worktree-list"))?;
     Ok(parse_worktree_porcelain(fields[0]))
 }
 
@@ -400,6 +409,25 @@ pub async fn remove_remote(
 mod tests {
     use super::*;
     use crate::worktree::manager::WorktreeManager;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_listing_larger_than_probe_limit_is_complete() {
+        let marker = "FERRYX_WT_LIST_LARGE";
+        let script = format!(
+            "printf '{marker}\\000'; i=0; while [ $i -lt 300 ]; do printf 'worktree /srv/repo/worktree-%s\\nHEAD 0123456789012345678901234567890123456789\\nbranch refs/heads/branch-%s\\n\\n' \"$i\" \"$i\"; i=$((i+1)); done; printf '\\000'"
+        );
+        let plan = crate::terminal::shell::ShellCommandPlan {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script],
+        };
+
+        let entries = list_output(&plan, marker).await.expect("complete listing");
+
+        assert_eq!(entries.len(), 300);
+        assert_eq!(entries[299].path, "/srv/repo/worktree-299");
+        assert_eq!(entries[299].branch.as_deref(), Some("branch-299"));
+    }
 
     #[test]
     fn red_parse_porcelain_entries() {
