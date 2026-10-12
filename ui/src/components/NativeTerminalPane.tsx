@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { cn } from "../lib/cn";
 import { matchesAttachTuple } from "../lib/localSplitContract";
 import { persistNativeBinding } from "../lib/localSplitLifecycle";
-import type { PaneAttachTuple } from "../lib/types";
+import type { PaneAttachTuple, PanePresentationReceipt } from "../lib/types";
 import type { TerminalActivity } from "../lib/activity";
 import {
   attachNativeTerminalLifecycle,
@@ -696,6 +696,43 @@ export function NativeTerminalPane({
       : null;
     return () => { presentationIdentityRef.current = null; };
   }, [bindingKey, paneIdentity, surfaceSessionId, session?.incarnation, session?.daemonEpoch]);
+
+  // set_bounds stops waiting for the GPU after its deadline and answers `renderDeferred`,
+  // which arms nothing. The frame still completes later and the backend announces it with
+  // this receipt; without consuming it the pane keeps its opaque cover over a live surface
+  // until some unrelated click re-sends bounds.
+  useEffect(() => {
+    if (!isTauri() || !targetSessionId) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<PanePresentationReceipt>("pane_presentation_receipt", (event) => {
+      const tuple = event.payload?.attachTuple;
+      if (disposed || event.payload?.presented !== true || !tuple || tuple.backendSessionId !== targetSessionId) return;
+      const durable = getDurableNativeBinding(targetSessionId);
+      const identity = presentationIdentityRef.current;
+      if (!durable || !matchesAttachTuple(durable, tuple) || !identity ||
+          identity.paneIdentity !== tuple.paneIdentity ||
+          identity.backendSessionId !== tuple.backendSessionId ||
+          identity.bindingKey !== tuple.bindingKey) return;
+      setPresentation((current) =>
+        current?.backendSessionId === tuple.backendSessionId && current.paneIdentity === tuple.paneIdentity &&
+        current.bindingKey === tuple.bindingKey
+          ? current
+          : { paneIdentity: tuple.paneIdentity, backendSessionId: tuple.backendSessionId, bindingKey: tuple.bindingKey },
+      );
+      emitNativeTerminalPresentation(tuple);
+      presentNativeTerminalLifecycle(targetSessionId);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error: unknown) => {
+      switchDebug("terminal.surface.presentation.listen.error", { backendSessionId: targetSessionId, error: String(error) });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [targetSessionId]);
 
   const splitAttemptRef = useRef(splitAttempt);
   useLayoutEffect(() => {

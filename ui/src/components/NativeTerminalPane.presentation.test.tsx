@@ -8,6 +8,7 @@ import * as shortcuts from "../lib/shortcuts";
 
 const bridge = vi.hoisted(() => ({
   invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(),
+  listeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -31,7 +32,12 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onDragDropEvent: async () => () => undefined }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: async () => () => undefined,
+  listen: async (name: string, handler: (event: { payload: unknown }) => void) => {
+    const handlers = bridge.listeners.get(name) ?? new Set();
+    handlers.add(handler);
+    bridge.listeners.set(name, handlers);
+    return () => { handlers.delete(handler); };
+  },
 }));
 vi.mock("../lib/tauri", async (original) => ({
   ...await original<typeof import("../lib/tauri")>(),
@@ -68,6 +74,7 @@ function commands(name: string) {
 
 beforeEach(() => {
   persistedBindings.clear();
+  bridge.listeners.clear();
   vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockReturnValue(new DOMRect(10, 20, 800, 600));
@@ -383,6 +390,32 @@ describe("native terminal presentation retention", () => {
     expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
     expect(commands("cmd_native_terminal_send_input")).toHaveLength(1);
     expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("uncovers a pane whose first frame finishes after set_bounds gave up waiting", async () => {
+    // Given: the GPU frame outlives the set_bounds wait, so the receipt is only deferred.
+    bridge.invoke.mockImplementation(async (command) =>
+      command === "cmd_native_terminal_set_bounds" ? { ...PRESENTED, presented: false, renderDeferred: true } : undefined,
+    );
+    const view = render(<NativeTerminalPane session={session()} />);
+    await act(async () => {});
+    const pane = view.getByTestId("native-terminal-pane");
+    expect(pane).toHaveAttribute("data-native-terminal-presented", "false");
+    const tuple = commands("cmd_native_terminal_set_bounds")[0][1]?.attachTuple as Record<string, unknown>;
+    const emit = (attachTuple: Record<string, unknown>) => {
+      for (const handler of bridge.listeners.get("pane_presentation_receipt") ?? []) {
+        handler({ payload: { attachTuple, presented: true } });
+      }
+    };
+
+    // When: a receipt for an older attempt arrives, then the frame for the live binding completes.
+    await act(async () => { emit({ ...tuple, attemptGeneration: Number(tuple.attemptGeneration) - 1 }); });
+    expect(pane).toHaveAttribute("data-native-terminal-presented", "false");
+    await act(async () => { emit(tuple); });
+
+    // Then: only the live binding's completion lifts the opaque cover, with no click or resize.
+    expect(pane).toHaveAttribute("data-native-terminal-presented", "true");
+    expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
   });
 
   it("does not attach a cold exited pane and leaves an opaque fallback", async () => {
