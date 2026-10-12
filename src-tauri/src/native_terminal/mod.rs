@@ -54,7 +54,6 @@ mod terminal;
 pub mod thread_ownership;
 mod url;
 mod viewport;
-mod vt_format;
 #[cfg(feature = "native-terminal")]
 pub mod wheel;
 
