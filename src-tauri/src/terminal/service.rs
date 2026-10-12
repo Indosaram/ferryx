@@ -407,7 +407,7 @@ impl TerminalService {
         }
 
         self.output_hub
-            .subscribe_with_sequence_ranges(session_id, after_sequence)
+            .subscribe_with_screen_mirror(session_id, after_sequence)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
     }
 

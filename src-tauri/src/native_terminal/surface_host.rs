@@ -2344,6 +2344,20 @@ pub struct ReplayRequestToken {
     pub last_sequence: Option<u64>,
     pub attempt_generation: Option<u64>,
     pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+    /// PTY lifetime whose output the resident grid holds, captured before this attach rebinds.
+    pub resident_incarnation: Option<String>,
+}
+
+impl ReplayRequestToken {
+    /// True when the attach rebinds the same PTY lifetime the resident grid was built from.
+    ///
+    /// A rolling handover hands the PTY and its sequence space to a successor daemon with a new
+    /// epoch. The resident grid is still exact, so a continuation must not reset it: resetting
+    /// would replay a ring that starts mid-frame and lose everything above the first cursor-up.
+    pub fn continues_pty_lifetime(&self) -> bool {
+        let incoming = self.attach_tuple.as_ref().and_then(|tuple| tuple.incarnation.as_ref());
+        matches!((self.resident_incarnation.as_ref(), incoming), (Some(resident), Some(incoming)) if resident == incoming)
+    }
 }
 
 fn pane_liveness_tuple_matches(
@@ -2564,6 +2578,85 @@ mod pane_liveness_native_binding_tests {
         foreign.incarnation = Some("foreign-lifetime".into());
         assert!(state.begin_replay_request_with_tuple(&new.backend_session_id, Some(foreign)).is_none());
         assert_eq!(state.session_attach_tuple(&new.backend_session_id), Some(new));
+        state.teardown();
+    }
+
+    fn visible_text(state: &super::NativeTerminalSurfaceHostState, session_id: &str) -> Vec<String> {
+        let snapshot = state.snapshot_for_session(session_id).unwrap().unwrap();
+        (0..24).map(|row| snapshot.row_text(row).trim_end().to_string()).collect()
+    }
+
+    fn resident_offer(
+        session_id: &str,
+        epoch: u64,
+        start: u64,
+        end: u64,
+        history: &'static [u8],
+    ) -> (crate::daemon::DaemonAttachment, tokio::sync::mpsc::Sender<crate::daemon::DaemonStreamMessage<'static>>) {
+        let (mut offer, output) = attachment(session_id);
+        offer.epoch = epoch;
+        offer.start_sequence = Some(start);
+        offer.end_sequence = Some(end);
+        offer.history = bytes::Bytes::from_static(history);
+        (offer, output)
+    }
+
+    #[tokio::test]
+    async fn handover_rebind_of_same_pty_lifetime_keeps_resident_grid() {
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let old = tuple();
+        state.attach_test_session_for_liveness(&old.backend_session_id, 7, None).unwrap();
+        let token = state.begin_replay_request_with_tuple(&old.backend_session_id, Some(old.clone())).unwrap();
+        let (offer, _first) = resident_offer(&old.backend_session_id, 7, 1, 10, b"top line\r\nmiddle line\r\n");
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            &old.backend_session_id, offer, None, None, Some(token),
+        ).unwrap();
+
+        // The successor daemon serves the same PTY under a new epoch; its tail starts mid-frame
+        // with a cursor-up that only lands correctly on top of the resident grid.
+        let mut new = old.clone();
+        new.daemon_epoch = "8".into();
+        new.attempt_generation += 1;
+        let token = state.begin_replay_request_with_tuple(&new.backend_session_id, Some(new.clone())).unwrap();
+        assert_eq!(token.last_sequence, Some(10));
+        assert!(token.continues_pty_lifetime());
+        let (offer, _second) = resident_offer(&new.backend_session_id, 8, 11, 12, b"\x1b[1A\rrewritten\x1b[K");
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            &new.backend_session_id, offer, None, None, Some(token),
+        ).unwrap();
+
+        let rows = visible_text(&state, &new.backend_session_id);
+        assert_eq!(&rows[..2], ["top line", "rewritten"], "resident grid must survive a handover rebind");
+        assert_eq!(state.sessions.lock()[&new.backend_session_id].last_sequence, Some(12));
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn new_pty_lifetime_under_new_epoch_rebuilds_from_offer() {
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let old = tuple();
+        state.attach_test_session_for_liveness(&old.backend_session_id, 7, None).unwrap();
+        let token = state.begin_replay_request_with_tuple(&old.backend_session_id, Some(old.clone())).unwrap();
+        let (offer, _first) = resident_offer(&old.backend_session_id, 7, 1, 10, b"stale output\r\n");
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            &old.backend_session_id, offer, None, None, Some(token),
+        ).unwrap();
+        state.sessions.lock().get_mut(&old.backend_session_id).unwrap().incarnation = Some("previous-lifetime".into());
+
+        let mut new = old.clone();
+        new.daemon_epoch = "8".into();
+        new.attempt_generation += 1;
+        let token = state.begin_replay_request_with_tuple(&new.backend_session_id, Some(new.clone())).unwrap();
+        assert!(!token.continues_pty_lifetime());
+        let (offer, _second) = resident_offer(&new.backend_session_id, 8, 1, 3, b"fresh output");
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            &new.backend_session_id, offer, None, None, Some(token),
+        ).unwrap();
+
+        let rows = visible_text(&state, &new.backend_session_id);
+        assert_eq!(rows[0], "fresh output");
+        assert!(rows.iter().all(|row| !row.contains("stale output")));
+        assert_eq!(state.sessions.lock()[&new.backend_session_id].last_sequence, Some(3));
         state.teardown();
     }
 
@@ -3573,8 +3666,12 @@ impl NativeTerminalSurfaceHostState {
                 // the generation under this same lock fences those late writes out.
                 session.pump_generation = session.pump_generation.wrapping_add(1);
                 let epoch_changed = session.daemon_epoch != attachment.epoch;
+                // A handover keeps the PTY and its sequence space under a new epoch; only a new
+                // PTY lifetime invalidates the resident grid and its cursor.
+                let lifetime_changed =
+                    epoch_changed && !token.as_ref().is_some_and(ReplayRequestToken::continues_pty_lifetime);
                 session.daemon_epoch = attachment.epoch;
-                let verdict = if is_fresh_startup || epoch_changed {
+                let verdict = if is_fresh_startup || lifetime_changed {
                     ReplayVerdict::Rebuild
                 } else {
                     classify_replay(
@@ -3641,7 +3738,7 @@ impl NativeTerminalSurfaceHostState {
                 // the grid already applied; neither may rewind the replay cursor. A new epoch
                 // discards the old cursor outright, including when it carries no end of its own:
                 // keeping a number from a retired counter would fence out the new epoch's output.
-                session.last_sequence = if epoch_changed {
+                session.last_sequence = if lifetime_changed {
                     attachment.end_sequence
                 } else {
                     match (session.last_sequence, attachment.end_sequence) {
@@ -4690,6 +4787,7 @@ impl NativeTerminalSurfaceHostState {
         if tuple.is_none() && session.active_attach_tuple.is_some() {
             return None;
         }
+        let resident_incarnation = session.incarnation.clone();
         if let Some(ref tuple) = tuple {
             session.active_attach_tuple = Some(tuple.clone());
             session.attempt_generation = tuple.attempt_generation;
@@ -4714,6 +4812,7 @@ impl NativeTerminalSurfaceHostState {
             last_sequence: session.last_sequence,
             attempt_generation: attempt_gen,
             attach_tuple: tuple,
+            resident_incarnation,
         })
     }
 

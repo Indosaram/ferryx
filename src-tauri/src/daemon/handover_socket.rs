@@ -500,6 +500,7 @@ mod tests {
             replay_gap: None,
             transport_owner: false,
             retained_state: None,
+            screen_seed: None,
         };
 
         let snapshot = crate::terminal::session::PtySessionSnapshot {

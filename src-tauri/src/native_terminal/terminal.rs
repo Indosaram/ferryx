@@ -374,6 +374,18 @@ impl NativeTerminal {
     ) -> Result<Option<String>, NativeTerminalError> {
         selection::hyperlink_uri_at(self.handle, col, row)
     }
+
+    /// VT bytes that rebuild this terminal's active screen and its scrollback in a fresh parser of
+    /// the same size, aligned row for row so later output lands where it does here.
+    pub fn reconstruction_bytes(&self) -> Result<Vec<u8>, NativeTerminalError> {
+        super::vt_format::reconstruction_bytes(self.handle)
+    }
+
+    /// Plain text of one grid row in screen coordinates (scrollback first).
+    pub fn screen_row_text(&self, row: usize) -> Result<String, NativeTerminalError> {
+        let row = u32::try_from(row).map_err(|_| NativeTerminalError::LimitExceeded)?;
+        selection::screen_row_text(self.handle, row)
+    }
 }
 
 impl TerminalEngine for NativeTerminal {

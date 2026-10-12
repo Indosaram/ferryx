@@ -217,6 +217,20 @@ pub fn selection_text(
     format_selection(handle, None, true)
 }
 
+/// Plain text of one grid row in screen coordinates (scrollback first), trailing blanks trimmed.
+pub fn screen_row_text(
+    handle: NonNull<GhosttyTerminalImpl>,
+    row: u32,
+) -> Result<String, NativeTerminalError> {
+    let cols = super::queries::query_cols(handle)?;
+    let selection = GhosttySelection {
+        start: screen_ref(handle, 0, row)?,
+        end: screen_ref(handle, cols.saturating_sub(1), row)?,
+        ..GhosttySelection::default()
+    };
+    Ok(format_selection(handle, Some(&selection), true)?.unwrap_or_default())
+}
+
 /// Screen-coordinate text of the logical (soft-wrap aware) line containing `grid_ref`,
 /// paired with the screen cell each character came from.
 ///

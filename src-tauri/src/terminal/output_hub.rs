@@ -123,6 +123,10 @@ pub struct SessionHubSnapshot {
     /// its chunk was evicted from the ring).
     #[serde(default)]
     pub retained_state: Option<vt_state::TerminalStatePrelude>,
+    /// The predecessor's mirrored screen, so a successor answers full attaches with the same
+    /// screen instead of re-deriving it from a ring that starts mid-stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_seed: Option<super::screen_mirror::ScreenSeed>,
 }
 
 impl SessionHubSnapshot {
@@ -731,6 +735,9 @@ pub struct SessionHub {
     /// late first attach still sees the output (see `end_session`).
     pub(crate) ended: bool,
     pub(crate) published_bytes: u64,
+    /// Headless parser fed with every published chunk. `None` only when the parser could not be
+    /// created, in which case full attaches fall back to retained replay.
+    pub(crate) screen: Option<parking_lot::Mutex<super::screen_mirror::ScreenMirror>>,
 }
 
 impl SessionHub {
@@ -744,7 +751,26 @@ impl SessionHub {
             replay_gap: self.replay_gap.clone(),
             transport_owner: false,
             retained_state: Some(self.buffer.retained.state()),
+            screen_seed: self
+                .screen_seed()
+                .filter(|seed| seed.bytes.len() <= super::screen_mirror::MAX_HANDOVER_SEED_BYTES),
         }
+    }
+
+    /// The mirrored screen, when it can stand in for retained replay.
+    ///
+    /// Two cases keep retained replay: an alternate screen (the formatter serializes only the
+    /// active screen, so the primary screen's history would be lost) and retained inline images
+    /// (the formatter carries no image data).
+    fn screen_seed(&self) -> Option<super::screen_mirror::ScreenSeed> {
+        if self.buffer.retained_image_bytes() > 0 {
+            return None;
+        }
+        let screen = self.screen.as_ref()?.lock();
+        if screen.is_alternate_screen() {
+            return None;
+        }
+        screen.seed()
     }
 
     pub fn buffer(&self) -> &BoundedBuffer {
@@ -828,6 +854,7 @@ impl TerminalOutputHub {
             subscribed: false,
             ended: false,
             published_bytes: 0,
+            screen: super::screen_mirror::ScreenMirror::new(80, 24).map(parking_lot::Mutex::new),
         };
         self.sessions
             .write()
@@ -884,6 +911,9 @@ impl TerminalOutputHub {
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
+        if let Some(screen) = hub.screen.as_ref() {
+            screen.lock().feed(&chunk.bytes);
+        }
         hub.replay_gap = None;
         hub.published_bytes = hub
             .published_bytes
@@ -927,6 +957,9 @@ impl TerminalOutputHub {
                 cols,
                 rows,
             });
+            if let Some(screen) = hub.screen.as_ref() {
+                screen.lock().resize(cols, rows);
+            }
         }
     }
 
@@ -949,6 +982,9 @@ impl TerminalOutputHub {
             cols,
             rows,
         });
+        if let Some(screen) = hub.screen.as_ref() {
+            screen.lock().resize(cols, rows);
+        }
         Some(sequence)
     }
 
@@ -1024,7 +1060,6 @@ impl TerminalOutputHub {
                 after_sequence.is_some_and(|after| after < gap.available_from_sequence - 1)
             })
         });
-
         let snapshot = AttachmentSnapshot {
             session_id: session_id.to_string(),
             history_start_sequence,
@@ -1043,6 +1078,33 @@ impl TerminalOutputHub {
             snapshot,
             receiver: rx,
         }, history_segments))
+    }
+
+    /// Like [`Self::subscribe_with_sequence_ranges`] but substitutes the mirrored screen for
+    /// raw bytes when the retained replay starts mid-stream (eviction happened).
+    pub(crate) fn subscribe_with_screen_mirror(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Option<(SessionAttachment, Vec<HistoryRange>)> {
+        let (mut attachment, mut ranges) =
+            self.subscribe_with_sequence_ranges(session_id, after_sequence)?;
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        let retained_lost_bytes = hub.buffer.retained_start_sequence().is_some_and(|seq| seq > 1);
+        let is_full_replay = after_sequence.is_none() || attachment.snapshot.gap.is_some();
+        if is_full_replay && retained_lost_bytes {
+            if let Some(seed) = hub.screen_seed() {
+                ranges = vec![HistoryRange {
+                    cols: Some(seed.cols),
+                    rows: Some(seed.rows),
+                    start: 0,
+                    end: seed.bytes.len(),
+                }];
+                attachment.snapshot.history = seed.bytes;
+            }
+        }
+        Some((attachment, ranges))
     }
 
     pub fn remove_session(&self, session_id: &str) {
@@ -1152,6 +1214,22 @@ impl TerminalOutputHub {
         );
 
         let is_transport_owner = snapshot.transport_owner;
+        // The predecessor's mirrored screen is the authoritative starting point; without one the
+        // mirror is rebuilt from the retained bytes, as good as a raw replay and no worse.
+        let screen = match snapshot.screen_seed.as_ref() {
+            Some(seed) => super::screen_mirror::ScreenMirror::from_seed(seed),
+            None => {
+                let (cols, rows) = snapshot
+                    .resize_ledger
+                    .last()
+                    .map(|point| (point.cols, point.rows))
+                    .unwrap_or((80, 24));
+                super::screen_mirror::ScreenMirror::new(cols, rows).map(|mut mirror| {
+                    mirror.feed(&buffer.retained.replay());
+                    mirror
+                })
+            }
+        };
         let hub = SessionHub {
             machine_senders: Vec::new(),
             buffer,
@@ -1162,6 +1240,7 @@ impl TerminalOutputHub {
             subscribed: false,
             ended: false,
             published_bytes: 0,
+            screen: screen.map(parking_lot::Mutex::new),
         };
 
         self.sessions
@@ -2050,6 +2129,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_zero_next.validate(),
@@ -2071,6 +2151,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_zero_chunk_seq.validate(),
@@ -2092,6 +2173,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_chunk_seq_exceeds.validate(),
@@ -2121,6 +2203,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_non_monotonic.validate(),
@@ -2141,6 +2224,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_resize_exceeds.validate(),
@@ -2168,6 +2252,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_resize_unordered.validate(),
@@ -2189,6 +2274,7 @@ mod tests {
           replay_gap: None,
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_bytes_exceed.validate(),
@@ -2211,6 +2297,7 @@ mod tests {
           }),
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_invalid_gap.validate(),
@@ -2233,6 +2320,7 @@ mod tests {
           }),
           transport_owner: false,
           retained_state: None,
+          screen_seed: None,
         };
         assert_eq!(
             snap_gap_future.validate(),

@@ -276,6 +276,52 @@ pub struct GhosttyTerminalSelectionFormatOptions {
     pub selection: *const GhosttySelection,
 }
 
+/// Opaque foreign formatter handle matching `include/ghostty/vt/types.h`.
+#[repr(C)]
+pub struct GhosttyFormatterImpl {
+    _private: [u8; 0],
+}
+pub type GhosttyFormatter = *mut GhosttyFormatterImpl;
+
+/// Screen-level extras matching `GhosttyFormatterScreenExtra` in `include/ghostty/vt/formatter.h`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GhosttyFormatterScreenExtra {
+    pub size: usize,
+    pub cursor: bool,
+    pub style: bool,
+    pub hyperlink: bool,
+    pub protection: bool,
+    pub kitty_keyboard: bool,
+    pub charsets: bool,
+}
+
+/// Terminal-level extras matching `GhosttyFormatterTerminalExtra` in `include/ghostty/vt/formatter.h`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GhosttyFormatterTerminalExtra {
+    pub size: usize,
+    pub palette: bool,
+    pub modes: bool,
+    pub scrolling_region: bool,
+    pub tabstops: bool,
+    pub pwd: bool,
+    pub keyboard: bool,
+    pub screen: GhosttyFormatterScreenExtra,
+}
+
+/// Formatter options matching `GhosttyFormatterTerminalOptions` in `include/ghostty/vt/formatter.h`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GhosttyFormatterTerminalOptions {
+    pub size: usize,
+    pub emit: c_int,
+    pub unwrap: bool,
+    pub trim: bool,
+    pub extra: GhosttyFormatterTerminalExtra,
+    pub selection: *const GhosttySelection,
+}
+
 /// Mode query configuration matching `include/ghostty/vt/terminal.h`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]

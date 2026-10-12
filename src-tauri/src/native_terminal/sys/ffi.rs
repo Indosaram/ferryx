@@ -3,7 +3,8 @@
 use std::ffi::{c_int, c_void};
 
 use super::types::{
-    GhosttyAllocator, GhosttyCell, GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
+    GhosttyAllocator, GhosttyCell, GhosttyFormatter, GhosttyFormatterTerminalOptions,
+    GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
     GhosttyMouseEncoder, GhosttyMouseEvent, GhosttyMousePosition, GhosttyPoint,
     GhosttyPointCoordinate, GhosttyReader, GhosttyRenderState, GhosttyRenderStateRowCells,
     GhosttyRenderStateRowIterator, GhosttySelection, GhosttySelectionGesture,
@@ -21,6 +22,19 @@ extern "C" {
     ) -> c_int;
 
     pub fn ghostty_terminal_free(terminal: GhosttyTerminal);
+    pub fn ghostty_formatter_terminal_new(
+        allocator: *const GhosttyAllocator,
+        formatter: *mut GhosttyFormatter,
+        terminal: GhosttyTerminal,
+        options: GhosttyFormatterTerminalOptions,
+    ) -> c_int;
+    pub fn ghostty_formatter_format_alloc(
+        formatter: GhosttyFormatter,
+        allocator: *const GhosttyAllocator,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
+    pub fn ghostty_formatter_free(formatter: GhosttyFormatter);
     pub fn ghostty_terminal_reset(terminal: GhosttyTerminal);
     pub fn ghostty_terminal_resize(
         terminal: GhosttyTerminal,
