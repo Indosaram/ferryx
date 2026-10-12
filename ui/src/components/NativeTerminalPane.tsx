@@ -2770,6 +2770,7 @@ export function NativeTerminalPane({
     let inFlightAttempt: Promise<void> | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let notifiedMissing = false;
+    let refreshedIdentityAfterDetach = false;
 
     const cancelRetry = () => {
       if (retryTimer) {
@@ -2853,6 +2854,21 @@ export function NativeTerminalPane({
               notifiedMissing = true;
               onBackendSessionUnavailable?.(targetSessionId, classification.reason, bindingKey);
             }
+            return;
+          }
+
+          // A detached refusal that is not a confirmed-missing PTY is how attach rejects a tuple
+          // minted under a previous daemon epoch (e.g. a pane hidden during a rolling handover).
+          // Retrying with the same tuple can never succeed, so refresh the session identity once
+          // and re-attach with it before falling back to the timed retries.
+          if (classification.status === "unverified-missing" && onRefreshSessionIdentity &&
+              !refreshedIdentityAfterDetach) {
+            refreshedIdentityAfterDetach = true;
+            switchDebug("terminal.surface.attach.identity_refresh", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+            });
+            retryAttachRef.current?.();
             return;
           }
 
