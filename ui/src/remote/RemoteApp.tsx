@@ -3793,11 +3793,6 @@ export const RemoteHostConnection: React.FC<{
           hideControls={accountPreselection}
         />
       )}
-      {!desktopSidebar ? (
-        <header className="sr-only">
-          <span>Ferryx Remote</span>
-        </header>
-      ) : null}
 
       <RemoteWorkspaceMirror
         model={effectiveModel}
@@ -4046,6 +4041,7 @@ export const RemoteHostConnection: React.FC<{
         activeTabId={model.context.activeTabId}
         worktreeLabel={model.context.worktreeLabel}
         pending={pending}
+        disabled={pending !== null || !model.context.workspaceId}
         onSelectTab={(tab) => {
           const option = paneSelectionOption(model, tab);
           if (option) {

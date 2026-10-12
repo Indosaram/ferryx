@@ -101,7 +101,7 @@ export function MobileSheet({
             type="button"
             aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
             onClick={() => onOpenChange(false)}
-            className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <X className="size-4" aria-hidden="true" />
           </button>
@@ -133,7 +133,7 @@ export function MobileSheetItem({
     <button
       type="button"
       data-testid={testId}
-      aria-selected={selected === true}
+      aria-current={selected || undefined}
       disabled={disabled}
       onClick={() => onSelect?.()}
       className={cn(

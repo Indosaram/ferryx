@@ -18,6 +18,7 @@ export interface MobileSessionSwitcherSheetProps {
   activeTabId?: string | null;
   worktreeLabel?: string | null;
   pending?: unknown;
+  disabled?: boolean;
   onSelectTab: (tab: RemoteTerminalTabInfo) => void;
   onNewTerminal: () => void;
 }
@@ -29,6 +30,7 @@ export function MobileSessionSwitcherSheet({
   activeTabId,
   worktreeLabel,
   pending,
+  disabled = false,
   onSelectTab,
   onNewTerminal,
 }: MobileSessionSwitcherSheetProps) {
@@ -38,7 +40,7 @@ export function MobileSessionSwitcherSheet({
     <button
       type="button"
       data-testid="session-switcher-new-terminal"
-      disabled={isPending}
+      disabled={isPending || disabled}
       onClick={() => {
         onNewTerminal();
         onOpenChange(false);

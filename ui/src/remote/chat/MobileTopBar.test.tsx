@@ -85,7 +85,8 @@ describe("MobileTopBar", () => {
   it("renders the title with the compact chat typography", () => {
     renderTopBar({ title: "Refactor lanes" });
     const title = screen.getByText("Refactor lanes");
-    expect(title).toHaveClass("truncate", "text-base", "font-medium", "text-chat-foreground");
+    expect(title).toHaveClass("min-w-12", "truncate", "text-base", "font-medium", "text-chat-foreground");
+    expect(title.parentElement?.parentElement).toHaveClass("flex-1", "min-w-12");
   });
 
   it("shows a pulsing working dot with its screen-reader label", () => {
@@ -133,7 +134,11 @@ describe("MobileTopBar", () => {
     expect(badge).toHaveAttribute("aria-label", "Connection: Relay");
     expect(badge).toHaveTextContent("maho-win");
     expect(badge.querySelector("svg")).toBeInTheDocument();
-    expect(badge.lastElementChild).toHaveClass("truncate", "max-w-[40%]");
+    expect(badge).toHaveClass("max-w-[40%]", "min-w-[4ch]", "shrink");
+    expect(badge).not.toHaveClass("shrink-[100]");
+    expect(badge.lastElementChild).toHaveClass("min-w-0", "truncate");
+    expect(badge.lastElementChild).not.toHaveClass("max-w-[40%]", "shrink-[100]");
+    expect(badge.lastElementChild).toHaveTextContent("maho-win");
     const separator = screen.getByText("·");
     expect(separator).toHaveClass("text-chat-foreground-tertiary");
   });
@@ -164,7 +169,10 @@ describe("MobileTopBar", () => {
     expect(badge).toBeDisabled();
     expect(badge).toHaveTextContent("Fix tests");
     expect(badge).toHaveTextContent("3");
-    expect(badge).toHaveClass("bg-status-warning/15", "text-status-warning", "text-[12px]");
+    expect(badge).toHaveClass("bg-status-warning/15", "text-status-warning", "text-[12px]", "min-w-0");
+    expect(badge).not.toHaveClass("shrink-0");
+    expect(badge.parentElement).toHaveClass("min-w-0");
+    expect(badge.lastElementChild).toHaveClass("shrink-0");
   });
 
   it("fires onPress for an enabled attention badge and hides the count at one", () => {

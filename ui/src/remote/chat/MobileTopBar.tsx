@@ -17,7 +17,7 @@ const ICON_BUTTON_32 =
   HIT_SLOP;
 
 const ATTENTION_BUTTON =
-  "relative flex h-8 shrink-0 items-center gap-1 rounded-full bg-status-warning/15 px-2 text-status-warning text-[12px] font-medium disabled:opacity-60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " +
+  "relative flex h-8 min-w-0 items-center gap-1 rounded-full bg-status-warning/15 px-2 text-status-warning text-[12px] font-medium disabled:opacity-60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " +
   HIT_SLOP;
 
 export type MobileTopBarActivityState = "working" | "waiting" | "done" | null;
@@ -100,7 +100,7 @@ export function MobileTopBar({
           </button>
         </div>
 
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-12">
           <div className="flex min-w-0 items-center gap-1.5">
             {logo ? (
               <img
@@ -110,7 +110,7 @@ export function MobileTopBar({
                 className={cn("size-4 shrink-0", monochrome && "agent-tab-logo--monochrome opacity-80")}
               />
             ) : null}
-            <span className="truncate text-base font-medium text-chat-foreground">{title}</span>
+            <span className="min-w-12 truncate text-base font-medium text-chat-foreground">{title}</span>
             {activityState === "working" ? (
               <>
                 <span
@@ -133,17 +133,15 @@ export function MobileTopBar({
             {hostBadge ? (
               <>
                 <span aria-hidden="true" className="shrink-0 text-chat-foreground-tertiary">·</span>
-                {/* The badge yields space before its neighbours, so the least interesting
-                    string on the line (the hostname) is the first to give up pixels
-                    (paseo host-badge.tsx:37-45 flexShrink 100). */}
+                {/* Cap the badge while keeping room for its glyph and a visible label. */}
                 <span
                   data-testid="remote-connection-badge"
                   data-connection={hostBadge.transport}
                   aria-label={hostBadge.ariaLabel}
-                  className="flex min-w-0 shrink-[100] items-center gap-1"
+                  className="flex min-w-[4ch] max-w-[40%] shrink items-center gap-1"
                 >
                   <Server aria-hidden="true" className="size-3 shrink-0" />
-                  <span className="min-w-0 max-w-[40%] truncate">{hostBadge.label}</span>
+                  <span className="min-w-0 truncate">{hostBadge.label}</span>
                 </span>
               </>
             ) : null}
@@ -151,7 +149,7 @@ export function MobileTopBar({
         </div>
 
         {hideControls ? null : (
-          <div className="flex rounded-full p-[7px] bg-chat-surface-raised shadow-sm gap-0.5">
+          <div className="flex min-w-0 rounded-full p-[7px] bg-chat-surface-raised shadow-sm gap-0.5">
             {attention ? (
               <button
                 type="button"
@@ -163,7 +161,7 @@ export function MobileTopBar({
               >
                 <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-warning" />
                 <span className="min-w-0 max-w-24 truncate max-[389px]:sr-only">{attention.label}</span>
-                {attention.count > 1 ? <span className="tabular-nums">{attention.count}</span> : null}
+                {attention.count > 1 ? <span className="shrink-0 tabular-nums">{attention.count}</span> : null}
               </button>
             ) : null}
 
@@ -229,6 +227,7 @@ export function MobileTopBar({
           </div>
         )}
       </div>
+      <span className="sr-only">Ferryx Remote</span>
     </header>
   );
 }

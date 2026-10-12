@@ -110,6 +110,7 @@ describe("MobileSheet", () => {
     render(<MobileSheet open onOpenChange={onOpenChange} title="Actions" ariaLabel="Actions" />);
 
     const dialog = screen.getByRole("dialog", { name: "Actions" });
+    expect(dialog.querySelector('[aria-label="Close Actions"]')).toHaveClass("size-11");
     fireEvent.click(dialog.querySelector('[aria-label="Close Actions"]') as HTMLElement);
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -163,7 +164,7 @@ describe("MobileSheetItem", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
-  it("renders touch sizing, an 18px icon, a 15px label, a 13px description and aria-selected", () => {
+  it("renders touch sizing, an 18px icon, a 15px label, a 13px description and aria-current", () => {
     render(
       <MobileSheet open onOpenChange={vi.fn()} title="Sessions" ariaLabel="Sessions">
         <MobileSheetItem
@@ -183,7 +184,9 @@ describe("MobileSheetItem", () => {
     expect(active.querySelector("svg")).toHaveClass("size-[18px]");
     expect(screen.getByText("build box")).toHaveClass("text-[15px]");
     expect(screen.getByText("orca/ws/main")).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
-    expect(active).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("row-idle")).toHaveAttribute("aria-selected", "false");
+    expect(active).toHaveAttribute("aria-current", "true");
+    expect(active).not.toHaveAttribute("aria-selected");
+    expect(screen.getByTestId("row-idle")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("row-idle")).not.toHaveAttribute("aria-selected");
   });
 });

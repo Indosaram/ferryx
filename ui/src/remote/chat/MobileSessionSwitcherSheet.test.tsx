@@ -93,7 +93,7 @@ describe("MobileSessionSwitcherSheet", () => {
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
   });
 
-  it("indicates active tab via aria-selected", () => {
+  it("indicates active tab via aria-current", () => {
     render(
       <MobileSessionSwitcherSheet
         open
@@ -109,8 +109,10 @@ describe("MobileSessionSwitcherSheet", () => {
     const tab1Btn = screen.getByTestId("session-switcher-tab-tab-1");
     const tab2Btn = screen.getByTestId("session-switcher-tab-tab-2");
 
-    expect(tab1Btn).toHaveAttribute("aria-selected", "false");
-    expect(tab2Btn).toHaveAttribute("aria-selected", "true");
+    expect(tab1Btn).not.toHaveAttribute("aria-current");
+    expect(tab2Btn).toHaveAttribute("aria-current", "true");
+    expect(tab1Btn).not.toHaveAttribute("aria-selected");
+    expect(tab2Btn).not.toHaveAttribute("aria-selected");
   });
 
   it("disables tabs and New terminal button while pending", () => {
@@ -132,6 +134,21 @@ describe("MobileSessionSwitcherSheet", () => {
 
     expect(tab1Btn).toBeDisabled();
     expect(newTerminalBtn).toBeDisabled();
+  });
+
+  it("disables New terminal without workspace context but keeps tabs selectable", () => {
+    const onNewTerminal = vi.fn();
+    const onOpenChange = vi.fn();
+    render(
+      <MobileSessionSwitcherSheet open onOpenChange={onOpenChange} tabs={sampleTabs}
+        disabled onSelectTab={vi.fn()} onNewTerminal={onNewTerminal} />,
+    );
+    const button = screen.getByTestId("session-switcher-new-terminal");
+    expect(button).toBeDisabled();
+    expect(screen.getByTestId("session-switcher-tab-tab-1")).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(onNewTerminal).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("calls onSelectTab when a tab row is clicked", () => {

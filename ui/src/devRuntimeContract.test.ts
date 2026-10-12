@@ -19,7 +19,7 @@ describe("Ferryx development runtime contract", () => {
     });
   });
 
-  it("keeps the Tauri dev URL aligned with strict Vite HMR", () => {
+  it("keeps the Tauri dev URL aligned with strict Vite HMR and dynamic dev port override", () => {
     const tauriConfig: unknown = JSON.parse(
       readFileSync(resolve(projectRoot, "src-tauri/tauri.conf.json"), "utf8"),
     );
@@ -32,7 +32,8 @@ describe("Ferryx development runtime contract", () => {
       },
     });
     expect(viteConfig).toContain('const DEV_HOST = "127.0.0.1";');
-    expect(viteConfig).toContain("const DEV_PORT = 5173;");
+    expect(viteConfig).toContain("const DEV_PORT = Number(process.env.FERRYX_DEV_PORT ?? 5173);");
     expect(viteConfig).toContain("strictPort: true");
+    expect(viteConfig).toContain("clientPort: DEV_PORT");
   });
 });
