@@ -902,7 +902,7 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     app: &tauri::App<R>,
 ) -> tauri::Result<()> {
     use block2::RcBlock;
-    use objc2_app_kit::{NSEvent, NSEventMask, NSWindow};
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventType, NSWindow};
     use std::ptr::NonNull;
 
     let app_handle = app.handle().clone();
@@ -910,6 +910,7 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
         .state::<NativeTerminalSurfaceHostState>()
         .inner()
         .clone();
+    let focus_gate = crate::native_terminal::focus_gesture::PressReleaseFocusGate::new();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
         if let Some(window) = app_handle.get_window("main") {
@@ -922,9 +923,10 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
                             let content_height = content_view.bounds().size.height;
                             let logical_x = location.x;
                             let logical_y = content_height - location.y;
-                            if let Some(session_id) =
-                                surface_host.session_at_logical_point(logical_x, logical_y)
-                            {
+                            let hit = surface_host.session_at_logical_point(logical_x, logical_y);
+                            if event.r#type() == NSEventType::LeftMouseDown {
+                                focus_gate.press(hit);
+                            } else if let Some(session_id) = focus_gate.release(hit) {
                                 let _ = app_handle.emit(NATIVE_TERMINAL_FOCUS_EVENT, &session_id);
                             }
                         }
@@ -936,7 +938,10 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     });
 
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp,
+            &block,
+        )
     };
     if let Some(monitor) = monitor {
         std::mem::forget(monitor);

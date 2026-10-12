@@ -20,6 +20,7 @@ type Hinstance = *mut c_void;
 type Hhook = *mut c_void;
 
 const WH_MOUSE_LL: i32 = 14;
+const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const HC_ACTION: i32 = 0;
 
@@ -148,9 +149,12 @@ struct MonitorState {
 
 static MONITOR_STATE: Mutex<Option<MonitorState>> = Mutex::new(None);
 static HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
+static FOCUS_GATE: crate::native_terminal::focus_gesture::PressReleaseFocusGate =
+    crate::native_terminal::focus_gesture::PressReleaseFocusGate::new();
 
 unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam: isize) -> isize {
-    if n_code >= HC_ACTION && wparam == WM_LBUTTONUP as usize && lparam != 0 {
+    let is_press = wparam == WM_LBUTTONDOWN as usize;
+    if n_code >= HC_ACTION && (is_press || wparam == WM_LBUTTONUP as usize) && lparam != 0 {
         let hook_struct = &*(lparam as *const MSLLHOOKSTRUCT);
         let mut pt = hook_struct.pt;
 
@@ -163,10 +167,12 @@ unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam:
                     let logical_x = pt.x as f64 / dpi_scale;
                     let logical_y = pt.y as f64 / dpi_scale;
 
-                    if let Some(session_id) = state
+                    let hit = state
                         .surface_host
-                        .session_at_logical_point(logical_x, logical_y)
-                    {
+                        .session_at_logical_point(logical_x, logical_y);
+                    if is_press {
+                        FOCUS_GATE.press(hit);
+                    } else if let Some(session_id) = FOCUS_GATE.release(hit) {
                         best_effort_focus_webview(root_hwnd);
                         (state.emit_focus)(session_id);
                     }
