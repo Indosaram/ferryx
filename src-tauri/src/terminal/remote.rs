@@ -752,6 +752,9 @@ impl RemoteRuntime {
         .await;
         if let Err(error) = result {
             let f = RemoteFailure::from_bridge(&error);
+            // The target is already gone (its helper restarted with a new owner/epoch, or it no
+            // longer knows the target): there is nothing left to stop, so the close succeeded.
+            let target_gone = matches!(f.kind, RemoteFailureKind::Expired | RemoteFailureKind::Missing);
             {
                 let mut s = e.state.lock();
                 fail(&mut s, f.clone());
@@ -762,10 +765,10 @@ impl RemoteRuntime {
             }
             // The terminal was closed: whether its target is already gone or only unreachable,
             // forget it locally so it is neither listed nor restored (and redialed) after a
-            // daemon restart. The failure is still reported to the caller.
+            // daemon restart. An unreachable target is still reported to the caller.
             self.sessions.lock().remove(id);
             self.hub.remove_session(id);
-            return Err(f);
+            return if target_gone { Ok(()) } else { Err(f) };
         }
         self.sessions.lock().remove(id);
         self.hub.remove_session(id);

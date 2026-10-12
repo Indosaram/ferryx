@@ -1549,19 +1549,31 @@ async fn ssh_imported_transport_recovers_after_read_disconnect() {
 }
 
 #[tokio::test]
-async fn ssh_close_preserves_expired_target_classification() {
-    let (runtime, _hub, dialer, tx) = fixture();
-    runtime.restore(descriptor()).unwrap();
-    let mut updates = runtime.subscribe("local-stable").unwrap();
-    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
-    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
-    state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
-    *dialer.failure.lock() = Some(BridgeError::RemoteTargetExpired);
-    let failure = runtime.close("local-stable").await.unwrap_err();
-    assert_eq!(failure.kind, RemoteFailureKind::Expired);
-    // Closing forgets the session even though its gone target could not be stopped.
-    assert!(runtime.details("local-stable").is_none());
-    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+async fn ssh_close_of_gone_target_succeeds_and_forgets_the_session() {
+    let gone = [
+        BridgeError::RemoteTargetExpired,
+        BridgeError::TargetExpired {
+            expected_owner: "old-owner".into(),
+            expected_epoch: crate::scoped_contracts::Epoch(1),
+            actual_owner: "new-owner".into(),
+            actual_epoch: crate::scoped_contracts::Epoch(2),
+        },
+        BridgeError::TargetNotFound,
+    ];
+    for error in gone {
+        let (runtime, hub, dialer, tx) = fixture();
+        runtime.restore(descriptor()).unwrap();
+        let mut updates = runtime.subscribe("local-stable").unwrap();
+        state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+        tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+        state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+        *dialer.failure.lock() = Some(error);
+        // Nothing is left to stop, so closing a gone target is a successful close.
+        runtime.close("local-stable").await.unwrap();
+        assert!(runtime.details("local-stable").is_none());
+        assert!(!hub.has_session("local-stable"));
+        assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
