@@ -20,11 +20,17 @@ import {
   contextName,
   getRemoteDocumentTitle,
   normalizeRemoteWorkspaceState,
+  paneSelectionOption,
   RemoteWorkspaceMirror,
+  useRemoteDesktopSidebar,
   type RemoteContextOption,
   type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
+import { BUILD_STAMP } from "../lib/buildStamp";
+import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
+import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
+import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -1051,6 +1057,7 @@ export const RemoteHostConnection: React.FC<{
   initialMagicLinkRequested?: boolean;
   onMagicLinkConsumed?: () => void;
 }> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
+  const desktopSidebar = useRemoteDesktopSidebar();
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
     if (initialMagicLinkRequested) return null;
@@ -1080,6 +1087,8 @@ export const RemoteHostConnection: React.FC<{
   modelRef.current = model;
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
@@ -3612,9 +3621,62 @@ export const RemoteHostConnection: React.FC<{
     </Suspense>
   );
 
+  const CONNECTION_SHORT: Record<string, string> = {
+    relay: "Relay",
+    lan: "LAN",
+    tailscale: "Tailscale",
+  };
+
+  const terminalTabs =
+    effectiveModel.context.terminalTabs ?? model.context.terminalTabs ?? [];
+  const activeTerminalTab = terminalTabs.find(
+    (tab) => tab.id === model.context.activeTabId,
+  );
+  const mobileTitle =
+    activeTerminalTab?.label ??
+    model.context.activeTerminal?.title ??
+    model.context.worktreeLabel ??
+    model.context.workspaceId ??
+    "Ferryx";
+  const mobileAgentType = activeTerminalTab?.agentType ?? null;
+  const mobileActivityState = (activeTerminalTab?.activityState as MobileTopBarActivityState) ?? null;
+  const mobileHostBadge = accountPreselection
+    ? undefined
+    : {
+        label:
+          activeTunnelConnection?.machine.displayName ||
+          CONNECTION_SHORT[transport.type] ||
+          transport.type,
+        transport: transport.type,
+        ariaLabel: `Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`,
+      };
+  const mobileAttention = firstWaiting
+    ? {
+        label: firstWaiting.label,
+        count: waitingCount,
+        ariaLabel: attentionAriaLabel,
+        disabled: pending !== null,
+        onPress: () => {
+          void selectContext({
+            workspaceId: firstWaiting.workspaceId,
+            worktreeSlug: firstWaiting.worktreeSlug,
+            worktreeLabel: firstWaiting.worktreeLabel,
+            tabId: firstWaiting.tabId,
+            sessionId: firstWaiting.sessionId,
+          });
+          document
+            .querySelector<HTMLTextAreaElement>(
+              'textarea[data-testid="remote-terminal-input-sink"]',
+            )
+            ?.focus({ preventScroll: true });
+        },
+      }
+    : null;
+
   return (
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
+      {desktopSidebar ? (
       <header className="flex h-7 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
           type="button"
@@ -3711,6 +3773,31 @@ export const RemoteHostConnection: React.FC<{
         </div>
         )}
       </header>
+      ) : (
+        <MobileTopBar
+          title={mobileTitle}
+          agentType={mobileAgentType}
+          activityState={mobileActivityState}
+          contextLabel={contextName(model.context)}
+          hostBadge={mobileHostBadge}
+          pickerOpen={selectorOpen}
+          onTogglePicker={() => setSelectorOpen((open) => !open)}
+          attention={mobileAttention}
+          viewMode={viewMode as "chat" | "terminal"}
+          onViewModeChange={setViewMode}
+          sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
+          switcherOpen={switcherOpen}
+          onOpenSwitcher={() => setSwitcherOpen(true)}
+          menuOpen={menuOpen}
+          onOpenMenu={() => setMenuOpen(true)}
+          hideControls={accountPreselection}
+        />
+      )}
+      {!desktopSidebar ? (
+        <header className="sr-only">
+          <span>Ferryx Remote</span>
+        </header>
+      ) : null}
 
       <RemoteWorkspaceMirror
         model={effectiveModel}
@@ -3811,6 +3898,7 @@ export const RemoteHostConnection: React.FC<{
           ) : viewMode === "chat" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
               <MobileChatWorkspace
+                showHeader={desktopSidebar}
                 headerTitle={
                   model.context.terminalTabs?.find((t) => t.id === model.context.activeTabId)?.label ??
                   model.context.activeTerminal?.title ??
@@ -3923,6 +4011,7 @@ export const RemoteHostConnection: React.FC<{
           ) : effectiveSessionId && token ? renderLazy(
             <RemoteTerminal
               key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+              showTitleBar={desktopSidebar}
               sessionId={effectiveSessionId}
               token={token}
               title={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
@@ -3948,6 +4037,63 @@ export const RemoteHostConnection: React.FC<{
         onDisconnect={disconnect}
         onSignOut={handleSignOut}
         isAccountSession={Boolean(activeTunnelConnection)}
+      />
+
+      <MobileSessionSwitcherSheet
+        open={switcherOpen}
+        onOpenChange={setSwitcherOpen}
+        tabs={terminalTabs}
+        activeTabId={model.context.activeTabId}
+        worktreeLabel={model.context.worktreeLabel}
+        pending={pending}
+        onSelectTab={(tab) => {
+          const option = paneSelectionOption(model, tab);
+          if (option) {
+            void selectContext(option);
+          }
+          setSwitcherOpen(false);
+        }}
+        onNewTerminal={() => {
+          if (!model.context.workspaceId) return;
+          void selectContext(
+            {
+              workspaceId: model.context.workspaceId,
+              worktreeSlug: model.context.worktreeSlug,
+              worktreeLabel: model.context.worktreeLabel,
+            },
+            true,
+          );
+        }}
+      />
+
+      <MobileOverflowSheet
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        onNewTerminal={() => {
+          if (!model.context.workspaceId) return;
+          void selectContext(
+            {
+              workspaceId: model.context.workspaceId,
+              worktreeSlug: model.context.worktreeSlug,
+              worktreeLabel: model.context.worktreeLabel,
+            },
+            true,
+          );
+        }}
+        onNewWorktree={() => {
+          void createWorktree();
+        }}
+        onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
+        onSignOut={isAccountMode ? handleSignOut : undefined}
+        connectionLabel={
+          accountPreselection
+            ? undefined
+            : activeTunnelConnection?.machine.displayName ||
+              CONNECTION_SHORT[transport.type] ||
+              transport.type
+        }
+        buildStamp={BUILD_STAMP}
+        disabled={pending !== null || !model.context.workspaceId}
       />
     </div>
   );
