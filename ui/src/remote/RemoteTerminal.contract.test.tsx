@@ -1664,4 +1664,48 @@ describe("remote terminal grid contract", () => {
     );
     expect(ws2.send).not.toHaveBeenCalledWith(expect.stringContaining("remoteWrite"));
   });
+
+  it("renders standard h-11 title bar with back button and title by default, and h-7 strip with status cluster only when showTitleBar is false", () => {
+    const onBack = vi.fn();
+    const { rerender } = render(
+      <RemoteTerminal
+        sessionId="session-titlebar-test"
+        token="token-abc"
+        title="feature-branch"
+        onBack={onBack}
+        showTitleBar={true}
+      />,
+    );
+
+    // Default / showTitleBar=true checks
+    expect(screen.getByText("Terminal")).toBeInTheDocument();
+    expect(screen.getByText("feature-branch")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-back")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    const titleBarTrue = screen.getByTestId("remote-terminal-back").closest("div.flex.shrink-0");
+    expect(titleBarTrue?.className).toContain("h-11");
+    expect(titleBarTrue?.className).toContain("justify-between");
+
+    // showTitleBar=false checks
+    rerender(
+      <RemoteTerminal
+        sessionId="session-titlebar-test"
+        token="token-abc"
+        title="feature-branch"
+        onBack={onBack}
+        showTitleBar={false}
+      />,
+    );
+
+    expect(screen.queryByText("Terminal")).not.toBeInTheDocument();
+    expect(screen.queryByText("feature-branch")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-back")).not.toBeInTheDocument();
+    // Status cluster remains with identical testids and roles
+    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    const titleBarFalse = screen.getByTestId("remote-terminal-build-stamp").closest("div.flex.shrink-0");
+    expect(titleBarFalse?.className).toContain("h-7");
+    expect(titleBarFalse?.className).toContain("justify-end");
+  });
 });

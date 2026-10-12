@@ -6,7 +6,7 @@ import { Agent as HttpsAgent } from "node:https";
 import path from "node:path";
 
 const DEV_HOST = "127.0.0.1";
-const DEV_PORT = 5173;
+const DEV_PORT = Number(process.env.FERRYX_DEV_PORT ?? 5173);
 
 /**
  * Dev-only: the Vite SPA fallback answers every unknown path with 200 text/html, so the

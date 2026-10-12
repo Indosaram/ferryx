@@ -387,7 +387,8 @@ export const MobileChatComposer = React.forwardRef<
         </div>
       )}
 
-      <div className="flex items-end gap-2 px-[12px] py-2">
+      {/* One card, text first under it: single-surface wrapper + control row ported from paseo composer/input/input.tsx (Apache-2.0) and t3code ThreadComposer.tsx (MIT). */}
+      <div className="flex flex-col px-[12px] py-2">
         <input
           ref={fileInputRef}
           type="file"
@@ -397,19 +398,7 @@ export const MobileChatComposer = React.forwardRef<
           data-testid="file-upload-input"
         />
 
-        <button
-          type="button"
-          data-testid="attach-file-button"
-          aria-label="Attach file"
-          aria-busy={attaching || undefined}
-          disabled={disabled || attaching}
-          onClick={() => fileInputRef.current?.click()}
-          className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <Plus className="size-4" />
-        </button>
-
-        <div className="relative flex min-h-[38px] flex-1 items-center rounded-xl bg-chat-composer-surface border border-chat-composer-border focus-within:border-chat-primary/80 focus-within:ring-1 focus-within:ring-chat-primary/30 px-[14px] pb-2.5 pt-1.5 transition-all">
+        <div className="rounded-[20px] border border-chat-composer-border bg-chat-composer-surface transition-colors focus-within:border-chat-foreground-secondary/40">
           <textarea
             ref={textareaRef}
             data-testid="chat-composer-textarea"
@@ -425,49 +414,65 @@ export const MobileChatComposer = React.forwardRef<
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            className="w-full resize-none bg-transparent font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
+            className="w-full resize-none bg-transparent px-[14px] pt-2.5 font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
           />
+
+          <div className="flex items-center justify-between px-2 pb-2">
+            <button
+              type="button"
+              data-testid="attach-file-button"
+              aria-label="Attach file"
+              aria-busy={attaching || undefined}
+              disabled={disabled || attaching}
+              onClick={() => fileInputRef.current?.click()}
+              className="flex size-8 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Plus className="size-4" />
+            </button>
+
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                data-testid="mic-button"
+                disabled
+                aria-label="Voice input is not supported"
+                title="Voice input is not supported"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <Mic className="size-4" />
+              </button>
+
+              {isRunning && (
+                <button
+                  type="button"
+                  data-testid="stop-button"
+                  aria-label="Stop the running turn"
+                  onClick={onStop}
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-chat-danger text-chat-foreground shadow-sm hover:bg-chat-danger/90 active:bg-chat-danger/80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <Square className="size-4 fill-current" />
+                </button>
+              )}
+              {showsSend && (
+                <button
+                  type="button"
+                  data-testid="send-button"
+                  aria-label="Send message"
+                  disabled={!canSubmit}
+                  onClick={handleSend}
+                  className={cn(
+                    "flex size-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    canSubmit
+                      ? "bg-chat-primary text-chat-primary-foreground hover:brightness-110 active:brightness-95"
+                      : "bg-chat-surface-raised/40 text-chat-foreground-secondary/50 border border-chat-border/40 cursor-not-allowed"
+                  )}
+                >
+                  <ArrowUp className="size-4 stroke-[2.5]" />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
-
-        <button
-          type="button"
-          data-testid="mic-button"
-          disabled
-          aria-label="Voice input is not supported"
-          title="Voice input is not supported"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <Mic className="size-4" />
-        </button>
-
-        {isRunning && (
-          <button
-            type="button"
-            data-testid="stop-button"
-            aria-label="Stop the running turn"
-            onClick={onStop}
-            className="flex size-9 shrink-0 items-center justify-center rounded-full bg-chat-danger text-chat-foreground shadow-sm hover:bg-chat-danger/90 active:bg-chat-danger/80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            <Square className="size-4 fill-current" />
-          </button>
-        )}
-        {showsSend && (
-          <button
-            type="button"
-            data-testid="send-button"
-            aria-label="Send message"
-            disabled={!canSubmit}
-            onClick={handleSend}
-            className={cn(
-              "flex size-9 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              canSubmit
-                ? "bg-chat-primary text-chat-primary-foreground hover:brightness-110 active:brightness-95"
-                : "bg-chat-surface-raised/40 text-chat-foreground-secondary/50 border border-chat-border/40 cursor-not-allowed"
-            )}
-          >
-            <ArrowUp className="size-4 stroke-[2.5]" />
-          </button>
-        )}
       </div>
     </div>
   );

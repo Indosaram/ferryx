@@ -62,6 +62,7 @@ type RemoteTerminalProps = {
    */
   readonly onAgentStateFrame?: (raw: string) => void;
   readonly followHostSize?: boolean;
+  readonly showTitleBar?: boolean;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -403,6 +404,7 @@ export function RemoteTerminal({
   daemonEpoch,
   onAgentStateFrame,
   followHostSize = false,
+  showTitleBar = true,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   // The account tunnel dials the machine terminal protocol: PTY input is raw binary and
@@ -1235,26 +1237,28 @@ export function RemoteTerminal({
 
   return (
     <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-[#f5f5f5] ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-[#191919] bg-[#0a0a0a] px-2">
-        <div className="flex min-w-0 items-center gap-2">
-          {onBack ? (
-            <button
-              type="button"
-              data-testid="remote-terminal-back"
-              aria-label="Back to chat"
-              onClick={onBack}
-              className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#838383] transition-colors hover:text-[#f5f5f5]"
-            >
-              <ChevronLeft className="size-4" aria-hidden="true" />
-            </button>
-          ) : null}
-          <div className="flex min-w-0 flex-col justify-center">
-            <span className="truncate text-sm font-medium text-[#f5f5f5]">Terminal</span>
-            {title ? (
-              <span className="truncate font-mono text-[11px] text-[#838383]">{title}</span>
+      <div className={`flex shrink-0 items-center border-b border-chat-header-border bg-chat-header px-2 ${showTitleBar ? "h-11 justify-between" : "h-7 justify-end"}`}>
+        {showTitleBar ? (
+          <div className="flex min-w-0 items-center gap-2">
+            {onBack ? (
+              <button
+                type="button"
+                data-testid="remote-terminal-back"
+                aria-label="Back to chat"
+                onClick={onBack}
+                className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground"
+              >
+                <ChevronLeft className="size-4" aria-hidden="true" />
+              </button>
             ) : null}
+            <div className="flex min-w-0 flex-col justify-center">
+              <span className="truncate text-sm font-medium text-chat-foreground">Terminal</span>
+              {title ? (
+                <span className="truncate font-mono text-[11px] text-chat-foreground-secondary">{title}</span>
+              ) : null}
+            </div>
           </div>
-        </div>
+        ) : null}
         <span className="flex items-center gap-2">
           {inputOverflow ? (
             <span

@@ -84,6 +84,7 @@ export interface MobileChatWorkspaceProps {
 
   readonly headerTitle?: string;
   readonly headerSubtitle?: string;
+  readonly showHeader?: boolean;
   readonly onBack?: () => void;
   readonly headerActions?: React.ReactNode;
 }
@@ -118,6 +119,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   activityLabel,
   workspaceLabel,
   worktreeLabel,
+  showHeader = true,
   onOpenTerminal,
   pageDisclosure = null,
   pageAbandoned = null,
@@ -224,6 +226,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         className
       )}
     >
+      {showHeader && (
       <header
         data-testid="mobile-chat-header"
         className="flex items-center justify-between px-3 py-2 bg-chat-screen border-b border-chat-border backdrop-blur-md shrink-0 z-10"
@@ -295,6 +298,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           {headerActions}
         </div>
       </header>
+      )}
 
       <div
         ref={scrollContainerRef}

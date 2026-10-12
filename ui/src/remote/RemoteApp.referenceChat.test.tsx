@@ -261,7 +261,7 @@ function setWidth(width: number): void {
 
 async function openTerminalMode(): Promise<void> {
   await act(async () => {
-    fireEvent.click(screen.getByTestId("open-terminal-button"));
+    fireEvent.click(screen.getByTestId("remote-view-mode-terminal"));
   });
 }
 
