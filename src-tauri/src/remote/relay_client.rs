@@ -374,6 +374,27 @@ impl RelayClient {
         client
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_identity_and_auth(
+        relay_url: impl Into<String>,
+        identity: MachineIdentity,
+        gateway_addr: impl Into<String>,
+        auth: AuthManager,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        let (attach_tx, attach_rx) = mpsc::channel(1);
+        Self {
+            relay_url: relay_url.into(),
+            pairing: PairingCoordinator::new_with_auth(identity.machine_id.clone(), tx, auth),
+            machine_token: String::new(),
+            gateway_addr: gateway_addr.into(),
+            identity: Some(identity),
+            register_rx: Arc::new(Mutex::new(rx)),
+            attach_tx,
+            attach_rx: Arc::new(Mutex::new(attach_rx)),
+        }
+    }
+
     /// Supplies the private relay's enrollment credential for key-based authentication.
     pub fn with_enrollment_token(mut self, token: impl Into<String>) -> Self {
         self.machine_token = token.into();

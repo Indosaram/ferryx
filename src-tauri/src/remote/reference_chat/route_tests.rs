@@ -538,6 +538,16 @@ impl ReferenceRouteFixture {
     /// detected and answered, whether a write failed, and what the host says about the pane - and
     /// none of them is asserted to be the cause.
     async fn submit_and_await_marker(&self, marker: &str) {
+        self.submit_and_await_marker_at(marker, &self.server, &self.route("submit"))
+            .await;
+    }
+
+    async fn submit_and_await_marker_at(
+        &self,
+        marker: &str,
+        server: &ReferenceRouteServer,
+        path: &str,
+    ) {
         let (prefix, suffix) = marker
             .split_once('_')
             .expect("the marker names a prefix and a suffix the shell joins");
@@ -577,11 +587,10 @@ impl ReferenceRouteFixture {
             last_write_error = Some(error);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
-        let (status, body) = self
-            .server
+        let (status, body) = server
             .request(
                 "POST",
-                &self.route("submit"),
+                path,
                 Some(&self.control),
                 Some(&self.mutation(
                     &request_id,
@@ -631,6 +640,82 @@ impl ReferenceRouteFixture {
                 seen.len()
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn a_reference_chat_submit_through_the_relay_reaches_the_real_pane() {
+    use crate::remote::relay_client::RelayClient;
+    use crate::remote::relay_server::{relay_router, RelayState};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    // Given an isolated gateway, real PTY, and production relay/client with synthetic keys.
+    let fixture = fixture().await;
+    let relay_state = RelayState::new_with_key_store(
+        vec!["reference-route-enrollment".to_string()],
+        fixture._root.path().join("relay-keys.json"),
+    )
+    .expect("isolated relay key store");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("relay listener");
+    let addr = listener.local_addr().expect("relay address");
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        axum::serve(
+            listener,
+            relay_router(relay_state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve isolated relay");
+    });
+    let key = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+    let identity = crate::remote::auth::MachineIdentity {
+        machine_id: "reference-route-relay".to_string(),
+        display_name: "reference route relay".to_string(),
+        public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+        private_key: STANDARD.encode(key.to_bytes()),
+    };
+    let client = RelayClient::with_identity_and_auth(
+        &format!("ws://{addr}"),
+        identity,
+        fixture.server.addr.to_string(),
+        (*fixture.state.auth_manager).clone(),
+    )
+    .with_enrollment_token("reference-route-enrollment");
+    let coordinator = client.pairing_coordinator();
+    tasks.spawn(async move { client.run().await });
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        // The registration ACK is the readiness barrier; no sleeps or polling.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            coordinator.generate_pairing(std::time::Duration::from_secs(60)),
+        )
+        .await
+        .expect("relay ready deadline")
+        .expect("relay registration ACK");
+        let relay_server = ReferenceRouteServer {
+            addr,
+            state: Arc::clone(&fixture.state),
+            phases: Arc::clone(&fixture.server.phases),
+            tasks: tokio::task::JoinSet::new(),
+        };
+        // When the authenticated submit traverses the host HTTP tunnel, then the real shell
+        // must execute it and emit the split marker, not merely echo the submitted text.
+        fixture
+            .submit_and_await_marker_at(
+                "RELAY_REFERENCE_ROUTE_MARKER",
+                &relay_server,
+                &format!("/host/reference-route-relay{}", fixture.route("submit")),
+            )
+            .await;
+    }))
+    .await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    fixture.server.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
 }
 
