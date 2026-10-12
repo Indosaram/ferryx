@@ -17,6 +17,7 @@ export type MobileSheetProps = {
   onOpenChange: (open: boolean) => void;
   title: string;
   ariaLabel: string;
+  closeAriaLabel?: string;
   children?: ReactNode;
   footer?: ReactNode;
   testId?: string;
@@ -38,6 +39,7 @@ export function MobileSheet({
   onOpenChange,
   title,
   ariaLabel,
+  closeAriaLabel,
   children,
   footer,
   testId,
@@ -77,7 +79,7 @@ export function MobileSheet({
     <div className="fixed inset-0 z-50 flex flex-col justify-end" data-testid={testId}>
       <button
         type="button"
-        aria-label={`Close ${ariaLabel}`}
+        aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
         data-testid={testId ? `${testId}-backdrop` : undefined}
         onClick={() => onOpenChange(false)}
         className="absolute inset-0 bg-black/50"
@@ -97,7 +99,7 @@ export function MobileSheet({
           <h2 className="min-w-0 truncate text-[15px] font-semibold text-chat-foreground">{title}</h2>
           <button
             type="button"
-            aria-label={`Close ${ariaLabel}`}
+            aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
             onClick={() => onOpenChange(false)}
             className="flex size-9 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
