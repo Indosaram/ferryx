@@ -418,6 +418,25 @@ describe("native terminal presentation retention", () => {
     expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
   });
 
+  it("does not take keyboard focus when a background pane rebinds after resume", async () => {
+    // Given: the user types in another element while this inactive pane is suspended.
+    const other = document.createElement("button");
+    other.setAttribute("data-presentation-test-overlay", "");
+    document.body.appendChild(other);
+    const view = render(<NativeTerminalPane session={{ ...session(), processState: "suspended" }} active={false} />);
+    await act(async () => {});
+    other.focus();
+
+    // When: the suspend is lifted and the pane re-attaches its backend.
+    await act(async () => {
+      view.rerender(<NativeTerminalPane session={{ ...session(), processState: "running" }} active={false} />);
+    });
+
+    // Then: the re-attach happened, but focus stays where the user left it.
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
+    expect(document.activeElement).toBe(other);
+  });
+
   it("does not attach a cold exited pane and leaves an opaque fallback", async () => {
     const view = render(<NativeTerminalPane session={session(null)} />);
     await act(async () => {});

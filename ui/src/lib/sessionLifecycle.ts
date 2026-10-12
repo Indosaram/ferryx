@@ -268,13 +268,11 @@ export async function suspendRegisteredSession(sessionId: string): Promise<void>
   }
 
   await captureRecentScrollback(sessionId, backendSessionId);
+  // Mark the pane sleeping only once the daemon has stopped the process. Sleeping detaches the
+  // native surface; flipping it on before a suspend that then fails tore the surface down and
+  // re-attached it, which blanked the pane and let the re-attach take keyboard focus.
+  await suspendTerminal(backendSessionId);
   setSessionSleeping(sessionId, true);
-  try {
-    await suspendTerminal(backendSessionId);
-  } catch (error) {
-    setSessionSleeping(sessionId, false);
-    throw error;
-  }
   entry.session = { ...session, processState: "suspended" };
   entry.idleSince = null;
 }

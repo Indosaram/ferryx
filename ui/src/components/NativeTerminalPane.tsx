@@ -769,6 +769,12 @@ export function NativeTerminalPane({
   }, [bindingKey, targetSessionId, visible]);
   const previousTargetSessionIdRef = useRef(targetSessionId);
   const isBackendRebind = previousTargetSessionIdRef.current === null && targetSessionId !== null;
+  // Attach completes asynchronously, so the focus decision reads the pane's active state at
+  // completion time rather than the value captured when the attach started.
+  const activeRef = useRef(active);
+  useLayoutEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   useEffect(() => {
     if (isExited) {
@@ -2811,7 +2817,9 @@ export function NativeTerminalPane({
           refreshScrollbar();
           reportBounds();
           if (surfaceOwnerRef.current?.sessionId === targetSessionId) {
-            if (isBackendRebind) {
+            // A rebind (suspend/resume, reconnect) of a background pane must not take keyboard
+            // focus from the pane the user is typing in.
+            if (isBackendRebind && activeRef.current !== false) {
               inputRef.current?.focus();
             } else {
               restoreFocusIfLost();

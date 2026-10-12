@@ -220,6 +220,23 @@ describe("sessionLifecycle", () => {
     expect(live.backendSessionId).toBe("backend-live-1");
   });
 
+  it("never marks a session sleeping when the daemon refuses the suspend", async () => {
+    // Given: a live session whose daemon suspend fails.
+    const live = session("backend-live-1", "running");
+    registerSessionSnapshot(live, "idle");
+    vi.spyOn(tauri, "suspendTerminal").mockRejectedValue(new Error("suspend refused"));
+    const sleepingSeen: boolean[] = [];
+    const unsubscribe = subscribeSleepingSessions(() => sleepingSeen.push(isSessionSleeping(live.id)));
+
+    // When: the suspend is attempted.
+    await expect(suspendRegisteredSession(live.id)).rejects.toThrow("suspend refused");
+    unsubscribe();
+
+    // Then: the pane never flipped to sleeping, so its surface was never torn down.
+    expect(sleepingSeen).toEqual([]);
+    expect(isSessionSleeping(live.id)).toBe(false);
+  });
+
   it("resumeRegisteredSession clears sleeping bit and restores running state", async () => {
     const live = session("backend-live-1", "running");
     registerSessionSnapshot(live, "idle");
