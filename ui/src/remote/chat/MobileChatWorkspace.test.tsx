@@ -318,5 +318,25 @@ describe("MobileChatWorkspace", () => {
     // at the bottom the view follows the newest turn rather than being pinned to a stale offset
     expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   });
+
+  it("18. renders header by default and hides header when showHeader is false", () => {
+    const { rerender } = render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        showHeader={true}
+      />
+    );
+    expect(screen.getByTestId("mobile-chat-header")).toBeInTheDocument();
+
+    rerender(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        showHeader={false}
+      />
+    );
+    expect(screen.queryByTestId("mobile-chat-header")).not.toBeInTheDocument();
+  });
 });
 
