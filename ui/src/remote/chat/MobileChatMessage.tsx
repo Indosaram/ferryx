@@ -14,6 +14,7 @@ import {
   ChatAttachment,
   ChatWorkItem,
   chatMarkdownUrlTransform,
+  formatReferenceTimestamp,
   ReferenceAbandonedBranchDisclosure,
   ReferencePartList,
   ReferencePartRenderContext,
@@ -204,16 +205,6 @@ const ASSISTANT_MARKDOWN_COMPONENTS = {
   img: ChatMarkdownImage,
 };
 
-function formatTimestamp(timestamp?: string | number): string | null {
-  if (!timestamp) return null;
-  if (typeof timestamp === "string" && !/^\d+$/.test(timestamp)) {
-    return timestamp;
-  }
-  const date = new Date(Number(timestamp));
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 interface WorkRowsContainerProps {
   children: React.ReactNode;
   count: number;
@@ -275,7 +266,8 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   className,
 }) => {
   const isUser = role === "user";
-  const formattedTime = formatTimestamp(timestamp);
+  // A native turn's start is an ISO instant; it prints as a local time like every other turn.
+  const formattedTime = formatReferenceTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -289,7 +281,9 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         .map((part) => part.text)
         .join("\n\n")
     : "";
-  const copyText = hasRichParts && content.trim().length === 0 ? richText : content;
+  // `content` of a native turn also carries its thinking and compaction text; only the text
+  // parts are the prose a reader sees, copies, or (on a user turn) wrote.
+  const copyText = hasRichParts ? richText : content;
   const hasProse = Boolean(copyText && copyText.trim().length > 0);
   // A skill chip is drawn by the turn's skill list, never inside the parts drawn in order: the
   // reference filters `skill` out of the parts it renders (`ChatView.tsx:322`).
@@ -297,6 +291,11 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   // A user turn's bubble already holds its prose; only its other parts are drawn below it.
   const userExtraParts = visibleParts.filter((part) => part.kind !== "text");
   const isRuntime = referenceSource === "runtime";
+  // The Worked for toggle folds a native turn's work (tools, thinking) as it folds `toolCalls`.
+  const workFolded = Boolean(durationLabel) && !workExpanded;
+  const assistantParts = workFolded
+    ? visibleParts.filter((part) => part.kind !== "tool" && part.kind !== "thinking")
+    : visibleParts;
 
   useEffect(() => {
     return () => {
@@ -346,6 +345,18 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   );
 
   if (isUser) {
+    // A runtime turn, or a native user turn with no prose (a compaction), was not typed by the
+    // user: its parts are drawn on their own, never inside a user bubble.
+    if (isRuntime || (hasRichParts && !hasProse && attachments.length === 0)) {
+      return (
+        <div className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
+          {isRuntime && <span className="sr-only">Runtime message</span>}
+          <ReferencePartList parts={visibleParts} context={referenceContext} timestamp={timestamp} />
+          {hasProse && metaRow}
+          <ReferenceTurnSkills parts={richParts} />
+        </div>
+      );
+    }
     return (
       <div
         className={cn(
@@ -357,7 +368,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           data-testid="user-message-bubble"
           className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
-          <p className="whitespace-pre-wrap">{hasRichParts && content.trim().length === 0 ? richText : content}</p>
+          <p className="whitespace-pre-wrap">{copyText}</p>
           {attachments.length > 0 && (
             <AttachmentList attachments={attachments} className="mt-1" />
           )}
@@ -427,7 +438,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       {hasRichParts ? (
         <div data-testid="assistant-reference-body" className="w-full">
           <ReferencePartList
-            parts={visibleParts}
+            parts={assistantParts}
             context={referenceContext}
             timestamp={timestamp}
           />
