@@ -282,7 +282,7 @@ export const MobileChatQaHarness: React.FC = () => {
   }, []);
 
   return (
-    <div className="h-[100dvh] w-full bg-chat-screen flex flex-col">
+    <div className="remote-app-root h-[100dvh] w-full bg-chat-screen flex flex-col">
       <div className="w-full">
         <MobileTopBar
           title={title}

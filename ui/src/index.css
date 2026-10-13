@@ -152,6 +152,47 @@
   --chat-header-border-rgb: 25 25 25;
 }
 
+:root[data-theme="light"] {
+  /* Mobile chat surface (remote phone client; light T3-style palette) */
+  --chat-screen: #ffffff;
+  --chat-screen-rgb: 255 255 255;
+  --chat-surface: #f4f4f5;
+  --chat-surface-rgb: 244 244 245;
+  --chat-surface-raised: #e4e4e7;
+  --chat-surface-raised-rgb: 228 228 231;
+  --chat-surface-hover: #eaeaea;
+  --chat-surface-hover-rgb: 234 234 234;
+  --chat-user-bubble: #e4e4e7;
+  --chat-user-bubble-rgb: 228 228 231;
+  --chat-foreground: #0a0a0a;
+  --chat-foreground-rgb: 10 10 10;
+  --chat-foreground-secondary: #52525b;
+  --chat-foreground-secondary-rgb: 82 82 91;
+  --chat-foreground-tertiary: #686873;
+  --chat-foreground-tertiary-rgb: 104 104 115;
+  --chat-border: #71717a;
+  --chat-border-rgb: 113 113 122;
+  --chat-primary: #1d4ed8;
+  --chat-primary-rgb: 29 78 216;
+  --chat-primary-foreground: #ffffff;
+  --chat-primary-foreground-rgb: 255 255 255;
+  --chat-link: #1d4ed8;
+  --chat-link-rgb: 29 78 216;
+  --chat-code: #0369a1;
+  --chat-code-rgb: 3 105 161;
+  --chat-danger: #c5221f;
+  --chat-danger-rgb: 197 34 31;
+
+  --chat-row-hover: rgba(0, 0, 0, 0.04);
+  --chat-composer-panel: rgba(255, 255, 255, 0.92);
+  --chat-composer-surface: rgba(244, 244, 245, 0.9);
+  --chat-composer-border: rgba(113, 113, 122, 0.8);
+  /* Mobile chat header tokens */
+  --chat-header: rgba(255, 255, 255, 0.97);
+  --chat-header-border: #71717a;
+  --chat-header-border-rgb: 113 113 122;
+}
+
 html,
 body,
 #root {
@@ -318,6 +359,30 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --input: #111111;
   --input-rgb: 17 17 17;
   --input-alpha: 1;
+}
+
+:root[data-theme="light"] .remote-app-root {
+  --background: #ffffff;
+  --background-rgb: 255 255 255;
+  --foreground: #0a0a0a;
+  --foreground-rgb: 10 10 10;
+  --card: #f4f4f5;
+  --card-rgb: 244 244 245;
+  --secondary: #e4e4e7;
+  --secondary-rgb: 228 228 231;
+  --muted-foreground: #52525b;
+  --muted-foreground-rgb: 82 82 91;
+  --border: #71717a;
+  --border-rgb: 113 113 122;
+  --border-alpha: 1;
+  --input: #e4e4e7;
+  --input-rgb: 228 228 231;
+  --input-alpha: 1;
+
+  --status-working: #1e40af;
+  --status-working-rgb: 30 64 175;
+  --status-warning: #92400e;
+  --status-warning-rgb: 146 64 14;
 }
 
 @keyframes pane-inbox-flash {
