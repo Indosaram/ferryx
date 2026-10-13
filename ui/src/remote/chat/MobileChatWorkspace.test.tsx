@@ -92,6 +92,19 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByText("All clean and up to date.")).toBeInTheDocument();
   });
 
+  it("announces a finished assistant turn through a polite live region", () => {
+    const messages: MobileChatMessageProps[] = [
+      { id: "u", role: "user", content: "go", timestamp: 1 },
+      { id: "a", role: "assistant", content: "finished", timestamp: 2 },
+    ];
+    const { rerender } = render(<MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} isRunning />);
+    const announcer = screen.getByTestId("chat-turn-announcer");
+    expect(announcer).toHaveAttribute("aria-live", "polite");
+    expect(announcer).toBeEmptyDOMElement();
+    rerender(<MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} isRunning={false} />);
+    expect(screen.getByTestId("chat-turn-announcer")).toHaveTextContent("Assistant finished responding.");
+  });
+
   it("5. sends the draft through onSendMessage with the text alone", () => {
     const handleSend = vi.fn();
     render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} />);

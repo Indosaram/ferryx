@@ -10,8 +10,10 @@ import {
   ApprovalActionCard,
   ApprovalActionCardProps,
   AttachmentList,
+  ChatMarkdownImage,
   ChatAttachment,
   ChatWorkItem,
+  chatMarkdownUrlTransform,
   ReferenceAbandonedBranchDisclosure,
   ReferencePartList,
   ReferencePartRenderContext,
@@ -142,6 +144,66 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
   );
 };
 
+/**
+ * The assistant prose vocabulary. It is hoisted because a map built inside the component hands
+ * ReactMarkdown a NEW component identity on every render, which remounts the rendered prose
+ * (selection lost, code-block copy state reset) on every poll.
+ */
+const ASSISTANT_MARKDOWN_COMPONENTS = {
+  code: ({ node, inline, className, children, ...props }: any) => {
+    const contentStr = String(children);
+    const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
+    const hasNewline = contentStr.includes("\n");
+    const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
+    const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
+
+    if (isPureInline && !isFenced) {
+      return (
+        <InlineCode className={className} {...props}>
+          {children}
+        </InlineCode>
+      );
+    }
+    return (
+      <CodeBlock className={className} {...props}>
+        {children}
+      </CodeBlock>
+    );
+  },
+  pre: ({ children }: any) => <>{children}</>,
+  p: ({ children }: any) => {
+    const childArray = React.Children.toArray(children);
+    const hasBlockChild = childArray.some(
+      (child) =>
+        React.isValidElement(child) &&
+        (child.type === CodeBlock ||
+          (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
+    );
+    if (hasBlockChild) {
+      return <div className="mb-2 last:mb-0">{children}</div>;
+    }
+    return <p className="mb-2 last:mb-0">{children}</p>;
+  },
+  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+  a: ({ href, children }: any) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+    >
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }: any) => (
+    <blockquote className="border-l-2 border-chat-border pl-2.5 my-2 text-chat-foreground-secondary italic">
+      {children}
+    </blockquote>
+  ),
+  img: ChatMarkdownImage,
+};
+
 function formatTimestamp(timestamp?: string | number): string | null {
   if (!timestamp) return null;
   if (typeof timestamp === "string" && !/^\d+$/.test(timestamp)) {
@@ -197,7 +259,7 @@ const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children, count }
   );
 };
 
-export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
+const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   role,
   content,
   timestamp,
@@ -377,59 +439,8 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
         >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={{
-              code: ({ node, inline, className, children, ...props }: any) => {
-                const contentStr = String(children);
-                const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
-                const hasNewline = contentStr.includes("\n");
-                const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
-                const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
-
-                if (isPureInline && !isFenced) {
-                  return (
-                    <InlineCode className={className} {...props}>
-                      {children}
-                    </InlineCode>
-                  );
-                }
-                return (
-                  <CodeBlock className={className} {...props}>
-                    {children}
-                  </CodeBlock>
-                );
-              },
-              pre: ({ children }: any) => <>{children}</>,
-              p: ({ children }: any) => {
-                const childArray = React.Children.toArray(children);
-                const hasBlockChild = childArray.some(
-                  (child) =>
-                    React.isValidElement(child) &&
-                    (child.type === CodeBlock ||
-                      (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
-                );
-                if (hasBlockChild) {
-                  return <div className="mb-2 last:mb-0">{children}</div>;
-                }
-                return <p className="mb-2 last:mb-0">{children}</p>;
-              },
-              ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-              ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-              a: ({ href, children }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-                >
-                  {children}
-                </a>
-              ),
-              blockquote: ({ children }) => (
-                <blockquote className="border-l-2 border-chat-border pl-2.5 my-2 text-chat-foreground-secondary italic">
-                  {children}
-                </blockquote>
-              ),
-            }}
+            components={ASSISTANT_MARKDOWN_COMPONENTS}
+            urlTransform={chatMarkdownUrlTransform}
           >
             {content}
           </ReactMarkdown>
@@ -456,3 +467,6 @@ export const MobileChatMessage: React.FC<MobileChatMessageProps> = ({
     </div>
   );
 };
+
+/** Memoized so a poll that leaves a turn's props untouched does not re-render its markdown. */
+export const MobileChatMessage = React.memo(MobileChatMessageImpl);

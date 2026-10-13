@@ -225,6 +225,24 @@ describe("MobileChatComposer", () => {
     expect(onRemoveHeld).toHaveBeenCalledWith("held-1");
   });
 
+  it("does not commit a held edit on the Enter that confirms an IME candidate (Safari keyCode 229)", () => {
+    const onEditHeld = vi.fn();
+    render(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        heldMessages={[{ id: "held-1", text: "waiting to send" }]}
+        onEditHeld={onEditHeld}
+      />
+    );
+    fireEvent.click(screen.getByTestId("held-message-edit-held-1"));
+    const input = screen.getByTestId("held-message-input-held-1");
+    fireEvent.change(input, { target: { value: "안녕" } });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(onEditHeld).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    expect(onEditHeld).toHaveBeenCalledWith("held-1", "안녕");
+  });
+
   it("draws the prompt card above the input row and reports attach progress", () => {
     render(
       <MobileChatComposer

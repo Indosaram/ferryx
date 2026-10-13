@@ -68,6 +68,20 @@ export interface MobileChatComposerProps {
   readonly className?: string;
 }
 
+/**
+ * Enter that confirms an IME candidate is not a submit. Safari fires that keydown after
+ * compositionend with isComposing=false and keyCode 229, so every signal is checked.
+ */
+function isImeConfirmingKey(e: React.KeyboardEvent, composing: boolean): boolean {
+  return (
+    composing ||
+    Boolean(e.nativeEvent?.isComposing) ||
+    Boolean((e as unknown as { isComposing?: boolean }).isComposing) ||
+    e.keyCode === 229 ||
+    (e.nativeEvent as KeyboardEvent | undefined)?.keyCode === 229
+  );
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -168,15 +182,7 @@ export const MobileChatComposer = React.forwardRef<
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
-        if (
-          isComposingRef.current ||
-          Boolean(e.nativeEvent?.isComposing) ||
-          Boolean((e as unknown as { isComposing?: boolean }).isComposing) ||
-          e.keyCode === 229 ||
-          (e.nativeEvent as KeyboardEvent | undefined)?.keyCode === 229
-        ) {
-          return;
-        }
+        if (isImeConfirmingKey(e, isComposingRef.current)) return;
         e.preventDefault();
         handleSend();
       }
@@ -329,7 +335,7 @@ export const MobileChatComposer = React.forwardRef<
                     disabled={sending}
                     onChange={(event) => setEditingHeldText(event.currentTarget.value)}
                     onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                      if (event.key === "Enter" && !isImeConfirmingKey(event, false)) {
                         event.preventDefault();
                         commitHeldEdit();
                       }
