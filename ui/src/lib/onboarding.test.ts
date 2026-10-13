@@ -1007,7 +1007,6 @@ describe("features step", () => {
 
 describe("account step", () => {
   it("is pending until this computer is linked, without forcing auto-open", () => {
-    const state = { version: 1 as const, completedSteps: [], dismissed: false };
     const ctx = { permissions: null, agents: null, cli: null, projectCount: 1, accountLinked: false };
     expect(isOnboardingStepSatisfied("account", ctx)).toBe(false);
     expect(isOnboardingStepSatisfied("account", { ...ctx, accountLinked: true })).toBe(true);

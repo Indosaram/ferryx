@@ -7,7 +7,7 @@ import {
   tokenFromHyperlink,
   TERMINAL_FILE_LINK_ACTION_EVENT,
 } from "./terminalLinkTarget";
-import type { TerminalFileToken } from "./terminalLinkTarget";
+import type { TerminalFileToken, TerminalInvokeFn } from "./terminalLinkTarget";
 
 describe("terminalLinkTarget", () => {
   describe("tokenFromHyperlink", () => {
@@ -92,7 +92,7 @@ describe("terminalLinkTarget", () => {
         return rows[r];
       });
 
-      const result = await readLinkLine(fakeInvoke, "session-1", 3, 1, 3, 11);
+      const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 3, 1, 3, 11);
       expect(result).not.toBeNull();
       expect(result?.text).toBe("https://example.com/path-end");
       expect(result?.col).toBe(3 + 11);
@@ -114,7 +114,7 @@ describe("terminalLinkTarget", () => {
         throw new Error("Out of range");
       });
 
-      const result = await readLinkLine(fakeInvoke, "session-1", 2, 1, 3, 12);
+      const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 2, 1, 3, 12);
       expect(result).not.toBeNull();
       expect(result?.text).toBe("current-linecont");
       expect(result?.col).toBe(2);
@@ -125,7 +125,7 @@ describe("terminalLinkTarget", () => {
         throw new Error("Primary row query failed");
       });
 
-      const result = await readLinkLine(fakeInvoke, "session-1", 0, 0, 10, 80);
+      const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 0, 0, 10, 80);
       expect(result).toBeNull();
     });
 
@@ -137,17 +137,17 @@ describe("terminalLinkTarget", () => {
         return { text: "single", col: 0, row: r };
       });
 
-      await readLinkLine(fakeInvoke, "session-1", 0, 0, 5, 80);
+      await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 0, 0, 5, 80);
       expect(queriedRows).toEqual([0, 1]);
 
       queriedRows.length = 0;
-      await readLinkLine(fakeInvoke, "session-1", 0, 4, 5, 80);
+      await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 0, 4, 5, 80);
       expect(queriedRows).toEqual([4, 3]);
     });
 
     it("returns current unstitched line when cols is not provided", async () => {
       const fakeInvoke = vi.fn(async () => ({ text: "no cols specified", col: 5, row: 2 }));
-      const result = await readLinkLine(fakeInvoke, "session-1", 5, 2);
+      const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 5, 2);
       expect(result).toEqual({ text: "no cols specified", col: 5 });
       expect(fakeInvoke).toHaveBeenCalledTimes(1);
     });
@@ -188,7 +188,7 @@ describe("terminalLinkTarget", () => {
         cwd: "/remote/path/to",
         shiftKey: true,
         openLocal,
-        invokeFn: fakeInvoke,
+        invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
       });
 
       expect(success).toBe(true);
@@ -221,7 +221,7 @@ describe("terminalLinkTarget", () => {
         workspaceId: "ws-ssh-2",
         shiftKey: false,
         openLocal,
-        invokeFn: fakeInvoke,
+        invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
       });
 
       expect(fakeInvoke).toHaveBeenCalledWith("cmd_remote_file_fetch", {
@@ -248,7 +248,7 @@ describe("terminalLinkTarget", () => {
           workspaceId: "ws-ssh-1",
           shiftKey: false,
           openLocal,
-          invokeFn: fakeInvoke,
+          invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
         }),
       ).rejects.toThrow("File not found on remote");
 

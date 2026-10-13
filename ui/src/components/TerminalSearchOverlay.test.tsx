@@ -1,5 +1,4 @@
 import type { NativeTerminalSearchResult } from "./TerminalSearchOverlay";
-// @ts-ignore
 import { JSDOM } from "jsdom";
 
 if (typeof window === "undefined") {

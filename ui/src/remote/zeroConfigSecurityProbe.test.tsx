@@ -58,15 +58,6 @@ function buildFailureTrace(label: string, ...mocks: unknown[]): string[] {
   return lines;
 }
 
-/**
- * Emit the report NOW. Call it from a catch block at the assertion boundary: vitest runs
- * onTestFailed AFTER afterEach (which here does cleanup() plus the configured
- * clearMocks/restoreMocks), so a report built inside the hook sees an empty document and zero
- * recorded calls. A report frozen before an await can also miss requests that arrive while waiting.
- */
-function emitFailureTrace(label: string, ...mocks: unknown[]): void {
-  for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
-}
 
 /** Freeze the report now and emit it only if the test fails - for boundaries that normally pass. */
 function captureOnFailure(label: string, ...mocks: unknown[]): void {

@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("Sidebar worktree listing failure badge", () => {
   it("badges only the project whose worktrees could not be loaded, and clears when it recovers", () => {
-    render(<Sidebar projects={projects} activeProjectId="default" worktrees={[]} agents={[]} activePath={null}
+    render(<Sidebar projects={projects} activeProjectId="default" worktrees={[]} agents={[]} activePath=""
       onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} onOpenCommandPalette={vi.fn()} />);
     const qa = screen.getByRole("button", { name: "qa" });
     const defaultProject = screen.getByRole("button", { name: "default" });

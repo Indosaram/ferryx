@@ -17,13 +17,30 @@ const captured: Captured[] = [];
 let moduleCounter = 0;
 let server: net.Server;
 
-async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("timed out waiting for the extension to publish");
+// Re-checked whenever the socket server records a payload, so waits resolve on the data event
+// itself; the timeout only bounds a failing test.
+const captureListeners = new Set<() => void>();
+
+function recordCapture(entry: Captured): void {
+  captured.push(entry);
+  for (const listener of [...captureListeners]) listener();
+}
+
+function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  if (predicate()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (!predicate()) return;
+      clearTimeout(timer);
+      captureListeners.delete(check);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      captureListeners.delete(check);
+      reject(new Error("timed out waiting for the extension to publish"));
+    }, timeoutMs);
+    captureListeners.add(check);
+  });
 }
 
 async function loadExtension() {
@@ -84,7 +101,7 @@ describe("ferryx-agent-state extension", () => {
           if (line.trim().length === 0) continue;
           const payload = JSON.parse(line) as { type?: string; state?: string; detail?: string };
           if (payload.type === "agentState" && typeof payload.state === "string") {
-            captured.push({ state: payload.state, detail: payload.detail });
+            recordCapture({ state: payload.state, detail: payload.detail });
           }
         }
       });

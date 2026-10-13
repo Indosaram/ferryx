@@ -21,6 +21,7 @@ function videoPayload(overrides: Partial<FilePreviewPayload> = {}): FilePreviewP
     text: null,
     lineCount: null,
     target: null,
+    resolvedPath: null,
     ...overrides,
   };
 }

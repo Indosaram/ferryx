@@ -516,10 +516,9 @@ describe("workspace store native activity subscription", () => {
     );
 
     let tab1 = "";
-    let tab2 = "";
     await act(async () => {
       tab1 = (await result.current.openTab(worktree))!;
-      tab2 = (await result.current.openTab(worktree))!;
+      await result.current.openTab(worktree);
     });
 
     const interacted: string[] = [];

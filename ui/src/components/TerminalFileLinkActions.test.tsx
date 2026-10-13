@@ -2,8 +2,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { copyTextToClipboard } from "../lib/clipboard";
-import { revealPath } from "../lib/tauri";
 import { TERMINAL_FILE_LINK_ACTION_EVENT } from "../lib/terminalLinkTarget";
 import { TerminalFileLinkActions } from "./TerminalFileLinkActions";
 
@@ -21,10 +19,8 @@ vi.mock("../lib/tauri", () => ({
   revealPath: (path: string) => mockRevealPath(path),
 }));
 
-let customToastRender: ((id: string) => ReactNode) | null = null;
 const mockToast = {
   custom: vi.fn((renderFn: (id: string) => ReactNode, _options?: any) => {
-    customToastRender = renderFn;
     render(renderFn("custom-toast-id") as React.ReactElement);
     return "custom-toast-id";
   }),
@@ -48,7 +44,6 @@ describe("TerminalFileLinkActions", () => {
     vi.clearAllMocks();
     mockCopyTextToClipboard.mockResolvedValue(true);
     mockRevealPath.mockResolvedValue(undefined);
-    customToastRender = null;
   });
 
   afterEach(() => {

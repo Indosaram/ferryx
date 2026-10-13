@@ -79,7 +79,7 @@ it("switches API and event sockets to the selected host without reusing local cr
   localStorage.setItem(`ferryx_remote_token_local:${window.location.origin}`, "local-token");
   localStorage.setItem("ferryx_remote_token_host-b", "host-b-token");
   remoteHostStore.setHosts([{ hostId: "host-b", name: "B", address: "http://192.168.1.9:8787", transport: "mdns", authStatus: "paired", online: true }]);
-  const fetcher = vi.fn(async () => workspace());
+  const fetcher = vi.fn(async (_input: unknown, _init?: unknown) => workspace());
   vi.stubGlobal("fetch", ticketed(fetcher));
   vi.stubGlobal("WebSocket", EventSocket);
   await act(async () => { render(<RemoteApp />); });

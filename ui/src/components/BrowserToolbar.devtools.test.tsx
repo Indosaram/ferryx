@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserTab } from "../lib/types";
-import { BrowserToolbar } from "./BrowserToolbar";
 
 const { invoke } = vi.hoisted(() => ({
   invoke: vi.fn(async () => undefined),
