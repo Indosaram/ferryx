@@ -76,6 +76,12 @@ pub enum RemoteBrowserError {
     WaitTimeout,
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
+    /// The command's target element or reference could not be resolved.
+    #[error("Browser target not found: {0}")]
+    TargetNotFound(String),
+    /// The command was issued against a frame/viewport revision that is no longer current.
+    #[error("Stale frame: {0}")]
+    StaleFrame(String),
     /// Remote input was refused for a typed reason (iframe / canvas / dialog point input).
     /// The explanation travels to the client as the `details` field of the BrowserError frame.
     #[error("Input refused: {0}")]
@@ -546,10 +552,7 @@ impl LocalIpcBrowserBackend {
                     Some(name) => format!("{name}.token"),
                     None => "browser.token".to_string(),
                 });
-            std::fs::read_to_string(&token_path)
-                .unwrap_or_default()
-                .trim()
-                .to_string()
+            read_local_ipc_token(&token_path).await
         };
 
         let handshake = serde_json::json!({
@@ -899,6 +902,10 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                         Err(RemoteBrowserError::Forbidden(msg.to_string()))
                     }
                     "BROWSER_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
+                    "BROWSER_TARGET_NOT_FOUND" => {
+                        Err(RemoteBrowserError::TargetNotFound(msg.to_string()))
+                    }
+                    "BROWSER_STALE_FRAME" => Err(RemoteBrowserError::StaleFrame(msg.to_string())),
                     _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
                 };
             }
@@ -1007,10 +1014,7 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                         None => "browser.token".to_string(),
                     },
                 );
-                std::fs::read_to_string(&token_path)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
+                read_local_ipc_token(&token_path).await
             };
 
             let handshake = serde_json::json!({
@@ -1211,6 +1215,10 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                 return match err_code {
                     "BROWSER_FORBIDDEN" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
                     "BROWSER_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
+                    "BROWSER_TARGET_NOT_FOUND" => {
+                        Err(RemoteBrowserError::TargetNotFound(msg.to_string()))
+                    }
+                    "BROWSER_STALE_FRAME" => Err(RemoteBrowserError::StaleFrame(msg.to_string())),
                     _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
                 };
             }
@@ -1708,8 +1716,18 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
                         exec.execute(ctx).await
                     } else {
                         self.manager
-                            .update_url(&ctx.browser_id, url)
-                            .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                            .update_url_with_context(
+                                &ctx.browser_id,
+                                url,
+                                crate::browser::security::BrowserSecurityContext::Remote,
+                            )
+                            .map_err(|e| match e {
+                                crate::browser::security::BrowserError::SchemeDenied(_)
+                                | crate::browser::security::BrowserError::InvalidUrl(_) => {
+                                    RemoteBrowserError::Forbidden(e.to_string())
+                                }
+                                other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                            })?;
                         Ok(BrowserCommandResult {
                             success: true,
                             value: Some(serde_json::json!({ "url": url })),
@@ -2085,9 +2103,107 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
     }
 }
 
+/// Reads the GUI's local IPC token; a missing or unreadable file yields an empty token.
+#[cfg(unix)]
+async fn read_local_ipc_token(token_path: &std::path::Path) -> String {
+    tokio::fs::read_to_string(token_path)
+        .await
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn in_process_navigate_fallback_rejects_local_file_url() {
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let backend =
+            InProcessBrowserServiceBackend::new(Arc::clone(&service), Arc::clone(&manager));
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-fallback-nav".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        service
+            .driver_broker()
+            .claim("dev1", "conn1", "sub1", &state.browser_id, true)
+            .unwrap();
+        let res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "navigate".into(),
+                params: Some(serde_json::json!({ "url": "file:///tmp/x.html" })),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(res, Err(RemoteBrowserError::Forbidden(ref m)) if m.contains("file:///tmp/x.html")),
+            "fallback remote navigate to a local file must be denied, got {res:?}"
+        );
+        assert_eq!(manager.get_state(&state.browser_id).unwrap().url, state.url);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_ipc_token_missing_file_reads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_local_ipc_token(&dir.path().join("absent.token")).await, "");
+        let present = dir.path().join("browser.sock.token");
+        std::fs::write(&present, "  tok-123\n").unwrap();
+        assert_eq!(read_local_ipc_token(&present).await, "tok-123");
+    }
+
+    /// A token read that blocks (a FIFO with no writer yet) must not stall the async
+    /// runtime: the writer task on the same single-threaded runtime still has to run.
+    #[cfg(unix)]
+    #[test]
+    fn local_ipc_token_read_does_not_block_the_runtime_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("browser.sock.token");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader_path = fifo.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let token = rt.block_on(async move {
+                let writer = async {
+                    tokio::task::yield_now().await;
+                    let mut f = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&fifo)
+                        .await
+                        .unwrap();
+                    tokio::io::AsyncWriteExt::write_all(&mut f, b"fifo-token\n")
+                        .await
+                        .unwrap();
+                };
+                let (token, ()) = tokio::join!(read_local_ipc_token(&reader_path), writer);
+                token
+            });
+            let _ = tx.send(token);
+        });
+        let token = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("token read blocked the runtime thread");
+        assert_eq!(token, "fifo-token");
+    }
 
     #[tokio::test]
     async fn test_unavailable_backend_returns_typed_error() {

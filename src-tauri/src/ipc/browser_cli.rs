@@ -1102,72 +1102,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 Ok(result) => Ok(result
                     .value
                     .unwrap_or_else(|| serde_json::json!({ "success": true }))),
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    if err_msg.contains("BROWSER_TARGET_NOT_FOUND")
-                        || err_msg.contains("element not found")
-                        || err_msg.contains("no element at coordinates")
-                        || err_msg.contains("no active element")
-                    {
-                        Err(IpcError::new(
-                            IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
-                            err_msg,
-                        ))
-                    } else if err_msg.contains("BROWSER_STALE_FRAME")
-                        || err_msg.contains("viewport revision changed")
-                    {
-                        Err(IpcError::new(
-                            IpcErrorCode::Custom("BROWSER_STALE_FRAME".into()),
-                            err_msg,
-                        ))
-                    } else {
-                        match e {
-                            crate::remote::browser_backend::RemoteBrowserError::Forbidden(msg) => {
-                                Err(IpcError::new(
-                                    IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()),
-                                    msg,
-                                ))
-                            }
-                            crate::remote::browser_backend::RemoteBrowserError::NotFound(msg) => {
-                                Err(IpcError::new(
-                                    IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()),
-                                    msg,
-                                ))
-                            }
-                            crate::remote::browser_backend::RemoteBrowserError::InvalidRequest(
-                                msg,
-                            ) => Err(IpcError::new(
-                                IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()),
-                                msg,
-                            )),
-                            crate::remote::browser_backend::RemoteBrowserError::WaitTimeout => {
-                                Err(IpcError::new(
-                                    IpcErrorCode::BrowserWaitTimeout,
-                                    "wait timeout expired",
-                                ))
-                            }
-                            crate::remote::browser_backend::RemoteBrowserError::Unavailable(
-                                msg,
-                            ) => Err(IpcError::new(
-                                IpcErrorCode::Custom("BROWSER_UNAVAILABLE".into()),
-                                msg,
-                            )),
-                            crate::remote::browser_backend::RemoteBrowserError::ExecutionFailed(
-                                msg,
-                            ) => Err(IpcError::new(
-                                IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()),
-                                msg,
-                            )),
-                            crate::remote::browser_backend::RemoteBrowserError::InputRefused(
-                                explanation,
-                            ) => Err(IpcError::new(
-                                IpcErrorCode::Unsupported,
-                                explanation.to_string(),
-                            )
-                            .with_details(explanation.to_details())),
-                        }
-                    }
-                }
+                Err(e) => Err(remote_browser_error_to_ipc(e)),
             }
         }
         RemoteBrowserOperation::SubscribeViewer {
@@ -1873,6 +1808,44 @@ async fn read_limited_line<R: tokio::io::AsyncRead + Unpin>(
                 line.extend_from_slice(available);
                 reader.consume(chunk_len);
             }
+        }
+    }
+}
+
+/// Maps a typed remote browser executor error onto the public IPC error.
+///
+/// Classification is by variant only: message text can carry page-controlled
+/// strings and must never choose the IPC code.
+fn remote_browser_error_to_ipc(e: crate::remote::browser_backend::RemoteBrowserError) -> IpcError {
+    use crate::remote::browser_backend::RemoteBrowserError;
+    match e {
+        RemoteBrowserError::TargetNotFound(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()), msg)
+        }
+        RemoteBrowserError::StaleFrame(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_STALE_FRAME".into()), msg)
+        }
+        RemoteBrowserError::Forbidden(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), msg)
+        }
+        RemoteBrowserError::NotFound(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()), msg)
+        }
+        RemoteBrowserError::InvalidRequest(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()), msg)
+        }
+        RemoteBrowserError::WaitTimeout => {
+            IpcError::new(IpcErrorCode::BrowserWaitTimeout, "wait timeout expired")
+        }
+        RemoteBrowserError::Unavailable(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_UNAVAILABLE".into()), msg)
+        }
+        RemoteBrowserError::ExecutionFailed(msg) => {
+            IpcError::new(IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()), msg)
+        }
+        RemoteBrowserError::InputRefused(explanation) => {
+            IpcError::new(IpcErrorCode::Unsupported, explanation.to_string())
+                .with_details(explanation.to_details())
         }
     }
 }
@@ -2880,6 +2853,25 @@ async fn send_browser_cli_request_at_path(
 mod tests {
     use super::*;
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};
+
+    #[test]
+    fn remote_execution_failed_page_text_is_not_reclassified() {
+        use crate::remote::browser_backend::RemoteBrowserError;
+        for text in [
+            "element not found",
+            "no element at coordinates",
+            "no active element",
+            "BROWSER_TARGET_NOT_FOUND: spoofed by page",
+            "BROWSER_STALE_FRAME: viewport revision changed",
+        ] {
+            let err = remote_browser_error_to_ipc(RemoteBrowserError::ExecutionFailed(text.into()));
+            assert_eq!(
+                ipc_error_code_string(err.code),
+                "BROWSER_EXECUTION_FAILED",
+                "page-controlled text {text:?} must not choose the IPC code"
+            );
+        }
+    }
 
     #[test]
     fn test_browser_cli_open_file_request_serialization() {

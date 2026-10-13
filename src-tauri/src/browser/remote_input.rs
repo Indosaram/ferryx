@@ -454,6 +454,9 @@ pub fn validate_fill(reference: &str, value: &str) -> Result<(), RemoteInputErro
 /// Page-scoped keypress allowlist.
 /// Rejects chrome-level shortcuts (Cmd+T, Cmd+W, Cmd+Q, Alt+F4, Super keys).
 pub fn validate_page_key(key: &str) -> Result<String, RemoteInputError> {
+    if key.chars().any(char::is_control) {
+        return Err(RemoteInputError::KeyNotAllowed("control character".into()));
+    }
     let trimmed = key.trim();
     if trimmed.is_empty() {
         return Err(RemoteInputError::KeyNotAllowed("empty key".into()));
@@ -640,9 +643,18 @@ pub fn decode_point_click_result(raw: &str) -> Result<(), ActionDecodeError> {
 
 /// Tracks the highest queued IME fill revision per (browser_id, lease_epoch, target)
 /// to enforce supersession at execution time (R5-13).
+/// Entries are pruned per (browser_id, lease_epoch) when that lease ends
+/// (see [`prune_ime_supersession`]).
 pub static IME_SUPERSESSION_TRACKER: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<(String, u64, String), u64>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Drops every IME supersession entry recorded for `browser_id` under `lease_epoch`.
+pub fn prune_ime_supersession(browser_id: &str, lease_epoch: u64) {
+    IME_SUPERSESSION_TRACKER
+        .lock()
+        .retain(|(b, e, _), _| !(b == browser_id && *e == lease_epoch));
+}
 
 #[cfg(test)]
 mod tests {
@@ -811,6 +823,17 @@ mod tests {
             validate_fill("elem-1", &huge_value),
             Err(RemoteInputError::FillTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn validate_page_key_rejects_control_characters() {
+        for key in ["\u{0}", "\u{7}", "\u{1b}", "\u{7f}", "\u{85}"] {
+            assert!(
+                matches!(validate_page_key(key), Err(RemoteInputError::KeyNotAllowed(_))),
+                "control character {key:?} must be rejected"
+            );
+        }
+        assert_eq!(validate_page_key("a").unwrap(), "a");
     }
 
     #[test]

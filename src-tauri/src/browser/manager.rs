@@ -220,7 +220,22 @@ impl BrowserManager {
     }
 
     pub fn update_url(&self, browser_id: &str, new_url: &str) -> Result<String, BrowserError> {
-        let valid_url = validate_url(new_url)?;
+        self.update_url_with_context(
+            browser_id,
+            new_url,
+            crate::browser::security::BrowserSecurityContext::Local,
+        )
+    }
+
+    /// Validates `new_url` under `context` (remote callers must pass
+    /// `BrowserSecurityContext::Remote`) and records it as the session's URL.
+    pub fn update_url_with_context(
+        &self,
+        browser_id: &str,
+        new_url: &str,
+        context: crate::browser::security::BrowserSecurityContext,
+    ) -> Result<String, BrowserError> {
+        let valid_url = crate::browser::security::validate_url_with_context(new_url, context)?;
         let mut guard = self.sessions.write();
         let s = guard
             .get_mut(browser_id)
