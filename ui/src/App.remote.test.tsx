@@ -61,6 +61,11 @@ vi.mock("./lib/updater", async (importOriginal) => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ isFocused: async () => true, onFocusChanged: async () => () => undefined }) }));
 vi.mock("./lib/updateToast", () => ({ initUpdateToasts: () => () => undefined }));
+const toastMocks = vi.hoisted(() => ({ warning: vi.fn() }));
+vi.mock("./components/ui/sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./components/ui/sonner")>();
+  return { ...actual, toast: Object.assign(actual.toast, { warning: toastMocks.warning }) };
+});
 vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection }: { initialSection?: string }) => <div data-testid="settings-section">{initialSection}</div> }));
 vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout }: {
   onAddTab: () => void;
@@ -172,6 +177,25 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { registration.resolve(registered); await registration.promise; });
     expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
     expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+  });
+
+  it("says so when a New Terminal is discarded because the workspace changed mid-spawn", async () => {
+    // Given: two local projects, and a spawn for the first that is still in flight.
+    seed([{ workspaceId: "local", repoRoot: "/local", gitRoot: null }, { workspaceId: "other", repoRoot: "/other", gitRoot: null }]);
+    await mount();
+    const spawn = deferred<Awaited<ReturnType<typeof import("./lib/tauri").spawnTerminalDetailed>>>();
+    native.spawnTerminalDetailed.mockReturnValueOnce(spawn.promise);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
+
+    // When: the user switches project before the spawn returns, so the new tab is discarded.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "other" })); });
+    await act(async () => {
+      spawn.resolve({ sessionId: "late", daemonEpoch: "epoch", session: { sessionId: "late", incarnation: "life:late", cwd: "/local", cols: 80, rows: 24, running: true } });
+      await spawn.promise;
+    });
+
+    // Then: the discard is reported instead of silently producing no terminal.
+    expect(toastMocks.warning).toHaveBeenCalledWith(expect.stringContaining("workspace changed"));
   });
 
   it("does not leak a late SSH failure into the selected local workspace", async () => {

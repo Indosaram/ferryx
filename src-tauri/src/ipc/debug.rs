@@ -158,6 +158,10 @@ pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
         || event.starts_with("terminal.surface.input.stall")
         || event.starts_with("app.watchdog")
         || event.starts_with("terminal.render.")
+        || event.starts_with("terminal.open.")
+        || event.starts_with("project.register.")
+        || event.starts_with("terminal.surface.attach.")
+        || event == "terminal.surface.bounds.error"
 }
 
 fn switch_debug_path(root: &std::path::Path) -> std::path::PathBuf {
@@ -690,6 +694,11 @@ mod tests {
         assert!(should_persist_entry(false, "terminal.render.attach"));
         assert!(should_persist_entry(false, "terminal.render.reattach"));
         assert!(should_persist_entry(false, "terminal.render.redraw"));
+        assert!(should_persist_entry(false, "terminal.open.discarded"));
+        assert!(should_persist_entry(false, "project.register.error"));
+        assert!(should_persist_entry(false, "terminal.surface.attach.error"));
+        assert!(should_persist_entry(false, "terminal.surface.bounds.error"));
+        assert!(!should_persist_entry(false, "terminal.surface.bounds.start"));
     }
 
     #[test]

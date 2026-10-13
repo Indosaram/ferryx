@@ -2207,17 +2207,38 @@ function WorkspaceApp({
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
-    if (activeRemoteHostRef.current) return;
-    if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+    // Every refusal below used to return silently, so a click on "New Terminal" could do nothing
+    // with no trace. Say why, and record it so a release log shows which guard fired.
+    const refuse = (reason: string, message: string) => {
+      switchDebug("terminal.open.refused", { workspaceId: activeProjectRef.current.workspaceId, reason });
+      toast.warning(message);
+    };
+    if (activeRemoteHostRef.current) {
+      refuse("remote-host-active", "Terminal was not opened because a remote host is active.");
+      return;
+    }
+    if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+      refuse("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
+      return;
+    }
     if (
       (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
       registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
     ) {
+      refuse("project-not-registered", "Terminal was not opened: this project is still connecting.");
       return;
     }
     const activeWt = activeWorktreeRef.current;
-    if (!activeWt) return;
-    runTabOperation(() => openTab(activeWt, undefined, undefined, shell));
+    if (!activeWt) {
+      refuse("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+      return;
+    }
+    runTabOperation(async () => {
+      const tabId = await openTab(activeWt, undefined, undefined, shell);
+      // openTab discards the new terminal when the workspace changed while it was spawning.
+      if (tabId === null) toast.warning("Terminal was not opened because the workspace changed while it was starting. Try again.");
+      return tabId;
+    });
   }, [openTab, runTabOperation]);
 
   const handleLaunchAgent = useCallback(

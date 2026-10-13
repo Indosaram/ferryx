@@ -177,5 +177,14 @@ describe("switchDebug", () => {
       expect(isReleasePersistedInputEvent("terminal.surface.input.capture")).toBe(false);
       expect(isReleasePersistedInputEvent("terminal.surface.presented")).toBe(true);
     });
+
+    it("persists terminal open, project registration, and attach outcomes", () => {
+      expect(isReleasePersistedInputEvent("terminal.open.start")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.open.discarded")).toBe(true);
+      expect(isReleasePersistedInputEvent("project.register.error")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.attach.error")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.bounds.error")).toBe(true);
+      expect(isReleasePersistedInputEvent("terminal.surface.bounds.start")).toBe(false);
+    });
   });
 });

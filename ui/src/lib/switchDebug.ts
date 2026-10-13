@@ -39,7 +39,13 @@ export function isReleasePersistedInputEvent(event: string): boolean {
     || event.startsWith("terminal.surface.input.in_flight")
     || event.startsWith("terminal.surface.input.backend")
     || event.startsWith("terminal.surface.input.stage")
-    || event.startsWith("terminal.surface.input.stall");
+    || event.startsWith("terminal.surface.input.stall")
+    // Opening a terminal and registering a project are rare, user-initiated steps; without them
+    // a click that silently produced no terminal leaves nothing to diagnose in a release build.
+    || event.startsWith("terminal.open.")
+    || event.startsWith("project.register.")
+    || event.startsWith("terminal.surface.attach.")
+    || event === "terminal.surface.bounds.error";
 }
 
 type SwitchDebugLoggerOptions = {
