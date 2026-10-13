@@ -1,6 +1,11 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RemoteWorkspaceMirror, type RemoteContextOption, type RemoteWorkspaceModel } from "./RemoteSessionList";
+import {
+  paneSelectionOption,
+  RemoteWorkspaceMirror,
+  type RemoteContextOption,
+  type RemoteWorkspaceModel,
+} from "./RemoteSessionList";
 
 const MACHINE_A = "mach-macos-primary-01";
 const MACHINE_B = "mach-linux-headless-02";
@@ -70,6 +75,19 @@ function mirrorModel(): RemoteWorkspaceModel {
 function desktopViewport() {
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: query === "(min-width: 768px)",
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent: () => false,
+  }));
+}
+
+/** The phone contract as an explicit stub: every media query misses (matches:false),
+ * including the desktop-sidebar probe. */
+function phoneViewport() {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
     media: query,
     onchange: null,
     addEventListener() {},
@@ -347,10 +365,191 @@ describe("remote session inventory rows", () => {
 
     expect(drawer.className).toContain("inset-y-0");
     expect(drawer.className).toContain("left-0");
-    expect(drawer.className).toContain("w-[85%]");
+    expect(drawer.className).toContain("w-[88%]");
+    expect(drawer.className).toContain("max-w-[340px]");
+    expect(drawer.className).toContain("animate-drawer-in");
     expect(drawer.className).not.toContain("max-h-full");
     expect(drawer.className).not.toContain("rounded-lg");
     expect(within(drawer).getByTestId("remote-new-terminal")).toBeInTheDocument();
     expect(within(drawer).getAllByTestId("remote-worktree-group").length).toBeGreaterThan(1);
+  });
+
+  it("sizes touch rows for thumbs under a matchMedia matches:false stub", () => {
+    phoneViewport();
+    renderMirror();
+    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+
+    const rows = within(dialog).getAllByTestId("remote-session-row");
+    const workingRow = rows.find((row) => row.textContent === "agent (1a)")!;
+    expect(workingRow).toHaveClass("min-h-11");
+    expect(workingRow).not.toHaveClass("min-h-[24px]");
+    expect(within(workingRow).getByText("agent (1a)")).toHaveClass("text-[14px]");
+    expect(within(workingRow).getByTestId("tab-terminal-icon")).toHaveClass("size-4");
+
+    const [firstGroup] = within(dialog).getAllByTestId("remote-worktree-group");
+    const worktreeRow = within(firstGroup).getAllByRole("button")[0];
+    expect(worktreeRow).toHaveClass("min-h-11");
+    expect(worktreeRow).not.toHaveClass("h-7");
+    expect(worktreeRow.querySelector('[data-testid="worktree-label-text"]')).toHaveClass("text-[14px]");
+
+    const section = document.querySelector('section[aria-label="ws-ferryx-core"]');
+    expect(section).not.toBeNull();
+    const header = section!.firstElementChild as HTMLElement;
+    expect(header.className).toContain("text-[12px]");
+    expect(header.className).toContain("font-medium");
+    expect(header.className).toContain("text-chat-foreground-secondary");
+    expect(header.className).toContain("border-b");
+    expect(header.className).not.toContain("uppercase");
+  });
+
+  it("labels touch rows with the T3 status vocabulary as a caption outside the row button", () => {
+    phoneViewport();
+    renderMirror();
+    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+    const rows = within(dialog).getAllByTestId("remote-session-row");
+    const captionOf = (row: HTMLElement | undefined) =>
+      row?.parentElement?.querySelector('[data-testid="row-status-label"]') ?? null;
+
+    const workingRow = rows.find((row) => row.textContent === "agent (1a)")!;
+    const workingCaption = captionOf(workingRow) as HTMLElement | null;
+    expect(workingCaption).not.toBeNull();
+    expect(workingCaption!.textContent).toBe("Working");
+    expect(workingCaption!.className).toContain("text-status-working");
+    expect(workingCaption!.className).toContain("text-[12px]");
+    expect(workingCaption!.className).toContain("tabular-nums");
+    expect(workingCaption!.className).toContain("right-2");
+    expect(workingRow.querySelector('[data-testid="row-status-label"]')).toBeNull();
+
+    const waitingRow = rows.find((row) => row.textContent === "agent (1b)")!;
+    const waitingCaption = captionOf(waitingRow) as HTMLElement | null;
+    expect(waitingCaption).not.toBeNull();
+    expect(waitingCaption!.textContent).toBe("Approval");
+    expect(waitingCaption!.className).toContain("text-status-warning");
+
+    expect(captionOf(rows.find((row) => row.textContent === "root (done)")!)).toBeNull();
+    expect(captionOf(rows.find((row) => row.textContent === "headless (1a)")!)).toBeNull();
+  });
+
+  it("renders pane rows with touch height, labels and a status caption", () => {
+    phoneViewport();
+    const model = mirrorModel();
+    model.context.terminalTabs = [
+      {
+        id: "tab-editor",
+        label: "editor",
+        sessionId: "s-editor",
+        worktreeSlug: "main",
+        activityState: "working",
+      },
+    ];
+    renderMirrorWith(model);
+
+    const tab = screen.getByRole("tab", { name: "editor (working)" });
+    expect(tab).toHaveClass("min-h-11");
+    expect(tab).not.toHaveClass("min-h-[24px]");
+    expect(within(tab).getByText("editor")).toHaveClass("text-[14px]");
+    const caption = tab.parentElement?.querySelector(
+      '[data-testid="row-status-label"]',
+    ) as HTMLElement | null;
+    expect(caption).not.toBeNull();
+    expect(caption!.textContent).toBe("Working");
+  });
+
+  it("keeps desktop sidebar rows at min-h-[24px] when matchMedia matches:true", () => {
+    desktopViewport();
+    const model = mirrorModel();
+    model.context.terminalTabs = [
+      { id: "tab-editor", label: "editor", sessionId: "s-editor", worktreeSlug: "main", activityState: "working" },
+    ];
+    renderMirrorWith(model);
+    const sidebar = screen.getByTestId("remote-desktop-sidebar");
+
+    for (const row of within(sidebar).getAllByTestId("remote-session-row")) {
+      expect(row).toHaveClass("min-h-[24px]");
+      expect(row).not.toHaveClass("min-h-11");
+    }
+    const tab = within(sidebar).getByRole("tab", { name: "editor (working)" });
+    expect(tab).toHaveClass("min-h-[24px]");
+    expect(tab).not.toHaveClass("min-h-11");
+    expect(within(sidebar).queryAllByTestId("row-status-label")).toHaveLength(0);
+    const [firstGroup] = within(sidebar).getAllByTestId("remote-worktree-group");
+    const worktreeRow = within(firstGroup).getAllByRole("button")[0];
+    expect(worktreeRow).toHaveClass("h-7");
+    expect(worktreeRow).not.toHaveClass("min-h-11");
+  });
+});
+
+describe("paneSelectionOption", () => {
+  it("uses the pane's own declared workspace and slug instead of the active context", () => {
+    const option = paneSelectionOption(mirrorModel(), {
+      id: "tab-docs",
+      label: "docs",
+      workspaceId: "ws-docs",
+      worktreeSlug: "feature/x",
+      worktreeLabel: "feature-x",
+      sessionId: "s-docs",
+    });
+    expect(option).toEqual({
+      workspaceId: "ws-docs",
+      worktreeSlug: "feature/x",
+      worktreeLabel: "feature-x",
+      tabId: "tab-docs",
+      sessionId: "s-docs",
+    });
+  });
+
+  it("inherits workspaceId, worktreeSlug and label from the context when the pane declares neither", () => {
+    const option = paneSelectionOption(mirrorModel(), {
+      id: "tab-shell",
+      label: "shell",
+      sessionId: "s-shell",
+    });
+    expect(option).toEqual({
+      workspaceId: "ws-ferryx-core",
+      worktreeSlug: "main",
+      worktreeLabel: "main",
+      tabId: "tab-shell",
+      sessionId: "s-shell",
+    });
+  });
+
+  it("honours a declared null slug: the pane's own choice beats the context", () => {
+    const option = paneSelectionOption(mirrorModel(), {
+      id: "tab-root",
+      label: "root",
+      worktreeSlug: null,
+      sessionId: "s-root",
+    });
+    expect(option).not.toBeNull();
+    expect(option!.worktreeSlug).toBeNull();
+    expect(option!.worktreeLabel).toBeNull();
+    expect(option!.workspaceId).toBe("ws-ferryx-core");
+  });
+
+  it("spreads daemonEpoch only when the pane declares one", () => {
+    const withEpoch = paneSelectionOption(mirrorModel(), {
+      id: "tab-a",
+      label: "a",
+      sessionId: "s-a",
+      daemonEpoch: 303,
+    });
+    expect(withEpoch).toHaveProperty("daemonEpoch", 303);
+
+    const nullEpoch = paneSelectionOption(mirrorModel(), {
+      id: "tab-b",
+      label: "b",
+      sessionId: "s-b",
+      daemonEpoch: null,
+    });
+    expect(nullEpoch).not.toHaveProperty("daemonEpoch");
+
+    const noEpoch = paneSelectionOption(mirrorModel(), { id: "tab-c", label: "c", sessionId: "s-c" });
+    expect(noEpoch).not.toHaveProperty("daemonEpoch");
+  });
+
+  it("returns null when the pane declares its own workspaceId as null", () => {
+    expect(
+      paneSelectionOption(mirrorModel(), { id: "tab-n", label: "n", workspaceId: null }),
+    ).toBeNull();
   });
 });

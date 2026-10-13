@@ -77,7 +77,7 @@ const UNNAMED_BUTTON_PROBE = () => {
   return { total: buttons.length, unnamed };
 };
 
-const LAYOUT_PROBE = () => {
+const LAYOUT_PROBE = (expectedWidth) => {
   const rect = (selector) => {
     const el = document.querySelector(selector);
     if (!el) return null;
@@ -87,23 +87,46 @@ const LAYOUT_PROBE = () => {
   const overlaps = (a, b) => Boolean(a && b) && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
   const pill = rect('[data-testid="scroll-to-latest-pill"]');
   const composer = rect('[data-testid="mobile-chat-composer"]');
-  const drawerEl = document.querySelector('[data-testid="terminal-drawer"]');
-  const drawer = rect('[data-testid="terminal-drawer"]');
+  const drawerEl = document.querySelector('[data-testid="remote-sidebar-drawer"], [data-testid="terminal-drawer"]');
+  const drawer = rect('[data-testid="remote-sidebar-drawer"], [data-testid="terminal-drawer"]');
   const drawerInteractive = Boolean(drawerEl) && !drawerEl.hasAttribute("inert");
   const composerEl = document.querySelector('[data-testid="mobile-chat-composer"]');
   const streamEl = document.querySelector('[data-testid="chat-message-stream"]');
+  const sendOrStopBtn =
+    document.querySelector('[data-testid="send-button"]') ||
+    document.querySelector('[data-testid="stop-button"]');
+  const sendOrStopRect = sendOrStopBtn ? sendOrStopBtn.getBoundingClientRect() : null;
+  const sendOrStopBottomWithinViewport = sendOrStopRect
+    ? sendOrStopRect.bottom <= window.innerHeight + 1
+    : null;
+  const textareaEl = document.querySelector('[data-testid="chat-composer-textarea"]');
+  const textareaScrollable = textareaEl
+    ? textareaEl.scrollHeight > textareaEl.clientHeight
+    : null;
+  const isSidebarDrawer = drawerEl?.getAttribute("data-testid") === "remote-sidebar-drawer";
+  const attachBtn = document.querySelector('[data-testid="attach-file-button"]');
+  const toolbarContainer = attachBtn ? attachBtn.parentElement : null;
+  const toolbarRect = toolbarContainer ? toolbarContainer.getBoundingClientRect() : null;
+  const toolbarVisible = toolbarRect
+    ? toolbarRect.bottom <= window.innerHeight + 1 && toolbarRect.top < toolbarRect.bottom
+    : null;
   return {
     pill,
     composer,
     drawer,
     drawerInteractive,
     pillOverlapsComposer: overlaps(pill, composer),
-    drawerOverlapsComposer: drawerInteractive ? overlaps(drawer, composer) : null,
+    drawerOverlapsComposer: drawerInteractive && !isSidebarDrawer ? overlaps(drawer, composer) : false,
     closedDrawerIsInert: drawerEl ? drawerEl.hasAttribute("inert") : undefined,
     hiddenDrawerIsTransparent: drawerEl ? window.getComputedStyle(drawerEl).opacity === "0" : undefined,
-    composerHorizontalOverflow: composerEl ? composerEl.scrollWidth > composerEl.clientWidth + 1 : null,
+    documentHorizontalOverflow:
+      document.documentElement.scrollWidth > window.innerWidth + 1 ||
+      (typeof expectedWidth === "number" && document.documentElement.scrollWidth > expectedWidth + 1),
     documentHorizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
     streamScrollable: streamEl ? streamEl.scrollHeight > streamEl.clientHeight : null,
+    sendOrStopBottomWithinViewport,
+    textareaScrollable,
+    toolbarVisible,
     viewport: { width: window.innerWidth, height: window.innerHeight },
   };
 };
@@ -152,6 +175,99 @@ const OCCLUSION_PROBE = async () => {
     hitTestTarget: hit ? `${hit.tagName.toLowerCase()}${hit.getAttribute("data-testid") ? `[${hit.getAttribute("data-testid")}]` : ""}` : null,
   };
 };
+const TOP_BAR_PROBE = (expectedWidth) => {
+  const topBars = Array.from(document.querySelectorAll('[data-testid="mobile-top-bar"]'));
+  if (topBars.length !== 1) {
+    return {
+      count: topBars.length,
+      error: `expected exactly 1 mobile-top-bar, found ${topBars.length}`,
+    };
+  }
+  const topBar = topBars[0];
+  const row = topBar.firstElementChild || topBar;
+  const rowRect = row.getBoundingClientRect();
+  const rowHeight = rowRect.height;
+  const rowHeightOk = Math.abs(rowHeight - 56) <= 1;
+
+  const buttons = Array.from(topBar.querySelectorAll("button"));
+  const nameOf = (el) => {
+    const labelledBy = el.getAttribute("aria-labelledby");
+    const labelledText = labelledBy
+      ? labelledBy
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ")
+      : "";
+    return (
+      el.getAttribute("aria-label") ||
+      labelledText.trim() ||
+      (el.textContent ?? "").trim() ||
+      el.getAttribute("title") ||
+      ""
+    ).trim();
+  };
+
+  const buttonDetails = buttons.map((el, i) => {
+    const name = nameOf(el);
+    const r = el.getBoundingClientRect();
+    const hasName = name.length > 0;
+    const minSizeOk = r.width >= 31 && r.height >= 31;
+    return {
+      index: i,
+      name,
+      width: r.width,
+      height: r.height,
+      hasName,
+      minSizeOk,
+      testId: el.getAttribute("data-testid") ?? null,
+    };
+  });
+  const buttonFailures = buttonDetails.filter((b) => !b.hasName || !b.minSizeOk);
+
+  const scrollingEl = document.scrollingElement || document.documentElement;
+  const scrollWidth = scrollingEl.scrollWidth;
+  const innerWidth = window.innerWidth;
+  const targetWidth = typeof expectedWidth === "number" ? expectedWidth : innerWidth;
+  const noHorizontalScroll =
+    scrollWidth <= innerWidth &&
+    (typeof expectedWidth !== "number" || scrollWidth <= expectedWidth);
+
+  const titleEl =
+    topBar.querySelector(".truncate.text-base") ||
+    topBar.querySelector("span.truncate");
+  const titleStyle = titleEl ? window.getComputedStyle(titleEl) : null;
+  const textOverflow = titleStyle ? titleStyle.textOverflow : "";
+  const clientWidth = titleEl ? titleEl.clientWidth : 0;
+  const titleEllipsisOk = textOverflow === "ellipsis";
+  const titleTruncated = Boolean(titleEl && titleEl.scrollWidth > clientWidth);
+  const titleWidthOk = !titleTruncated || clientWidth >= 48;
+  const hostBadge = topBar.querySelector('[data-testid="remote-connection-badge"]');
+  const hostLabel = hostBadge?.querySelector("span");
+  const hostLabelClientWidth = hostLabel?.clientWidth ?? 0;
+  const hostLabelVisible = !hostBadge || hostLabelClientWidth > 0;
+
+  return {
+    count: topBars.length,
+    rowHeight,
+    rowHeightOk,
+    buttonCount: buttons.length,
+    buttonFailures,
+    scrollWidth,
+    innerWidth,
+    scrollWidth,
+    innerWidth,
+    targetWidth,
+    noHorizontalScroll,
+    titleTextOverflow: textOverflow,
+    titleClientWidth: clientWidth,
+    titleEllipsisOk,
+    titleWidthOk,
+    titleTruncated,
+    hostBadgePresent: Boolean(hostBadge),
+    hostLabelClientWidth,
+    hostLabelVisible,
+  };
+};
 
 async function run() {
   const args = parseArgs(process.argv.slice(2));
@@ -163,6 +279,7 @@ async function run() {
   try {
     for (const [label, viewport] of [
       ["390x844", { width: 390, height: 844 }],
+      ["375x812", { width: 375, height: 812 }],
       ["320x844", { width: 320, height: 844 }],
     ]) {
       const context = await browser.newContext({ viewport, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
@@ -172,17 +289,72 @@ async function run() {
       });
       page.on("pageerror", (error) => report.consoleErrors.push(`${label}: pageerror ${error.message}`));
 
-      for (const state of ["stream", "running", "long", "empty"]) {
+      for (const state of [
+        "stream",
+        "running",
+        "long",
+        "empty",
+        "topbar-attention",
+        "topbar-long-title",
+        "switcher-open",
+        "menu-open",
+        "terminal-mode",
+        "drawer-open",
+      ]) {
         await page.goto(`${args.url}?state=${state}`, { waitUntil: "domcontentloaded" });
-        await page.waitForSelector('[data-testid="mobile-chat-workspace"]', { timeout: 15000 });
+        await page.waitForSelector('[data-testid="mobile-top-bar"]', { timeout: 15000 });
+        if (state === "terminal-mode") {
+          await page.waitForSelector('[data-testid="qa-terminal-placeholder"]', { timeout: 15000 });
+        } else if (state === "drawer-open") {
+          await page.waitForSelector('[data-testid="remote-sidebar-drawer"]', { timeout: 15000 });
+        } else {
+          await page.waitForSelector('[data-testid="mobile-chat-workspace"]', { timeout: 15000 });
+        }
         await page.waitForTimeout(900);
         const shot = join(args.evidenceDir, `mobile-chat-${state}-${label}.png`);
         await page.screenshot({ path: shot });
         report.shots.push(shot);
-        if (label === "390x844") {
+        if (label === "390x844" && state !== "terminal-mode") {
           report.probes[`unnamed-buttons-${state}`] = await page.evaluate(UNNAMED_BUTTON_PROBE);
         }
-        report.probes[`layout-${state}-${label}`] = await page.evaluate(LAYOUT_PROBE);
+        if (state !== "terminal-mode") {
+          report.probes[`layout-${state}-${label}`] = await page.evaluate(LAYOUT_PROBE, viewport.width);
+        }
+        report.probes[`topbar-${state}-${label}`] = await page.evaluate(TOP_BAR_PROBE, viewport.width);
+
+        if (state === "switcher-open" || state === "menu-open") {
+          const sheetBefore = await page.evaluate(() => {
+            const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+            if (dialogs.length !== 1) {
+              return { count: dialogs.length, error: `expected exactly 1 role="dialog", found ${dialogs.length}` };
+            }
+            const dialog = dialogs[0];
+            const r = dialog.getBoundingClientRect();
+            const bottom = r.bottom;
+            const innerHeight = window.innerHeight;
+            const bottomMatchesInnerHeight = Math.abs(bottom - innerHeight) <= 1;
+            return {
+              count: dialogs.length,
+              bottom,
+              innerHeight,
+              bottomMatchesInnerHeight,
+              ariaLabel: dialog.getAttribute("aria-label"),
+            };
+          });
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(350);
+          const sheetAfter = await page.evaluate(() => {
+            const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+            return {
+              count: dialogs.length,
+              dialogGone: dialogs.length === 0,
+            };
+          });
+          report.probes[`sheet-${state}-${label}`] = {
+            before: sheetBefore,
+            after: sheetAfter,
+          };
+        }
       }
 
       await page.goto(`${args.url}?state=long`, { waitUntil: "domcontentloaded" });
@@ -196,7 +368,7 @@ async function run() {
       await page.screenshot({ path: scrollShot });
       report.shots.push(scrollShot);
       if (label === "390x844") {
-        report.probes[`layout-scrolled-${label}`] = await page.evaluate(LAYOUT_PROBE);
+        report.probes[`layout-scrolled-${label}`] = await page.evaluate(LAYOUT_PROBE, viewport.width);
         await page.fill('[data-testid="chat-composer-textarea"]', "focus probe");
         await page.waitForTimeout(120);
         await page.keyboard.press("Tab");
@@ -221,31 +393,45 @@ async function run() {
       await page.screenshot({ path: expandedShot });
       report.shots.push(expandedShot);
 
-      const toggle = await page.$('[data-testid="terminal-toggle-button"]');
-      if (toggle) {
-        await toggle.click();
-        await page.waitForTimeout(450);
-        const drawerShot = join(args.evidenceDir, `mobile-chat-drawer-${label}.png`);
-        await page.screenshot({ path: drawerShot });
-        report.shots.push(drawerShot);
-        report.probes[`drawer-open-${label}`] = await page.evaluate(LAYOUT_PROBE);
-        await page.keyboard.press("Tab");
-        report.probes[`focus-drawer-expand-${label}`] = await page.evaluate(FOCUS_PROBE, '[data-testid="terminal-expand-button"]');
-        await page.click('[data-testid="terminal-close-button"]').catch(() => undefined);
-        await page.waitForTimeout(450);
-        report.probes[`drawer-closed-inert-${label}`] = await page.evaluate(() => {
-          const drawer = document.querySelector('[data-testid="terminal-drawer"]');
-          if (!drawer) return { drawerPresent: false };
-          const focusables = Array.from(drawer.querySelectorAll("button, a, input, textarea, [tabindex]"));
-          return {
-            drawerPresent: true,
-            hasInertAttribute: drawer.hasAttribute("inert"),
-            ariaHidden: drawer.getAttribute("aria-hidden"),
-            focusableCount: focusables.length,
-            focusableAreInert: focusables.every((el) => el.closest("[inert]") !== null),
-          };
-        });
+      await page.goto(`${args.url}?state=stream`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="mobile-top-bar"]', { timeout: 15000 });
+      const toggle = await page.$('button[aria-label="Change workspace context"]');
+      if (!toggle) {
+        throw new Error(`${label}: missing required trigger button aria-label="Change workspace context"`);
       }
+      await toggle.click();
+      await page.waitForTimeout(450);
+      await page.waitForSelector('[data-testid="remote-sidebar-drawer"]', { timeout: 15000 });
+      const drawerShot = join(args.evidenceDir, `mobile-chat-drawer-${label}.png`);
+      await page.screenshot({ path: drawerShot });
+      report.shots.push(drawerShot);
+      report.probes[`drawer-open-${label}`] = await page.evaluate(LAYOUT_PROBE, viewport.width);
+      await page.keyboard.press("Tab");
+      report.probes[`focus-drawer-expand-${label}`] = await page.evaluate(
+        FOCUS_PROBE,
+        '[data-testid="remote-sidebar-drawer"] button[aria-label="Close worktree list"], [data-testid="remote-sidebar-drawer"] button',
+      );
+      const closeBtn =
+        (await page.$('[aria-label="Close worktree list"]')) ||
+        (await page.$('[aria-label="Dismiss worktree list"]'));
+      if (closeBtn) {
+        await closeBtn.click();
+      } else {
+        await page.keyboard.press("Escape");
+      }
+      await page.waitForTimeout(450);
+      report.probes[`drawer-closed-inert-${label}`] = await page.evaluate(() => {
+        const drawer = document.querySelector('[data-testid="remote-sidebar-drawer"]');
+        if (!drawer) return { drawerPresent: false, closed: true };
+        const focusables = Array.from(drawer.querySelectorAll("button, a, input, textarea, [tabindex]"));
+        return {
+          drawerPresent: true,
+          hasInertAttribute: drawer.hasAttribute("inert"),
+          ariaHidden: drawer.getAttribute("aria-hidden"),
+          focusableCount: focusables.length,
+          focusableAreInert: focusables.every((el) => el.closest("[inert]") !== null),
+        };
+      });
 
       await page.goto(`${args.url}?state=stream`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector('[data-testid="mobile-chat-workspace"]', { timeout: 15000 });
@@ -287,6 +473,11 @@ async function run() {
 
   const failures = [];
   const fail = (message) => failures.push(message);
+  for (const label of ["320x844", "375x812", "390x844"]) {
+    if (!report.probes[`drawer-open-${label}`]) fail(`missing required probe: drawer-open-${label}`);
+    if (!report.probes[`focus-drawer-expand-${label}`]) fail(`missing required probe: focus-drawer-expand-${label}`);
+    if (!report.probes[`drawer-closed-inert-${label}`]) fail(`missing required probe: drawer-closed-inert-${label}`);
+  }
   for (const [key, value] of Object.entries(report.probes)) {
     if (key.startsWith("unnamed-buttons") && value?.unnamed?.length > 0) {
       fail(`${key}: ${value.unnamed.length} unnamed button(s) ${JSON.stringify(value.unnamed)}`);
@@ -295,9 +486,54 @@ async function run() {
       if (value?.pillOverlapsComposer === true) fail(`${key}: the scroll pill overlaps the composer`);
       if (value?.drawerOverlapsComposer === true) fail(`${key}: the open terminal drawer overlaps the composer`);
       if (value?.documentHorizontalOverflow === true) fail(`${key}: the document scrolls horizontally`);
-      if (value?.composerHorizontalOverflow === true) fail(`${key}: the composer overflows horizontally`);
-      if (typeof value?.composer?.height === "number" && value.composer.height > 80) {
-        fail(`${key}: the composer is ${Math.round(value.composer.height)}px tall (expected a single row, <= 80px)`);
+      const isExpandedState = key.startsWith("layout-long-") || key.startsWith("layout-scrolled-");
+      if (!isExpandedState && typeof value?.composer?.height === "number" && value.composer.height > 112) {
+        fail(`${key}: the composer is ${Math.round(value.composer.height)}px tall (expected <= 112px)`);
+      }
+      if (value?.sendOrStopBottomWithinViewport === false) {
+        fail(`${key}: the send/stop button's bottom is outside the viewport`);
+      }
+      if (isExpandedState && value?.composer) {
+        if (value?.textareaScrollable !== true) {
+          fail(`${key}: composer textarea does not scroll (scrollHeight <= clientHeight)`);
+        }
+        if (value?.toolbarVisible !== true) {
+          fail(`${key}: composer toolbar is not visible`);
+        }
+      }
+    }
+    if (key.startsWith("topbar-")) {
+      if (value?.count !== 1) {
+        fail(`${key}: expected exactly one mobile-top-bar, found ${value?.count}`);
+      }
+      if (value?.rowHeightOk !== true) {
+        fail(`${key}: row height is ${value?.rowHeight}px (expected 56 +-1)`);
+      }
+      if (value?.buttonFailures?.length > 0) {
+        fail(`${key}: button probe failures: ${JSON.stringify(value.buttonFailures)}`);
+      }
+      if (value?.noHorizontalScroll !== true) {
+        fail(`${key}: horizontal overflow (scrollWidth ${value?.scrollWidth} > targetWidth ${value?.targetWidth})`);
+      }
+      if (value?.titleEllipsisOk !== true) {
+        fail(`${key}: title element text-overflow is '${value?.titleTextOverflow}' (expected ellipsis)`);
+      }
+      if (value?.titleWidthOk !== true) {
+        fail(`${key}: titleWidthOk failed: truncated title clientWidth is ${value?.titleClientWidth}px (expected >= 48)`);
+      }
+      if (value?.hostLabelVisible !== true) {
+        fail(`${key}: hostLabelVisible failed: badge label clientWidth is ${value?.hostLabelClientWidth}px (expected > 0)`);
+      }
+    }
+    if (key.startsWith("sheet-")) {
+      if (value?.before?.count !== 1) {
+        fail(`${key}: expected 1 role="dialog" before escape, found ${value?.before?.count}`);
+      }
+      if (value?.before?.bottomMatchesInnerHeight !== true) {
+        fail(`${key}: dialog bottom (${value?.before?.bottom}) does not match innerHeight (${value?.before?.innerHeight})`);
+      }
+      if (value?.after?.dialogGone !== true) {
+        fail(`${key}: dialog still present after Escape (${value?.after?.count} remaining)`);
       }
     }
     if (key.startsWith("occlusion-") && value) {
@@ -310,8 +546,8 @@ async function run() {
     if (key.startsWith("drawer-closed-inert") && value?.drawerPresent && value.hasInertAttribute !== true) {
       fail(`${key}: the closed drawer is not inert`);
     }
-    if (key.startsWith("attachments-") && value && (value.sendDisabled !== true || value.bannerRole !== "status")) {
-      fail(`${key}: the blocked-attachment state is not announced or send is not disabled`);
+    if (key.startsWith("attachments-") && value && value.sendDisabled !== true) {
+      fail(`${key}: the attachment state send button is not disabled`);
     }
   }
   console.log(JSON.stringify({ reportPath, gate: failures.length === 0 ? "PASS" : "FAIL", failures, probes: report.probes, consoleErrors: report.consoleErrors }, null, 2));

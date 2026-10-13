@@ -197,6 +197,29 @@ describe("MobileHostDrawer", () => {
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+
+  it("closes when Escape is pressed", () => {
+    const onOpenChange = vi.fn();
+    render(<MobileHostDrawer open onOpenChange={onOpenChange} />);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("renders both close buttons with aria-label 'Close host switcher' and clicking the X closes the drawer", () => {
+    const onOpenChange = vi.fn();
+    render(<MobileHostDrawer open onOpenChange={onOpenChange} />);
+
+    const closeButtons = screen.getAllByLabelText("Close host switcher");
+    expect(closeButtons).toHaveLength(2);
+
+    // The X button inside the dialog header is the second close button (first is backdrop)
+    const xButton = closeButtons.find((btn) => btn.querySelector("svg"));
+    expect(xButton).toBeDefined();
+    fireEvent.click(xButton!);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
 });
 
 describe("getHostAgentSummary via drawer rendering", () => {

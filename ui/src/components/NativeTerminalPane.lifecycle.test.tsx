@@ -292,6 +292,33 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriListen.mockImplementation(async () => () => undefined);
   });
 
+  it("refreshes a stale daemon epoch and re-attaches when attach refuses the tuple as detached", async () => {
+    // Given: the pane still carries the epoch of a daemon that a rolling handover replaced, so
+    // the first attach is refused as detached without proof that the PTY is gone.
+    let attaches = 0;
+    tauriInvoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_attach" && ++attaches === 1) {
+        throw { code: "SESSION_NOT_FOUND", message: "Native terminal session 'handover-epoch' is detached" };
+      }
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const stale = { ...session("handover-epoch"), daemonEpoch: "epoch-old", incarnation: "inc-1" };
+    const onRefreshSessionIdentity = vi.fn(async () => ({ ...stale, daemonEpoch: "epoch-new" }));
+
+    // When: the pane mounts.
+    const view = render(<NativeTerminalPane session={stale} onRefreshSessionIdentity={onRefreshSessionIdentity} />);
+    await act(async () => {});
+
+    // Then: it refreshed the identity once and re-attached with the live epoch, no banner.
+    expect(onRefreshSessionIdentity).toHaveBeenCalledTimes(1);
+    const calls = tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_attach");
+    expect(calls).toHaveLength(2);
+    expect(calls[0][1].attachTuple.daemonEpoch).toBe("epoch-old");
+    expect(calls[1][1].attachTuple.daemonEpoch).toBe("epoch-new");
+    expect(view.queryByText("Failed to attach native terminal")).toBeNull();
+    await act(async () => { view.unmount(); });
+  });
+
   it("negative control: stale or failing onRefreshSessionIdentity does not spawn new shell or lose session identity", async () => {
     let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
     tauriListen.mockImplementation(async (event, handler) => {

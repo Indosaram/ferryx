@@ -21,6 +21,9 @@ import {
   RemoteInventoryProjectRow,
   RemoteInventorySessionRow,
   RemoteInventoryWorktreeRow,
+  touchStatusLabel,
+  withTouchCaption,
+  type RemoteInventoryRowDensity,
 } from "./remoteInventoryRows";
 import {
   buildRemoteInventory,
@@ -477,6 +480,35 @@ export function renderedPaneOrder(inventory: RemoteInventoryModel): RemoteTermin
   return order;
 }
 
+/** Pure pane-to-option mapping behind the picker rows: a pane's own declared workspace and
+ * slug win over the active context, undeclared fields inherit it, and daemonEpoch travels
+ * only when the pane declares one. Extracted verbatim from the row click so the compact
+ * session sheet can reuse it. */
+export function paneSelectionOption(
+  model: RemoteWorkspaceModel,
+  tab: RemoteTerminalTabInfo,
+): RemoteContextOption | null {
+  const workspaceId = declaresOwnProperty(tab, "workspaceId")
+    ? tab.workspaceId ?? null
+    : model.context.workspaceId;
+  if (!workspaceId) return null;
+  const declaredSlug = declaresOwnProperty(tab, "worktreeSlug");
+  const worktreeSlug = declaredSlug ? tab.worktreeSlug ?? null : model.context.worktreeSlug;
+  const worktreeLabel = declaredSlug
+    ? tab.worktreeLabel ?? worktreeSlug
+    : tab.worktreeLabel ?? model.context.worktreeLabel;
+  return {
+    workspaceId,
+    worktreeSlug,
+    worktreeLabel,
+    tabId: tab.id,
+    sessionId: tab.sessionId,
+    ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined
+      ? { daemonEpoch: tab.daemonEpoch }
+      : {}),
+  };
+}
+
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
@@ -493,6 +525,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   children,
 }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
+  // Touch density only when the drawer (not the desktop sidebar) renders these rows.
+  const rowDensity: RemoteInventoryRowDensity = desktopSidebar ? "compact" : "touch";
   const paneTabs = model.context.terminalTabs ?? [];
 
   const inventory = useMemo(
@@ -512,25 +546,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   };
 
   const selectPane = (tab: RemoteTerminalTabInfo) => {
-    const workspaceId = declaresOwnProperty(tab, "workspaceId")
-      ? tab.workspaceId ?? null
-      : model.context.workspaceId;
-    if (!workspaceId) return;
-    const declaredSlug = declaresOwnProperty(tab, "worktreeSlug");
-    const worktreeSlug = declaredSlug ? tab.worktreeSlug ?? null : model.context.worktreeSlug;
-    const worktreeLabel = declaredSlug
-      ? tab.worktreeLabel ?? worktreeSlug
-      : tab.worktreeLabel ?? model.context.worktreeLabel;
-    selectOption({
-      workspaceId,
-      worktreeSlug,
-      worktreeLabel,
-      tabId: tab.id,
-      sessionId: tab.sessionId,
-      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined
-        ? { daemonEpoch: tab.daemonEpoch }
-        : {}),
-    });
+    const option = paneSelectionOption(model, tab);
+    if (!option) return;
+    selectOption(option);
   };
 
   const selectSelection = (selection: RemoteInventorySelectionTarget) => {
@@ -572,7 +590,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     const tabAriaLabel = tab.activityState
       ? `${tabDescription} (${tab.activityState})`
       : tabDescription;
-    return (
+    const caption = rowDensity === "touch" ? touchStatusLabel(tab.activityState ?? null) : null;
+    const row = (
       <button
         key={tab.id}
         type="button"
@@ -583,7 +602,10 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         disabled={pending !== null}
         onClick={() => selectPane(tab)}
         className={cn(
-          "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
+          rowDensity === "touch"
+            ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+            : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-6 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
+          caption ? "pr-16" : null,
           paneActive ? "bg-white/[0.06] text-foreground" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]",
         )}
       >
@@ -593,12 +615,31 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             alt=""
             data-testid="tab-agent-icon"
             data-agent-type={tab.agentType}
-            className={cn("size-3 shrink-0", monochrome && "agent-tab-logo--monochrome opacity-80")}
+            className={cn(
+              rowDensity === "touch" ? "size-4 shrink-0" : "size-3 shrink-0",
+              monochrome && "agent-tab-logo--monochrome opacity-80",
+            )}
           />
         ) : (
-          <TerminalIcon data-testid="tab-terminal-icon" className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+          <TerminalIcon
+            data-testid="tab-terminal-icon"
+            className={
+              rowDensity === "touch"
+                ? "size-4 shrink-0 opacity-70"
+                : "size-3 shrink-0 opacity-70"
+            }
+            aria-hidden="true"
+          />
         )}
-        <span className="min-w-0 flex-1 truncate text-[11px] leading-tight">{tab.label}</span>
+        <span
+          className={
+            rowDensity === "touch"
+              ? "min-w-0 flex-1 truncate text-[14px] leading-tight"
+              : "min-w-0 flex-1 truncate text-[11px] leading-tight"
+          }
+        >
+          {tab.label}
+        </span>
         {tab.activityState === "working" ? (
           <LoaderCircle
             aria-hidden="true"
@@ -620,6 +661,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         ) : null}
       </button>
     );
+    return rowDensity === "touch"
+      ? withTouchCaption(row, tab.activityState ?? null, pending !== null)
+      : row;
   };
 
   const renderEntry = (entry: RemoteInventoryEntry) => {
@@ -640,6 +684,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         active={entry.active}
         disabled={pending !== null}
         busy={isPendingOption(entry.option)}
+        density={rowDensity}
         onSelect={() => {
           onSelectorOpenChange(false);
           selectSelection(entry.selection);
@@ -665,6 +710,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
           disabled={pending !== null}
           busy={isPendingOption(selectable)}
           activity={worktree.activity}
+          density={rowDensity}
           hasSessions={worktree.entries.length > 0}
           onSelect={() => {
             onSelectorOpenChange(false);
@@ -782,7 +828,11 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                   className="mb-0.5 last:mb-0"
                   aria-label={project.workspaceId}
                 >
-                  <RemoteInventoryProjectRow label={project.label} activity={project.activity} />
+                  <RemoteInventoryProjectRow
+                    label={project.label}
+                    activity={project.activity}
+                    density={rowDensity}
+                  />
                   <div data-testid="remote-project-worktrees">
                     {project.worktrees.map((worktree) => renderWorktree(worktree))}
                   </div>
@@ -791,7 +841,13 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             )}
             {inventory.orphanPanes.length > 0 ? (
               <section className="mb-0.5 last:mb-0" aria-label="Other panes">
-                <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65">
+                <div
+                  className={
+                    rowDensity === "touch"
+                      ? "flex min-h-9 items-center gap-1.5 border-b border-worktree-sidebar-border px-2 pb-1.5 pt-2 text-[12px] font-medium text-chat-foreground-secondary"
+                      : "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65"
+                  }
+                >
                   <h3 className="min-w-0 flex-1 truncate">Other panes</h3>
                 </div>
                 <div>{inventory.orphanPanes.map((tab) => renderPaneRow(tab, model.context.worktreeLabel))}</div>
@@ -872,7 +928,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             data-testid="remote-sidebar-drawer"
             role="dialog"
             aria-label="Workspace context"
-            className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[85%] max-w-[280px] flex-col border-r border-worktree-sidebar-border bg-worktree-sidebar text-worktree-sidebar-foreground shadow-xl"
+            className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[88%] max-w-[340px] animate-drawer-in flex-col border-r border-worktree-sidebar-border bg-worktree-sidebar text-worktree-sidebar-foreground shadow-xl"
           >
             {sidebarBody}
           </div>

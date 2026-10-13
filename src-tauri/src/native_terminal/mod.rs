@@ -15,6 +15,8 @@ pub mod composition;
 mod cursor;
 mod engine;
 mod error;
+#[cfg(feature = "native-terminal")]
+pub mod focus_gesture;
 mod guards;
 mod images;
 #[cfg(feature = "native-terminal")]
@@ -52,6 +54,7 @@ mod terminal;
 pub mod thread_ownership;
 mod url;
 mod viewport;
+mod vt_format;
 #[cfg(feature = "native-terminal")]
 pub mod wheel;
 

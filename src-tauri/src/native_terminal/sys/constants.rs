@@ -69,6 +69,7 @@ pub const GHOSTTY_POINT_TAG_SCREEN: c_int = 2;
 // GhosttySelectionOrder and GhosttyFormatterFormat matching selection/types headers.
 pub const GHOSTTY_SELECTION_ORDER_FORWARD: c_int = 0;
 pub const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
+pub const GHOSTTY_FORMATTER_FORMAT_VT: c_int = 1;
 
 // Packed DEC private mode 2004 matching `GHOSTTY_MODE_BRACKETED_PASTE`.
 pub const GHOSTTY_MODE_BRACKETED_PASTE: u16 = 2004;

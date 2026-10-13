@@ -146,6 +146,10 @@
   --chat-composer-panel: rgba(10, 10, 10, 0.92);
   --chat-composer-surface: rgba(26, 27, 27, 0.9);
   --chat-composer-border: rgba(25, 25, 25, 0.8);
+  /* Mobile chat header tokens (t3code generated-uniwind-themes.css:223 parity) */
+  --chat-header: rgba(10, 10, 10, 0.97);
+  --chat-header-border: #191919;
+  --chat-header-border-rgb: 25 25 25;
 }
 
 html,
@@ -205,6 +209,31 @@ body {
 
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .pt-safe-header {
+    padding-top: calc(env(safe-area-inset-top) + 8px);
+  }
+
+  .pb-safe-sheet {
+    padding-bottom: max(env(safe-area-inset-bottom), 12px);
+  }
+
+  @keyframes sheet-in {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+
+  @keyframes drawer-in {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(0); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-sheet-in,
+    .animate-drawer-in {
+      animation: none !important;
+    }
   }
 
   .terminal-host {

@@ -71,6 +71,8 @@ export default {
         "chat-composer-panel": "var(--chat-composer-panel)",
         "chat-composer-surface": "var(--chat-composer-surface)",
         "chat-composer-border": "var(--chat-composer-border)",
+        "chat-header": "var(--chat-header)",
+        "chat-header-border": "var(--chat-header-border)",
       },
       fontFamily: {
         sans: ["Geist", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
@@ -98,9 +100,19 @@ export default {
           from: { opacity: "0", transform: "translateY(2px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        "sheet-in": {
+          from: { transform: "translateY(100%)" },
+          to: { transform: "translateY(0)" },
+        },
+        "drawer-in": {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(0)" },
+        },
       },
       animation: {
         enter: "enter 140ms ease-out",
+        "sheet-in": "sheet-in 220ms cubic-bezier(.2,.8,.2,1)",
+        "drawer-in": "drawer-in 260ms cubic-bezier(.2,.8,.2,1)",
       },
     },
   },

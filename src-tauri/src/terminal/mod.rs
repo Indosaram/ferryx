@@ -42,6 +42,7 @@ pub mod remote;
 #[cfg(test)]
 mod remote_runtime_tests;
 pub(crate) mod resume_cwd;
+pub mod screen_mirror;
 pub mod service;
 pub mod session;
 pub mod shell;

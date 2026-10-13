@@ -964,8 +964,10 @@ async fn native_terminal_attach<R: Runtime>(
         // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
         // empty while carrying no gap, which would leave the pane blank. Re-request the full history
         // once the response reveals the epoch actually served.
+        // A handover successor serves a new epoch but keeps the PTY lifetime and its sequence
+        // space, so a cursor from the same incarnation still addresses the same bytes.
         if let Some(token) = token.as_ref() {
-            if after_seq.is_some() && attachment.epoch != token.epoch {
+            if after_seq.is_some() && attachment.epoch != token.epoch && !token.continues_pty_lifetime() {
                 attachment.stream_task.abort();
                 attachment = daemon_client.attach(&session_id, None).await?;
             }
