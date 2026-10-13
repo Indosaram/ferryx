@@ -179,6 +179,29 @@ export function MobileSheet({
     }
   };
 
+  // aria-modal promises focus stays inside: wrap Tab / Shift+Tab at the panel edges.
+  const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    if (focusables.length === 0) {
+      event.preventDefault();
+      panel.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || active === panel)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!isMounted) return null;
 
   return (
@@ -199,6 +222,7 @@ export function MobileSheet({
         aria-modal="true"
         aria-label={ariaLabel}
         tabIndex={-1}
+        onKeyDown={handlePanelKeyDown}
         onAnimationEnd={handleAnimationEnd}
         className={cn(
           "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[20px] border-t border-chat-border bg-chat-surface focus:outline-none",

@@ -128,7 +128,13 @@ export function MobileTopBar({
             ) : null}
           </div>
           <div className="flex min-w-0 items-center gap-1.5 text-[13px] text-chat-foreground-secondary">
-            <span aria-label="Current desktop context" className="min-w-8 shrink truncate">
+            {/* role=group makes the aria-label valid (a generic span cannot be named). */}
+            <span
+              role="group"
+              aria-label="Current desktop context"
+              data-testid="remote-context-label"
+              className="min-w-8 shrink truncate"
+            >
               {contextLabel}
             </span>
             {hostBadge ? (
@@ -138,9 +144,9 @@ export function MobileTopBar({
                 <span
                   data-testid="remote-connection-badge"
                   data-connection={hostBadge.transport}
-                  aria-label={hostBadge.ariaLabel}
                   className="flex min-w-12 max-w-[50%] shrink-0 items-center gap-1"
                 >
+                  <span className="sr-only">{hostBadge.ariaLabel}</span>
                   <Server aria-hidden="true" className="size-3 shrink-0" />
                   <span className="min-w-0 truncate">{hostBadge.label}</span>
                 </span>

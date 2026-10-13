@@ -1,5 +1,5 @@
 import { Cable, Check, Laptop, Radio, Server, Wifi } from "lucide-react";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
 import { MobileSheet } from "./chat/MobileSheet";
@@ -147,6 +147,12 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
   const hosts = useMemo(() => selectHostList(state), [state]);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
+  // The drawer stays mounted while closed, so a dismissal by any path (backdrop, Escape, X,
+  // host selection) must disarm the two-step confirm before the next open.
+  useEffect(() => {
+    if (!open) setConfirmDisconnect(false);
+  }, [open]);
+
   const selectHost = (hostId: string | null) => {
     remoteHostStore.setActiveHost(hostId);
     onOpenChange(false);
@@ -231,7 +237,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
       <div className="space-y-1">
           <button
             type="button"
-            aria-selected={state.activeHostId === null}
+            aria-current={state.activeHostId === null || undefined}
             data-testid="mobile-host-option-local"
             onClick={() => selectHost(null)}
             className={cn(
@@ -257,7 +263,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                   <button
                     key={host.hostId}
                     type="button"
-                    aria-selected={active}
+                    aria-current={active || undefined}
                     data-testid={`mobile-host-option-${host.hostId}`}
                     onClick={() => selectHost(host.hostId)}
                     className={cn(
